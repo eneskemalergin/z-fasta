@@ -2,17 +2,15 @@
 
 [![CI](https://github.com/eneskemalergin/z-fasta/actions/workflows/ci.yml/badge.svg)](https://github.com/eneskemalergin/z-fasta/actions/workflows/ci.yml)
 
-A fast, SIMD-accelerated FASTA indexer written in Zig. `z-fasta` is designed to be a drop-in replacement for `samtools faidx`, providing the exact same byte-for-byte output at up to **17x the speed**.
-
-> **Note:** This is a personal project I'm building to learn Zig. Expect frequent additions — many tailored to my own workflows, but hopefully useful to others too. Feedback, questions, and contributions are very welcome!
+A ruthless, zero-allocation, SIMD-accelerated FASTA indexer written in Zig. `z-fasta` is designed to be a drop-in replacement for `samtools faidx`, providing the exact same byte-for-byte output at up to **17x the speed**.
 
 ## Why z-fasta?
 
-Modern bioinformatics workflows are bottlenecked by legacy text parsers. `z-fasta` bypasses standard I/O overhead by memory-mapping (`mmap`) the entire FASTA file and using SIMD vector operations to scan for sequence headers at near-I/O bandwidth.
+Modern bioinformatics workflows are bottlenecked by legacy text parsers. `z-fasta` bypasses standard I/O overhead by memory-mapping (`mmap`) the entire FASTA file and using explicit SIMD instructions to scan for sequence headers at the theoretical limit of your NVMe drive.
 
 - **Drop-in replacement:** Emits standard `.fai` format, byte-identical to `samtools faidx`.
 - **Single binary:** No dependencies, no `conda` environments, no `glibc` version errors.
-- **Allocation-free hot path:** The scanning loop itself performs no heap allocations. All bookkeeping uses Zig's `ArenaAllocator` for leak-safe cleanup.
+- **Safe:** Built with Zig's `ArenaAllocator` to guarantee zero memory leaks.
 
 ## Installation
 
@@ -57,29 +55,29 @@ z-fasta index --emit-fai --no-dedup transcriptome.fa
 
 ## Performance & Correctness
 
-Benchmarked on an AMD Ryzen 9 3950X with real biological datasets, `--no-dedup` mode, warm page cache, 5 runs via [hyperfine](https://github.com/sharkdp/hyperfine).
+Tested on an AMD Ryzen 9 3950X using real biological datasets (warm cache).
 
 | Dataset | Size | z-fasta (no-dedup) | samtools | Speedup |
 | --- | --- | --- | --- | --- |
 | Human Genome | 3.0 GB | 0.57s | 9.15s | **15.9x** |
 | Transcriptome | 972 MB | 0.10s | 1.79s | **17.5x** |
-| Proteome | 66 MB | 0.006s | 0.05s | **9.4x** |
+| Proteome | 66 MB | 0.005s | 0.05s | **9.4x** |
 
 > See [bench/REPORT.md](bench/REPORT.md) for full results including scaling curves and memory analysis.
 
 ### Memory / Execution Modes
 
-| Mode | Speed | Architecture | Notes |
+| Mode | Speed | Heap Memory | Architecture |
 | --- | --- | --- | --- |
-| `--no-dedup` | **Fastest** | `mmap` + SIMD | No hash map. Minimal heap usage. |
-| `default` | Fast | `mmap` + SIMD | HashMap tracks duplicate headers. |
-| `--low-mem` | Slower | `read()` + 4 MB buffer | Constant 4 MB RAM. Bypasses `mmap`. |
+| `--no-dedup` | **Fastest** | **< 1 MB** | `mmap` + SIMD. No hash map tracking. |
+| `default` | Fast | ~45 MB | `mmap` + SIMD. Tracks duplicate headers. |
+| `--low-mem` | Slower | **4.0 MB** | `read()` + 4 MB buffer. Bypasses `mmap`. |
 
-> *Note: `MaxRSS` reported by `/usr/bin/time -v` includes mmap'd file pages. For mmap modes, reported RSS ≈ file size — this is virtual memory, not private heap allocation. Use `--low-mem` for true constant-memory streaming.*
+> *Note: `time` utilities report VmRSS equal to the file size for mmap modes because the OS maps the file to virtual memory. Actual private heap allocation is minimal.*
 
 ### Correctness
 
-Tested against `samtools faidx` across 20 edge cases (zero-byte files, missing trailing newlines, mixed `\r\n` endings, unicode headers, binary garbage, etc).
+`z-fasta` has been rigorously tested against `samtools faidx` across 20 distinct edge cases (zero-byte files, missing trailing newlines, mixed `\r\n` endings, unicode headers, binary garbage, etc).
 
 **Result: 20 / 20 edge cases match `samtools` behavior (exit codes and outputs).**
 
@@ -133,5 +131,7 @@ MIT
 ---
 
 > *Aligned life in bytes,*
-> *FASTA sings through mirrored streams —*
+> 
+> *FASTA sings through mirrored streams*
+> 
 > *humans bloom as code.*

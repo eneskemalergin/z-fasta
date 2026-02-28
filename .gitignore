@@ -27,8 +27,9 @@ tests/scaling/
 # Experiments (dev only)
 experiments/
 
-# Benchmark results (regenerated, except REPORT.md)
-bench/results/
+# Benchmark results (raw data is regenerated; keep figures for REPORT.md)
+bench/results/*
+!bench/results/figures/
 
 # Index files (generated during testing)
 *.fai
