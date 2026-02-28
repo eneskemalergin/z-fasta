@@ -1,0 +1,2 @@
+not a fasta file
+just some text

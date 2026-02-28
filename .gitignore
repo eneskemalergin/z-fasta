@@ -1,0 +1,35 @@
+# Zig build artifacts
+zig-out/
+zig-cache/
+.zig-cache/
+
+# Local Zig installation (download separately)
+zig-*/
+
+# Local tools (samtools, seqkit - download separately)
+tools/
+
+# Local zig wrapper (uses project-local zig installation)
+/zig
+
+# Editor
+.vscode/
+*.swp
+*~
+
+# Real datasets (download with bench/download_data.sh)
+tests/data/REAL_*
+
+# Generated test files (created by bench scripts)
+tests/edge_cases/
+tests/scaling/
+
+# Experiments (dev only)
+experiments/
+
+# Benchmark results (regenerated, except REPORT.md)
+bench/results/
+
+# Index files (generated during testing)
+*.fai
+*.zfi

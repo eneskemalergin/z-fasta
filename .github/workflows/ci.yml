@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.14.0
+
+      - name: Build
+        run: zig build
+
+      - name: Build (ReleaseFast)
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Run tests
+        run: zig build test
+
+      - name: Smoke test
+        run: |
+          printf '>seq1\nACGT\n>seq2\nGGGG\n' > /tmp/test.fasta
+          ./zig-out/bin/z-fasta --version
+          ./zig-out/bin/z-fasta index --emit-fai /tmp/test.fasta
