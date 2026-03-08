@@ -23,6 +23,17 @@ jobs:
       - name: Build (ReleaseFast)
         run: zig build -Doptimize=ReleaseFast
 
+      - name: Generate test indexes
+        run: |
+          for f in \
+            tests/data/simple.fasta \
+            tests/data/proteome.fasta \
+            tests/data/single.fasta \
+            tests/data/edge_cases.fasta \
+            tests/data/mixed_widths.fasta; do
+            ./zig-out/bin/z-fasta index "$f"
+          done
+
       - name: Run tests
         run: zig build test
 

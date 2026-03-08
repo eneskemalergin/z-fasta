@@ -2,6 +2,22 @@
 
 All notable changes to z-fasta will be documented in this file.
 
+## [0.2.1] - 2026-03-07
+
+### Changed
+
+- Removed samtools dependency from unit tests (`test_get.zig`)
+    - 17 samtools comparison integration tests removed (coverage moved to `bench/verify_get.sh`)
+    - `test_get.zig` now contains only self-contained `parseRegion` unit tests and `loadIndex` tests (12 tests)
+    - Total test count: 63 (19 index + 12 get + 32 stats)
+- CI no longer installs samtools; `Generate test indexes` step uses only `z-fasta index`
+    - Eliminated the `samtools faidx` call from the CI index generation loop
+
+### Fixed
+
+- CI fresh-checkout failures caused by missing `.zfi`/`.fai` index files (gitignored)
+    - Added `Generate test indexes` step to CI that runs `z-fasta index` on all test FASTA files before `zig build test`
+
 ## [0.2.0] - 2026-03-06
 
 ### Added
