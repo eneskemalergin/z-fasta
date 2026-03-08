@@ -2,6 +2,40 @@
 
 All notable changes to z-fasta will be documented in this file.
 
+## [0.2.0] - 2026-03-06
+
+### Added
+
+- **`z-fasta get <file.fasta> <region>`** — O(1) byte-offset sequence extraction
+    - Output byte-identical to `samtools faidx` (verified via `diff` on 90 test cases)
+    - Region formats: `NAME`, `NAME:START-END`, `NAME:START-`
+    - Handles Ensembl-style names with embedded colons (right-to-left parsing)
+    - mmap + MADV_RANDOM for point-access extraction
+    - Coordinate clamping matches samtools behavior (END > seq_len silently clamped)
+- **`z-fasta stats <file.fasta>`** — assembly/proteome statistics
+    - Tier 1 (index-only, `--index-only`): sequence count, total bases, min/max/mean/median, N50, L50, N90, L90, AU, duplicates — completes in <500 μs
+    - Tier 2 (full scan): branchless composition counting, nucleotide vs protein auto-detection
+    - Nucleotide: A/C/G/T/N frequencies, GC content (N excluded), GC skew, soft-masked fraction
+    - Protein: top 3 amino acids with full names, lowercase fraction
+- **Shared index loading** (`index_format.zig`) — .zfi preferred, .fai fallback with mtime/size staleness checks
+- **Test suites:** 80 unit tests (19 index + 29 get + 32 stats), 90 samtools-diff tests, 107 BioPython verification tests
+- `bench/verify_get.sh` — automated byte-identical comparison against samtools
+- `bench/verify_stats.py` — automated stats verification against BioPython
+
+### Changed
+
+- Source split into 5 modules: `main.zig`, `indexer.zig`, `getter.zig`, `stats.zig`, `index_format.zig`
+- `build.zig` updated with 3 test targets sharing a single main module
+- `main.zig` is now a slim CLI dispatcher (~280 lines)
+
+### Technical
+
+- Zig 0.14.0
+- .fai parsing: `ArenaAllocator`-owned name strings fed into `StringHashMap`
+- Extraction: O(1) byte-offset formula + newline-skipping loop, wraps at 60 chars/line
+- Composition: single-pass 256-element `u64` array indexed by byte value, branchless
+- N50/L50/N90/L90/AU computed in one sort + one pass
+
 ## [0.1.0] - 2026-02-28
 
 ### Added

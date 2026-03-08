@@ -11,9 +11,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+BENCH_ROOT="$(dirname "$SCRIPT_DIR")"
+PROJECT_ROOT="$(dirname "$BENCH_ROOT")"
 RESULTS_DIR="$SCRIPT_DIR/results"
-EDGE_DIR="$PROJECT_ROOT/tests/edge_cases"
+EDGE_DIR="$SCRIPT_DIR/edge_cases"
 
 # ── Tools ──────────────────────────────────────────────────────────
 ZFASTA="$PROJECT_ROOT/zig-out/bin/z-fasta"

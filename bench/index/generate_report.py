@@ -2,13 +2,13 @@
 """
 z-fasta Benchmark Report Generator
 
-Reads raw hyperfine JSON + CSV data from bench/results/,
+Reads raw hyperfine JSON + CSV data from bench/index/results/,
 produces Markdown report + PNG figures using pandas + matplotlib.
 
 Usage:
-    python3 bench/generate_report.py [results_dir]
+    python3 bench/index/generate_report.py [results_dir]
 
-Defaults to bench/results/ (latest timestamped files).
+Defaults to bench/index/results/ (latest timestamped files).
 """
 
 import json
@@ -519,7 +519,8 @@ def md_test_table(df: pd.DataFrame) -> str:
 
 
 def main():
-    results_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("bench/results")
+    script_dir = Path(__file__).resolve().parent
+    results_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else script_dir / "results"
     figures_dir = results_dir / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
 

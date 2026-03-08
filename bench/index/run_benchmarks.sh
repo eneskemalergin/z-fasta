@@ -14,10 +14,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+BENCH_ROOT="$(dirname "$SCRIPT_DIR")"
+PROJECT_ROOT="$(dirname "$BENCH_ROOT")"
 RESULTS_DIR="$SCRIPT_DIR/results"
-SCALING_DIR="$PROJECT_ROOT/tests/scaling"
-DATA_DIR="$PROJECT_ROOT/tests/data"
+SCALING_DIR="$SCRIPT_DIR/data"
+DATA_DIR="$BENCH_ROOT/shared/data"
 
 # ── Tools ──────────────────────────────────────────────────────────
 ZFASTA="$PROJECT_ROOT/zig-out/bin/z-fasta"
@@ -193,7 +194,7 @@ if ! $SKIP_REAL; then
         echo "  No REAL_* datasets found in $DATA_DIR"
         echo "  Running download_data.sh to fetch real datasets..."
         echo ""
-        bash "$SCRIPT_DIR/download_data.sh"
+        bash "$BENCH_ROOT/shared/download_data.sh"
         echo ""
         # Re-check after download
         [[ -f "$DATA_DIR/REAL_Genome.fa" ]]          && DATASETS["Genome"]="$DATA_DIR/REAL_Genome.fa"
