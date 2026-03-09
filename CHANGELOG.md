@@ -2,6 +2,24 @@
 
 All notable changes to z-fasta will be documented in this file.
 
+## [0.2.2] - 2026-03-08
+
+### Added
+
+- **GET benchmark suite** (`bench/get/`) — hyperfine timing, RSS memory, region-size scaling, real dataset benchmarks; `--skip-real` flag; `verify_get.sh` (90 diff tests); rewritten `generate_report.py` with human-readable names, per-module figures, and auto-generated `REPORT.md`
+- **STATS benchmark suite** (`bench/stats/`) — index-only vs. full-scan, file-size scaling (1 MB – 1 GB), throughput CSV; `--skip-real` flag; `verify_stats.py` (107 BioPython tests); rewritten `generate_report.py` with μs index-only speedup table, seqkit in all comparisons, and auto-generated `REPORT.md`
+- `bench/README.md`: GET and STATS added to Quick Start; `--skip-real` documented
+
+### Fixed
+
+- Memory CSV column order mismatch in `bench/stats/run_benchmarks.sh`
+- Seqkit throughput not written to CSV due to incorrect `2>&1` redirect in time group
+- figure folder exceptions in .gitignore to render report images in markdowns in GitHub UI
+
+### Changed
+
+- `README.md`: test count corrected (63/63); `--index-only` timing corrected to `< 1 ms`; performance section split into Index / Get / Stats with per-module tables and report links; tagline and description clarified (SIMD scoped to indexer, arena-allocated); roadmap reorganized
+
 ## [0.2.1] - 2026-03-07
 
 ### Changed

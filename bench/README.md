@@ -17,12 +17,18 @@ bench/
     data/                  # Generated scaling files (size_*.fasta, seqs_*.fasta)
     edge_cases/            # Generated edge-case FASTAs
     results/               # Timestamped perf JSON, memory CSV, figures/
-  get/                     # Getter verification (v0.2)
+  get/                     # Getter benchmarks + verification (v0.2)
+    run_benchmarks.sh      # Hyperfine benchmarks: latency, full-seq, region scaling
     verify_get.sh          # Byte-identical diff against samtools faidx
-    results/               # Future hyperfine results
-  stats/                   # Stats verification (v0.2)
+    generate_report.py     # Produces REPORT.md + PNG figures
+    REPORT.md              # Full GET benchmark report
+    results/               # Timestamped JSON, memory CSV, figures/
+  stats/                   # Stats benchmarks + verification (v0.2)
+    run_benchmarks.sh      # Hyperfine benchmarks: full/index-only, scaling, throughput
     verify_stats.py        # BioPython verification of all stats output
-    results/               # Future hyperfine results
+    generate_report.py     # Produces REPORT.md + PNG figures
+    REPORT.md              # Full STATS benchmark report
+    results/               # Timestamped JSON, memory/throughput CSV, figures/
 ```
 
 ## Prerequisites
@@ -79,19 +85,33 @@ bash bench/index/run_benchmarks.sh
 # 4. Run indexer correctness tests
 bash bench/index/run_tests.sh
 
-# 5. Verify get command against samtools
+# 5. Run GET benchmarks (includes real datasets by default)
+bash bench/get/run_benchmarks.sh
+# Add --skip-real to skip real dataset benchmarks (faster, ~5 min instead of ~15 min):
+# bash bench/get/run_benchmarks.sh --skip-real
+
+# 6. Run STATS benchmarks (includes real datasets by default)
+bash bench/stats/run_benchmarks.sh
+# Add --skip-real to skip real dataset benchmarks:
+# bash bench/stats/run_benchmarks.sh --skip-real
+
+# 7. Verify get command against samtools
 bash bench/get/verify_get.sh
 
-# 6. Verify stats against BioPython
+# 8. Verify stats against BioPython
 .venv/bin/python bench/stats/verify_stats.py
 
-# 7. Generate indexer benchmark report
+# 9. Generate all reports
 python3 bench/index/generate_report.py
+python3 bench/get/generate_report.py
+python3 bench/stats/generate_report.py
 ```
 
 ## Output
 
-- `index/REPORT.md` — Full indexer benchmark report with tables and figures (committed to repo)
-- `index/results/figures/` — PNG charts (committed to repo)
-- `index/results/*.csv`, `index/results/perf_*/` — Raw data (gitignored, regenerated)
+- `index/REPORT.md` — Full indexer benchmark report with tables and figures
+- `get/REPORT.md` — Full GET benchmark report (latency, scaling, memory)
+- `stats/REPORT.md` — Full STATS benchmark report (throughput, index-only speedup)
+- `*/results/figures/` — PNG charts
+- `*/results/*.csv`, `*/results/*/` — Raw data (gitignored, regenerated)
 - `shared/data/` — Real datasets (gitignored, downloaded by script)

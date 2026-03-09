@@ -27,8 +27,10 @@ bench/index/edge_cases/
 # Benchmark results (raw data is regenerated; keep figures for REPORT.md)
 bench/index/results/*
 !bench/index/results/figures/
-bench/get/results/
-bench/stats/results/
+bench/get/results/*
+!bench/get/results/figures/
+bench/stats/results/*
+!bench/stats/results/figures/
 
 # Temp dirs from verify scripts
 bench/get/.verify_tmp/
