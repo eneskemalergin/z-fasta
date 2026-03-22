@@ -57,6 +57,26 @@ pub const LoadedIndex = struct {
     }
 };
 
+pub const LoadIndexError = error{
+    FileNotFound,
+    AccessDenied,
+    Io,
+    EmptyFile,
+    PathTooLong,
+    MmapFailed,
+    CorruptIndex,
+    StaleIndex,
+    NoIndexFound,
+    OutOfMemory,
+};
+
+const LoadAttempt = union(enum) {
+    loaded: LoadedIndex,
+    not_found,
+    stale,
+    corrupt,
+};
+
 // ============================================================================
 // Error helper (same pattern as main.zig)
 // ============================================================================
@@ -98,22 +118,34 @@ pub fn writeZfi(
 /// Load the index for a FASTA file. Tries .zfi first, then .fai fallback.
 /// The caller must call deinit() on the returned LoadedIndex.
 pub fn loadIndex(fasta_path: []const u8) LoadedIndex {
+    return loadIndexChecked(fasta_path) catch |err| switch (err) {
+        error.FileNotFound => printErrorAndExit("error: file not found: {s}\n", .{fasta_path}),
+        error.AccessDenied => printErrorAndExit("error: access denied: {s}\n", .{fasta_path}),
+        error.EmptyFile => printErrorAndExit("error: file is empty: {s}\n", .{fasta_path}),
+        error.PathTooLong => printErrorAndExit("error: path too long\n", .{}),
+        error.MmapFailed => printErrorAndExit("error: failed to mmap file: {s}\n", .{fasta_path}),
+        error.CorruptIndex => printErrorAndExit("error: corrupt index file for: {s}\n", .{fasta_path}),
+        error.StaleIndex => printErrorAndExit("error: index is stale (FASTA is newer than index). Re-run 'z-fasta index <path>'.\n", .{}),
+        error.NoIndexFound => printErrorAndExit("error: no index found for {s}. Run 'z-fasta index {s}' first.\n", .{ fasta_path, fasta_path }),
+        error.OutOfMemory => printErrorAndExit("error: out of memory loading index\n", .{}),
+        error.Io => printErrorAndExit("error: failed to load index for: {s}\n", .{fasta_path}),
+    };
+}
+
+/// Load the index for a FASTA file with typed errors for testing and fallback control.
+pub fn loadIndexChecked(fasta_path: []const u8) LoadIndexError!LoadedIndex {
     // Open FASTA file
-    const fasta_file = std.fs.cwd().openFile(fasta_path, .{}) catch |err| {
-        switch (err) {
-            error.FileNotFound => printErrorAndExit("error: file not found: {s}\n", .{fasta_path}),
-            error.AccessDenied => printErrorAndExit("error: access denied: {s}\n", .{fasta_path}),
-            else => printErrorAndExit("error: failed to open file: {s}\n", .{fasta_path}),
-        }
+    const fasta_file = std.fs.cwd().openFile(fasta_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.FileNotFound,
+        error.AccessDenied => return error.AccessDenied,
+        else => return error.Io,
     };
     defer fasta_file.close();
 
-    const fasta_stat = fasta_file.stat() catch {
-        printErrorAndExit("error: failed to stat file: {s}\n", .{fasta_path});
-    };
+    const fasta_stat = fasta_file.stat() catch return error.Io;
 
     if (fasta_stat.size == 0) {
-        printErrorAndExit("error: file is empty: {s}\n", .{fasta_path});
+        return error.EmptyFile;
     }
 
     // mmap FASTA
@@ -124,55 +156,77 @@ pub fn loadIndex(fasta_path: []const u8) LoadedIndex {
         .{ .TYPE = .PRIVATE },
         fasta_file.handle,
         0,
-    ) catch {
-        printErrorAndExit("error: failed to mmap file: {s}\n", .{fasta_path});
-    };
+    ) catch return error.MmapFailed;
 
     // Try .zfi first
     var zfi_path_buf: [4096]u8 = undefined;
-    const zfi_path = std.fmt.bufPrint(&zfi_path_buf, "{s}.zfi", .{fasta_path}) catch {
-        printErrorAndExit("error: path too long\n", .{});
-    };
+    const zfi_path = std.fmt.bufPrint(&zfi_path_buf, "{s}.zfi", .{fasta_path}) catch return error.PathTooLong;
 
-    if (tryLoadZfi(zfi_path, fasta_data, fasta_stat)) |result| {
-        return result;
+    switch (tryLoadZfi(zfi_path, fasta_data, fasta_stat) catch |err| {
+        posix.munmap(@constCast(@alignCast(fasta_data)));
+        return err;
+    }) {
+        .loaded => |result| return result,
+        .stale => {
+            posix.munmap(@constCast(@alignCast(fasta_data)));
+            return error.StaleIndex;
+        },
+        .corrupt => {
+            posix.munmap(@constCast(@alignCast(fasta_data)));
+            return error.CorruptIndex;
+        },
+        .not_found => {},
     }
 
     // Try .fai fallback
     var fai_path_buf: [4096]u8 = undefined;
     const fai_path = std.fmt.bufPrint(&fai_path_buf, "{s}.fai", .{fasta_path}) catch {
-        printErrorAndExit("error: path too long\n", .{});
+        posix.munmap(@constCast(@alignCast(fasta_data)));
+        return error.PathTooLong;
     };
 
-    if (tryLoadFai(fai_path, fasta_data, fasta_stat)) |result| {
-        return result;
+    switch (tryLoadFai(fai_path, fasta_data, fasta_stat) catch |err| {
+        posix.munmap(@constCast(@alignCast(fasta_data)));
+        return err;
+    }) {
+        .loaded => |result| return result,
+        .stale => {
+            posix.munmap(@constCast(@alignCast(fasta_data)));
+            return error.StaleIndex;
+        },
+        .corrupt => {
+            posix.munmap(@constCast(@alignCast(fasta_data)));
+            return error.CorruptIndex;
+        },
+        .not_found => {
+            posix.munmap(@constCast(@alignCast(fasta_data)));
+            return error.NoIndexFound;
+        },
     }
-
-    printErrorAndExit("error: no index found for {s}. Run 'z-fasta index {s}' first.\n", .{ fasta_path, fasta_path });
 }
 
 fn tryLoadZfi(
     zfi_path: []const u8,
     fasta_data: []align(4096) const u8,
     fasta_stat: std.fs.File.Stat,
-) ?LoadedIndex {
-    const zfi_file = std.fs.cwd().openFile(zfi_path, .{}) catch {
-        return null; // .zfi not found, not an error
+) LoadIndexError!LoadAttempt {
+    const zfi_file = std.fs.cwd().openFile(zfi_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return .not_found,
+        error.AccessDenied => return error.AccessDenied,
+        else => return error.Io,
     };
     defer zfi_file.close();
 
-    const zfi_stat = zfi_file.stat() catch {
-        printErrorAndExit("error: failed to stat index: {s}\n", .{zfi_path});
-    };
+    const zfi_stat = zfi_file.stat() catch return error.Io;
 
     // Check for 0-byte file before mmap (POSIX returns EINVAL)
     if (zfi_stat.size == 0) {
-        printErrorAndExit("error: corrupt index file: {s}\n", .{zfi_path});
+        return .corrupt;
     }
 
     // Staleness check: mtime
     if (zfi_stat.mtime < fasta_stat.mtime) {
-        printErrorAndExit("error: index is stale (FASTA is newer than index). Re-run 'z-fasta index <path>'.\n", .{});
+        return .stale;
     }
 
     // mmap the .zfi
@@ -183,30 +237,29 @@ fn tryLoadZfi(
         .{ .TYPE = .PRIVATE },
         zfi_file.handle,
         0,
-    ) catch {
-        printErrorAndExit("error: failed to mmap index: {s}\n", .{zfi_path});
-    };
+    ) catch return error.MmapFailed;
+    errdefer posix.munmap(@constCast(@alignCast(zfi_data)));
 
     // Validate minimum size for header
     if (zfi_data.len < @sizeOf(ZfiHeader)) {
-        printErrorAndExit("error: corrupt index file: {s}\n", .{zfi_path});
+        return .corrupt;
     }
 
     // Validate magic
     const header: *const ZfiHeader = @ptrCast(@alignCast(zfi_data.ptr));
     if (!std.mem.eql(u8, &header.magic, &ZFI_MAGIC)) {
-        printErrorAndExit("error: corrupt index file: {s}\n", .{zfi_path});
+        return .corrupt;
     }
 
     // Validate source file size
     if (header.source_size != fasta_stat.size) {
-        printErrorAndExit("error: index is stale (file size changed). Re-run 'z-fasta index <path>'.\n", .{});
+        return .stale;
     }
 
     // Validate that the file has enough bytes for all records
     const expected_size = @sizeOf(ZfiHeader) + @as(usize, header.record_count) * @sizeOf(IndexRecord);
     if (zfi_data.len < expected_size) {
-        printErrorAndExit("error: corrupt index file: {s}\n", .{zfi_path});
+        return .corrupt;
     }
 
     // Cast record array from mmap bytes
@@ -216,16 +269,21 @@ fn tryLoadZfi(
         @ptrCast(@alignCast(record_bytes.ptr)),
     )[0..header.record_count];
 
-    // Build name map from FASTA mmap slices
-    var name_map = std.StringHashMap(usize).init(std.heap.page_allocator);
-    for (records, 0..) |rec, i| {
-        const name = fasta_data[rec.name_offset..][0..rec.name_len];
-        name_map.put(name, i) catch {
-            printErrorAndExit("error: failed to build name lookup\n", .{});
-        };
+    for (records) |rec| {
+        if (!isValidZfiRecord(rec, fasta_data)) {
+            return .corrupt;
+        }
     }
 
-    return LoadedIndex{
+    // Build name map from FASTA mmap slices
+    var name_map = std.StringHashMap(usize).init(std.heap.page_allocator);
+    errdefer name_map.deinit();
+    for (records, 0..) |rec, i| {
+        const name = fasta_data[rec.name_offset..][0..rec.name_len];
+        name_map.put(name, i) catch return error.OutOfMemory;
+    }
+
+    return .{ .loaded = LoadedIndex{
         .records = records,
         .name_map = name_map,
         .fasta_data = fasta_data,
@@ -233,30 +291,30 @@ fn tryLoadZfi(
         .zfi_data = zfi_data,
         .source = .zfi,
         .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator),
-    };
+    } };
 }
 
 fn tryLoadFai(
     fai_path: []const u8,
     fasta_data: []align(4096) const u8,
     fasta_stat: std.fs.File.Stat,
-) ?LoadedIndex {
-    const fai_file = std.fs.cwd().openFile(fai_path, .{}) catch {
-        return null; // .fai not found, not an error
+) LoadIndexError!LoadAttempt {
+    const fai_file = std.fs.cwd().openFile(fai_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return .not_found,
+        error.AccessDenied => return error.AccessDenied,
+        else => return error.Io,
     };
     defer fai_file.close();
 
-    const fai_stat = fai_file.stat() catch {
-        printErrorAndExit("error: failed to stat index: {s}\n", .{fai_path});
-    };
+    const fai_stat = fai_file.stat() catch return error.Io;
 
     // Staleness check: mtime
     if (fai_stat.mtime < fasta_stat.mtime) {
-        printErrorAndExit("error: index is stale (FASTA is newer than index). Re-run 'z-fasta index <path>'.\n", .{});
+        return .stale;
     }
 
     if (fai_stat.size == 0) {
-        printErrorAndExit("error: corrupt index file: {s}\n", .{fai_path});
+        return .corrupt;
     }
 
     // Read .fai into memory (they're small)
@@ -264,12 +322,8 @@ fn tryLoadFai(
     errdefer arena.deinit();
     const allocator = arena.allocator();
 
-    const fai_contents = allocator.alloc(u8, fai_stat.size) catch {
-        printErrorAndExit("error: out of memory loading index\n", .{});
-    };
-    const bytes_read = fai_file.readAll(fai_contents) catch {
-        printErrorAndExit("error: failed to read index: {s}\n", .{fai_path});
-    };
+    const fai_contents = allocator.alloc(u8, fai_stat.size) catch return error.OutOfMemory;
+    const bytes_read = fai_file.readAll(fai_contents) catch return error.Io;
     const fai_data = fai_contents[0..bytes_read];
 
     // Parse .fai lines: NAME\tLENGTH\tOFFSET\tLINE_BASES\tLINE_BYTES[\tQUAL_OFFSET]
@@ -283,31 +337,23 @@ fn tryLoadFai(
         var fields = std.mem.splitScalar(u8, line, '\t');
         const name = fields.next() orelse continue;
         const len_str = fields.next() orelse {
-            printErrorAndExit("error: corrupt index file: {s}\n", .{fai_path});
+            return .corrupt;
         };
         const offset_str = fields.next() orelse {
-            printErrorAndExit("error: corrupt index file: {s}\n", .{fai_path});
+            return .corrupt;
         };
         const lb_str = fields.next() orelse {
-            printErrorAndExit("error: corrupt index file: {s}\n", .{fai_path});
+            return .corrupt;
         };
         const lbytes_str = fields.next() orelse {
-            printErrorAndExit("error: corrupt index file: {s}\n", .{fai_path});
+            return .corrupt;
         };
         // Ignore optional 6th field (qual_offset for FASTQ)
 
-        const seq_len = std.fmt.parseInt(u64, len_str, 10) catch {
-            printErrorAndExit("error: corrupt index file: {s}\n", .{fai_path});
-        };
-        const seq_offset = std.fmt.parseInt(u64, offset_str, 10) catch {
-            printErrorAndExit("error: corrupt index file: {s}\n", .{fai_path});
-        };
-        const line_bases = std.fmt.parseInt(u32, lb_str, 10) catch {
-            printErrorAndExit("error: corrupt index file: {s}\n", .{fai_path});
-        };
-        const line_bytes = std.fmt.parseInt(u32, lbytes_str, 10) catch {
-            printErrorAndExit("error: corrupt index file: {s}\n", .{fai_path});
-        };
+        const seq_len = std.fmt.parseInt(u64, len_str, 10) catch return .corrupt;
+        const seq_offset = std.fmt.parseInt(u64, offset_str, 10) catch return .corrupt;
+        const line_bases = std.fmt.parseInt(u32, lb_str, 10) catch return .corrupt;
+        const line_bytes = std.fmt.parseInt(u32, lbytes_str, 10) catch return .corrupt;
 
         // For .fai records, name_offset/name_len refer to the name in fai_data
         // which is arena-owned. We DON'T scan the FASTA to recover name offsets.
@@ -322,24 +368,18 @@ fn tryLoadFai(
         };
 
         const idx = records_list.items.len;
-        records_list.append(rec) catch {
-            printErrorAndExit("error: out of memory loading index\n", .{});
-        };
+        records_list.append(rec) catch return error.OutOfMemory;
 
         // Store arena-owned name slice in the map
-        const name_owned = allocator.dupe(u8, name) catch {
-            printErrorAndExit("error: out of memory loading index\n", .{});
-        };
-        name_map.put(name_owned, idx) catch {
-            printErrorAndExit("error: out of memory loading index\n", .{});
-        };
+        const name_owned = allocator.dupe(u8, name) catch return error.OutOfMemory;
+        name_map.put(name_owned, idx) catch return error.OutOfMemory;
     }
 
     if (records_list.items.len == 0) {
-        printErrorAndExit("error: corrupt index file: {s}\n", .{fai_path});
+        return .corrupt;
     }
 
-    return LoadedIndex{
+    return .{ .loaded = LoadedIndex{
         .records = records_list.items,
         .name_map = name_map,
         .fasta_data = fasta_data,
@@ -347,5 +387,29 @@ fn tryLoadFai(
         .zfi_data = null,
         .source = .fai,
         .arena = arena,
-    };
+    } };
+}
+
+fn isValidZfiRecord(rec: IndexRecord, fasta_data: []align(4096) const u8) bool {
+    const fasta_len = fasta_data.len;
+
+    if (rec.name_offset == 0 or rec.name_offset > fasta_len) return false;
+    if (rec.name_len == 0) return false;
+    if (rec.name_offset + rec.name_len > fasta_len) return false;
+    if (fasta_data[rec.name_offset - 1] != '>') return false;
+
+    if (rec.seq_len == 0 or rec.seq_offset > fasta_len) return false;
+    if (rec.line_bases == 0 or rec.line_bytes == 0) return false;
+    if (rec.line_bytes < rec.line_bases) return false;
+
+    const full_lines: u128 = rec.seq_len / rec.line_bases;
+    const remainder: u128 = rec.seq_len % rec.line_bases;
+    var region_end: u128 = rec.seq_offset;
+    if (remainder > 0) {
+        region_end += full_lines * rec.line_bytes + remainder;
+    } else {
+        region_end += full_lines * rec.line_bytes;
+    }
+
+    return region_end <= fasta_len;
 }

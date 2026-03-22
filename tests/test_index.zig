@@ -3,6 +3,7 @@ const main = @import("main");
 const validateFasta = main.validateFasta;
 const scanHeaders = main.scanHeaders;
 const scanChunkedData = main.indexer.scanChunkedData;
+const loadIndexChecked = main.index_format.loadIndexChecked;
 const IndexRecord = main.IndexRecord;
 const writeZfi = main.writeZfi;
 const ZfiHeader = main.ZfiHeader;
@@ -19,6 +20,15 @@ fn readTestFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     const data = try allocator.alloc(u8, stat.size);
     const bytes_read = try file.readAll(data);
     return data[0..bytes_read];
+}
+
+fn uniqueArtifactPath(allocator: std.mem.Allocator, stem: []const u8, ext: []const u8) ![]u8 {
+    try std.fs.cwd().makePath("zig-cache/test-artifacts");
+    return std.fmt.allocPrint(allocator, "zig-cache/test-artifacts/{s}-{d}.{s}", .{
+        stem,
+        std.time.nanoTimestamp(),
+        ext,
+    });
 }
 
 // ============================================================================
@@ -266,4 +276,26 @@ test "low-mem indexing rejects overlong sequence names" {
         error.HeaderTooLong,
         scanChunkedData(fasta.items, output.writer(), allocator),
     );
+}
+
+test "loadIndexChecked rejects corrupt zfi records" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "corrupt-zfi", "fa");
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    defer std.fs.cwd().deleteFile(fasta_path) catch {};
+    defer std.fs.cwd().deleteFile(zfi_path) catch {};
+
+    const fasta_file = try std.fs.cwd().createFile(fasta_path, .{});
+    defer fasta_file.close();
+    try fasta_file.writeAll(">seq1\nACGT\n");
+
+    const bad_records = [_]IndexRecord{
+        .{ .name_offset = 999_999, .name_len = 4, .seq_offset = 6, .seq_len = 4, .line_bases = 4, .line_bytes = 5 },
+    };
+    try writeZfi(zfi_path, &bad_records, 11);
+
+    try std.testing.expectError(error.CorruptIndex, loadIndexChecked(fasta_path));
 }
