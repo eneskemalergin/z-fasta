@@ -490,7 +490,7 @@ pub fn runChunkedMode(path: []const u8) void {
     const writer = stdout_buffered.writer();
 
     const record_count = scanChunkedReader(buffered_reader.reader(), writer, &seen_names, allocator) catch |err| switch (err) {
-        error.HeaderTooLong => err_exit("error: sequence name too long for --low-mem mode: {s}\n", .{path}),
+        error.HeaderTooLong => err_exit("error: sequence name exceeds {d} bytes in --low-mem mode: {s}\n", .{ MAX_LOW_MEM_NAME_LEN, path }),
         else => err_exit("error: processing failed\n", .{}),
     };
     stdout_buffered.flush() catch {};

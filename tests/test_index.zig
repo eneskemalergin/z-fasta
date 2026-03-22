@@ -247,3 +247,23 @@ test "low-mem indexing matches default across chunk boundary" {
     try std.testing.expectEqual(expected_count, actual_count);
     try std.testing.expectEqualStrings(expected.items, actual.items);
 }
+
+test "low-mem indexing rejects overlong sequence names" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var fasta = std.ArrayList(u8).init(allocator);
+    defer fasta.deinit();
+    try fasta.append('>');
+    try fasta.appendNTimes('A', 4097);
+    try fasta.appendSlice("\nACGT\n");
+
+    var output = std.ArrayList(u8).init(allocator);
+    defer output.deinit();
+
+    try std.testing.expectError(
+        error.HeaderTooLong,
+        scanChunkedData(fasta.items, output.writer(), allocator),
+    );
+}
