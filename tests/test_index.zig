@@ -312,9 +312,21 @@ test "loadIndexChecked falls back to fai when zfi is stale" {
     defer std.fs.cwd().deleteFile(zfi_path) catch {};
     defer std.fs.cwd().deleteFile(fai_path) catch {};
 
-    try std.fs.cwd().copyFile("tests/data/simple.fasta", std.fs.cwd(), fasta_path, .{});
-    try std.fs.cwd().copyFile("tests/data/simple.fasta.zfi", std.fs.cwd(), zfi_path, .{});
-    try std.fs.cwd().copyFile("tests/data/simple.fasta.fai", std.fs.cwd(), fai_path, .{});
+    const fasta_data = ">seq1\nACGTACGT\n>seq2\nGGGG\n";
+
+    const fasta_file = try std.fs.cwd().createFile(fasta_path, .{ .truncate = true });
+    defer fasta_file.close();
+    try fasta_file.writeAll(fasta_data);
+
+    const records = try scanHeaders(fasta_data, allocator);
+    defer records.deinit();
+    try writeZfi(zfi_path, records.items, fasta_data.len);
+
+    const fai_file = try std.fs.cwd().createFile(fai_path, .{ .truncate = true });
+    defer fai_file.close();
+    var fai_buffered = std.io.bufferedWriter(fai_file.writer());
+    _ = try main.indexer.streamingScan(fasta_data, fai_buffered.writer(), .fai, true, allocator);
+    try fai_buffered.flush();
 
     const stale_time = std.time.timestamp() - 3600;
     const zfi_file = try std.fs.cwd().openFile(zfi_path, .{});
