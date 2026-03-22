@@ -1,8 +1,12 @@
 # z-fasta ⚡
 
 [![CI](https://github.com/eneskemalergin/z-fasta/actions/workflows/ci.yml/badge.svg)](https://github.com/eneskemalergin/z-fasta/actions/workflows/ci.yml)
+[![Zig](https://img.shields.io/badge/Zig-0.14.0-F7A41D?logo=zig&logoColor=white)](https://ziglang.org/download/0.14.0/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 A ruthless, arena-allocated FASTA toolkit written in Zig. `z-fasta` indexes, extracts, and summarizes FASTA files — SIMD-accelerated indexing up to **17× faster** than `samtools faidx`, sub-millisecond region extraction, and instantaneous assembly statistics from a compact binary index.
+
+Quick links: [Installation](#installation) · [Usage](#usage) · [Performance & Correctness](#performance--correctness) · [Benchmarking](#benchmarking) · [Roadmap](#roadmap)
 
 ## Why z-fasta?
 
@@ -114,7 +118,7 @@ All timings on AMD Ryzen 9 3950X, warm cache.
 | `default`    | ~45 MB      | `mmap` + SIMD, deduplicates sequence names.                                    |
 | `--low-mem`  | **4 MB**    | `read()` + fixed 4 MB buffer — no `mmap`, for memory-constrained environments. |
 
-> *`mmap` modes show VmRSS ≈ file size (OS-mapped pages); actual private heap is < 1 MB or ~45 MB as above.*  
+> _`mmap` modes show VmRSS ≈ file size (OS-mapped pages); actual private heap is < 1 MB or ~45 MB as above._  
 > See [bench/index/REPORT.md](bench/index/REPORT.md) for full scaling curves and memory analysis.
 
 ### Get — O(1) Region Extraction
@@ -125,7 +129,7 @@ All timings on AMD Ryzen 9 3950X, warm cache.
 | Proteome (14 MB)       | 1 kbp region    | 4.0 ms      | 11.3 ms  | **2.9×**     |
 | Transcriptome (459 MB) | 1 kbp region    | 128 ms      | 284 ms   | **2.2×**     |
 
-> Region extraction is O(1) regardless of file size — a single `pread` to the precomputed byte offset. Note: fastahack is faster than z-fasta for large (≥50 MB) single full-sequence extraction due to a simpler write path; z-fasta leads on multi-sequence real datasets.  
+> Region extraction is O(1) regardless of file size — the index resolves a direct byte offset into the FASTA, then `z-fasta` streams bases from the mapped file while skipping line breaks. Note: fastahack is faster than z-fasta for large (≥50 MB) single full-sequence extraction due to a simpler write path; z-fasta leads on multi-sequence real datasets.  
 > See [bench/get/REPORT.md](bench/get/REPORT.md) for full results.
 
 ### Stats — Assembly/Proteome Statistics
@@ -145,7 +149,7 @@ All timings on AMD Ryzen 9 3950X, warm cache.
 - **Index:** 20/20 edge cases match `samtools faidx` (exit codes and output).
 - **Get:** 90/90 byte-identical diff tests pass across 5 test files — full sequences, sub-regions, single bases, line-boundary spans, clamped ranges.
 - **Stats:** 107/107 BioPython verification tests pass — exact agreement on all Tier 1 and Tier 2 values across nucleotide and protein files.
-- **Unit tests:** 63/63 Zig unit tests (19 index · 12 get · 32 stats).
+- **Unit tests:** 67/67 Zig unit tests (23 index · 12 get · 32 stats).
 
 ## Benchmarking
 
@@ -175,7 +179,7 @@ Add `--skip-real` to the `get` / `stats` scripts to skip real dataset runs (~3 G
 
 | Format | Flag         | Description                                                |
 | ------ | ------------ | ---------------------------------------------------------- |
-| `.zfi` | *(default)*  | Compact binary index. Fast to read/write programmatically. |
+| `.zfi` | _(default)_  | Compact binary index. Fast to read/write programmatically. |
 | `.fai` | `--emit-fai` | Tab-separated text, identical to `samtools faidx` output.  |
 
 ## Development
@@ -220,8 +224,6 @@ MIT — see [LICENSE](LICENSE)
 
 ---
 
-> *Aligned life in bytes,*
->
->*FASTA sings through mirrored streams.*  
->
->*Humans bloom as code.*
+<p align="center"><em>Aligned life in bytes,<br>
+FASTA sings through mirrored streams.<br>
+Humans bloom as code.</em></p>
