@@ -2,6 +2,7 @@ const std = @import("std");
 const main = @import("main");
 const validateFasta = main.validateFasta;
 const scanHeaders = main.scanHeaders;
+const scanChunkedData = main.indexer.scanChunkedData;
 const IndexRecord = main.IndexRecord;
 const writeZfi = main.writeZfi;
 const ZfiHeader = main.ZfiHeader;
@@ -220,4 +221,29 @@ test "ZfiHeader has correct size" {
 test "IndexRecord has consistent size" {
     // name_offset(8) + name_len(2) + padding(6) + seq_offset(8) + seq_len(8) + line_bases(4) + line_bytes(4) = 40
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(IndexRecord));
+}
+
+test "low-mem indexing matches default across chunk boundary" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var fasta = std.ArrayList(u8).init(allocator);
+    defer fasta.deinit();
+    try fasta.appendSlice(">seq1\n");
+    try fasta.appendNTimes('A', 4 * 1024 * 1024 + 10);
+    try fasta.appendSlice("\n>seq2\nACGT\n");
+
+    var expected = std.ArrayList(u8).init(allocator);
+    defer expected.deinit();
+    const expected_writer = expected.writer();
+    const expected_count = try main.indexer.streamingScan(fasta.items, expected_writer, .fai, true, allocator);
+
+    var actual = std.ArrayList(u8).init(allocator);
+    defer actual.deinit();
+    const actual_writer = actual.writer();
+    const actual_count = try scanChunkedData(fasta.items, actual_writer, allocator);
+
+    try std.testing.expectEqual(expected_count, actual_count);
+    try std.testing.expectEqualStrings(expected.items, actual.items);
 }

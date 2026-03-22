@@ -14,6 +14,7 @@ pub const writeZfi = index_format.writeZfi;
 const SIMD_CHUNK_SIZE = 32;
 const SimdVec = @Vector(SIMD_CHUNK_SIZE, u8);
 const CHUNK_SIZE = 4 * 1024 * 1024; // 4 MB buffer for --low-mem mode
+const MAX_LOW_MEM_NAME_LEN = 4096;
 
 pub const OutputMode = enum { fai, zfi };
 
@@ -265,115 +266,204 @@ pub fn scanHeaders(data: []const u8, allocator: std.mem.Allocator) !std.ArrayLis
 // ============================================================================
 
 const ChunkState = struct {
-    name_buf: [4096]u8 = undefined,
+    name_buf: [MAX_LOW_MEM_NAME_LEN]u8 = undefined,
     name_len: u16 = 0,
     seq_offset: u64 = 0,
     seq_len: u64 = 0,
     line_bases: u32 = 0,
     line_bytes: u32 = 0,
     first_line_seen: bool = false,
-    in_sequence: bool = false,
+    has_header: bool = false,
     is_duplicate: bool = false,
     file_offset: u64 = 0,
     record_count: u32 = 0,
 };
 
-fn countLineBases(line: []const u8) u32 {
-    var count: u32 = 0;
-    for (line) |c| {
-        if (c > ' ') count += 1;
-    }
-    return count;
+const HeaderParseState = struct {
+    line_len: usize = 0,
+    parsing_name: bool = true,
+};
+
+const SequenceLineState = struct {
+    line_len: usize = 0,
+    base_count: u32 = 0,
+};
+
+fn finalizeChunkedRecord(state: *ChunkState, writer: anytype) !void {
+    if (!state.has_header or state.seq_len == 0 or state.is_duplicate) return;
+
+    try writer.print("{s}\t{d}\t{d}\t{d}\t{d}\n", .{
+        state.name_buf[0..state.name_len],
+        state.seq_len,
+        state.seq_offset,
+        state.line_bases,
+        state.line_bytes,
+    });
+    state.record_count += 1;
 }
 
-fn processChunk(
-    buffer: []const u8,
+fn resetChunkedSequence(state: *ChunkState) void {
+    state.seq_offset = 0;
+    state.seq_len = 0;
+    state.line_bases = 0;
+    state.line_bytes = 0;
+    state.first_line_seen = false;
+}
+
+fn startChunkedHeader(state: *ChunkState) void {
+    state.has_header = true;
+    state.name_len = 0;
+    state.is_duplicate = false;
+    resetChunkedSequence(state);
+}
+
+fn parseChunkedHeaderByte(
     state: *ChunkState,
-    writer: anytype,
-    is_last_chunk: bool,
+    parse_state: *HeaderParseState,
+    byte: u8,
+) !void {
+    parse_state.line_len += 1;
+    if (!parse_state.parsing_name) return;
+
+    if (byte == ' ' or byte == '\t' or byte == '\r') {
+        parse_state.parsing_name = false;
+        return;
+    }
+
+    if (state.name_len >= MAX_LOW_MEM_NAME_LEN) {
+        return error.HeaderTooLong;
+    }
+    state.name_buf[state.name_len] = byte;
+    state.name_len += 1;
+}
+
+fn finalizeChunkedHeader(
+    state: *ChunkState,
     seen_names: *std.StringHashMap(void),
     allocator: std.mem.Allocator,
 ) !void {
-    var pos: usize = 0;
+    const name_slice = state.name_buf[0..state.name_len];
+    const name_copy = try allocator.dupe(u8, name_slice);
+    const gop = try seen_names.getOrPut(name_copy);
+    if (gop.found_existing) {
+        allocator.free(name_copy);
+        state.is_duplicate = true;
+    } else {
+        state.is_duplicate = false;
+    }
+}
 
-    while (pos < buffer.len) {
-        if (buffer[pos] == '>') {
-            if (state.in_sequence and state.seq_len > 0 and !state.is_duplicate) {
-                try writer.print("{s}\t{d}\t{d}\t{d}\t{d}\n", .{
-                    state.name_buf[0..state.name_len],
-                    state.seq_len,
-                    state.seq_offset,
-                    state.line_bases,
-                    state.line_bytes,
-                });
-                state.record_count += 1;
+fn seedSequenceLine(line_state: *SequenceLineState, byte: u8) void {
+    line_state.line_len = 1;
+    line_state.base_count = if (byte > ' ') 1 else 0;
+}
+
+fn parseSequenceLineByte(line_state: *SequenceLineState, byte: u8) void {
+    line_state.line_len += 1;
+    if (byte > ' ') line_state.base_count += 1;
+}
+
+fn finalizeSequenceLine(state: *ChunkState, line_state: SequenceLineState) void {
+    state.seq_len += line_state.base_count;
+    if (!state.first_line_seen and line_state.base_count > 0) {
+        state.line_bases = line_state.base_count;
+        state.line_bytes = @intCast(line_state.line_len + 1);
+        state.first_line_seen = true;
+    }
+}
+
+fn scanChunkedReader(
+    reader: anytype,
+    writer: anytype,
+    seen_names: *std.StringHashMap(void),
+    allocator: std.mem.Allocator,
+) !u32 {
+    var state = ChunkState{};
+    var line_start = true;
+
+    while (true) {
+        const byte = reader.readByte() catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+
+        if (line_start and byte == '>') {
+            try finalizeChunkedRecord(&state, writer);
+            startChunkedHeader(&state);
+
+            var header_state = HeaderParseState{};
+            while (true) {
+                const header_byte = reader.readByte() catch |err| switch (err) {
+                    error.EndOfStream => {
+                        try finalizeChunkedHeader(&state, seen_names, allocator);
+                        state.file_offset += header_state.line_len + 1;
+                        return state.record_count;
+                    },
+                    else => return err,
+                };
+
+                if (header_byte == '\n') {
+                    try finalizeChunkedHeader(&state, seen_names, allocator);
+                    state.file_offset += header_state.line_len + 2;
+                    line_start = true;
+                    break;
+                }
+                try parseChunkedHeaderByte(&state, &header_state, header_byte);
+            }
+            continue;
+        }
+
+        if (!state.has_header) {
+            line_start = byte == '\n';
+            state.file_offset += 1;
+            continue;
+        }
+
+        var seq_line = SequenceLineState{};
+        seedSequenceLine(&seq_line, byte);
+
+        while (true) {
+            const seq_byte = reader.readByte() catch |err| switch (err) {
+                error.EndOfStream => {
+                    if (seq_line.base_count > 0 and state.seq_len == 0) {
+                        state.seq_offset = state.file_offset;
+                    }
+                    finalizeSequenceLine(&state, seq_line);
+                    state.file_offset += seq_line.line_len;
+                    try finalizeChunkedRecord(&state, writer);
+                    return state.record_count;
+                },
+                else => return err,
+            };
+
+            if (seq_byte == '\n') {
+                if (seq_line.base_count > 0 and state.seq_len == 0) {
+                    state.seq_offset = state.file_offset;
+                }
+                finalizeSequenceLine(&state, seq_line);
+                state.file_offset += seq_line.line_len + 1;
+                line_start = true;
+                break;
             }
 
-            const header_start = pos + 1;
-            var name_end = header_start;
-            while (name_end < buffer.len and
-                buffer[name_end] != ' ' and
-                buffer[name_end] != '\t' and
-                buffer[name_end] != '\n' and
-                buffer[name_end] != '\r')
-            {
-                name_end += 1;
-            }
-
-            const name_len = @min(name_end - header_start, state.name_buf.len);
-            @memcpy(state.name_buf[0..name_len], buffer[header_start..][0..name_len]);
-            state.name_len = @intCast(name_len);
-
-            const name_slice = state.name_buf[0..name_len];
-            const name_copy = try allocator.dupe(u8, name_slice);
-            const gop = try seen_names.getOrPut(name_copy);
-            if (gop.found_existing) {
-                allocator.free(name_copy);
-                state.is_duplicate = true;
-            } else {
-                state.is_duplicate = false;
-            }
-
-            while (pos < buffer.len and buffer[pos] != '\n') pos += 1;
-            if (pos < buffer.len) pos += 1;
-
-            state.seq_offset = state.file_offset + pos;
-            state.seq_len = 0;
-            state.line_bases = 0;
-            state.line_bytes = 0;
-            state.first_line_seen = false;
-            state.in_sequence = true;
-        } else if (state.in_sequence) {
-            const line_start = pos;
-            while (pos < buffer.len and buffer[pos] != '\n') pos += 1;
-            const line_end = pos;
-            const line = buffer[line_start..line_end];
-            const bases = countLineBases(line);
-            state.seq_len += bases;
-
-            if (!state.first_line_seen and bases > 0) {
-                state.line_bases = bases;
-                state.line_bytes = @intCast(line_end - line_start + 1);
-                state.first_line_seen = true;
-            }
-            if (pos < buffer.len) pos += 1;
-        } else {
-            pos += 1;
+            parseSequenceLineByte(&seq_line, seq_byte);
         }
     }
 
-    state.file_offset += buffer.len;
+    try finalizeChunkedRecord(&state, writer);
+    return state.record_count;
+}
 
-    if (is_last_chunk and state.in_sequence and state.seq_len > 0 and !state.is_duplicate) {
-        try writer.print("{s}\t{d}\t{d}\t{d}\t{d}\n", .{
-            state.name_buf[0..state.name_len],
-            state.seq_len,
-            state.seq_offset,
-            state.line_bases,
-            state.line_bytes,
-        });
-        state.record_count += 1;
-    }
+pub fn scanChunkedData(
+    data: []const u8,
+    writer: anytype,
+    allocator: std.mem.Allocator,
+) !u32 {
+    var stream = std.io.fixedBufferStream(data);
+    var seen_names = std.StringHashMap(void).init(allocator);
+    defer seen_names.deinit();
+
+    return scanChunkedReader(stream.reader(), writer, &seen_names, allocator);
 }
 
 pub fn runChunkedMode(path: []const u8) void {
@@ -395,26 +485,17 @@ pub fn runChunkedMode(path: []const u8) void {
     var seen_names = std.StringHashMap(void).init(allocator);
     defer seen_names.deinit();
 
-    var buffer: [CHUNK_SIZE]u8 = undefined;
-    var state = ChunkState{};
+    var buffered_reader = std.io.bufferedReaderSize(CHUNK_SIZE, file.reader());
     var stdout_buffered = std.io.bufferedWriter(std.io.getStdOut().writer());
     const writer = stdout_buffered.writer();
 
-    while (true) {
-        const bytes_read = file.read(&buffer) catch {
-            err_exit("error: read failed\n", .{});
-        };
-        if (bytes_read == 0) break;
-
-        const is_last = bytes_read < CHUNK_SIZE;
-        processChunk(buffer[0..bytes_read], &state, writer, is_last, &seen_names, allocator) catch {
-            err_exit("error: processing failed\n", .{});
-        };
-        if (is_last) break;
-    }
+    const record_count = scanChunkedReader(buffered_reader.reader(), writer, &seen_names, allocator) catch |err| switch (err) {
+        error.HeaderTooLong => err_exit("error: sequence name too long for --low-mem mode: {s}\n", .{path}),
+        else => err_exit("error: processing failed\n", .{}),
+    };
     stdout_buffered.flush() catch {};
 
-    if (state.record_count == 0) {
+    if (record_count == 0) {
         err_exit("error: no valid sequences found in: {s}\n", .{path});
     }
 }
