@@ -299,3 +299,31 @@ test "loadIndexChecked rejects corrupt zfi records" {
 
     try std.testing.expectError(error.CorruptIndex, loadIndexChecked(fasta_path));
 }
+
+test "loadIndexChecked falls back to fai when zfi is stale" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "stale-zfi", "fa");
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.fs.cwd().deleteFile(fasta_path) catch {};
+    defer std.fs.cwd().deleteFile(zfi_path) catch {};
+    defer std.fs.cwd().deleteFile(fai_path) catch {};
+
+    try std.fs.cwd().copyFile("tests/data/simple.fasta", std.fs.cwd(), fasta_path, .{});
+    try std.fs.cwd().copyFile("tests/data/simple.fasta.zfi", std.fs.cwd(), zfi_path, .{});
+    try std.fs.cwd().copyFile("tests/data/simple.fasta.fai", std.fs.cwd(), fai_path, .{});
+
+    const stale_time = std.time.timestamp() - 3600;
+    const zfi_file = try std.fs.cwd().openFile(zfi_path, .{});
+    defer zfi_file.close();
+    try zfi_file.updateTimes(stale_time, stale_time);
+
+    var idx = try loadIndexChecked(fasta_path);
+    defer idx.deinit();
+
+    try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.fai, idx.source);
+    try std.testing.expectEqual(@as(?usize, 0), idx.lookupName("seq1"));
+}

@@ -162,19 +162,14 @@ pub fn loadIndexChecked(fasta_path: []const u8) LoadIndexError!LoadedIndex {
     var zfi_path_buf: [4096]u8 = undefined;
     const zfi_path = std.fmt.bufPrint(&zfi_path_buf, "{s}.zfi", .{fasta_path}) catch return error.PathTooLong;
 
+    var zfi_failure: ?LoadIndexError = null;
     switch (tryLoadZfi(zfi_path, fasta_data, fasta_stat) catch |err| {
         posix.munmap(@constCast(@alignCast(fasta_data)));
         return err;
     }) {
         .loaded => |result| return result,
-        .stale => {
-            posix.munmap(@constCast(@alignCast(fasta_data)));
-            return error.StaleIndex;
-        },
-        .corrupt => {
-            posix.munmap(@constCast(@alignCast(fasta_data)));
-            return error.CorruptIndex;
-        },
+        .stale => zfi_failure = error.StaleIndex,
+        .corrupt => zfi_failure = error.CorruptIndex,
         .not_found => {},
     }
 
@@ -200,7 +195,7 @@ pub fn loadIndexChecked(fasta_path: []const u8) LoadIndexError!LoadedIndex {
         },
         .not_found => {
             posix.munmap(@constCast(@alignCast(fasta_data)));
-            return error.NoIndexFound;
+            return zfi_failure orelse error.NoIndexFound;
         },
     }
 }
