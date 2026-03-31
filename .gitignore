@@ -35,6 +35,10 @@ bench/stats/results/*
 # Temp dirs from verify scripts
 bench/get/.verify_tmp/
 
+# Ignored folders
+plan/
+assets/
+
 # Experiments (dev only)
 experiments/
 

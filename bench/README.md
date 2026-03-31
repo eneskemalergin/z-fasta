@@ -35,35 +35,48 @@ bench/
 
 The benchmark suite has its own dependencies, separate from z-fasta itself. **z-fasta has zero runtime dependencies** — but reproducing the benchmarks requires several tools.
 
-### Required
-
-| Tool | Purpose | Install |
-| --- | --- | --- |
-| [hyperfine](https://github.com/sharkdp/hyperfine) | Precise timing with warmup/cache control | `apt install hyperfine` or `cargo install hyperfine` |
-| [samtools](http://www.htslib.org/) | Reference indexer (`samtools faidx`) | `apt install samtools` or `conda install samtools` |
-| z-fasta | The tool being benchmarked | `zig build -Doptimize=ReleaseFast` (from project root) |
-
-### Optional (for comparison)
-
-| Tool | Purpose | Install |
-| --- | --- | --- |
-| [seqkit](https://bioinf.shenwei.me/seqkit/) | Go-based FASTA toolkit (`seqkit faidx`) | Download binary to `tools/seqkit` |
-| [fastahack](https://github.com/ekg/fastahack) | C++ FASTA indexer | Build and place in `tools/fastahack-1.0.0/` |
-
-If seqkit or fastahack are not found, benchmarks will skip them automatically.
-
-### Report generation (Python)
-
-Generating the Markdown report and figures requires Python 3.10+ with:
+Run the verification / install helper first:
 
 ```bash
-pip install matplotlib pandas tabulate
+bash bench/shared/install_tools.sh
 ```
 
-### Stats verification (Python)
+This prints a version-pins table and installs `pyfaidx` into the project `.venv` if it is missing. The other tools (seqtk, fastahack, seqkit) ship as pre-built binaries in `tools/` and are checked but not rebuilt.
+
+### Required
+
+| Tool | Pinned version | Purpose | Install |
+| --- | --- | --- | --- |
+| [hyperfine](https://github.com/sharkdp/hyperfine) | 1.12.0 | Precise timing with warmup/cache control | `apt install hyperfine` or `cargo install hyperfine` |
+| [samtools](http://www.htslib.org/) | 1.13 | Reference indexer (`samtools faidx`) | `apt install samtools` or `conda install samtools` |
+| z-fasta | current | The tool being benchmarked | `zig build -Doptimize=ReleaseFast` (from project root) |
+
+### Comparison tools (pre-built in `tools/`)
+
+| Tool | Pinned version | Purpose | Binary |
+| --- | --- | --- | --- |
+| [seqkit](https://bioinf.shenwei.me/seqkit/) | v2.13.0 | Go-based FASTA toolkit | `tools/seqkit` |
+| [fastahack](https://github.com/ekg/fastahack) | 1.0.0 | C++ FASTA indexer | `tools/fastahack-1.0.0/fastahack` |
+| [seqtk](https://github.com/lh3/seqtk) | 1.5-r133 | C FASTA/FASTQ toolkit | `tools/seqtk/seqtk` |
+
+If a comparison tool binary is not found, the benchmark script skips it automatically.
+
+> **Note on fastahack version:** fastahack does not expose a `--version` flag; the pinned version is tracked via the directory name `tools/fastahack-1.0.0/`.
+
+### Python tools
+
+| Package | Pinned version | Purpose | Install |
+| --- | --- | --- | --- |
+| [pyfaidx](https://github.com/mdshw5/pyfaidx) | 0.9.0.3 | Python FASTA random-access (`faidx` CLI) | `pip install pyfaidx==0.9.0.3` |
+| matplotlib | latest | Figures in benchmark reports | `pip install matplotlib` |
+| pandas | latest | Data processing | `pip install pandas` |
+| tabulate | latest | Markdown tables | `pip install tabulate` |
+| biopython | latest | Stats verification | `pip install biopython` |
+
+`pyfaidx` is handled automatically by `install_tools.sh`. All other packages can be installed together:
 
 ```bash
-pip install biopython
+pip install matplotlib pandas tabulate biopython
 ```
 
 ### Optional: Cold-cache benchmarkss
