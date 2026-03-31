@@ -26,9 +26,10 @@ import tabulate  # noqa: F401
 COLORS = {
     "z-fasta-full":      "#2E7D32",
     "z-fasta-indexonly": "#66BB6A",
-    "seqkit-stats":      "#E65100",
+    "seqkit-stats-a":    "#E65100",
+    "seqtk-comp":        "#00838F",
 }
-TOOL_ORDER = ["z-fasta-full", "z-fasta-indexonly", "seqkit-stats"]
+TOOL_ORDER = ["z-fasta-full", "z-fasta-indexonly", "seqkit-stats-a", "seqtk-comp"]
 
 
 def tool_sort_key(name):
@@ -178,7 +179,7 @@ def fig_test_files(df: pd.DataFrame, out: Path) -> Path:
     ax.set_xticks(list(x))
     ax.set_xticklabels(bench_labels, fontsize=10)
     ax.set_ylabel("Time (ms)")
-    ax.set_title("Stats Performance — Test Files")
+    ax.set_title("Stats Performance: Test Files")
     ax.legend(fontsize=8)
     ax.grid(axis="y", alpha=0.3)
     ax.set_axisbelow(True)
@@ -294,7 +295,7 @@ def fig_real_datasets(df: pd.DataFrame, out: Path) -> Path:
     ax.set_xticks(list(x))
     ax.set_xticklabels(bench_labels, fontsize=10)
     ax.set_ylabel("Time (s)")
-    ax.set_title("Stats Performance — Real Datasets")
+    ax.set_title("Stats Performance: Real Datasets")
     ax.legend(fontsize=8)
     ax.grid(axis="y", alpha=0.3)
     ax.set_axisbelow(True)
@@ -328,7 +329,7 @@ def md_indexonly_speedup(df: pd.DataFrame) -> str:
         bdf = df[df["file_mb"] == mb]
         full = bdf[bdf["tool_base"] == "z-fasta-full"]
         io = bdf[bdf["tool_base"] == "z-fasta-indexonly"]
-        seq = bdf[bdf["tool_base"] == "seqkit-stats"]
+        seq = bdf[bdf["tool_base"] == "seqkit-stats-a"]
         row = {"File": f"{int(mb)} MB"}
         if len(full):
             row["Full Scan"] = f"{full['mean'].values[0]:.4f}s"
@@ -339,7 +340,7 @@ def md_indexonly_speedup(df: pd.DataFrame) -> str:
                 sp = full["mean"].values[0] / io["mean"].values[0]
                 row["Speedup (full vs index-only)"] = f"**{sp:.0f}×**"
         if len(seq):
-            row["seqkit-stats"] = f"{seq['mean'].values[0]:.4f}s"
+            row["seqkit-stats-a"] = f"{seq['mean'].values[0]:.4f}s"
         rows.append(row)
     if not rows:
         return ""
@@ -394,7 +395,7 @@ def main():
         report.append(md_table(stats_df, "benchmark"))
         report.append("")
         fig_test_files(stats_df, figures_dir / "stats_test.png")
-        report.append("\n![Test File Stats](figures/stats_test.png)\n")
+        report.append("\n![Test File Stats](results/figures/stats_test.png)\n")
 
     # ── 2. Index-only vs full scan ─────────────────────────────────
     io_df = load_dir_jsons(results_dir, "indexonly")
@@ -403,20 +404,20 @@ def main():
         report.append(md_table(io_df, "benchmark"))
         report.append("")
         fig_indexonly_vs_full(io_df, figures_dir / "indexonly_vs_full.png")
-        report.append("\n![Index-Only vs Full](figures/indexonly_vs_full.png)\n")
+        report.append("\n![Index-Only vs Full](results/figures/indexonly_vs_full.png)\n")
 
         report.append("\n### Index-Only Speedup\n")
         report.append(md_indexonly_speedup(io_df))
         report.append("")
-        report.append("> **Interpretation:** Index-only mode reads only the binary `.zfi` header "
-                      "— no file I/O beyond the index. Time is dominated by process startup "
+        report.append("> **Interpretation:** Index-only mode reads only the binary `.zfi` header. "
+                      "No file I/O occurs beyond the index. Time is dominated by process startup "
                       "and is constant regardless of file size. This makes it suitable for "
                       "interactive assembly QC where waiting seconds for N50 is unacceptable.\n")
 
     # ── 3. File-size scaling ───────────────────────────────────────
     size_df = load_dir_jsons(results_dir, "scale_size")
     if size_df is not None and len(size_df):
-        report.append("\n## Scaling — File Size\n")
+        report.append("\n## Scaling: File Size\n")
         size_df = _prep(size_df)
         size_df["size_mb"] = size_df["benchmark"].str.extract(r"(\d+)mb$").astype(float)
 
@@ -431,7 +432,7 @@ def main():
         report.append("")
 
         fig_scaling_size(size_df, figures_dir / "scaling_size.png")
-        report.append("\n![Scaling by File Size](figures/scaling_size.png)\n")
+        report.append("\n![Scaling by File Size](results/figures/scaling_size.png)\n")
         report.append(
             "> **Note:** seqkit-stats is faster than z-fasta-full on large "
             "single-sequence synthetic files due to optimized FASTA parsing. "
@@ -447,7 +448,7 @@ def main():
         report.append(md_table(real_df, "benchmark"))
         report.append("")
         fig_real_datasets(real_df, figures_dir / "real_stats.png")
-        report.append("\n![Real Dataset Stats](figures/real_stats.png)\n")
+        report.append("\n![Real Dataset Stats](results/figures/real_stats.png)\n")
     else:
         report.append("\n## Real Dataset Stats\n")
         report.append("> _No real-dataset results found. "
@@ -459,7 +460,7 @@ def main():
     if mem_df is not None and len(mem_df):
         report.append("\n## Memory Usage\n")
         report.append("> RSS measured with `/usr/bin/time -v`. "
-                      "z-fasta-full uses mmap for reading — RSS reflects file pages mapped by OS. "
+                      "z-fasta-full uses mmap for reading. RSS reflects file pages mapped by OS. "
                       "z-fasta-indexonly reads only the tiny `.zfi` header: constant ~6 MB RSS.\n")
         report.append(md_memory_table(mem_df))
         report.append("")
@@ -471,7 +472,7 @@ def main():
         report.append(md_throughput_table(tp_df))
         report.append("")
         fig_throughput(tp_df, figures_dir / "throughput.png")
-        report.append("\n![Throughput](figures/throughput.png)\n")
+        report.append("\n![Throughput](results/figures/throughput.png)\n")
         report.append("> z-fasta-full throughput is ~1.0–1.25 GB/s on synthetic single-sequence "
                       "files. seqkit-stats throughput tends to be higher due to simpler output "
                       "formatting. z-fasta's advantage is the additional statistics computed "

@@ -25,6 +25,15 @@ ZFASTA="$PROJECT_ROOT/zig-out/bin/z-fasta"
 SAMTOOLS="samtools"
 SEQKIT="$PROJECT_ROOT/tools/seqkit"
 FASTAHACK="$PROJECT_ROOT/tools/fastahack-1.0.0/fastahack"
+SEQTK="$PROJECT_ROOT/tools/seqtk/seqtk"
+# pyfaidx: prefer venv, fall back to conda/system python env
+if [[ -x "$PROJECT_ROOT/.venv/bin/faidx" ]]; then
+    PYFAIDX="$PROJECT_ROOT/.venv/bin/faidx"
+elif command -v faidx &>/dev/null; then
+    PYFAIDX="$(command -v faidx)"
+else
+    PYFAIDX=""
+fi
 
 # ── Defaults ───────────────────────────────────────────────────────
 RUNS=5
@@ -52,6 +61,8 @@ command -v "$SAMTOOLS" &>/dev/null || { echo "Error: samtools not found"; exit 1
 
 HAS_SEQKIT=false;    [[ -x "$SEQKIT" ]]    && HAS_SEQKIT=true
 HAS_FASTAHACK=false; [[ -x "$FASTAHACK" ]] && HAS_FASTAHACK=true
+HAS_SEQTK=false;     [[ -x "$SEQTK" ]]     && HAS_SEQTK=true
+HAS_PYFAIDX=false;   [[ -n "$PYFAIDX" && -x "$PYFAIDX" ]] && HAS_PYFAIDX=true
 
 # Cache-clearing command
 CACHE_CLEAR=""
@@ -75,6 +86,8 @@ echo "  z-fasta:   $ZFASTA"
 echo "  samtools:  $(which $SAMTOOLS) ($($SAMTOOLS --version | head -1))"
 echo "  seqkit:    $HAS_SEQKIT"
 echo "  fastahack: $HAS_FASTAHACK"
+echo "  seqtk:     $HAS_SEQTK ($SEQTK)"
+echo "  pyfaidx:   $HAS_PYFAIDX ($PYFAIDX)"
 echo ""
 
 # ── Helper: ensure index exists for a FASTA file ──────────────────
@@ -83,7 +96,26 @@ ensure_indexes() {
     [[ -f "${file}.fai" ]] || $SAMTOOLS faidx "$file" 2>/dev/null
     [[ -f "${file}.zfi" ]] || "$ZFASTA" index "$file" 2>/dev/null
 }
-
+# ── Helper: convert samtools region to seqtk BED file ──────────────
+# seqtk subseq takes either a sequence-name list or a BED file (0-based start).
+# Samtools regions are 1-based inclusive, so start_bed = start - 1.
+make_seqtk_region_file() {
+    local region="$1"
+    local tmpfile
+    tmpfile=$(mktemp /tmp/seqtk_region.XXXXXX.bed)
+    if [[ "$region" == *:* ]]; then
+        local seqname="${region%%:*}"
+        local coords="${region#*:}"
+        local start="${coords%-*}"
+        local end="${coords#*-}"
+        local start0=$(( start - 1 ))
+        printf '%s\t%s\t%s\n' "$seqname" "$start0" "$end" > "$tmpfile"
+    else
+        # Full sequence: just the name
+        printf '%s\n' "$region" > "$tmpfile"
+    fi
+    echo "$tmpfile"
+}
 # ── Helper: get first sequence name and length from .fai ──────────
 first_seq_info() {
     local fai="$1.fai"
@@ -129,6 +161,20 @@ bench_get_region() {
         cmds+=("$FASTAHACK '$file' '$region' > /dev/null 2>&1")
     fi
 
+    # seqtk subseq (requires a BED/name file for region specification)
+    local seqtk_region_file=""
+    if $HAS_SEQTK; then
+        seqtk_region_file=$(make_seqtk_region_file "$region")
+        names+=("${label_prefix}seqtk")
+        cmds+=("$SEQTK subseq '$file' '$seqtk_region_file' > /dev/null 2>&1")
+    fi
+
+    # pyfaidx (accepts samtools-style regions directly)
+    if $HAS_PYFAIDX; then
+        names+=("${label_prefix}pyfaidx")
+        cmds+=("$PYFAIDX '$file' '$region' > /dev/null 2>&1")
+    fi
+
     local hf_args=(
         hyperfine
         --warmup "$WARMUP"
@@ -142,6 +188,9 @@ bench_get_region() {
     done
 
     "${hf_args[@]}"
+
+    # Clean up seqtk temp file after benchmark
+    [[ -n "$seqtk_region_file" ]] && rm -f "$seqtk_region_file"
 }
 
 # ── Helper: measure memory ────────────────────────────────────────
@@ -155,6 +204,14 @@ measure_memory_get() {
     )
     $HAS_SEQKIT    && tools_and_cmds+=("seqkit:$SEQKIT faidx '$file' '$region' > /dev/null 2>&1")
     $HAS_FASTAHACK && tools_and_cmds+=("fastahack:$FASTAHACK '$file' '$region' > /dev/null 2>&1")
+
+    # seqtk: pre-create the region file once (not per /usr/bin/time run)
+    local seqtk_mem_file=""
+    if $HAS_SEQTK; then
+        seqtk_mem_file=$(make_seqtk_region_file "$region")
+        tools_and_cmds+=("seqtk:$SEQTK subseq '$file' '$seqtk_mem_file' > /dev/null 2>&1")
+    fi
+    $HAS_PYFAIDX && tools_and_cmds+=("pyfaidx:$PYFAIDX '$file' '$region' > /dev/null 2>&1")
 
     for entry in "${tools_and_cmds[@]}"; do
         local tool="${entry%%:*}"
@@ -173,6 +230,9 @@ measure_memory_get() {
 
         echo "$tool,$time_s,$mem_kb,$major_faults,$minor_faults"
     done
+
+    # Clean up seqtk temp file
+    [[ -n "$seqtk_mem_file" ]] && rm -f "$seqtk_mem_file"
 }
 
 # ══════════════════════════════════════════════════════════════════════

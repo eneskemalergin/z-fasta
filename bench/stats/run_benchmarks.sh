@@ -31,6 +31,7 @@ INDEX_DATA="$BENCH_ROOT/index/data"
 # ── Tools ──────────────────────────────────────────────────────────
 ZFASTA="$PROJECT_ROOT/zig-out/bin/z-fasta"
 SEQKIT="$PROJECT_ROOT/tools/seqkit"
+SEQTK="$PROJECT_ROOT/tools/seqtk/seqtk"
 
 # ── Defaults ───────────────────────────────────────────────────────
 RUNS=5
@@ -56,6 +57,7 @@ command -v hyperfine &>/dev/null || { echo "Error: hyperfine not found (apt inst
 [[ -x "$ZFASTA" ]]   || { echo "Error: z-fasta not found at $ZFASTA. Run: zig build -Doptimize=ReleaseFast"; exit 1; }
 
 HAS_SEQKIT=false; [[ -x "$SEQKIT" ]] && HAS_SEQKIT=true
+HAS_SEQTK=false;  [[ -x "$SEQTK" ]]  && HAS_SEQTK=true
 
 # Cache-clearing command
 CACHE_CLEAR=""
@@ -77,9 +79,12 @@ echo "  Mode: $BENCH_MODE"
 echo "  Runs: $RUNS | Warmup: $WARMUP"
 echo "  z-fasta: $ZFASTA"
 echo "  seqkit:  $HAS_SEQKIT ($SEQKIT)"
+echo "  seqtk:   $HAS_SEQTK ($SEQTK)"
 echo ""
 echo "  NOTE: samtools/fastahack have no stats command."
-echo "        seqkit stats is the primary comparison."
+echo "  Composition  : z-fasta stats vs seqtk comp"
+echo "  Assembly stats: z-fasta stats vs seqkit stats -a (N50, GC%, etc.)"
+echo "  Index-only   : z-fasta stats --index-only (no equivalent in seqtk/seqkit)"
 echo ""
 
 # ── Helper: ensure index exists ───────────────────────────────────
@@ -109,10 +114,16 @@ bench_stats() {
     names+=("${label_prefix}z-fasta-indexonly")
     cmds+=("$ZFASTA stats --index-only '$file' > /dev/null")
 
-    # seqkit stats
+    # seqkit stats -a (assembly stats: N50, GC%, total N, etc.)
     if $HAS_SEQKIT; then
-        names+=("${label_prefix}seqkit-stats")
-        cmds+=("$SEQKIT stats '$file' > /dev/null 2>&1")
+        names+=("${label_prefix}seqkit-stats-a")
+        cmds+=("$SEQKIT stats -a '$file' > /dev/null 2>&1")
+    fi
+
+    # seqtk comp (per-sequence base composition; full scan)
+    if $HAS_SEQTK; then
+        names+=("${label_prefix}seqtk-comp")
+        cmds+=("$SEQTK comp '$file' > /dev/null 2>&1")
     fi
 
     local hf_args=(
@@ -143,7 +154,10 @@ measure_memory_stats() {
     fi
 
     if $HAS_SEQKIT && [[ "$mode" == "full" ]]; then
-        tools_and_cmds+=("seqkit-stats:$SEQKIT stats '$file' > /dev/null 2>&1")
+        tools_and_cmds+=("seqkit-stats-a:$SEQKIT stats -a '$file' > /dev/null 2>&1")
+    fi
+    if $HAS_SEQTK && [[ "$mode" == "full" ]]; then
+        tools_and_cmds+=("seqtk-comp:$SEQTK comp '$file' > /dev/null 2>&1")
     fi
 
     for entry in "${tools_and_cmds[@]}"; do
@@ -322,11 +336,20 @@ for mb in 10 50 100 250 500 1000; do
         fi
 
         if $HAS_SEQKIT; then
-            TIME_S=$( { /usr/bin/time -f "%e" "$SEQKIT" stats "$f" > /dev/null; } 2>&1 ) || true
+            TIME_S=$( { /usr/bin/time -f "%e" "$SEQKIT" stats -a "$f" > /dev/null; } 2>&1 ) || true
             if [[ -n "$TIME_S" ]] && (( $(echo "$TIME_S > 0" | bc -l 2>/dev/null || echo 0) )); then
                 THROUGHPUT=$(echo "scale=1; $mb / $TIME_S" | bc -l 2>/dev/null || echo "0")
-                echo "seqkit-stats,$mb,$TIME_S,$THROUGHPUT" >> "$THROUGHPUT_CSV"
-                echo "  seqkit ${mb}MB: ${TIME_S}s → ${THROUGHPUT} MB/s"
+                echo "seqkit-stats-a,$mb,$TIME_S,$THROUGHPUT" >> "$THROUGHPUT_CSV"
+                echo "  seqkit -a ${mb}MB: ${TIME_S}s → ${THROUGHPUT} MB/s"
+            fi
+        fi
+
+        if $HAS_SEQTK; then
+            TIME_S=$( { /usr/bin/time -f "%e" "$SEQTK" comp "$f" > /dev/null; } 2>&1 ) || true
+            if [[ -n "$TIME_S" ]] && (( $(echo "$TIME_S > 0" | bc -l 2>/dev/null || echo 0) )); then
+                THROUGHPUT=$(echo "scale=1; $mb / $TIME_S" | bc -l 2>/dev/null || echo "0")
+                echo "seqtk-comp,$mb,$TIME_S,$THROUGHPUT" >> "$THROUGHPUT_CSV"
+                echo "  seqtk comp ${mb}MB: ${TIME_S}s → ${THROUGHPUT} MB/s"
             fi
         fi
     fi

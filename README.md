@@ -3,15 +3,15 @@
   <h1>z-fasta ⚡</h1>
   <p>
     Fast, modular FASTA/FASTQ toolkit built in Zig.<br/>
-    SIMD-accelerated indexing, O(1) region extraction, and instant assembly stats —<br/>
+    SIMD-accelerated indexing, O(1) region extraction, and instant assembly stats.<br/>
     a drop-in replacement for <code>samtools faidx</code>, <code>seqkit</code>, and <code>fastahack</code>.
   </p>
-  <p>Current version: <strong>v0.2.0</strong></p>
+  <p>Current version: <strong>v0.2.3</strong></p>
   <br/>
   <a href="https://github.com/eneskemalergin/z-fasta/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/CI-passing-22c55e?style=for-the-badge" alt="CI" /></a>
   <a href="https://ziglang.org/download/0.14.0/"><img src="https://img.shields.io/badge/Zig-0.14.0-F7A41D?style=for-the-badge&logo=zig&logoColor=white" alt="Zig 0.14.0" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-6366f1?style=for-the-badge" alt="License: MIT" /></a>
-  <a href="bench/"><img src="https://img.shields.io/badge/samtools-17×_faster-0ea5e9?style=for-the-badge" alt="17× faster than samtools" /></a>
+  <a href="bench/"><img src="https://img.shields.io/badge/samtools-20×_faster-0ea5e9?style=for-the-badge" alt="20× faster than samtools" /></a>
 </div>
 <!-- markdownlint-enable MD041 -->
 
@@ -25,7 +25,7 @@ Modern bioinformatics workflows are bottlenecked by legacy text parsers. `z-fast
 
 - **Drop-in replacement:** Both `z-fasta index --emit-fai` and `z-fasta get` produce output byte-identical to `samtools faidx`. Falls back from `.zfi` to `.fai` with mtime + file-size staleness validation.
 - **Single binary:** No dependencies, no `conda` environments, no `glibc` version errors.
-- **Arena-allocated:** Uses Zig's `ArenaAllocator` — zero memory leaks, minimal heap overhead in all modes.
+- **Arena-allocated:** Uses Zig's `ArenaAllocator`. Zero memory leaks, minimal heap overhead in all modes.
 
 ## Installation
 
@@ -62,7 +62,7 @@ z-fasta get <file.fasta> <region>
 
 Extract sequences or sub-regions from an indexed FASTA file. Output is **byte-identical** to `samtools faidx`.
 
-Requires an index — either `.zfi` (preferred) or `.fai`. If `.zfi` is not found, falls back to `.fai` automatically.
+Requires an index: either `.zfi` (preferred) or `.fai`. If `.zfi` is not found, falls back to `.fai` automatically.
 
 **Region formats:**
 
@@ -87,7 +87,7 @@ Compute assembly/proteome statistics. Automatically detects nucleotide vs. prote
 
 **Tier 1 (index-only):** sequence count, total bases, min/max/mean/median lengths, N50, L50, N90, L90, AU, duplicate count.
 
-**Tier 2 (default):** full composition scan — nucleotide frequencies, GC content (N excluded), GC skew, soft-masked fraction. For proteins: top 3 amino acids with full names.
+**Tier 2 (default):** full composition scan: nucleotide frequencies, GC content (N excluded), GC skew, soft-masked fraction. For proteins: top 3 amino acids with full names.
 
 ### Examples
 
@@ -115,52 +115,53 @@ z-fasta stats --index-only genome.fa
 
 All timings on AMD Ryzen 9 3950X, warm cache.
 
-### Index — SIMD-Accelerated Indexing
+### Index: SIMD-Accelerated Indexing
 
-| Dataset       | Size   | z-fasta (no-dedup) | samtools | Speedup   |
-| ------------- | ------ | ------------------ | -------- | --------- |
-| Human Genome  | 3.0 GB | 0.57s              | 9.15s    | **15.9×** |
-| Transcriptome | 972 MB | 0.10s              | 1.79s    | **17.5×** |
-| Proteome      | 66 MB  | 0.005s             | 0.05s    | **9.4×**  |
+| Dataset       | Size   | z-fasta (no-dedup) | samtools | fastahack | pyfaidx | Speedup vs samtools |
+| ------------- | ------ | ------------------ | -------- | --------- | ------- | ------------------- |
+| Human Genome  | 3.0 GB | 0.45s              | 9.02s    | 21.79s    | 27.04s  | **20.2×**           |
+| Transcriptome | 972 MB | 0.11s              | 1.79s    | 5.60s     | 6.36s   | **16.5×**           |
+| Proteome      | 66 MB  | 0.006s             | 0.054s   | 0.253s    | 0.360s  | **8.6×**            |
 
-| Mode         | Heap Memory | Notes                                                                          |
-| ------------ | ----------- | ------------------------------------------------------------------------------ |
-| `--no-dedup` | **< 1 MB**  | Fastest — `mmap` + SIMD, no deduplication hash map.                            |
-| `default`    | ~45 MB      | `mmap` + SIMD, deduplicates sequence names.                                    |
-| `--low-mem`  | **4 MB**    | `read()` + fixed 4 MB buffer — no `mmap`, for memory-constrained environments. |
+| Mode         | Heap Memory | Notes                                                                         |
+| ------------ | ----------- | ----------------------------------------------------------------------------- |
+| `--no-dedup` | **< 1 MB**  | Fastest. `mmap` + SIMD, no deduplication hash map.                            |
+| `default`    | ~45 MB      | `mmap` + SIMD, deduplicates sequence names.                                   |
+| `--low-mem`  | **4 MB**    | `read()` + fixed 4 MB buffer, no `mmap`. For memory-constrained environments. |
 
-> _`mmap` modes show VmRSS ≈ file size (OS-mapped pages); actual private heap is < 1 MB or ~45 MB as above._  
-> See [bench/index/REPORT.md](bench/index/REPORT.md) for full scaling curves and memory analysis.
+> _`mmap` modes show VmRSS ≈ file size (OS-mapped pages); actual private heap is < 1 MB or ~45 MB as above._
+See [bench/index/REPORT.md](bench/index/REPORT.md) for full scaling curves and memory analysis.
 
-### Get — O(1) Region Extraction
+### Get: O(1) Region Extraction
 
-| Dataset                | Region          | z-fasta     | samtools | Speedup      |
-| ---------------------- | --------------- | ----------- | -------- | ------------ |
-| Any (warm cache)       | 100 bp – 10 kbp | **~0.6 ms** | ~1.5 ms  | **2.3–2.5×** |
-| Proteome (14 MB)       | 1 kbp region    | 4.0 ms      | 11.3 ms  | **2.9×**     |
-| Transcriptome (459 MB) | 1 kbp region    | 128 ms      | 284 ms   | **2.2×**     |
+| Dataset                | Region          | z-fasta     | samtools | seqtk  | pyfaidx | Speedup vs samtools |
+| ---------------------- | --------------- | ----------- | -------- | ------ | ------- | ------------------- |
+| Any (warm cache)       | 100 bp – 10 kbp | **~0.6 ms** | ~1.5 ms  | ~4 ms  | ~60 ms  | **2.2–2.9×**        |
+| Proteome (14 MB)       | 1 kbp region    | 3.9 ms      | 11.1 ms  | 7.1 ms | 116 ms  | **2.8×**            |
+| Transcriptome (459 MB) | 1 kbp region    | 126 ms      | 275 ms   | 220 ms | 1098 ms | **2.2×**            |
 
-> Region extraction is O(1) regardless of file size — the index resolves a direct byte offset into the FASTA, then `z-fasta` streams bases from the mapped file while skipping line breaks. Note: fastahack is faster than z-fasta for large (≥50 MB) single full-sequence extraction due to a simpler write path; z-fasta leads on multi-sequence real datasets.  
-> See [bench/get/REPORT.md](bench/get/REPORT.md) for full results.
+> Region extraction is O(1) regardless of file size. The index resolves a direct byte offset into the FASTA, then `z-fasta` streams bases from the mapped file while skipping line breaks. Note: fastahack is faster than z-fasta for large (>=50 MB) single full-sequence extraction due to a simpler write path; z-fasta leads on multi-sequence real datasets.
+See [bench/get/REPORT.md](bench/get/REPORT.md) for full results.
 
-### Stats — Assembly/Proteome Statistics
+### Stats: Assembly/Proteome Statistics
 
-| Mode       | Dataset              | z-fasta    | seqkit  | Speedup    |
-| ---------- | -------------------- | ---------- | ------- | ---------- |
-| Index-only | Genome (3.0 GB)      | **0.7 ms** | 2.1 s   | **~3000×** |
-| Index-only | Proteome (14 MB)     | **4.9 ms** | 24.6 ms | **5×**     |
-| Full scan  | 1 GB single-seq file | 0.89 s     | 0.41 s  | 0.46×      |
-| Full scan  | Proteome (14 MB)     | **15 ms**  | 25 ms   | **1.6×**   |
+| Mode       | Dataset              | z-fasta     | seqkit -a | seqtk comp | Speedup vs seqkit -a |
+| ---------- | -------------------- | ----------- | --------- | ---------- | -------------------- |
+| Index-only | Genome (3.0 GB)      | **0.8 ms**  | 17.4 s    | N/A        | **~21,000x**         |
+| Index-only | Proteome (14 MB)     | **4.9 ms**  | 57.5 ms   | N/A        | **~12x**             |
+| Full scan  | 1 GB single-seq file | 0.89 s      | 0.41 s    | N/A        | 0.46x                |
+| Full scan  | Proteome (14 MB)     | **14.5 ms** | 57.5 ms   | 91.9 ms    | **~4×**              |
 
-> Index-only time is constant (< 1 ms) regardless of file size — reads only the binary `.zfi` header. Full-scan throughput is ~1.1 GB/s. seqkit is faster on large single-sequence synthetic files; z-fasta leads on multi-sequence files (proteomes, transcriptomes) and computes richer statistics (N50, GC composition, skew, amino acid breakdown) that seqkit does not provide.  
-> See [bench/stats/REPORT.md](bench/stats/REPORT.md) for full results.
+> Index-only time is constant (< 1 ms) regardless of file size. It reads only the binary `.zfi` header. Full-scan throughput is ~1.1 GB/s. seqkit -a is faster on large single-sequence synthetic files; z-fasta leads on multi-sequence files (proteomes, transcriptomes) and computes richer statistics (N50, GC composition, skew, amino acid breakdown) that seqkit does not provide.
+See [bench/stats/REPORT.md](bench/stats/REPORT.md) for full results.
 
 ### Correctness
 
 - **Index:** 20/20 edge cases match `samtools faidx` (exit codes and output).
-- **Get:** 90/90 byte-identical diff tests pass across 5 test files — full sequences, sub-regions, single bases, line-boundary spans, clamped ranges.
-- **Stats:** 107/107 BioPython verification tests pass — exact agreement on all Tier 1 and Tier 2 values across nucleotide and protein files.
+- **Get:** 90/90 byte-identical diff tests pass across 5 test files: full sequences, sub-regions, single bases, line-boundary spans, clamped ranges.
+- **Stats:** 107/107 BioPython verification tests pass: exact agreement on all Tier 1 and Tier 2 values across nucleotide and protein files.
 - **Unit tests:** 67/67 Zig unit tests (23 index · 12 get · 32 stats).
+- **Messy FASTA:** z-fasta is the only tool tested that correctly indexes mixed-width and trailing-whitespace FASTA files. samtools, fastahack, and pyfaidx all reject them. See [bench/index/REPORT.md](bench/index/REPORT.md) for the full compatibility matrix.
 
 ## Benchmarking
 
@@ -210,28 +211,44 @@ zig build -Doptimize=ReleaseFast
 
 **Delivered**
 
-- [x] `z-fasta index` — SIMD-accelerated FASTA indexing (v0.1)
-- [x] `z-fasta get` — O(1) byte-offset sequence extraction (v0.2)
-- [x] `z-fasta stats` — Assembly/proteome statistics with index-only mode (v0.2)
+- [x] `z-fasta index`: SIMD-accelerated FASTA indexing (v0.1)
+- [x] `z-fasta get`: O(1) byte-offset sequence extraction (v0.2)
+- [x] `z-fasta stats`: Assembly/proteome statistics with index-only mode (v0.2)
 - [x] Unified benchmark suite with per-module reports and figures (v0.2.2)
+- [x] Expanded tool comparison: pyfaidx, seqtk added across all benchmark modules; messy FASTA compatibility matrix (v0.2.3)
 
 **Near-term**
 
-- [ ] Expanded tool comparison across all subcommands in benchmark reports (v0.2.3)
-- [ ] Multi-region queries: multiple `NAME:START-END` args or BED file input (v0.3)
-- [ ] Reverse complement output flag for `z-fasta get` (v0.3)
+- [ ] v0.2.4: Multi-region `get`
+    - [ ] Accept multiple `NAME:START-END` args in a single `z-fasta get` call
+    - [ ] Load the index once and resolve all regions without re-opening the file
+    - [ ] Example: `z-fasta get genome.fa chr1:1000-2000 chr2:5000-6000 chrX:100-200`
+- [ ] v0.2.5: BED file input
+    - [ ] `--bed regions.bed` flag for batch extraction from BED files
+    - [ ] BED coordinates are 0-based half-open; z-fasta converts to 1-based inclusive internally
+    - [ ] Mix `--bed` with positional `NAME:START-END` args in one call
+    - [ ] Enables direct comparison with `bedtools getfasta`
+- [ ] v0.2.6: Reverse complement
+    - [ ] `--rc` flag for `z-fasta get` to output the reverse complement of any extracted region
+    - [ ] Comptime 256-element complement table, zero-cost lookup baked into the binary
+    - [ ] Works with single regions, multi-region, and `--bed` batch calls
+- [ ] v0.3.0: Validate + Tier 2 benchmarks + release polish
+    - [ ] `z-fasta validate`: single-pass FASTA format checker with line-numbered error/warning output
+    - [ ] Checks: duplicate names, inconsistent line widths, invalid characters, empty sequences, missing terminal newline
+    - [ ] `--strict` flag treats warnings as errors
+    - [ ] Tier 2 benchmark suite: noodles, rust-bio, Fusta, htslib, bedtools comparisons
+    - [ ] Fix GET on messy FASTA (mixed-width and trailing-whitespace files indexed but not retrievable)
 
 **Long-term / Exploratory**
 
-- [ ] `z-fasta validate` — FASTA format validator with detailed error reporting (v0.3+)
-- [ ] `z-fasta digest` — In-silico trypsin digestion for mass spectrometry (v0.3+)
+- [ ] `z-fasta digest`: In-silico trypsin digestion for mass spectrometry (v0.4+)
 - [ ] Zig version upgrade to 0.15+ for async I/O and improved SIMD support (v0.4+)
 - [ ] Parallel mmap scanning for multi-threaded indexing on NVMe arrays
 - [ ] Native BGZF / gzip streaming read support
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+MIT. See [LICENSE](LICENSE)
 
 ---
 

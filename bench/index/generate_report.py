@@ -21,7 +21,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import pandas as pd
-import tabulate  # noqa: F401  — needed by pd.to_markdown()
+import tabulate  # noqa: F401  -- needed by pd.to_markdown()
 
 # ── Styling ────────────────────────────────────────────────────────
 COLORS = {
@@ -31,6 +31,7 @@ COLORS = {
     "samtools": "#1565C0",
     "seqkit": "#E65100",
     "fastahack": "#7B1FA2",
+    "pyfaidx": "#F7A41D",
 }
 TOOL_ORDER = [
     "z-fasta-default",
@@ -39,6 +40,7 @@ TOOL_ORDER = [
     "samtools",
     "seqkit",
     "fastahack",
+    "pyfaidx",
 ]
 
 
@@ -467,7 +469,7 @@ def md_speedup_table(df: pd.DataFrame) -> str:
             if len(r) and r["mean"].values[0] > 0:
                 row[f"{t} vs samtools"] = f"**{sam_t / r['mean'].values[0]:.1f}x**"
             else:
-                row[f"{t} vs samtools"] = "—"
+                row[f"{t} vs samtools"] = "N/A"
         rows.append(row)
     return pd.DataFrame(rows).to_markdown(index=False)
 
@@ -496,6 +498,54 @@ def md_memory_table(df: pd.DataFrame) -> str:
     display["Major Faults"] = display["Major Faults"].apply(lambda v: f"{int(v):,}")
     display["Minor Faults"] = display["Minor Faults"].apply(lambda v: f"{int(v):,}")
     return display.to_markdown(index=False, floatfmt=".2f")
+
+
+def load_messy_index(results_dir: Path) -> pd.DataFrame | None:
+    """Load messy FASTA indexing results from messy_* directories."""
+    dirs = sorted(results_dir.glob("messy_*"), reverse=True)
+    if not dirs:
+        return None
+    d = dirs[0]
+    rows = []
+    for f in sorted(d.glob("*.json")):
+        data = json.loads(f.read_text())
+        variant = f.stem
+        for r in data["results"]:
+            exits = r.get("exit_codes", [])
+            n_ok = exits.count(0)
+            n_total = len(exits)
+            cmd = r["command"]
+            tool = cmd.split()[0].split("/")[-1]
+            # faidx binary is pyfaidx CLI
+            if tool == "faidx":
+                tool = "pyfaidx"
+            success = n_ok == n_total and n_total > 0
+            rows.append({"variant": variant, "tool": tool, "success": success})
+    if not rows:
+        return None
+    return pd.DataFrame(rows)
+
+
+def md_messy_table(df: pd.DataFrame) -> str:
+    """Markdown compatibility matrix for messy FASTA variants."""
+    messy_order = ["z-fasta", "samtools", "fastahack", "pyfaidx"]
+    tools = [t for t in messy_order if t in df["tool"].values]
+    # append any unexpected tools at end
+    for t in df["tool"].unique():
+        if t not in tools and t != "seqtk":
+            tools.append(t)
+    variants = sorted(df["variant"].unique())
+    rows = []
+    for variant in variants:
+        row: dict = {"Variant": variant}
+        for tool in tools:
+            sub = df[(df["variant"] == variant) & (df["tool"] == tool)]
+            if sub.empty:
+                row[tool] = "n/a"
+            else:
+                row[tool] = "✓" if sub.iloc[0]["success"] else "✗"
+        rows.append(row)
+    return pd.DataFrame(rows).to_markdown(index=False)
 
 
 def md_test_table(df: pd.DataFrame) -> str:
@@ -537,14 +587,14 @@ def main():
     # ── 1. Performance ─────────────────────────────────────────────
     perf_df = load_perf(results_dir)
     if perf_df is not None and len(perf_df):
-        section("Performance — Real Datasets")
+        section("Performance: Real Datasets")
 
         report_lines.append(md_perf_table(perf_df))
         report_lines.append("")
 
         p = fig_performance(perf_df, figures_dir / "performance.png")
         generated_figs.append(str(p))
-        report_lines.append(f"![Performance Comparison](figures/performance.png)\n")
+        report_lines.append(f"![Performance Comparison](results/figures/performance.png)\n")
 
         # Speedup table
         section("Speedup vs samtools", 3)
@@ -554,15 +604,15 @@ def main():
         p = fig_speedup(perf_df, figures_dir / "speedup.png")
         if p:
             generated_figs.append(str(p))
-            report_lines.append(f"![Speedup](figures/speedup.png)\n")
+            report_lines.append(f"![Speedup](results/figures/speedup.png)\n")
     else:
-        section("Performance — Real Datasets")
+        section("Performance: Real Datasets")
         report_lines.append("_No real-dataset benchmark data found._\n")
 
     # ── 2. Scaling by file size ────────────────────────────────────
     size_df = load_scaling(results_dir, "scale_size", "size_mb")
     if size_df is not None and len(size_df):
-        section("Scaling — File Size")
+        section("Scaling: File Size")
         report_lines.append(md_scaling_table(size_df, "size_mb", "File Size"))
         report_lines.append("")
 
@@ -574,12 +624,12 @@ def main():
             figures_dir / "scaling_size.png",
         )
         generated_figs.append(str(p))
-        report_lines.append(f"![Scaling by File Size](figures/scaling_size.png)\n")
+        report_lines.append(f"![Scaling by File Size](results/figures/scaling_size.png)\n")
 
     # ── 3. Scaling by sequence count ───────────────────────────────
     seq_df = load_scaling(results_dir, "scale_seqs", "seq_count")
     if seq_df is not None and len(seq_df):
-        section("Scaling — Sequence Count")
+        section("Scaling: Sequence Count")
         report_lines.append(md_scaling_table(seq_df, "seq_count", "Sequences"))
         report_lines.append("")
 
@@ -592,7 +642,7 @@ def main():
         )
         generated_figs.append(str(p))
         report_lines.append(
-            f"![Scaling by Sequence Count](figures/scaling_seqs.png)\n"
+            f"![Scaling by Sequence Count](results/figures/scaling_seqs.png)\n"
         )
 
     # ── 4. Memory ──────────────────────────────────────────────────
@@ -608,14 +658,14 @@ def main():
             "Use `--low-mem` for true streaming memory.\n"
             ">\n"
             "> **Page faults:** Major faults = blocking disk reads (should be ~0 "
-            "on warm cache). Minor faults = non-blocking page mappings — a high "
+            "on warm cache). Minor faults = non-blocking page mappings. A high "
             "count for mmap tools confirms the OS is seamlessly mapping file "
             "pages to RAM without blocking I/O.\n"
         )
 
         p = fig_memory(mem_df, figures_dir / "memory.png")
         generated_figs.append(str(p))
-        report_lines.append(f"![Memory Usage](figures/memory.png)\n")
+        report_lines.append(f"![Memory Usage](results/figures/memory.png)\n")
 
     # ── 5. Edge Case Tests ─────────────────────────────────────────
     test_df = load_tests(results_dir)
@@ -633,9 +683,32 @@ def main():
 
         p = fig_edge_heatmap(test_df, figures_dir / "edge_cases.png")
         generated_figs.append(str(p))
-        report_lines.append(f"![Edge Case Heatmap](figures/edge_cases.png)\n")
+        report_lines.append(f"![Edge Case Heatmap](results/figures/edge_cases.png)\n")
 
-    # ── 6. Tools Tested ────────────────────────────────────────────
+    # ── 6. Messy FASTA Compatibility ──────────────────────────────
+    messy_df = load_messy_index(results_dir)
+    if messy_df is not None and len(messy_df):
+        section("Messy FASTA Compatibility")
+        report_lines.append(
+            "Real-world FASTA files often have mixed line widths or trailing whitespace "
+            "that violates the fixed-width assumption in the FAI spec. "
+            "z-fasta indexes all four variants correctly. "
+            "samtools, fastahack, and pyfaidx reject mixed-width and trailing-whitespace files.\n"
+        )
+        report_lines.append(md_messy_table(messy_df))
+        report_lines.append("")
+        report_lines.append(
+            "> **Legend:** ✓ = all hyperfine runs exited 0 (indexing succeeded). "
+            "✗ = all runs exited non-zero (indexing failed). "
+            "n/a = tool absent in this benchmark run.\n"
+            ">\n"
+            "> **Variants:** `mixed_widths` has sequences wrapped at irregular column widths. "
+            "`trailing_whitespace` has spaces at the end of each line. "
+            "`crlf_endings` uses Windows CRLF line endings. "
+            "`all_messy` combines all three.\n"
+        )
+
+    # ── 7. Tools Tested ────────────────────────────────────────────
     section("Tools Tested")
     report_lines.append(
         "| Tool | Description |\n"
@@ -643,9 +716,10 @@ def main():
         "| z-fasta-default | Zig FASTA indexer (mmap + dedup, default) |\n"
         "| z-fasta-nodedup | z-fasta with `--no-dedup` (skip duplicate checking) |\n"
         "| z-fasta-lowmem | z-fasta with `--low-mem` (streaming, no mmap) |\n"
-        "| samtools | `samtools faidx` — industry standard |\n"
-        "| seqkit | `seqkit faidx` — Go bioinformatics toolkit |\n"
-        "| fastahack | `fastahack -i` — C++ FASTA indexer |\n"
+        "| samtools | `samtools faidx`: industry standard |\n"
+        "| seqkit | `seqkit faidx`: Go bioinformatics toolkit |\n"
+        "| fastahack | `fastahack -i`: C++ FASTA indexer (first-access indexing) |\n"
+        "| pyfaidx | `faidx --no-output`: Python pyfaidx 0.9.0.3 |\n"
     )
 
     # ── Write report ───────────────────────────────────────────────

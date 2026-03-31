@@ -28,8 +28,10 @@ COLORS = {
     "samtools": "#1565C0",
     "seqkit": "#E65100",
     "fastahack": "#7B1FA2",
+    "seqtk": "#00838F",
+    "pyfaidx": "#F7A41D",
 }
-TOOL_ORDER = ["z-fasta", "samtools", "seqkit", "fastahack"]
+TOOL_ORDER = ["z-fasta", "samtools", "seqkit", "fastahack", "seqtk", "pyfaidx"]
 
 
 def tool_sort_key(name):
@@ -70,8 +72,8 @@ def _human_bench(name: str) -> str:
         'size_100mb_10kbp'   → '100 MB / 10 kbp'
         '10mb_full'          → '10 MB (full)'
         '100bp'              → '100 bp'
-        'Genome_1kb'         → 'Genome — 1 kbp region'
-        'Genome_full'        → 'Genome — full seq'
+        'Genome_1kb'         -> 'Genome: 1 kbp region'
+        'Genome_full'        -> 'Genome: full seq'
     """
     # single-region latency: size_Xmb_Ybp or size_Xmb_Ykbp
     m = re.match(r"size_(\d+)mb_(\d+)(k?)bp$", name)
@@ -93,7 +95,7 @@ def _human_bench(name: str) -> str:
     if m:
         ds, sz = m.group(1), m.group(2)
         label = {"full": "full seq", "1kb": "1 kbp region", "1mb": "1 Mbp region"}.get(sz, sz)
-        return f"{ds} — {label}"
+        return f"{ds}: {label}"
     return name
 
 
@@ -409,7 +411,7 @@ def md_speedup_table(df: pd.DataFrame, group_col: str,
         if zf_t > 0:
             row["z-fasta vs samtools"] = f"**{sam_t / zf_t:.1f}×**"
         else:
-            row["z-fasta vs samtools"] = "—"
+            row["z-fasta vs samtools"] = "N/A"
         if include_fastahack:
             fh = gdf[gdf["tool_base"] == "fastahack"]
             if len(fh) and zf_t > 0:
@@ -462,7 +464,7 @@ def main():
         report.append(md_table(single_df, "benchmark"))
         report.append("")
         fig_latency_panels(single_df, figures_dir / "single_latency.png")
-        report.append("\n![Single-Region Latency](figures/single_latency.png)\n")
+        report.append("\n![Single-Region Latency](results/figures/single_latency.png)\n")
 
         report.append("> **Interpretation:** z-fasta achieves sub-millisecond latency via O(1) "
                       "index lookup + `pread`. samtools is ~2–2.6× slower due to full `.fai` "
@@ -475,7 +477,7 @@ def main():
         p = fig_speedup_vs(single_df, "samtools", "z-fasta GET Speedup vs samtools",
                            figures_dir / "single_speedup.png")
         if p:
-            report.append("\n![Single-Region Speedup](figures/single_speedup.png)\n")
+            report.append("\n![Single-Region Speedup](results/figures/single_speedup.png)\n")
 
     # ── 2. Full-sequence extraction ────────────────────────────────
     fullseq_df = load_dir_jsons(results_dir, "fullseq")
@@ -484,7 +486,7 @@ def main():
         report.append(md_table(fullseq_df, "benchmark"))
         report.append("")
         fig_fullseq(fullseq_df, figures_dir / "fullseq.png")
-        report.append("\n![Full-Sequence Extraction](figures/fullseq.png)\n")
+        report.append("\n![Full-Sequence Extraction](results/figures/fullseq.png)\n")
 
         report.append("\n### Speedup vs samtools (and fastahack)\n")
         report.append(md_speedup_table(fullseq_df, "benchmark", include_fastahack=True))
@@ -520,9 +522,9 @@ def main():
         report.append(pivot.to_markdown(floatfmt=".4f"))
         report.append("")
         fig_scaling_region(scale_df.copy(), figures_dir / "scaling_region.png")
-        report.append("\n![Region-Size Scaling](figures/scaling_region.png)\n")
-        report.append("> **Interpretation:** Latency is O(1) up to ~10 kbp — dominated by "
-                      "process startup and index lookup. Above ~100 kbp it grows linearly "
+        report.append("\n![Region-Size Scaling](results/figures/scaling_region.png)\n")
+        report.append("> **Interpretation:** Latency is O(1) up to ~10 kbp. Process startup "
+                      "and index lookup dominate below that threshold. Above ~100 kbp it grows linearly "
                       "with region size as the I/O read cost dominates. fastahack's output "
                       "advantage grows with region size due to its simpler write path.\n")
 
@@ -533,7 +535,7 @@ def main():
         report.append(md_table(real_df, "benchmark"))
         report.append("")
         fig_real_datasets(real_df, figures_dir / "real_get.png")
-        report.append("\n![Real Dataset Extraction](figures/real_get.png)\n")
+        report.append("\n![Real Dataset Extraction](results/figures/real_get.png)\n")
     else:
         report.append("\n## Real Dataset Extraction\n")
         report.append("> _No real-dataset results found. "
@@ -545,8 +547,8 @@ def main():
     if mem_df is not None and len(mem_df):
         report.append("\n## Memory Usage\n")
         report.append("> RSS measured with `/usr/bin/time -v`. For mmap-based tools "
-                      "(z-fasta, samtools, fastahack) RSS reflects file pages mapped by the OS "
-                      "— not heap allocation. `Major Faults` should be ~0 on warm cache.\n")
+                      "(z-fasta, samtools, fastahack) RSS reflects file pages mapped by the OS, "
+                      "not heap allocation. `Major Faults` should be ~0 on warm cache.\n")
         report.append(md_memory_table(mem_df))
         report.append("")
 

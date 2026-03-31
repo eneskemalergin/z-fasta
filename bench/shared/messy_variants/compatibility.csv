@@ -1,0 +1,21 @@
+variant,tool,index_ok,get_ok,notes
+mixed_widths,z-fasta,1,1,
+mixed_widths,samtools,0,1,index fails (non-uniform line lengths required)
+mixed_widths,fastahack,0,1,index fails (non-uniform line lengths required)
+mixed_widths,pyfaidx,0,1,index fails (non-uniform line lengths required)
+mixed_widths,seqtk,N/A,1,
+crlf_endings,z-fasta,1,1,
+crlf_endings,samtools,1,1,
+crlf_endings,fastahack,1,1,indexes OK; get output has CRLF in sequence (differs from z-fasta)
+crlf_endings,pyfaidx,1,1,indexes OK; get output may differ on CRLF files
+crlf_endings,seqtk,N/A,1,
+trailing_whitespace,z-fasta,1,1,
+trailing_whitespace,samtools,0,1,index fails (non-uniform line lengths required)
+trailing_whitespace,fastahack,0,1,index fails (non-uniform line lengths required)
+trailing_whitespace,pyfaidx,0,1,index fails (non-uniform line lengths required)
+trailing_whitespace,seqtk,N/A,1,
+all_messy,z-fasta,1,1,
+all_messy,samtools,0,1,index fails (non-uniform line lengths required)
+all_messy,fastahack,0,1,index fails (non-uniform line lengths required)
+all_messy,pyfaidx,0,1,index fails (non-uniform line lengths required)
+all_messy,seqtk,N/A,1,

@@ -33,7 +33,7 @@ bench/
 
 ## Prerequisites
 
-The benchmark suite has its own dependencies, separate from z-fasta itself. **z-fasta has zero runtime dependencies** — but reproducing the benchmarks requires several tools.
+The benchmark suite has its own dependencies, separate from z-fasta itself. **z-fasta has zero runtime dependencies**, but reproducing the benchmarks requires several tools.
 
 Run the verification / install helper first:
 
@@ -122,9 +122,9 @@ python3 bench/stats/generate_report.py
 
 ## Output
 
-- `index/REPORT.md` — Full indexer benchmark report with tables and figures
-- `get/REPORT.md` — Full GET benchmark report (latency, scaling, memory)
-- `stats/REPORT.md` — Full STATS benchmark report (throughput, index-only speedup)
-- `*/results/figures/` — PNG charts
-- `*/results/*.csv`, `*/results/*/` — Raw data (gitignored, regenerated)
-- `shared/data/` — Real datasets (gitignored, downloaded by script)
+- `index/REPORT.md`: Full indexer benchmark report with tables and figures
+- `get/REPORT.md`: Full GET benchmark report (latency, scaling, memory)
+- `stats/REPORT.md`: Full STATS benchmark report (throughput, index-only speedup)
+- `*/results/figures/`: PNG charts
+- `*/results/*.csv`, `*/results/*/`: Raw data (gitignored, regenerated)
+- `shared/data/`: Real datasets (gitignored, downloaded by script)

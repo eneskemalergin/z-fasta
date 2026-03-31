@@ -25,6 +25,14 @@ ZFASTA="$PROJECT_ROOT/zig-out/bin/z-fasta"
 SAMTOOLS="samtools"
 SEQKIT="$PROJECT_ROOT/tools/seqkit"
 FASTAHACK="$PROJECT_ROOT/tools/fastahack-1.0.0/fastahack"
+# pyfaidx: prefer venv, fall back to conda/system python env
+if [[ -x "$PROJECT_ROOT/.venv/bin/faidx" ]]; then
+    PYFAIDX="$PROJECT_ROOT/.venv/bin/faidx"
+elif command -v faidx &>/dev/null; then
+    PYFAIDX="$(command -v faidx)"
+else
+    PYFAIDX=""
+fi
 
 # ── Defaults ───────────────────────────────────────────────────────
 RUNS=5
@@ -52,6 +60,7 @@ command -v "$SAMTOOLS" &>/dev/null || { echo "Error: samtools not found"; exit 1
 
 HAS_SEQKIT=false;    [[ -x "$SEQKIT" ]]    && HAS_SEQKIT=true
 HAS_FASTAHACK=false; [[ -x "$FASTAHACK" ]] && HAS_FASTAHACK=true
+HAS_PYFAIDX=false;   [[ -n "$PYFAIDX" && -x "$PYFAIDX" ]] && HAS_PYFAIDX=true
 
 # Cache-clearing command (needs sudo for drop_caches)
 CACHE_CLEAR=""
@@ -79,6 +88,7 @@ echo "  z-fasta:   $ZFASTA ($(ls -lh "$ZFASTA" | awk '{print $5}'))"
 echo "  samtools:  $(which $SAMTOOLS) ($($SAMTOOLS --version | head -1))"
 echo "  seqkit:    $HAS_SEQKIT ($SEQKIT)"
 echo "  fastahack: $HAS_FASTAHACK ($FASTAHACK)"
+echo "  pyfaidx:   $HAS_PYFAIDX ($PYFAIDX)"
 echo ""
 
 # ── Helper: build hyperfine command for a single file ──────────────
@@ -116,10 +126,16 @@ bench_file() {
         cmds+=("$SEQKIT faidx '$file' > /dev/null 2>&1")
     fi
 
-    # fastahack
+    # fastahack (indexes via first access: -i flag)
     if $HAS_FASTAHACK; then
         names+=("${label_prefix}fastahack")
         cmds+=("$FASTAHACK -i '$file' > /dev/null 2>&1")
+    fi
+
+    # pyfaidx (creates .fai on first access; --no-output suppresses sequence extraction)
+    if $HAS_PYFAIDX; then
+        names+=("${label_prefix}pyfaidx")
+        cmds+=("$PYFAIDX '$file' --no-output 2>&1")
     fi
 
     # Build the hyperfine invocation
@@ -154,6 +170,7 @@ measure_memory() {
     )
     $HAS_SEQKIT    && tools_and_cmds+=("seqkit:$SEQKIT faidx '$file' > /dev/null 2>&1")
     $HAS_FASTAHACK && tools_and_cmds+=("fastahack:$FASTAHACK -i '$file' > /dev/null 2>&1")
+    $HAS_PYFAIDX   && tools_and_cmds+=("pyfaidx:$PYFAIDX '$file' --no-output 2>&1")
 
     for entry in "${tools_and_cmds[@]}"; do
         local tool="${entry%%:*}"

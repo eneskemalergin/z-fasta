@@ -1,13 +1,34 @@
+<!-- markdownlint-disable MD024 -->
 # Changelog
 
 All notable changes to z-fasta will be documented in this file.
+
+## [0.2.3] - 2026-03-30
+
+### Added
+
+- **pyfaidx** added to index and get benchmark suites (`faidx --no-output` for indexing, `faidx file region` for extraction)
+- **seqtk** added to get and stats benchmark suites (`seqtk subseq` via BED file for extraction, `seqtk comp` for per-sequence composition)
+- **seqkit stats -a** replaces `seqkit stats` in stats benchmarks (adds N50, GC% to comparison)
+- `bench/shared/install_tools.sh`: verification helper for all pinned tool versions; installs pyfaidx into `.venv` automatically
+- **Messy FASTA benchmark** (`bench/shared/messy_variants/`): four derived FASTA variants (mixed_widths, crlf_endings, trailing_whitespace, all_messy) benchmarked against all indexing tools; `compatibility.csv` with per-tool exit-code results
+- Messy FASTA compatibility section added to `bench/index/REPORT.md` (auto-generated from `generate_report.py`)
+
+### Changed
+
+- `bench/index/generate_report.py`: pyfaidx added to COLORS/TOOL_ORDER; figure paths corrected to `results/figures/`; messy compatibility section added; em-dashes removed from all generated prose
+- `bench/get/generate_report.py`: seqtk and pyfaidx added; figure paths corrected; em-dashes removed
+- `bench/stats/generate_report.py`: seqtk-comp added; seqkit-stats renamed to seqkit-stats-a throughout; figure paths corrected; em-dashes removed
+- `README.md`: version bumped to v0.2.3; performance tables updated with pyfaidx and seqtk columns; messy FASTA correctness bullet added; roadmap updated
+- `src/main.zig`: VERSION bumped to 0.2.3
+- `build.zig.zon`: version bumped to 0.2.3
 
 ## [0.2.2] - 2026-03-08
 
 ### Added
 
-- **GET benchmark suite** (`bench/get/`) — hyperfine timing, RSS memory, region-size scaling, real dataset benchmarks; `--skip-real` flag; `verify_get.sh` (90 diff tests); rewritten `generate_report.py` with human-readable names, per-module figures, and auto-generated `REPORT.md`
-- **STATS benchmark suite** (`bench/stats/`) — index-only vs. full-scan, file-size scaling (1 MB – 1 GB), throughput CSV; `--skip-real` flag; `verify_stats.py` (107 BioPython tests); rewritten `generate_report.py` with μs index-only speedup table, seqkit in all comparisons, and auto-generated `REPORT.md`
+- **GET benchmark suite** (`bench/get/`): hyperfine timing, RSS memory, region-size scaling, real dataset benchmarks; `--skip-real` flag; `verify_get.sh` (90 diff tests); rewritten `generate_report.py` with human-readable names, per-module figures, and auto-generated `REPORT.md`
+- **STATS benchmark suite** (`bench/stats/`): index-only vs. full-scan, file-size scaling (1 MB – 1 GB), throughput CSV; `--skip-real` flag; `verify_stats.py` (107 BioPython tests); rewritten `generate_report.py` with μs index-only speedup table, seqkit in all comparisons, and auto-generated `REPORT.md`
 - `bench/README.md`: GET and STATS added to Quick Start; `--skip-real` documented
 
 ### Fixed
@@ -40,21 +61,21 @@ All notable changes to z-fasta will be documented in this file.
 
 ### Added
 
-- **`z-fasta get <file.fasta> <region>`** — O(1) byte-offset sequence extraction
+- **`z-fasta get <file.fasta> <region>`**: O(1) byte-offset sequence extraction
     - Output byte-identical to `samtools faidx` (verified via `diff` on 90 test cases)
     - Region formats: `NAME`, `NAME:START-END`, `NAME:START-`
     - Handles Ensembl-style names with embedded colons (right-to-left parsing)
     - mmap + MADV_RANDOM for point-access extraction
     - Coordinate clamping matches samtools behavior (END > seq_len silently clamped)
-- **`z-fasta stats <file.fasta>`** — assembly/proteome statistics
-    - Tier 1 (index-only, `--index-only`): sequence count, total bases, min/max/mean/median, N50, L50, N90, L90, AU, duplicates — completes in <500 μs
+- **`z-fasta stats <file.fasta>`**: assembly/proteome statistics
+    - Tier 1 (index-only, `--index-only`): sequence count, total bases, min/max/mean/median, N50, L50, N90, L90, AU, duplicates -- completes in <500 μs
     - Tier 2 (full scan): branchless composition counting, nucleotide vs protein auto-detection
     - Nucleotide: A/C/G/T/N frequencies, GC content (N excluded), GC skew, soft-masked fraction
     - Protein: top 3 amino acids with full names, lowercase fraction
-- **Shared index loading** (`index_format.zig`) — .zfi preferred, .fai fallback with mtime/size staleness checks
+- **Shared index loading** (`index_format.zig`): .zfi preferred, .fai fallback with mtime/size staleness checks
 - **Test suites:** 80 unit tests (19 index + 29 get + 32 stats), 90 samtools-diff tests, 107 BioPython verification tests
-- `bench/verify_get.sh` — automated byte-identical comparison against samtools
-- `bench/verify_stats.py` — automated stats verification against BioPython
+- `bench/verify_get.sh` -- automated byte-identical comparison against samtools
+- `bench/verify_stats.py` -- automated stats verification against BioPython
 
 ### Changed
 
