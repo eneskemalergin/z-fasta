@@ -236,7 +236,6 @@ zig build -Doptimize=ReleaseFast
 **Near-term**
 
 - [ ] v0.2.5: BED file input
-- [ ] v0.2.5: BED file input
     - [ ] `--bed regions.bed` flag for batch extraction from BED files
     - [ ] BED coordinates are 0-based half-open; z-fasta converts to 1-based inclusive internally
     - [ ] Mix `--bed` with positional `NAME:START-END` args in one call
