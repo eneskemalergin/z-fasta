@@ -467,6 +467,152 @@ fi
 echo "  Memory data → $MEM_CSV"
 echo ""
 
+# ══════════════════════════════════════════════════════════════════════
+#  6. Multi-Region Extraction (v0.2.4)
+# ══════════════════════════════════════════════════════════════════════
+
+echo "──────────────────────────────────────────────────"
+echo " [6] Multi-Region Extraction (v0.2.4)"
+echo "──────────────────────────────────────────────────"
+
+# Helper: make a seqtk BED file from multiple samtools-style regions
+make_seqtk_multi_bed() {
+    local tmpfile
+    tmpfile=$(mktemp /tmp/seqtk_multi.XXXXXX.bed)
+    for region in "$@"; do
+        if [[ "$region" == *:* ]]; then
+            local seqname="${region%%:*}"
+            local coords="${region#*:}"
+            local start="${coords%-*}"
+            local end="${coords#*-}"
+            printf '%s\t%s\t%s\n' "$seqname" "$(( start - 1 ))" "$end"
+        else
+            printf '%s\n' "$region"
+        fi
+    done > "$tmpfile"
+    echo "$tmpfile"
+}
+
+# Helper: bench_get_multi <file> <region_count_label> <json_out> <label_prefix> region1 region2 ...
+bench_get_multi() {
+    local file="$1"
+    local json_out="$2"
+    local label_prefix="$3"
+    shift 3
+    local regions=("$@")
+
+    local prepare_cmd=""
+    [[ -n "$CACHE_CLEAR" ]] && prepare_cmd="$CACHE_CLEAR"
+
+    local cmds=()
+    local names=()
+
+    # z-fasta (native multi-region)
+    names+=("${label_prefix}z-fasta")
+    local zf_cmd="$ZFASTA get '$file'"
+    for r in "${regions[@]}"; do zf_cmd+=" '$r'"; done
+    zf_cmd+=" > /dev/null"
+    cmds+=("$zf_cmd")
+
+    # samtools (accepts multiple region args natively)
+    names+=("${label_prefix}samtools")
+    local st_cmd="$SAMTOOLS faidx '$file'"
+    for r in "${regions[@]}"; do st_cmd+=" '$r'"; done
+    st_cmd+=" > /dev/null"
+    cmds+=("$st_cmd")
+
+    # seqtk (BED file with all regions)
+    if $HAS_SEQTK; then
+        local seqtk_bed
+        seqtk_bed=$(make_seqtk_multi_bed "${regions[@]}")
+        names+=("${label_prefix}seqtk")
+        cmds+=("$SEQTK subseq '$file' '$seqtk_bed' > /dev/null 2>&1")
+    fi
+
+    local hf_args=(
+        hyperfine
+        --warmup "$WARMUP"
+        --runs "$RUNS"
+        --export-json "$json_out"
+    )
+    [[ -n "$prepare_cmd" ]] && hf_args+=(--prepare "$prepare_cmd")
+    for i in "${!names[@]}"; do
+        hf_args+=(-n "${names[$i]}" "${cmds[$i]}")
+    done
+
+    "${hf_args[@]}"
+
+    [[ $HAS_SEQTK == true ]] && rm -f "$seqtk_bed" 2>/dev/null || true
+}
+
+# Pick a file with enough sequences
+MULTI_FILE=""
+MULTI_SEQ_COUNT=0
+for candidate in \
+    "$DATA_DIR/REAL_Proteome.fasta" \
+    "$DATA_DIR/REAL_Transcriptome.fa" \
+    "$INDEX_DATA/size_100mb.fasta" \
+    "$INDEX_DATA/size_50mb.fasta" \
+    "$PROJECT_ROOT/tests/data/edge_cases.fasta" \
+    "$PROJECT_ROOT/tests/data/simple.fasta"; do
+    if [[ -f "${candidate}.fai" ]] || { [[ -f "$candidate" ]] && "$SAMTOOLS" faidx "$candidate" 2>/dev/null; }; then
+        CNT=$(wc -l < "${candidate}.fai" 2>/dev/null || echo 0)
+        if [[ "$CNT" -gt "$MULTI_SEQ_COUNT" ]]; then
+            MULTI_FILE="$candidate"
+            MULTI_SEQ_COUNT=$CNT
+        fi
+    fi
+done
+
+if [[ -n "$MULTI_FILE" && "$MULTI_SEQ_COUNT" -gt 0 ]]; then
+    ensure_indexes "$MULTI_FILE"
+    MULTI_DIR="$RESULTS_DIR/multi_${TIMESTAMP}"
+    mkdir -p "$MULTI_DIR"
+
+    echo "  File: $MULTI_FILE ($MULTI_SEQ_COUNT sequences)"
+
+    # Read all sequence names and lengths from .fai
+    mapfile -t ALL_NAMES < <(awk -F'\t' '{print $1}' "${MULTI_FILE}.fai")
+    mapfile -t ALL_LENS  < <(awk -F'\t' '{print $2}' "${MULTI_FILE}.fai")
+
+    # For each region count, pick evenly spaced sequences + 100bp sub-regions
+    for RCOUNT in 1 10 50 100; do
+        if [[ "$RCOUNT" -gt "$MULTI_SEQ_COUNT" ]]; then
+            echo "  SKIP: $RCOUNT regions (only $MULTI_SEQ_COUNT sequences available)"
+            continue
+        fi
+
+        REGIONS=()
+        STEP=$(( MULTI_SEQ_COUNT / RCOUNT ))
+        [[ "$STEP" -lt 1 ]] && STEP=1
+        idx2=0
+        while [[ ${#REGIONS[@]} -lt $RCOUNT && $idx2 -lt $MULTI_SEQ_COUNT ]]; do
+            NAME="${ALL_NAMES[$idx2]}"
+            LEN="${ALL_LENS[$idx2]}"
+            if [[ "$LEN" -ge 100 ]]; then
+                MID=$(( LEN / 2 ))
+                START=$(( MID - 50 ))
+                [[ "$START" -lt 1 ]] && START=1
+                END=$(( START + 99 ))
+                REGIONS+=("${NAME}:${START}-${END}")
+            else
+                REGIONS+=("$NAME")
+            fi
+            idx2=$(( idx2 + STEP ))
+        done
+
+        echo "  $RCOUNT region(s)..."
+        bench_get_multi "$MULTI_FILE" \
+            "$MULTI_DIR/${RCOUNT}regions.json" \
+            "${RCOUNT}regions_" \
+            "${REGIONS[@]}"
+    done
+else
+    echo "  SKIP: no suitable multi-sequence file found"
+fi
+
+echo ""
+
 echo "════════════════════════════════════════════════════════════════"
 echo "  GET benchmarks complete."
 echo "  Results in: $RESULTS_DIR"

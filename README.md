@@ -57,10 +57,10 @@ Options:
 ### Get (sequence extraction)
 
 ```bash
-z-fasta get <file.fasta> <region>
+z-fasta get <file.fasta> <region> [region ...]
 ```
 
-Extract sequences or sub-regions from an indexed FASTA file. Output is **byte-identical** to `samtools faidx`.
+Extract one or more sequences or sub-regions from an indexed FASTA file. Output is **byte-identical** to `samtools faidx`. Multiple regions are accepted in a single call; the index loads once and results stream in CLI order.
 
 Requires an index: either `.zfi` (preferred) or `.fai`. If `.zfi` is not found, falls back to `.fai` automatically.
 
@@ -104,6 +104,9 @@ z-fasta get genome.fa chr1
 # Extract a sub-region (1-based, inclusive)
 z-fasta get genome.fa chr1:1000000-2000000
 
+# Extract multiple regions in one call (index loads once)
+z-fasta get genome.fa chr1:1000-2000 chr2:5000-6000 chrX:100-200
+
 # Assembly stats (full composition scan)
 z-fasta stats genome.fa
 
@@ -141,6 +144,18 @@ See [bench/index/REPORT.md](bench/index/REPORT.md) for full scaling curves and m
 | Transcriptome (459 MB) | 1 kbp region    | 126 ms      | 275 ms   | 220 ms | 1098 ms | **2.2×**            |
 
 > Region extraction is O(1) regardless of file size. The index resolves a direct byte offset into the FASTA, then `z-fasta` streams bases from the mapped file while skipping line breaks. Note: fastahack is faster than z-fasta for large (>=50 MB) single full-sequence extraction due to a simpler write path; z-fasta leads on multi-sequence real datasets.
+
+**Multi-region (v0.2.4):** `z-fasta get` accepts multiple regions per call, loading the index once and streaming all results in CLI order.
+
+| Regions | z-fasta  | samtools  | seqtk    | Speedup vs samtools |
+| ------- | -------- | --------- | -------- | ------------------- |
+| 1       | 137 ms   | 280 ms    | 218 ms   | **2.0×**            |
+| 10      | 140 ms   | 269 ms    | 221 ms   | **1.9×**            |
+| 50      | 135 ms   | 272 ms    | 219 ms   | **2.0×**            |
+| 100     | 138 ms   | 277 ms    | 218 ms   | **2.0×**            |
+
+> Benchmarked on REAL_Transcriptome.fa (972 MB, 254,070 sequences). Latency is dominated by mmap startup cost and stays constant across region counts — each additional region costs ~1 µs of index lookup. seqtk performs a full-file scan per call regardless of region count and is listed for reference only.
+
 See [bench/get/REPORT.md](bench/get/REPORT.md) for full results.
 
 ### Stats: Assembly/Proteome Statistics
@@ -158,9 +173,9 @@ See [bench/stats/REPORT.md](bench/stats/REPORT.md) for full results.
 ### Correctness
 
 - **Index:** 20/20 edge cases match `samtools faidx` (exit codes and output).
-- **Get:** 90/90 byte-identical diff tests pass across 5 test files: full sequences, sub-regions, single bases, line-boundary spans, clamped ranges.
+- **Get:** 90/90 single-region and 22/22 multi-region byte-identical diff tests pass vs samtools across 5+ test files: full sequences, sub-regions, single bases, line-boundary spans, clamped ranges, duplicate regions, reversed CLI order, sort-path (≥16 regions).
 - **Stats:** 107/107 BioPython verification tests pass: exact agreement on all Tier 1 and Tier 2 values across nucleotide and protein files.
-- **Unit tests:** 67/67 Zig unit tests (23 index · 12 get · 32 stats).
+- **Unit tests:** 85/85 Zig unit tests (23 index · 30 get · 32 stats).
 - **Messy FASTA:** z-fasta is the only tool tested that correctly indexes mixed-width and trailing-whitespace FASTA files. samtools, fastahack, and pyfaidx all reject them. See [bench/index/REPORT.md](bench/index/REPORT.md) for the full compatibility matrix.
 
 ## Benchmarking
@@ -216,13 +231,11 @@ zig build -Doptimize=ReleaseFast
 - [x] `z-fasta stats`: Assembly/proteome statistics with index-only mode (v0.2)
 - [x] Unified benchmark suite with per-module reports and figures (v0.2.2)
 - [x] Expanded tool comparison: pyfaidx, seqtk added across all benchmark modules; messy FASTA compatibility matrix (v0.2.3)
+- [x] Multi-region `get`: single call with N regions, index loads once, results stream in CLI order; ~2× faster than samtools across 1–100 regions (v0.2.4)
 
 **Near-term**
 
-- [ ] v0.2.4: Multi-region `get`
-    - [ ] Accept multiple `NAME:START-END` args in a single `z-fasta get` call
-    - [ ] Load the index once and resolve all regions without re-opening the file
-    - [ ] Example: `z-fasta get genome.fa chr1:1000-2000 chr2:5000-6000 chrX:100-200`
+- [ ] v0.2.5: BED file input
 - [ ] v0.2.5: BED file input
     - [ ] `--bed regions.bed` flag for batch extraction from BED files
     - [ ] BED coordinates are 0-based half-open; z-fasta converts to 1-based inclusive internally

@@ -35,7 +35,7 @@ const USAGE =
     \\  --low-mem    Use chunked reader instead of mmap (4 MB constant memory)
     \\
     \\Get usage:
-    \\  z-fasta get <file.fasta> <region>
+    \\  z-fasta get <file.fasta> <region> [region ...]
     \\  Region formats: NAME, NAME:START-END, NAME:START-
     \\
     \\Stats options:
@@ -46,6 +46,7 @@ const USAGE =
     \\  z-fasta index --emit-fai genome.fa       Output FAI to stdout
     \\  z-fasta get genome.fa chr1:1000-2000     Extract region
     \\  z-fasta get genome.fa chr1               Extract full sequence
+    \\  z-fasta get genome.fa chr1 chr2 chrM     Extract multiple sequences
     \\  z-fasta stats genome.fa                  Full stats with composition
     \\  z-fasta stats --index-only genome.fa     Quick index-only stats
     \\
@@ -232,26 +233,32 @@ fn runIndex(args: *std.process.ArgIterator) void {
 
 fn runGetCmd(args: *std.process.ArgIterator) void {
     var fasta_path: ?[]const u8 = null;
-    var region: ?[]const u8 = null;
+    // Static buffer: up to 1024 region strings without heap allocation.
+    var region_buf: [1024][]const u8 = undefined;
+    var region_count: usize = 0;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printHelpAndExit();
         } else if (fasta_path == null) {
             fasta_path = arg;
-        } else if (region == null) {
-            region = arg;
+        } else {
+            if (region_count >= region_buf.len) {
+                printErrorAndExit("error: too many regions (max 1024)\n", .{});
+            }
+            region_buf[region_count] = arg;
+            region_count += 1;
         }
     }
 
     const path = fasta_path orelse {
-        printErrorAndExit("error: usage: z-fasta get <file.fasta> <region>\n", .{});
+        printErrorAndExit("error: usage: z-fasta get <file.fasta> <region> [region ...]\n", .{});
     };
-    const region_str = region orelse {
-        printErrorAndExit("error: usage: z-fasta get <file.fasta> <region>\n", .{});
-    };
+    if (region_count == 0) {
+        printErrorAndExit("error: usage: z-fasta get <file.fasta> <region> [region ...]\n", .{});
+    }
 
-    getter.runGet(path, region_str);
+    getter.runGet(path, region_buf[0..region_count]);
 }
 
 // ============================================================================

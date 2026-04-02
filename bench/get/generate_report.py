@@ -156,6 +156,33 @@ def load_memory(results_dir: Path) -> pd.DataFrame | None:
     return df
 
 
+def load_multi(results_dir: Path) -> pd.DataFrame | None:
+    """Load multi-region benchmark results (bench [6]).
+
+    Files come from results/multi_<timestamp>/<N>regions.json where N is
+    the region count (1, 10, 50, 100).
+    """
+    d = discover_latest(results_dir, "multi")
+    if not d or not d.is_dir():
+        return None
+    frames = []
+    for jf in sorted(d.glob("*.json")):
+        df = load_hyperfine_json(jf)
+        # stem is e.g. "10regions" or "100regions"
+        stem = jf.stem  # e.g. "10regions"
+        count_str = stem.replace("regions", "")
+        try:
+            count = int(count_str)
+        except ValueError:
+            count = 0
+        df["region_count"] = count
+        df["benchmark"] = stem
+        frames.append(df)
+    if not frames:
+        return None
+    return pd.concat(frames, ignore_index=True)
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  Figures
 # ══════════════════════════════════════════════════════════════════════
@@ -551,6 +578,62 @@ def main():
                       "not heap allocation. `Major Faults` should be ~0 on warm cache.\n")
         report.append(md_memory_table(mem_df))
         report.append("")
+
+    # ── 6. Multi-region extraction ────────────────────────────────
+    multi_df = load_multi(results_dir)
+    if multi_df is not None and len(multi_df):
+        report.append("\n## Multi-Region Extraction (v0.2.4)\n")
+        report.append("> Time to extract N regions in a single CLI call, loading the index once "
+                      "and streaming all results to stdout. z-fasta uses O(1) offset lookup per "
+                      "region. samtools re-parses its FAI header per call but otherwise uses the "
+                      "same mmap strategy. seqtk scan time dominates because it has no index.\n")
+
+        # Build a tidy table: rows = region count, columns = tool, values = mean time
+        multi_df2 = multi_df.copy()
+        multi_df2["tool_base"] = multi_df2["tool"].apply(_strip_tool_prefix)
+        multi_df2 = multi_df2.sort_values("region_count")
+
+        pivot = multi_df2.pivot_table(
+            index="region_count", columns="tool_base", values="mean", aggfunc="first"
+        )
+        cols = sorted(pivot.columns, key=tool_sort_key)
+        pivot = pivot[cols]
+
+        # Format as ms
+        def fmt_ms(v):
+            if pd.isna(v):
+                return "N/A"
+            return f"{v * 1000:.1f} ms"
+
+        fmt_pivot = pivot.map(fmt_ms)
+        fmt_pivot.index.name = "Regions"
+        report.append(fmt_pivot.to_markdown())
+        report.append("")
+
+        # Speedup vs samtools table
+        rows_spd = []
+        for rc in sorted(multi_df2["region_count"].unique()):
+            gdf = multi_df2[multi_df2["region_count"] == rc]
+            sam = gdf[gdf["tool_base"] == "samtools"]
+            zf = gdf[gdf["tool_base"] == "z-fasta"]
+            if len(sam) and len(zf):
+                sam_t = sam["mean"].values[0]
+                zf_t = zf["mean"].values[0]
+                speedup = sam_t / zf_t if zf_t > 0 else float("nan")
+                rows_spd.append({
+                    "Regions": rc,
+                    "z-fasta (ms)": f"{zf_t * 1000:.1f}",
+                    "samtools (ms)": f"{sam_t * 1000:.1f}",
+                    "Speedup": f"**{speedup:.1f}x**" if not pd.isna(speedup) else "N/A",
+                })
+        if rows_spd:
+            report.append("\n### Speedup vs samtools\n")
+            report.append(pd.DataFrame(rows_spd).to_markdown(index=False))
+            report.append("")
+            report.append("> **Note:** seqtk does not use an index for region extraction. It "
+                          "performs a full-file scan for every call regardless of region count, "
+                          "so its time is roughly constant here and reflects file I/O cost, not "
+                          "region count. It is listed for reference only.\n")
 
     # ── Write report ──────────────────────────────────────────────
     report_text = "\n".join(report) + "\n"

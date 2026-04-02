@@ -1,4 +1,5 @@
 const std = @import("std");
+const posix = std.posix;
 const index_format = @import("index_format.zig");
 
 const IndexRecord = index_format.IndexRecord;
@@ -123,34 +124,42 @@ fn parseRangeSuffix(suffix: []const u8) ?RangeParsed {
 }
 
 // ============================================================================
-// Sequence extraction
+// Region resolution
 // ============================================================================
 
-/// Run the get command: extract a region from a FASTA file using its index.
-pub fn runGet(fasta_path: []const u8, region_str: []const u8) void {
-    var idx = index_format.loadIndex(fasta_path);
-    defer idx.deinit();
+/// A fully resolved, validated extraction request.
+/// Byte offset and length are pre-computed so extraction is a single mmap
+/// slice walk — no further index lookups required.
+pub const ResolvedRegion = struct {
+    name: []const u8, // sequence name for FASTA header
+    start: u64, // 1-based inclusive (validated)
+    display_end: u64, // end value for header (pre-clamp, samtools convention)
+    is_full: bool, // true → emit ">NAME", false → emit ">NAME:start-display_end"
+    start_byte: u64, // absolute byte offset into fasta_data for first base
+    num_bases: u64, // number of bases to extract
+    original_index: usize, // position in CLI argument list (preserves output order)
+};
 
+/// Resolve one region string against a loaded index.
+/// Validates coordinates and pre-computes the O(1) byte offset.
+/// Calls printErrorAndExit on any error (sequence not found, bad coordinates).
+pub fn resolveRegion(idx: *const LoadedIndex, region_str: []const u8, original_index: usize) ResolvedRegion {
     const region = parseRegion(region_str);
 
-    // Look up the sequence
     const rec_idx = idx.lookupName(region.name) orelse {
         printErrorAndExit("error: sequence not found: {s}\n", .{region.name});
     };
     const rec = idx.records[rec_idx];
 
-    // Resolve coordinates
     var start = region.start;
     var end = region.end orelse rec.seq_len;
-    const display_end = end; // Preserve original END for header (samtools keeps it)
+    const display_end = end; // capture before clamping (samtools keeps unclamped in header)
 
-    // For full sequence, use the full range
     if (region.is_full) {
         start = 1;
         end = rec.seq_len;
     }
 
-    // Validate coordinates
     if (start < 1) {
         printErrorAndExit("error: start position must be >= 1\n", .{});
     }
@@ -168,35 +177,46 @@ pub fn runGet(fasta_path: []const u8, region_str: []const u8) void {
 
     const num_bases = end - start + 1;
 
-    // Compute byte offset for start position using O(1) formula
+    // O(1) byte offset formula
     const base_index = start - 1;
     const line_number = base_index / rec.line_bases;
     const column = base_index % rec.line_bases;
     const start_byte = rec.seq_offset + (line_number * rec.line_bytes) + column;
 
-    // Write output
-    var buffered = std.io.bufferedWriter(std.io.getStdOut().writer());
-    const writer = buffered.writer();
+    return ResolvedRegion{
+        .name = region.name,
+        .start = start,
+        .display_end = display_end,
+        .is_full = region.is_full,
+        .start_byte = start_byte,
+        .num_bases = num_bases,
+        .original_index = original_index,
+    };
+}
 
-    // Header
-    if (region.is_full) {
-        writer.print(">{s}\n", .{region.name}) catch {
+// ============================================================================
+// Sequence emission
+// ============================================================================
+
+/// Write FASTA output for one resolved region to `writer`.
+/// Output is wrapped at 60 bases per line (samtools default).
+fn emitRegion(resolved: ResolvedRegion, fasta: []const u8, writer: anytype) void {
+    if (resolved.is_full) {
+        writer.print(">{s}\n", .{resolved.name}) catch {
             printErrorAndExit("error: write failed\n", .{});
         };
     } else {
-        writer.print(">{s}:{d}-{d}\n", .{ region.name, start, display_end }) catch {
+        writer.print(">{s}:{d}-{d}\n", .{ resolved.name, resolved.start, resolved.display_end }) catch {
             printErrorAndExit("error: write failed\n", .{});
         };
     }
 
-    // Extract bases from mmap'd FASTA, skipping newlines
-    const fasta = idx.fasta_data;
-    var pos: usize = @intCast(start_byte);
+    const wrap_width: u32 = 60;
+    var pos: usize = @intCast(resolved.start_byte);
     var bases_written: u64 = 0;
     var line_pos: u32 = 0;
-    const wrap_width: u32 = 60; // samtools default output line width
 
-    while (bases_written < num_bases and pos < fasta.len) {
+    while (bases_written < resolved.num_bases and pos < fasta.len) {
         const byte = fasta[pos];
         pos += 1;
 
@@ -209,7 +229,6 @@ pub fn runGet(fasta_path: []const u8, region_str: []const u8) void {
         bases_written += 1;
         line_pos += 1;
 
-        // Wrap at 60 chars (samtools default)
         if (line_pos >= wrap_width) {
             writer.writeByte('\n') catch {
                 printErrorAndExit("error: write failed\n", .{});
@@ -218,11 +237,88 @@ pub fn runGet(fasta_path: []const u8, region_str: []const u8) void {
         }
     }
 
-    // Trailing newline if the last line wasn't complete
     if (line_pos > 0) {
         writer.writeByte('\n') catch {
             printErrorAndExit("error: write failed\n", .{});
         };
+    }
+}
+
+// ============================================================================
+// Public entry point
+// ============================================================================
+
+/// Run the get command: extract one or more regions from a FASTA file.
+///
+/// Regions are emitted in CLI argument order regardless of their position in
+/// the file.
+///
+/// For >= 16 regions the extractions are sorted by file offset before reading
+/// to improve sequential page access. Output is buffered per-region and
+/// flushed in original CLI order.
+pub fn runGet(fasta_path: []const u8, region_strs: []const []const u8) void {
+    var idx = index_format.loadIndex(fasta_path);
+    defer idx.deinit();
+
+    // Point-access pattern: disable kernel readahead.
+    posix.madvise(@constCast(@alignCast(idx.fasta_data.ptr)), idx.fasta_data.len, posix.MADV.RANDOM) catch {};
+
+    // Resolve all regions before writing any output — fail-fast on bad names or
+    // coordinates so we never emit partial results.
+    var resolved_buf: [1024]ResolvedRegion = undefined;
+    if (region_strs.len > resolved_buf.len) {
+        printErrorAndExit("error: too many regions (max 1024)\n", .{});
+    }
+    const resolved = resolved_buf[0..region_strs.len];
+    for (region_strs, 0..) |rs, i| {
+        resolved[i] = resolveRegion(&idx, rs, i);
+    }
+
+    var buffered = std.io.bufferedWriter(std.io.getStdOut().writer());
+    const writer = buffered.writer();
+
+    if (region_strs.len < 16) {
+        // Direct path: small count, emit in CLI order.
+        // The mmap page cache handles random access well for a handful of regions.
+        for (resolved) |r| {
+            emitRegion(r, idx.fasta_data, writer);
+        }
+    } else {
+        // Sorted path: sort by file offset for sequential I/O, write each region into
+        // its own buffer, then emit buffers in original CLI order.
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        // Copy so we can sort without disturbing original order.
+        const sorted = allocator.dupe(ResolvedRegion, resolved) catch {
+            printErrorAndExit("error: out of memory\n", .{});
+        };
+        std.mem.sort(ResolvedRegion, sorted, {}, struct {
+            fn lessThan(_: void, a: ResolvedRegion, b: ResolvedRegion) bool {
+                return a.start_byte < b.start_byte;
+            }
+        }.lessThan);
+
+        // One output buffer per region keyed by original_index.
+        const output_bufs = allocator.alloc(std.ArrayList(u8), region_strs.len) catch {
+            printErrorAndExit("error: out of memory\n", .{});
+        };
+        for (output_bufs) |*buf| {
+            buf.* = std.ArrayList(u8).init(allocator);
+        }
+
+        // Extract in file-offset order for sequential page access.
+        for (sorted) |r| {
+            emitRegion(r, idx.fasta_data, output_bufs[r.original_index].writer());
+        }
+
+        // Emit in original CLI order.
+        for (output_bufs) |buf| {
+            writer.writeAll(buf.items) catch {
+                printErrorAndExit("error: write failed\n", .{});
+            };
+        }
     }
 
     buffered.flush() catch {
