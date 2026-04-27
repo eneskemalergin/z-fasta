@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bench/shared/install_tools.sh
 #
-# Installs / verifies all v0.2.3 benchmark tools at pinned versions and prints
+# Installs / verifies all v0.2.5 benchmark tools at pinned versions and prints
 # a canonical VERSION_PINS block for inclusion in REPORT.md.
 #
 # Pinned versions (last verified 2026-03-30):
@@ -185,7 +185,7 @@ print_pins() {
 # ── Main ───────────────────────────────────────────────────────────────────────
 main() {
     echo ""
-    echo "z-fasta v0.2.3 — benchmark tool verification"
+    echo "z-fasta v0.2.5 — benchmark tool verification"
     echo "=============================================="
     local fail_count=0
 

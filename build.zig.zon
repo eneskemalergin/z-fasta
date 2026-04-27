@@ -1,6 +1,6 @@
 .{
     .name = .z_fasta,
-    .version = "0.2.3",
+    .version = "0.2.5",
     .fingerprint = 0x9a15c387ada5d1f1,
     .minimum_zig_version = "0.16.0",
     .paths = .{

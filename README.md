@@ -6,10 +6,10 @@
     SIMD-accelerated indexing, O(1) region extraction, and instant assembly stats.<br/>
     a drop-in replacement for <code>samtools faidx</code>, <code>seqkit</code>, and <code>fastahack</code>.
   </p>
-  <p>Current version: <strong>v0.2.4</strong></p>
+  <p>Current version: <strong>v0.2.5</strong></p>
   <br/>
   <a href="https://github.com/eneskemalergin/z-fasta/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/CI-passing-22c55e?style=for-the-badge" alt="CI" /></a>
-  <a href="https://ziglang.org/download/0.14.0/"><img src="https://img.shields.io/badge/Zig-0.14.0-F7A41D?style=for-the-badge&logo=zig&logoColor=white" alt="Zig 0.14.0" /></a>
+  <a href="https://ziglang.org/download/0.16.0/"><img src="https://img.shields.io/badge/Zig-0.16.0-F7A41D?style=for-the-badge&logo=zig&logoColor=white" alt="Zig 0.16.0" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-6366f1?style=for-the-badge" alt="License: MIT" /></a>
   <a href="bench/"><img src="https://img.shields.io/badge/samtools-20×_faster-0ea5e9?style=for-the-badge" alt="20× faster than samtools" /></a>
 </div>
@@ -30,8 +30,8 @@ Modern bioinformatics workflows are bottlenecked by legacy text parsers. `z-fast
 ## Installation
 
 ```bash
-# Download Zig 0.14.0 (if needed)
-curl -L https://ziglang.org/download/0.14.0/zig-linux-x86_64-0.14.0.tar.xz | tar xJ
+# Download Zig 0.16.0 (if needed)
+curl -L https://ziglang.org/download/0.16.0/zig-linux-x86_64-0.16.0.tar.xz | tar xJ
 
 # Build
 zig build -Doptimize=ReleaseFast

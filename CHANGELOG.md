@@ -3,6 +3,44 @@
 
 All notable changes to z-fasta will be documented in this file.
 
+<!-- ## [0.2.5] - 2026-04-27
+
+### Changed
+
+- Migrated the toolchain from Zig 0.14.0 to Zig 0.16.0
+- `build.zig`: updated to the Zig 0.16 module-based build API for executable and test targets
+- `src/main.zig`: migrated CLI entry to `std.process.Init` and `std.process.Args.Iterator`
+- `src/index_format.zig`, `src/indexer.zig`, `src/getter.zig`, `src/stats.zig`: migrated file and stream handling from `std.io`/`std.fs` call sites to `std.Io`
+- Collections updated for Zig 0.16 unmanaged APIs (`ArrayList`, related allocator-explicit append/deinit patterns)
+- Tests updated for Zig 0.16 I/O, allocator, process spawning, and timestamp APIs
+- `.github/workflows/ci.yml`: Zig CI pin updated to 0.16.0
+- `README.md`: version and Zig installation/docs references updated to 0.16.0 / v0.2.5
+- `build.zig.zon`: package version bumped to 0.2.5 and minimum Zig version kept at 0.16.0
+
+### Validation
+
+- `zig build`
+- `zig build test`
+- `zig build -Doptimize=ReleaseFast` -->
+
+## [0.2.4] - 2026-04-02
+
+### Added
+
+- **Multi-region `get`**: `z-fasta get <file.fasta> <region> [region ...]` now accepts multiple regions in a single invocation, loads the index once, and streams results in CLI order
+- `bench/get/verify_multi_get.sh`: byte-identical multi-region verification against `samtools faidx`, covering duplicate regions, reversed CLI order, and the sort-path used for larger region lists
+- `bench/get/run_benchmarks.sh`: multi-region extraction benchmark module for 1, 10, 50, and 100 regions in a single CLI call
+- `bench/get/generate_report.py`: multi-region benchmark loader and report section generation
+
+### Changed
+
+- `src/getter.zig` and `src/main.zig`: CLI and extraction flow updated to resolve and emit multiple requested regions per invocation without re-loading the index
+- `tests/test_get.zig`: expanded coverage for multi-region parsing, ordering, duplicate requests, and output behavior
+- `README.md`: `get` command usage updated to document multi-region extraction, correctness counts updated, and a v0.2.4 performance table added
+- `bench/get/REPORT.md`: added the Multi-Region Extraction section and updated figures
+- `src/main.zig`: VERSION bumped to 0.2.4
+- `build.zig.zon`: version bumped to 0.2.4
+
 ## [0.2.3] - 2026-03-30
 
 ### Added
