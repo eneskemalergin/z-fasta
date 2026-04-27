@@ -2,6 +2,7 @@ const std = @import("std");
 const main = @import("main");
 const parseRegion = main.getter.parseRegion;
 const resolveRegion = main.getter.resolveRegion;
+const io = std.Io.Threaded.global_single_threaded.io();
 
 // ============================================================================
 // Region parsing tests
@@ -92,7 +93,7 @@ test "parseRegion — name only with dots" {
 // ============================================================================
 
 test "loadIndex — .zfi file" {
-    var idx = main.index_format.loadIndex("tests/data/simple.fasta");
+    var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), idx.records.len);
@@ -115,7 +116,7 @@ test "loadIndex — .zfi file" {
 // ============================================================================
 
 test "resolveRegion — single region, full sequence" {
-    var idx = main.index_format.loadIndex("tests/data/simple.fasta");
+    var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
     const r = resolveRegion(&idx, "seq1", 0);
@@ -126,7 +127,7 @@ test "resolveRegion — single region, full sequence" {
 }
 
 test "resolveRegion — single region, sub-range" {
-    var idx = main.index_format.loadIndex("tests/data/simple.fasta");
+    var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
     const r = resolveRegion(&idx, "seq1:1-12", 0);
@@ -138,7 +139,7 @@ test "resolveRegion — single region, sub-range" {
 }
 
 test "resolveRegion — original_index preserved" {
-    var idx = main.index_format.loadIndex("tests/data/simple.fasta");
+    var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
     const r0 = resolveRegion(&idx, "seq1", 0);
@@ -151,7 +152,7 @@ test "resolveRegion — original_index preserved" {
 }
 
 test "resolveRegion — end clamped silently" {
-    var idx = main.index_format.loadIndex("tests/data/simple.fasta");
+    var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
     // seq1 has 24 bases; request end=9999 should clamp to 24
@@ -162,7 +163,7 @@ test "resolveRegion — end clamped silently" {
 }
 
 test "resolveRegion — byte offset for first base" {
-    var idx = main.index_format.loadIndex("tests/data/simple.fasta");
+    var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
     // seq1 starts immediately after ">seq1 test sequence\n"
@@ -174,7 +175,7 @@ test "resolveRegion — byte offset for first base" {
 }
 
 test "resolveRegion — duplicate region allowed, same start_byte" {
-    var idx = main.index_format.loadIndex("tests/data/simple.fasta");
+    var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
     const r0 = resolveRegion(&idx, "seq1:1-5", 0);
@@ -192,7 +193,7 @@ test "resolveRegion — duplicate region allowed, same start_byte" {
 // ============================================================================
 
 test "resolveRegion — open-ended region (NAME:START-) uses seq_len as end" {
-    var idx = main.index_format.loadIndex("tests/data/simple.fasta");
+    var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
     // seq1 has 24 bases; NAME:13- should return bases 13..24 = 12 bases
@@ -204,7 +205,7 @@ test "resolveRegion — open-ended region (NAME:START-) uses seq_len as end" {
 }
 
 test "resolveRegion — single-base region" {
-    var idx = main.index_format.loadIndex("tests/data/simple.fasta");
+    var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
     const r = resolveRegion(&idx, "seq1:1-1", 0);
@@ -214,7 +215,7 @@ test "resolveRegion — single-base region" {
 }
 
 test "resolveRegion — last-base region" {
-    var idx = main.index_format.loadIndex("tests/data/simple.fasta");
+    var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
     // seq1: ACGTACGTACGTACGTACGTACGT (24 bases), last base = 'T'
@@ -226,7 +227,7 @@ test "resolveRegion — last-base region" {
 }
 
 test "resolveRegion — cross-line region (starts line 1, ends line 2)" {
-    var idx = main.index_format.loadIndex("tests/data/simple.fasta");
+    var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
     // seq1 wraps at 12 bases per line; region 10-15 crosses the line boundary
@@ -235,7 +236,7 @@ test "resolveRegion — cross-line region (starts line 1, ends line 2)" {
 }
 
 test "resolveRegion — full sequence start_byte points to first base character" {
-    var idx = main.index_format.loadIndex("tests/data/simple.fasta");
+    var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
     const r_full = resolveRegion(&idx, "seq1", 0);
@@ -246,7 +247,7 @@ test "resolveRegion — full sequence start_byte points to first base character"
 }
 
 test "resolveRegion — display_end before clamp, num_bases after clamp" {
-    var idx = main.index_format.loadIndex("tests/data/simple.fasta");
+    var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
     const r = resolveRegion(&idx, "seq1:1-9999", 0);
@@ -257,7 +258,7 @@ test "resolveRegion — display_end before clamp, num_bases after clamp" {
 }
 
 test "resolveRegion — proteome pipe-delimited name" {
-    var idx = main.index_format.loadIndex("tests/data/proteome.fasta");
+    var idx = main.index_format.loadIndex(io, "tests/data/proteome.fasta");
     defer idx.deinit();
 
     const r = resolveRegion(&idx, "sp|P12345|PROT_HUMAN:1-10", 0);
@@ -266,7 +267,7 @@ test "resolveRegion — proteome pipe-delimited name" {
 }
 
 test "resolveRegion — long header name (200-char sequence name)" {
-    var idx = main.index_format.loadIndex("tests/data/edge_cases.fasta");
+    var idx = main.index_format.loadIndex(io, "tests/data/edge_cases.fasta");
     defer idx.deinit();
 
     const long_name = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -277,7 +278,7 @@ test "resolveRegion — long header name (200-char sequence name)" {
 }
 
 test "resolveRegion — lowercase bases preserved (byte offset still correct)" {
-    var idx = main.index_format.loadIndex("tests/data/edge_cases.fasta");
+    var idx = main.index_format.loadIndex(io, "tests/data/edge_cases.fasta");
     defer idx.deinit();
 
     // 'lowercase' in edge_cases.fasta: acgtACGTacgt (12 bases)
@@ -288,7 +289,7 @@ test "resolveRegion — lowercase bases preserved (byte offset still correct)" {
 }
 
 test "resolveRegion — ordering: seq2 has higher file offset than seq1" {
-    var idx = main.index_format.loadIndex("tests/data/simple.fasta");
+    var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
     const r1 = resolveRegion(&idx, "seq1:1-1", 0);
@@ -298,7 +299,7 @@ test "resolveRegion — ordering: seq2 has higher file offset than seq1" {
 }
 
 test "resolveRegion — reversed CLI order: seq2 before seq1 in args" {
-    var idx = main.index_format.loadIndex("tests/data/simple.fasta");
+    var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
     // Even if caller passes seq2 first, original_index tracks CLI position
@@ -311,7 +312,7 @@ test "resolveRegion — reversed CLI order: seq2 before seq1 in args" {
 }
 
 test "resolveRegion — nonstandard characters in sequence (stars/dashes)" {
-    var idx = main.index_format.loadIndex("tests/data/edge_cases.fasta");
+    var idx = main.index_format.loadIndex(io, "tests/data/edge_cases.fasta");
     defer idx.deinit();
 
     // 'nonstandard' has ACG*-NACGT (10 chars)

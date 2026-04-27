@@ -28,7 +28,7 @@ fn findNextGt(data: []const u8, start: usize) usize {
         const chunk: SimdVec = data[pos..][0..SIMD_CHUNK_SIZE].*;
         const mask = chunk == @as(SimdVec, @splat('>'));
         if (@reduce(.Or, mask)) {
-            for (0..SIMD_CHUNK_SIZE) |j| {
+            inline for (0..SIMD_CHUNK_SIZE) |j| {
                 if (mask[j]) return pos + j;
             }
         }
@@ -59,7 +59,7 @@ pub fn countBases(data: []const u8) u64 {
         const chunk: SimdVec = data[pos..][0..SIMD_CHUNK_SIZE].*;
         const space_char: SimdVec = @splat(' ');
         var chunk_count: u32 = 0;
-        for (0..SIMD_CHUNK_SIZE) |j| {
+        inline for (0..SIMD_CHUNK_SIZE) |j| {
             if (chunk[j] > space_char[j]) chunk_count += 1;
         }
         count += chunk_count;
@@ -181,8 +181,8 @@ pub fn streamingScan(
 /// Scans FASTA data and returns index records as ArrayList (for testing).
 /// Use streamingScan for production (lower memory).
 pub fn scanHeaders(data: []const u8, allocator: std.mem.Allocator) !std.ArrayList(IndexRecord) {
-    var records = std.ArrayList(IndexRecord).init(allocator);
-    errdefer records.deinit();
+    var records: std.ArrayList(IndexRecord) = .empty;
+    errdefer records.deinit(allocator);
 
     var seen_names = std.StringHashMap(void).init(allocator);
     defer seen_names.deinit();
@@ -247,7 +247,7 @@ pub fn scanHeaders(data: []const u8, allocator: std.mem.Allocator) !std.ArrayLis
             continue;
         }
 
-        try records.append(IndexRecord{
+        try records.append(allocator, IndexRecord{
             .name_offset = @intCast(name_offset),
             .name_len = name_len,
             .seq_offset = seq_offset,
@@ -373,7 +373,7 @@ fn finalizeSequenceLine(state: *ChunkState, line_state: SequenceLineState) void 
 }
 
 fn scanChunkedReader(
-    reader: anytype,
+    reader: *std.Io.Reader,
     writer: anytype,
     seen_names: *std.StringHashMap(void),
     allocator: std.mem.Allocator,
@@ -382,7 +382,7 @@ fn scanChunkedReader(
     var line_start = true;
 
     while (true) {
-        const byte = reader.readByte() catch |err| switch (err) {
+        const byte = reader.takeByte() catch |err| switch (err) {
             error.EndOfStream => break,
             else => return err,
         };
@@ -393,7 +393,7 @@ fn scanChunkedReader(
 
             var header_state = HeaderParseState{};
             while (true) {
-                const header_byte = reader.readByte() catch |err| switch (err) {
+                const header_byte = reader.takeByte() catch |err| switch (err) {
                     error.EndOfStream => {
                         try finalizeChunkedHeader(&state, seen_names, allocator);
                         state.file_offset += header_state.line_len + 1;
@@ -423,7 +423,7 @@ fn scanChunkedReader(
         seedSequenceLine(&seq_line, byte);
 
         while (true) {
-            const seq_byte = reader.readByte() catch |err| switch (err) {
+            const seq_byte = reader.takeByte() catch |err| switch (err) {
                 error.EndOfStream => {
                     if (seq_line.base_count > 0 and state.seq_len == 0) {
                         state.seq_offset = state.file_offset;
@@ -459,24 +459,24 @@ pub fn scanChunkedData(
     writer: anytype,
     allocator: std.mem.Allocator,
 ) !u32 {
-    var stream = std.io.fixedBufferStream(data);
+    var r = std.Io.Reader.fixed(data);
     var seen_names = std.StringHashMap(void).init(allocator);
     defer seen_names.deinit();
 
-    return scanChunkedReader(stream.reader(), writer, &seen_names, allocator);
+    return scanChunkedReader(&r, writer, &seen_names, allocator);
 }
 
-pub fn runChunkedMode(path: []const u8) void {
+pub fn runChunkedMode(io: std.Io, path: []const u8) void {
     const err_exit = index_format.printErrorAndExit;
 
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| {
         switch (err) {
             error.FileNotFound => err_exit("error: file not found: {s}\n", .{path}),
             error.AccessDenied => err_exit("error: access denied: {s}\n", .{path}),
             else => err_exit("error: failed to open file: {s}\n", .{path}),
         }
     };
-    defer file.close();
+    defer file.close(io);
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -485,15 +485,16 @@ pub fn runChunkedMode(path: []const u8) void {
     var seen_names = std.StringHashMap(void).init(allocator);
     defer seen_names.deinit();
 
-    var buffered_reader = std.io.bufferedReaderSize(CHUNK_SIZE, file.reader());
-    var stdout_buffered = std.io.bufferedWriter(std.io.getStdOut().writer());
-    const writer = stdout_buffered.writer();
+    var read_buf: [CHUNK_SIZE]u8 = undefined;
+    var file_reader = file.reader(io, &read_buf);
+    var out_buf: [65536]u8 = undefined;
+    var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
 
-    const record_count = scanChunkedReader(buffered_reader.reader(), writer, &seen_names, allocator) catch |err| switch (err) {
+    const record_count = scanChunkedReader(&file_reader.interface, &stdout_fw.interface, &seen_names, allocator) catch |err| switch (err) {
         error.HeaderTooLong => err_exit("error: sequence name exceeds {d} bytes in --low-mem mode: {s}\n", .{ MAX_LOW_MEM_NAME_LEN, path }),
         else => err_exit("error: processing failed\n", .{}),
     };
-    stdout_buffered.flush() catch {};
+    stdout_fw.flush() catch {};
 
     if (record_count == 0) {
         err_exit("error: no valid sequences found in: {s}\n", .{path});

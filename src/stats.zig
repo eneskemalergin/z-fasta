@@ -105,8 +105,8 @@ fn getAminoAcidName(code: u8) []const u8 {
 }
 
 /// Run the stats command.
-pub fn runStats(fasta_path: []const u8, index_only: bool) void {
-    var idx = index_format.loadIndex(fasta_path);
+pub fn runStats(io: std.Io, fasta_path: []const u8, index_only: bool) void {
+    var idx = index_format.loadIndex(io, fasta_path);
     defer idx.deinit();
 
     const records = idx.records;
@@ -203,8 +203,9 @@ pub fn runStats(fasta_path: []const u8, index_only: bool) void {
     const comp: ?CompositionStats = if (!index_only) scanComposition(&idx) else null;
 
     // Output
-    var buffered = std.io.bufferedWriter(std.io.getStdOut().writer());
-    const writer = buffered.writer();
+    var out_buf: [65536]u8 = undefined;
+    var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
+    const writer = &stdout_fw.interface;
 
     var size_buf: [64]u8 = undefined;
     const size_str = formatSize(&size_buf, idx.fasta_size);
@@ -371,7 +372,7 @@ pub fn runStats(fasta_path: []const u8, index_only: bool) void {
         }
     }
 
-    buffered.flush() catch {};
+    stdout_fw.flush() catch {};
 }
 
 /// Get the name of a record, handling both .zfi and .fai sources.

@@ -82,7 +82,7 @@ const LoadAttempt = union(enum) {
 // ============================================================================
 
 pub fn printErrorAndExit(comptime fmt: []const u8, args: anytype) noreturn {
-    std.io.getStdErr().writer().print(fmt, args) catch {};
+    std.debug.print(fmt, args);
     std.process.exit(1);
 }
 
@@ -92,23 +92,22 @@ pub fn printErrorAndExit(comptime fmt: []const u8, args: anytype) noreturn {
 
 /// Writes the .zfi binary index file.
 pub fn writeZfi(
+    io: std.Io,
     path: []const u8,
     records: []const IndexRecord,
     source_size: u64,
 ) !void {
-    const file = try std.fs.cwd().createFile(path, .{});
-    errdefer std.fs.cwd().deleteFile(path) catch {};
-    defer file.close();
-
-    var writer = file.writer();
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    errdefer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    defer file.close(io);
 
     const header = ZfiHeader{
         .magic = ZFI_MAGIC,
         .record_count = @intCast(records.len),
         .source_size = source_size,
     };
-    try writer.writeAll(std.mem.asBytes(&header));
-    try writer.writeAll(std.mem.sliceAsBytes(records));
+    try std.Io.File.writeStreamingAll(file, io, std.mem.asBytes(&header));
+    try std.Io.File.writeStreamingAll(file, io, std.mem.sliceAsBytes(records));
 }
 
 // ============================================================================
@@ -117,8 +116,8 @@ pub fn writeZfi(
 
 /// Load the index for a FASTA file. Tries .zfi first, then .fai fallback.
 /// The caller must call deinit() on the returned LoadedIndex.
-pub fn loadIndex(fasta_path: []const u8) LoadedIndex {
-    return loadIndexChecked(fasta_path) catch |err| switch (err) {
+pub fn loadIndex(io: std.Io, fasta_path: []const u8) LoadedIndex {
+    return loadIndexChecked(io, fasta_path) catch |err| switch (err) {
         error.FileNotFound => printErrorAndExit("error: file not found: {s}\n", .{fasta_path}),
         error.AccessDenied => printErrorAndExit("error: access denied: {s}\n", .{fasta_path}),
         error.EmptyFile => printErrorAndExit("error: file is empty: {s}\n", .{fasta_path}),
@@ -133,16 +132,16 @@ pub fn loadIndex(fasta_path: []const u8) LoadedIndex {
 }
 
 /// Load the index for a FASTA file with typed errors for testing and fallback control.
-pub fn loadIndexChecked(fasta_path: []const u8) LoadIndexError!LoadedIndex {
+pub fn loadIndexChecked(io: std.Io, fasta_path: []const u8) LoadIndexError!LoadedIndex {
     // Open FASTA file
-    const fasta_file = std.fs.cwd().openFile(fasta_path, .{}) catch |err| switch (err) {
+    const fasta_file = std.Io.Dir.cwd().openFile(io, fasta_path, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.FileNotFound,
         error.AccessDenied => return error.AccessDenied,
         else => return error.Io,
     };
-    defer fasta_file.close();
+    defer fasta_file.close(io);
 
-    const fasta_stat = fasta_file.stat() catch return error.Io;
+    const fasta_stat = fasta_file.stat(io) catch return error.Io;
 
     if (fasta_stat.size == 0) {
         return error.EmptyFile;
@@ -152,7 +151,7 @@ pub fn loadIndexChecked(fasta_path: []const u8) LoadIndexError!LoadedIndex {
     const fasta_data = posix.mmap(
         null,
         fasta_stat.size,
-        posix.PROT.READ,
+        .{ .READ = true },
         .{ .TYPE = .PRIVATE },
         fasta_file.handle,
         0,
@@ -163,7 +162,7 @@ pub fn loadIndexChecked(fasta_path: []const u8) LoadIndexError!LoadedIndex {
     const zfi_path = std.fmt.bufPrint(&zfi_path_buf, "{s}.zfi", .{fasta_path}) catch return error.PathTooLong;
 
     var zfi_failure: ?LoadIndexError = null;
-    switch (tryLoadZfi(zfi_path, fasta_data, fasta_stat) catch |err| {
+    switch (tryLoadZfi(io, zfi_path, fasta_data, fasta_stat) catch |err| {
         posix.munmap(@constCast(@alignCast(fasta_data)));
         return err;
     }) {
@@ -180,7 +179,7 @@ pub fn loadIndexChecked(fasta_path: []const u8) LoadIndexError!LoadedIndex {
         return error.PathTooLong;
     };
 
-    switch (tryLoadFai(fai_path, fasta_data, fasta_stat) catch |err| {
+    switch (tryLoadFai(io, fai_path, fasta_data, fasta_stat) catch |err| {
         posix.munmap(@constCast(@alignCast(fasta_data)));
         return err;
     }) {
@@ -201,18 +200,19 @@ pub fn loadIndexChecked(fasta_path: []const u8) LoadIndexError!LoadedIndex {
 }
 
 fn tryLoadZfi(
+    io: std.Io,
     zfi_path: []const u8,
     fasta_data: []align(4096) const u8,
-    fasta_stat: std.fs.File.Stat,
+    fasta_stat: std.Io.File.Stat,
 ) LoadIndexError!LoadAttempt {
-    const zfi_file = std.fs.cwd().openFile(zfi_path, .{}) catch |err| switch (err) {
+    const zfi_file = std.Io.Dir.cwd().openFile(io, zfi_path, .{}) catch |err| switch (err) {
         error.FileNotFound => return .not_found,
         error.AccessDenied => return error.AccessDenied,
         else => return error.Io,
     };
-    defer zfi_file.close();
+    defer zfi_file.close(io);
 
-    const zfi_stat = zfi_file.stat() catch return error.Io;
+    const zfi_stat = zfi_file.stat(io) catch return error.Io;
 
     // Check for 0-byte file before mmap (POSIX returns EINVAL)
     if (zfi_stat.size == 0) {
@@ -220,7 +220,7 @@ fn tryLoadZfi(
     }
 
     // Staleness check: mtime
-    if (zfi_stat.mtime < fasta_stat.mtime) {
+    if (zfi_stat.mtime.nanoseconds < fasta_stat.mtime.nanoseconds) {
         return .stale;
     }
 
@@ -228,7 +228,7 @@ fn tryLoadZfi(
     const zfi_data = posix.mmap(
         null,
         zfi_stat.size,
-        posix.PROT.READ,
+        .{ .READ = true },
         .{ .TYPE = .PRIVATE },
         zfi_file.handle,
         0,
@@ -290,21 +290,22 @@ fn tryLoadZfi(
 }
 
 fn tryLoadFai(
+    io: std.Io,
     fai_path: []const u8,
     fasta_data: []align(4096) const u8,
-    fasta_stat: std.fs.File.Stat,
+    fasta_stat: std.Io.File.Stat,
 ) LoadIndexError!LoadAttempt {
-    const fai_file = std.fs.cwd().openFile(fai_path, .{}) catch |err| switch (err) {
+    const fai_file = std.Io.Dir.cwd().openFile(io, fai_path, .{}) catch |err| switch (err) {
         error.FileNotFound => return .not_found,
         error.AccessDenied => return error.AccessDenied,
         else => return error.Io,
     };
-    defer fai_file.close();
+    defer fai_file.close(io);
 
-    const fai_stat = fai_file.stat() catch return error.Io;
+    const fai_stat = fai_file.stat(io) catch return error.Io;
 
     // Staleness check: mtime
-    if (fai_stat.mtime < fasta_stat.mtime) {
+    if (fai_stat.mtime.nanoseconds < fasta_stat.mtime.nanoseconds) {
         return .stale;
     }
 
@@ -318,11 +319,11 @@ fn tryLoadFai(
     const allocator = arena.allocator();
 
     const fai_contents = allocator.alloc(u8, fai_stat.size) catch return error.OutOfMemory;
-    const bytes_read = fai_file.readAll(fai_contents) catch return error.Io;
+    const bytes_read = std.Io.File.readPositionalAll(fai_file, io, fai_contents, 0) catch return error.Io;
     const fai_data = fai_contents[0..bytes_read];
 
     // Parse .fai lines: NAME\tLENGTH\tOFFSET\tLINE_BASES\tLINE_BYTES[\tQUAL_OFFSET]
-    var records_list = std.ArrayList(IndexRecord).init(allocator);
+    var records_list: std.ArrayList(IndexRecord) = .empty;
     var name_map = std.StringHashMap(usize).init(allocator);
 
     var line_iter = std.mem.splitScalar(u8, fai_data, '\n');
@@ -363,7 +364,7 @@ fn tryLoadFai(
         };
 
         const idx = records_list.items.len;
-        records_list.append(rec) catch return error.OutOfMemory;
+        records_list.append(allocator, rec) catch return error.OutOfMemory;
 
         // Store arena-owned name slice in the map
         const name_owned = allocator.dupe(u8, name) catch return error.OutOfMemory;

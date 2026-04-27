@@ -256,8 +256,8 @@ fn emitRegion(resolved: ResolvedRegion, fasta: []const u8, writer: anytype) void
 /// For >= 16 regions the extractions are sorted by file offset before reading
 /// to improve sequential page access. Output is buffered per-region and
 /// flushed in original CLI order.
-pub fn runGet(fasta_path: []const u8, region_strs: []const []const u8) void {
-    var idx = index_format.loadIndex(fasta_path);
+pub fn runGet(io: std.Io, fasta_path: []const u8, region_strs: []const []const u8) void {
+    var idx = index_format.loadIndex(io, fasta_path);
     defer idx.deinit();
 
     // Point-access pattern: disable kernel readahead.
@@ -274,8 +274,9 @@ pub fn runGet(fasta_path: []const u8, region_strs: []const []const u8) void {
         resolved[i] = resolveRegion(&idx, rs, i);
     }
 
-    var buffered = std.io.bufferedWriter(std.io.getStdOut().writer());
-    const writer = buffered.writer();
+    var out_buf: [65536]u8 = undefined;
+    var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
+    const writer = &stdout_fw.interface;
 
     if (region_strs.len < 16) {
         // Direct path: small count, emit in CLI order.
@@ -301,27 +302,28 @@ pub fn runGet(fasta_path: []const u8, region_strs: []const []const u8) void {
         }.lessThan);
 
         // One output buffer per region keyed by original_index.
-        const output_bufs = allocator.alloc(std.ArrayList(u8), region_strs.len) catch {
+        const output_bufs = allocator.alloc(std.Io.Writer.Allocating, region_strs.len) catch {
             printErrorAndExit("error: out of memory\n", .{});
         };
         for (output_bufs) |*buf| {
-            buf.* = std.ArrayList(u8).init(allocator);
+            buf.* = std.Io.Writer.Allocating.init(allocator);
         }
 
         // Extract in file-offset order for sequential page access.
         for (sorted) |r| {
-            emitRegion(r, idx.fasta_data, output_bufs[r.original_index].writer());
+            emitRegion(r, idx.fasta_data, &output_bufs[r.original_index].writer);
         }
 
         // Emit in original CLI order.
-        for (output_bufs) |buf| {
-            writer.writeAll(buf.items) catch {
+        for (output_bufs) |*buf| {
+            const output = buf.toArrayList();
+            writer.writeAll(output.items) catch {
                 printErrorAndExit("error: write failed\n", .{});
             };
         }
     }
 
-    buffered.flush() catch {
+    stdout_fw.flush() catch {
         printErrorAndExit("error: write failed\n", .{});
     };
 }

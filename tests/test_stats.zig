@@ -169,20 +169,26 @@ test "detectType — lowercase nucleotides" {
 const ZFASTA_BIN = "zig-out/bin/z-fasta";
 
 fn runStatsAndCapture(allocator: std.mem.Allocator, fasta_path: []const u8, index_only: bool) ![]u8 {
-    var argv = std.ArrayList([]const u8).init(allocator);
-    defer argv.deinit();
-    try argv.append(ZFASTA_BIN);
-    try argv.append("stats");
-    if (index_only) try argv.append("--index-only");
-    try argv.append(fasta_path);
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
 
-    var proc = std.process.Child.init(argv.items, allocator);
-    proc.stdout_behavior = .Pipe;
-    proc.stderr_behavior = .Pipe;
-    try proc.spawn();
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.append(allocator, ZFASTA_BIN);
+    try argv.append(allocator, "stats");
+    if (index_only) try argv.append(allocator, "--index-only");
+    try argv.append(allocator, fasta_path);
 
-    const result = try proc.stdout.?.readToEndAlloc(allocator, 10 * 1024 * 1024);
-    _ = try proc.wait();
+    var proc = try std.process.spawn(io, .{
+        .argv = argv.items,
+        .stdout = .pipe,
+    });
+
+    var read_buf: [4096]u8 = undefined;
+    var stdout_reader = proc.stdout.?.reader(io, &read_buf);
+    const result = try stdout_reader.interface.allocRemaining(allocator, .limited(10 * 1024 * 1024));
+    _ = try proc.wait(io);
     return result;
 }
 

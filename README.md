@@ -6,7 +6,7 @@
     SIMD-accelerated indexing, O(1) region extraction, and instant assembly stats.<br/>
     a drop-in replacement for <code>samtools faidx</code>, <code>seqkit</code>, and <code>fastahack</code>.
   </p>
-  <p>Current version: <strong>v0.2.3</strong></p>
+  <p>Current version: <strong>v0.2.4</strong></p>
   <br/>
   <a href="https://github.com/eneskemalergin/z-fasta/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/CI-passing-22c55e?style=for-the-badge" alt="CI" /></a>
   <a href="https://ziglang.org/download/0.14.0/"><img src="https://img.shields.io/badge/Zig-0.14.0-F7A41D?style=for-the-badge&logo=zig&logoColor=white" alt="Zig 0.14.0" /></a>
@@ -235,12 +235,12 @@ zig build -Doptimize=ReleaseFast
 
 **Near-term**
 
-- [ ] v0.2.5: BED file input
+- [ ] v0.2.6: BED file input
     - [ ] `--bed regions.bed` flag for batch extraction from BED files
     - [ ] BED coordinates are 0-based half-open; z-fasta converts to 1-based inclusive internally
     - [ ] Mix `--bed` with positional `NAME:START-END` args in one call
     - [ ] Enables direct comparison with `bedtools getfasta`
-- [ ] v0.2.6: Reverse complement
+- [ ] v0.2.7: Reverse complement
     - [ ] `--rc` flag for `z-fasta get` to output the reverse complement of any extracted region
     - [ ] Comptime 256-element complement table, zero-cost lookup baked into the binary
     - [ ] Works with single regions, multi-region, and `--bed` batch calls

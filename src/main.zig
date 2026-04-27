@@ -53,27 +53,28 @@ const USAGE =
 ;
 
 fn printErrorAndExit(comptime fmt: []const u8, args_tuple: anytype) noreturn {
-    std.io.getStdErr().writer().print(fmt, args_tuple) catch {};
+    std.debug.print(fmt, args_tuple);
     std.process.exit(1);
 }
 
 fn printUsageAndExit() noreturn {
-    std.io.getStdErr().writer().writeAll(USAGE) catch {};
+    std.debug.print("{s}", .{USAGE});
     std.process.exit(1);
 }
 
-fn printHelpAndExit() noreturn {
-    std.io.getStdOut().writer().writeAll(USAGE) catch {};
+fn printHelpAndExit(io: std.Io) noreturn {
+    std.Io.File.writeStreamingAll(.stdout(), io, USAGE) catch {};
     std.process.exit(0);
 }
 
-fn printVersionAndExit() noreturn {
-    std.io.getStdOut().writer().writeAll("z-fasta " ++ VERSION ++ "\n") catch {};
+fn printVersionAndExit(io: std.Io) noreturn {
+    std.Io.File.writeStreamingAll(.stdout(), io, "z-fasta " ++ VERSION ++ "\n") catch {};
     std.process.exit(0);
 }
 
-pub fn main() void {
-    var args = std.process.args();
+pub fn main(init: std.process.Init) void {
+    const io = init.io;
+    var args = std.process.Args.Iterator.init(init.minimal.args);
     _ = args.skip();
 
     const cmd = args.next() orelse {
@@ -81,18 +82,18 @@ pub fn main() void {
     };
 
     if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) {
-        printHelpAndExit();
+        printHelpAndExit(io);
     }
     if (std.mem.eql(u8, cmd, "--version") or std.mem.eql(u8, cmd, "-V")) {
-        printVersionAndExit();
+        printVersionAndExit(io);
     }
 
     if (std.mem.eql(u8, cmd, "index")) {
-        runIndex(&args);
+        runIndex(io, &args);
     } else if (std.mem.eql(u8, cmd, "get")) {
-        runGetCmd(&args);
+        runGetCmd(io, &args);
     } else if (std.mem.eql(u8, cmd, "stats")) {
-        runStatsCmd(&args);
+        runStatsCmd(io, &args);
     } else {
         printUsageAndExit();
     }
@@ -102,7 +103,7 @@ pub fn main() void {
 // Subcommand: index
 // ============================================================================
 
-fn runIndex(args: *std.process.ArgIterator) void {
+fn runIndex(io: std.Io, args: *std.process.Args.Iterator) void {
     var emit_fai = false;
     var enable_dedup = true;
     var low_mem = false;
@@ -110,9 +111,9 @@ fn runIndex(args: *std.process.ArgIterator) void {
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            printHelpAndExit();
+            printHelpAndExit(io);
         } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")) {
-            printVersionAndExit();
+            printVersionAndExit(io);
         } else if (std.mem.eql(u8, arg, "--emit-fai")) {
             emit_fai = true;
         } else if (std.mem.eql(u8, arg, "--no-dedup")) {
@@ -132,21 +133,21 @@ fn runIndex(args: *std.process.ArgIterator) void {
     };
 
     if (low_mem) {
-        indexer.runChunkedMode(path);
+        indexer.runChunkedMode(io, path);
         return;
     }
 
     // Standard mmap mode
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| {
         switch (err) {
             error.FileNotFound => printErrorAndExit("error: file not found: {s}\n", .{path}),
             error.AccessDenied => printErrorAndExit("error: access denied: {s}\n", .{path}),
             else => printErrorAndExit("error: failed to open file: {s}\n", .{path}),
         }
     };
-    defer file.close();
+    defer file.close(io);
 
-    const stat = file.stat() catch {
+    const stat = file.stat(io) catch {
         printErrorAndExit("error: failed to stat file: {s}\n", .{path});
     };
 
@@ -157,7 +158,7 @@ fn runIndex(args: *std.process.ArgIterator) void {
     const data = posix.mmap(
         null,
         stat.size,
-        posix.PROT.READ,
+        .{ .READ = true },
         .{ .TYPE = .PRIVATE },
         file.handle,
         0,
@@ -176,11 +177,12 @@ fn runIndex(args: *std.process.ArgIterator) void {
     defer arena.deinit();
 
     if (emit_fai) {
-        var buffered = std.io.bufferedWriter(std.io.getStdOut().writer());
-        const record_count = indexer.streamingScan(data, buffered.writer(), .fai, enable_dedup, arena.allocator()) catch {
+        var out_buf: [65536]u8 = undefined;
+        var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
+        const record_count = indexer.streamingScan(data, &stdout_fw.interface, .fai, enable_dedup, arena.allocator()) catch {
             printErrorAndExit("error: failed to scan/write\n", .{});
         };
-        buffered.flush() catch {};
+        stdout_fw.flush() catch {};
 
         if (record_count == 0) {
             printErrorAndExit("error: no valid sequences found in: {s}\n", .{path});
@@ -191,13 +193,14 @@ fn runIndex(args: *std.process.ArgIterator) void {
             printErrorAndExit("error: path too long\n", .{});
         };
 
-        const out_file = std.fs.cwd().createFile(zfi_path, .{}) catch {
+        const out_file = std.Io.Dir.cwd().createFile(io, zfi_path, .{}) catch {
             printErrorAndExit("error: cannot create: {s}\n", .{zfi_path});
         };
-        defer out_file.close();
+        defer out_file.close(io);
 
-        var buffered = std.io.bufferedWriter(out_file.writer());
-        const writer = buffered.writer();
+        var file_buf: [65536]u8 = undefined;
+        var file_fw = out_file.writer(io, &file_buf);
+        const writer = &file_fw.interface;
 
         const dummy_header = index_format.ZfiHeader{
             .magic = index_format.ZFI_MAGIC,
@@ -212,16 +215,17 @@ fn runIndex(args: *std.process.ArgIterator) void {
             printErrorAndExit("error: scan failed\n", .{});
         };
 
-        buffered.flush() catch {};
+        file_fw.flush() catch {};
 
         if (record_count == 0) {
-            std.fs.cwd().deleteFile(zfi_path) catch {};
+            std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
             printErrorAndExit("error: no valid sequences found in: {s}\n", .{path});
         }
 
         // Fix record_count in header
-        out_file.seekTo(4) catch {};
-        out_file.writer().writeInt(u32, record_count, .little) catch {};
+        file_fw.seekTo(4) catch {};
+        file_fw.interface.writeInt(u32, record_count, .little) catch {};
+        file_fw.flush() catch {};
 
         std.debug.print("wrote {s} ({d} sequences)\n", .{ zfi_path, record_count });
     }
@@ -231,7 +235,7 @@ fn runIndex(args: *std.process.ArgIterator) void {
 // Subcommand: get
 // ============================================================================
 
-fn runGetCmd(args: *std.process.ArgIterator) void {
+fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     var fasta_path: ?[]const u8 = null;
     // Static buffer: up to 1024 region strings without heap allocation.
     var region_buf: [1024][]const u8 = undefined;
@@ -239,7 +243,7 @@ fn runGetCmd(args: *std.process.ArgIterator) void {
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            printHelpAndExit();
+            printHelpAndExit(io);
         } else if (fasta_path == null) {
             fasta_path = arg;
         } else {
@@ -258,20 +262,20 @@ fn runGetCmd(args: *std.process.ArgIterator) void {
         printErrorAndExit("error: usage: z-fasta get <file.fasta> <region> [region ...]\n", .{});
     }
 
-    getter.runGet(path, region_buf[0..region_count]);
+    getter.runGet(io, path, region_buf[0..region_count]);
 }
 
 // ============================================================================
 // Subcommand: stats
 // ============================================================================
 
-fn runStatsCmd(args: *std.process.ArgIterator) void {
+fn runStatsCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     var fasta_path: ?[]const u8 = null;
     var index_only = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            printHelpAndExit();
+            printHelpAndExit(io);
         } else if (std.mem.eql(u8, arg, "--index-only")) {
             index_only = true;
         } else {
@@ -283,5 +287,5 @@ fn runStatsCmd(args: *std.process.ArgIterator) void {
         printErrorAndExit("error: usage: z-fasta stats [--index-only] <file.fasta>\n", .{});
     };
 
-    stats.runStats(path, index_only);
+    stats.runStats(io, path, index_only);
 }

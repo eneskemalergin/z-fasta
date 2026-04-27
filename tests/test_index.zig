@@ -8,25 +8,29 @@ const IndexRecord = main.IndexRecord;
 const writeZfi = main.writeZfi;
 const ZfiHeader = main.ZfiHeader;
 const ZFI_MAGIC = main.ZFI_MAGIC;
+const io = std.Io.Threaded.global_single_threaded.io();
 
 // ============================================================================
 // Test helper: read file into memory
 // ============================================================================
 
 fn readTestFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    const stat = try file.stat();
-    const data = try allocator.alloc(u8, stat.size);
-    const bytes_read = try file.readAll(data);
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    const stat = try file.stat(io);
+    const data = try allocator.alloc(u8, @intCast(stat.size));
+    const bytes_read = try std.Io.File.readPositionalAll(file, io, data, 0);
     return data[0..bytes_read];
 }
 
 fn uniqueArtifactPath(allocator: std.mem.Allocator, stem: []const u8, ext: []const u8) ![]u8 {
-    try std.fs.cwd().makePath("zig-cache/test-artifacts");
+    try std.Io.Dir.cwd().createDirPath(io, "zig-cache/test-artifacts");
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+    const nanos: u64 = @intCast(@as(i128, ts.sec) * std.time.ns_per_s + ts.nsec);
     return std.fmt.allocPrint(allocator, "zig-cache/test-artifacts/{s}-{d}.{s}", .{
         stem,
-        std.time.nanoTimestamp(),
+        nanos,
         ext,
     });
 }
@@ -207,16 +211,16 @@ test "writeZfi creates valid file" {
     };
 
     const path = "tests/data/test_write.zfi";
-    defer std.fs.cwd().deleteFile(path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
 
-    try writeZfi(path, &records, 1000);
+    try writeZfi(io, path, &records, 1000);
 
     // Read and verify
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
 
     var header_bytes: [@sizeOf(ZfiHeader)]u8 = undefined;
-    _ = try file.readAll(&header_bytes);
+    _ = try std.Io.File.readPositionalAll(file, io, &header_bytes, 0);
     const header: ZfiHeader = @bitCast(header_bytes);
 
     try std.testing.expectEqualSlices(u8, &ZFI_MAGIC, &header.magic);
@@ -238,24 +242,20 @@ test "low-mem indexing matches default across chunk boundary" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var fasta = std.ArrayList(u8).init(allocator);
-    defer fasta.deinit();
-    try fasta.appendSlice(">seq1\n");
-    try fasta.appendNTimes('A', 4 * 1024 * 1024 + 10);
-    try fasta.appendSlice("\n>seq2\nACGT\n");
+    var fasta: std.ArrayList(u8) = .empty;
+    defer fasta.deinit(allocator);
+    try fasta.appendSlice(allocator, ">seq1\n");
+    try fasta.appendNTimes(allocator, 'A', 4 * 1024 * 1024 + 10);
+    try fasta.appendSlice(allocator, "\n>seq2\nACGT\n");
 
-    var expected = std.ArrayList(u8).init(allocator);
-    defer expected.deinit();
-    const expected_writer = expected.writer();
-    const expected_count = try main.indexer.streamingScan(fasta.items, expected_writer, .fai, true, allocator);
+    var expected = std.Io.Writer.Allocating.init(allocator);
+    const expected_count = try main.indexer.streamingScan(fasta.items, &expected.writer, .fai, true, allocator);
 
-    var actual = std.ArrayList(u8).init(allocator);
-    defer actual.deinit();
-    const actual_writer = actual.writer();
-    const actual_count = try scanChunkedData(fasta.items, actual_writer, allocator);
+    var actual = std.Io.Writer.Allocating.init(allocator);
+    const actual_count = try scanChunkedData(fasta.items, &actual.writer, allocator);
 
     try std.testing.expectEqual(expected_count, actual_count);
-    try std.testing.expectEqualStrings(expected.items, actual.items);
+    try std.testing.expectEqualStrings(expected.written(), actual.written());
 }
 
 test "low-mem indexing rejects overlong sequence names" {
@@ -263,18 +263,17 @@ test "low-mem indexing rejects overlong sequence names" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var fasta = std.ArrayList(u8).init(allocator);
-    defer fasta.deinit();
-    try fasta.append('>');
-    try fasta.appendNTimes('A', 4097);
-    try fasta.appendSlice("\nACGT\n");
+    var fasta: std.ArrayList(u8) = .empty;
+    defer fasta.deinit(allocator);
+    try fasta.append(allocator, '>');
+    try fasta.appendNTimes(allocator, 'A', 4097);
+    try fasta.appendSlice(allocator, "\nACGT\n");
 
-    var output = std.ArrayList(u8).init(allocator);
-    defer output.deinit();
+    var output = std.Io.Writer.Allocating.init(allocator);
 
     try std.testing.expectError(
         error.HeaderTooLong,
-        scanChunkedData(fasta.items, output.writer(), allocator),
+        scanChunkedData(fasta.items, &output.writer, allocator),
     );
 }
 
@@ -285,19 +284,19 @@ test "loadIndexChecked rejects corrupt zfi records" {
 
     const fasta_path = try uniqueArtifactPath(allocator, "corrupt-zfi", "fa");
     const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
-    defer std.fs.cwd().deleteFile(fasta_path) catch {};
-    defer std.fs.cwd().deleteFile(zfi_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
 
-    const fasta_file = try std.fs.cwd().createFile(fasta_path, .{});
-    defer fasta_file.close();
-    try fasta_file.writeAll(">seq1\nACGT\n");
+    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+    defer fasta_file.close(io);
+    try std.Io.File.writeStreamingAll(fasta_file, io, ">seq1\nACGT\n");
 
     const bad_records = [_]IndexRecord{
         .{ .name_offset = 999_999, .name_len = 4, .seq_offset = 6, .seq_len = 4, .line_bases = 4, .line_bytes = 5 },
     };
-    try writeZfi(zfi_path, &bad_records, 11);
+    try writeZfi(io, zfi_path, &bad_records, 11);
 
-    try std.testing.expectError(error.CorruptIndex, loadIndexChecked(fasta_path));
+    try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, fasta_path));
 }
 
 test "loadIndexChecked falls back to fai when zfi is stale" {
@@ -308,32 +307,35 @@ test "loadIndexChecked falls back to fai when zfi is stale" {
     const fasta_path = try uniqueArtifactPath(allocator, "stale-zfi", "fa");
     const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
     const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
-    defer std.fs.cwd().deleteFile(fasta_path) catch {};
-    defer std.fs.cwd().deleteFile(zfi_path) catch {};
-    defer std.fs.cwd().deleteFile(fai_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
 
     const fasta_data = ">seq1\nACGTACGT\n>seq2\nGGGG\n";
 
-    const fasta_file = try std.fs.cwd().createFile(fasta_path, .{ .truncate = true });
-    defer fasta_file.close();
-    try fasta_file.writeAll(fasta_data);
+    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{ .truncate = true });
+    defer fasta_file.close(io);
+    try std.Io.File.writeStreamingAll(fasta_file, io, fasta_data);
 
-    const records = try scanHeaders(fasta_data, allocator);
-    defer records.deinit();
-    try writeZfi(zfi_path, records.items, fasta_data.len);
+    var records = try scanHeaders(fasta_data, allocator);
+    defer records.deinit(allocator);
+    try writeZfi(io, zfi_path, records.items, fasta_data.len);
 
-    const fai_file = try std.fs.cwd().createFile(fai_path, .{ .truncate = true });
-    defer fai_file.close();
-    var fai_buffered = std.io.bufferedWriter(fai_file.writer());
-    _ = try main.indexer.streamingScan(fasta_data, fai_buffered.writer(), .fai, true, allocator);
-    try fai_buffered.flush();
+    const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
+    defer fai_file.close(io);
+    var fai_buf: [65536]u8 = undefined;
+    var fai_fw = fai_file.writer(io, &fai_buf);
+    _ = try main.indexer.streamingScan(fasta_data, &fai_fw.interface, .fai, true, allocator);
+    try fai_fw.flush();
 
-    const stale_time = std.time.timestamp() - 3600;
-    const zfi_file = try std.fs.cwd().openFile(zfi_path, .{});
-    defer zfi_file.close();
-    try zfi_file.updateTimes(stale_time, stale_time);
+    var now: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.REALTIME, &now);
+    const stale_time: std.os.linux.timespec = .{ .sec = now.sec - 3600, .nsec = now.nsec };
+    const zfi_file = try std.Io.Dir.cwd().openFile(io, zfi_path, .{});
+    defer zfi_file.close(io);
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.futimens(zfi_file.handle, &.{ stale_time, stale_time }));
 
-    var idx = try loadIndexChecked(fasta_path);
+    var idx = try loadIndexChecked(io, fasta_path);
     defer idx.deinit();
 
     try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.fai, idx.source);
