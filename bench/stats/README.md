@@ -38,6 +38,6 @@ Use `--skip-real` to avoid downloaded real datasets, or `--skip-scaling` to omit
 
 ## Notes
 
-The current v0.2.5 run was collected in warm-cache mode because passwordless sudo was not available for page-cache drops.
+The current v0.2.6 run was collected in warm-cache mode because passwordless sudo was not available for page-cache drops.
 
-`z-fasta stats --index-only` reads only the `.zfi` header and is intended for quick assembly QC. It has no direct equivalent in `seqkit` or `seqtk`, so full-scan comparisons should be read separately from index-only comparisons.
+`z-fasta stats --index-only` reads `.zfi` index data and computes length-derived metrics without scanning FASTA sequence bytes. It is intended for quick assembly QC. It has no direct equivalent in `seqkit` or `seqtk`, so full-scan comparisons should be read separately from index-only comparisons.

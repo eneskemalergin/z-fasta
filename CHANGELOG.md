@@ -3,7 +3,33 @@
 
 All notable changes to z-fasta will be documented in this file.
 
-<!-- ## [0.2.5] - 2026-04-27
+## [0.2.6] - 2026-04-27
+
+### Added
+
+- `bench/perf-recovery/run_startup.sh`: startup-floor benchmark harness for Zig 0.16 CLI entry-point overhead
+- `bench/perf-recovery/README.md`: notes for the performance recovery harness
+
+### Changed
+
+- `src/main.zig`: VERSION bumped to 0.2.6 and CLI startup moved to `std.process.Init.Minimal`, with direct Linux stdout writes for top-level `--help` and `--version`
+- `src/index_format.zig`: split index loading by use case so stats and small lookups can avoid rebuilding the full name map
+- `src/getter.zig`: small multi-region batches resolve in one record scan; sequence emission now uses buffered chunk writes
+- `src/stats.zig`: stats uses records-only loading and a fixed-width composition fast path for regular FASTA layouts
+- `src/indexer.zig`: fixed-width records avoid recounting sequence bytes during indexing when line metrics are regular
+- `README.md` and benchmark reports refreshed with v0.2.6 performance data
+- `build.zig.zon`: package version bumped to 0.2.6
+
+### Validation
+
+- `zig build -Doptimize=ReleaseFast`
+- `zig build test --summary all` (86/86 tests passed)
+- `bench/index/run_tests.sh` (20/20 edge cases match samtools)
+- `bench/get/verify_get.sh` (90/90 passed)
+- `bench/get/verify_multi_get.sh` (22/22 passed)
+- `bench/stats/verify_stats.py` (107/107 passed)
+
+## [0.2.5] - 2026-04-27
 
 ### Changed
 
@@ -21,7 +47,7 @@ All notable changes to z-fasta will be documented in this file.
 
 - `zig build`
 - `zig build test`
-- `zig build -Doptimize=ReleaseFast` -->
+- `zig build -Doptimize=ReleaseFast`
 
 ## [0.2.4] - 2026-04-02
 

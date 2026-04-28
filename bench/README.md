@@ -89,7 +89,7 @@ For cold-cache measurements, the benchmark script attempts `sudo sh -c 'echo 3 >
 ## Quick Start
 
 ```bash
-# 1. Build z-fasta v0.2.5 with Zig 0.16.0 (from project root)
+# 1. Build z-fasta v0.2.6 with Zig 0.16.0 (from project root)
 ./zig-0.16.0/zig build -Doptimize=ReleaseFast
 
 # 2. Download test data (~4 GB, one-time)

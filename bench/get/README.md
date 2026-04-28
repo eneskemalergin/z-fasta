@@ -39,6 +39,6 @@ Use `--skip-real` to avoid downloaded real datasets, or `--skip-scaling` to omit
 
 ## Notes
 
-The current v0.2.5 run was collected in warm-cache mode because passwordless sudo was not available for page-cache drops.
+The current v0.2.6 run was collected in warm-cache mode because passwordless sudo was not available for page-cache drops.
 
 For indexed tools, small-region latency is dominated by process startup plus index lookup. `seqtk` has no index and scans the FASTA, so it is included as a scan-based reference rather than a direct indexed-access equivalent.

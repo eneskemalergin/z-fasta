@@ -411,8 +411,9 @@ def main():
         report.append("\n### Index-Only Speedup\n")
         report.append(md_indexonly_speedup(io_df))
         report.append("")
-        report.append("> **Interpretation:** Index-only mode reads only the binary `.zfi` header. "
-                      "No file I/O occurs beyond the index. Time is dominated by process startup "
+        report.append("> **Interpretation:** Index-only mode reads `.zfi` index data and "
+                  "computes length-derived metrics without scanning FASTA sequence bytes. "
+                  "Time is dominated by process startup "
                       "and is constant regardless of file size. This makes it suitable for "
                       "interactive assembly QC where waiting seconds for N50 is unacceptable.\n")
 
@@ -436,12 +437,12 @@ def main():
         fig_scaling_size(size_df, figures_dir / "scaling_size.png")
         report.append("\n![Scaling by File Size](results/figures/scaling_size.png)\n")
         report.append(
-            "> **Note:** seqkit-stats is faster than z-fasta-full on large "
-            "single-sequence synthetic files due to optimized FASTA parsing. "
-            "z-fasta-full matches or outperforms seqkit on files with many short sequences "
-            "(proteomes, transcriptomes) because composition is computed in a single pass. "
+            "> **Note:** z-fasta-full is ahead of seqkit-stats and seqtk-comp across "
+            "the synthetic file-size scaling run while computing richer statistics. "
+            "Real-dataset performance still depends on record count, sequence layout, and "
+            "index-loading cost. "
             "Index-only time is effectively constant regardless of file size and is dominated "
-            "by CLI startup plus reading the tiny `.zfi` header.\n"
+            "by CLI startup plus reading `.zfi` index data.\n"
         )
 
     # ── 4. Real datasets ──────────────────────────────────────────
@@ -476,9 +477,9 @@ def main():
         report.append("")
         fig_throughput(tp_df, figures_dir / "throughput.png")
         report.append("\n![Throughput](results/figures/throughput.png)\n")
-        report.append("> z-fasta-full throughput is ~1.0–1.25 GB/s on synthetic single-sequence "
-                      "files. seqkit-stats throughput tends to be higher due to simpler output "
-                      "formatting. z-fasta's advantage is the additional statistics computed "
+        report.append("> z-fasta-full throughput is ~1.3 GB/s on synthetic single-sequence "
+                  "files in the current run, ahead of seqkit-stats and seqtk-comp. "
+                  "z-fasta's advantage is the additional statistics computed "
                       "(N50, L50, N90, L90, AU, GC%, per-base composition) that seqkit-stats "
                       "does not provide.\n")
 

@@ -16,7 +16,7 @@ pub const writeZfi = index_format.writeZfi;
 pub const validateFasta = indexer.validateFasta;
 pub const scanHeaders = indexer.scanHeaders;
 
-const VERSION = "0.2.5";
+const VERSION = "0.2.6";
 
 const USAGE =
     \\usage: z-fasta <command> [options]
