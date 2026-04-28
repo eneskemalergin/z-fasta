@@ -248,7 +248,8 @@ fn emitRegion(resolved: ResolvedRegion, fasta: []const u8, writer: anytype) void
     var pos: usize = @intCast(resolved.start_byte);
     var bases_written: u64 = 0;
     var line_pos: usize = 0;
-    var line_buf: [wrap_width]u8 = undefined;
+    var out_buf: [65536]u8 = undefined;
+    var out_len: usize = 0;
 
     while (bases_written < resolved.num_bases and pos < fasta.len) {
         const byte = fasta[pos];
@@ -257,26 +258,38 @@ fn emitRegion(resolved: ResolvedRegion, fasta: []const u8, writer: anytype) void
         // Skip newline characters (CRLF-safe)
         if (byte == '\n' or byte == '\r') continue;
 
-        line_buf[line_pos] = byte;
+        if (out_len + 2 > out_buf.len) {
+            writer.writeAll(out_buf[0..out_len]) catch {
+                printErrorAndExit("error: write failed\n", .{});
+            };
+            out_len = 0;
+        }
+
+        out_buf[out_len] = byte;
+        out_len += 1;
         bases_written += 1;
         line_pos += 1;
 
         if (line_pos >= wrap_width) {
-            writer.writeAll(&line_buf) catch {
-                printErrorAndExit("error: write failed\n", .{});
-            };
-            writer.writeByte('\n') catch {
-                printErrorAndExit("error: write failed\n", .{});
-            };
+            out_buf[out_len] = '\n';
+            out_len += 1;
             line_pos = 0;
         }
     }
 
     if (line_pos > 0) {
-        writer.writeAll(line_buf[0..line_pos]) catch {
-            printErrorAndExit("error: write failed\n", .{});
-        };
-        writer.writeByte('\n') catch {
+        if (out_len == out_buf.len) {
+            writer.writeAll(&out_buf) catch {
+                printErrorAndExit("error: write failed\n", .{});
+            };
+            out_len = 0;
+        }
+        out_buf[out_len] = '\n';
+        out_len += 1;
+    }
+
+    if (out_len > 0) {
+        writer.writeAll(out_buf[0..out_len]) catch {
             printErrorAndExit("error: write failed\n", .{});
         };
     }
