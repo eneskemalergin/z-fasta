@@ -149,6 +149,11 @@ pub fn resolveRegion(idx: *const LoadedIndex, region_str: []const u8, original_i
     const rec_idx = idx.lookupName(region.name) orelse {
         printErrorAndExit("error: sequence not found: {s}\n", .{region.name});
     };
+
+    return resolveParsedRegion(idx, region, rec_idx, original_index);
+}
+
+fn resolveParsedRegion(idx: *const LoadedIndex, region: Region, rec_idx: usize, original_index: usize) ResolvedRegion {
     const rec = idx.records[rec_idx];
 
     var start = region.start;
@@ -192,6 +197,34 @@ pub fn resolveRegion(idx: *const LoadedIndex, region_str: []const u8, original_i
         .num_bases = num_bases,
         .original_index = original_index,
     };
+}
+
+fn resolveRegionsByRecordScan(idx: *const LoadedIndex, region_strs: []const []const u8, resolved: []ResolvedRegion) void {
+    var regions_buf: [1024]Region = undefined;
+    var rec_indices_buf: [1024]?usize = undefined;
+    const regions = regions_buf[0..region_strs.len];
+    const rec_indices = rec_indices_buf[0..region_strs.len];
+
+    for (region_strs, 0..) |rs, i| {
+        regions[i] = parseRegion(rs);
+        rec_indices[i] = null;
+    }
+
+    for (idx.records, 0..) |rec, rec_idx| {
+        const rec_name = rec.getName(idx.fasta_data);
+        for (regions, 0..) |region, region_idx| {
+            if (std.mem.eql(u8, rec_name, region.name)) {
+                rec_indices[region_idx] = rec_idx;
+            }
+        }
+    }
+
+    for (regions, 0..) |region, i| {
+        const rec_idx = rec_indices[i] orelse {
+            printErrorAndExit("error: sequence not found: {s}\n", .{region.name});
+        };
+        resolved[i] = resolveParsedRegion(idx, region, rec_idx, i);
+    }
 }
 
 // ============================================================================
@@ -276,8 +309,12 @@ pub fn runGet(io: std.Io, fasta_path: []const u8, region_strs: []const []const u
         printErrorAndExit("error: too many regions (max 1024)\n", .{});
     }
     const resolved = resolved_buf[0..region_strs.len];
-    for (region_strs, 0..) |rs, i| {
-        resolved[i] = resolveRegion(&idx, rs, i);
+    if (region_strs.len > 1 and region_strs.len < 16 and idx.source == .zfi and !idx.has_name_map) {
+        resolveRegionsByRecordScan(&idx, region_strs, resolved);
+    } else {
+        for (region_strs, 0..) |rs, i| {
+            resolved[i] = resolveRegion(&idx, rs, i);
+        }
     }
 
     var out_buf: [65536]u8 = undefined;
