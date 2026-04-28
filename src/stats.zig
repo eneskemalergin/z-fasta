@@ -413,8 +413,11 @@ fn scanComposition(idx: *const LoadedIndex) CompositionStats {
     for (idx.records) |rec| {
         if (rec.seq_len == 0) continue;
 
-        // Compute the byte range for this sequence
         const start: usize = @intCast(rec.seq_offset);
+
+        if (tryScanFixedWidthRecord(fasta, rec, start, &counts, &total_bases, &lowercase_count)) {
+            continue;
+        }
 
         // Compute end of sequence region
         // end = seq_offset + (full_lines * line_bytes) + last_line_bytes
@@ -459,6 +462,51 @@ fn scanComposition(idx: *const LoadedIndex) CompositionStats {
         .seq_type = seq_type,
         .lowercase_count = lowercase_count,
     };
+}
+
+fn tryScanFixedWidthRecord(
+    fasta: []const u8,
+    rec: IndexRecord,
+    start: usize,
+    counts: *[256]u64,
+    total_bases: *u64,
+    lowercase_count: *u64,
+) bool {
+    if (rec.seq_len == 0 or rec.line_bases == 0) return true;
+    if (rec.line_bytes < rec.line_bases) return false;
+
+    const newline_bytes = rec.line_bytes - rec.line_bases;
+    if (newline_bytes != 1 and newline_bytes != 2) return false;
+
+    var pos = start;
+    var bases_remaining = rec.seq_len;
+    while (bases_remaining > 0) {
+        const bases_this_line: usize = @intCast(@min(bases_remaining, @as(u64, rec.line_bases)));
+        const line_end = pos + bases_this_line;
+        if (line_end > fasta.len) return false;
+
+        countCompositionSlice(fasta[pos..line_end], counts, total_bases, lowercase_count);
+
+        bases_remaining -= bases_this_line;
+        pos += if (bases_remaining > 0) @as(usize, @intCast(rec.line_bytes)) else bases_this_line;
+    }
+
+    return true;
+}
+
+fn countCompositionSlice(
+    data: []const u8,
+    counts: *[256]u64,
+    total_bases: *u64,
+    lowercase_count: *u64,
+) void {
+    for (data) |byte| {
+        counts[byte] += 1;
+        total_bases.* += 1;
+        if (byte >= 'a' and byte <= 'z') {
+            lowercase_count.* += 1;
+        }
+    }
 }
 
 /// Detect if sequences are nucleotide or protein based on first 100K bases.
