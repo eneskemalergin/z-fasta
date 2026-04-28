@@ -55,7 +55,7 @@ mkdir -p "$RESULTS_DIR" "$SCALING_DIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 command -v hyperfine &>/dev/null || { echo "Error: hyperfine not found (apt install hyperfine)"; exit 1; }
-[[ -x "$ZFASTA" ]]   || { echo "Error: z-fasta not found at $ZFASTA. Run: zig build -Doptimize=ReleaseFast"; exit 1; }
+[[ -x "$ZFASTA" ]]   || { echo "Error: z-fasta not found at $ZFASTA. Run: ./zig-0.16.0/zig build -Doptimize=ReleaseFast"; exit 1; }
 command -v "$SAMTOOLS" &>/dev/null || { echo "Error: samtools not found"; exit 1; }
 
 HAS_SEQKIT=false;    [[ -x "$SEQKIT" ]]    && HAS_SEQKIT=true
@@ -333,5 +333,5 @@ fi
 echo "════════════════════════════════════════════════════════════════"
 echo "  Benchmarks complete."
 echo "  Results in: $RESULTS_DIR"
-echo "  Run: python3 bench/generate_report.py $RESULTS_DIR"
+echo "  Run: .venv/bin/python bench/index/generate_report.py"
 echo "════════════════════════════════════════════════════════════════"

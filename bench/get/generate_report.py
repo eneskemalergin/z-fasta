@@ -6,7 +6,7 @@ Reads raw hyperfine JSON + CSV data from bench/get/results/,
 produces Markdown report + PNG figures using pandas + matplotlib.
 
 Usage:
-    python3 bench/get/generate_report.py [results_dir]
+    .venv/bin/python bench/get/generate_report.py [results_dir]
 
 Defaults to bench/get/results/ (latest timestamped files).
 """
@@ -493,10 +493,11 @@ def main():
         fig_latency_panels(single_df, figures_dir / "single_latency.png")
         report.append("\n![Single-Region Latency](results/figures/single_latency.png)\n")
 
-        report.append("> **Interpretation:** z-fasta achieves sub-millisecond latency via O(1) "
-                      "index lookup + `pread`. samtools is ~2–2.6× slower due to full `.fai` "
-                      "parse overhead on every call. seqkit carries a ~14 ms Go runtime startup "
-                      "cost that dominates at small regions. fastahack matches samtools.\n")
+        report.append("> **Interpretation:** z-fasta small-region extraction is startup-dominated: "
+                  "the measured path is O(1) index lookup + `pread`, with ~1-2 ms "
+                  "end-to-end CLI latency on this host. seqkit carries a ~14 ms Go runtime "
+                  "startup cost that dominates at small regions. fastahack and samtools are "
+                  "in the same low-millisecond range for indexed single-region access.\n")
 
         report.append("\n### Speedup vs samtools\n")
         report.append(md_speedup_table(single_df, "benchmark"))

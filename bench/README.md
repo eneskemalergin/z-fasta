@@ -9,7 +9,8 @@ bench/
   shared/                  # Shared infrastructure
     download_data.sh       # Downloads REAL_* files → bench/shared/data/
     data/                  # REAL_Genome.fa, REAL_Transcriptome.fa, REAL_Proteome.fasta
-  index/                   # Indexer benchmarks (v0.1)
+  index/                   # Indexer benchmarks
+    README.md              # Suite-specific workflow and outputs
     run_benchmarks.sh      # Hyperfine benchmarks across all tools and file sizes
     run_tests.sh           # 20 edge case correctness tests vs samtools
     generate_report.py     # Produces REPORT.md + PNG figures
@@ -17,13 +18,15 @@ bench/
     data/                  # Generated scaling files (size_*.fasta, seqs_*.fasta)
     edge_cases/            # Generated edge-case FASTAs
     results/               # Timestamped perf JSON, memory CSV, figures/
-  get/                     # Getter benchmarks + verification (v0.2)
+  get/                     # Getter benchmarks + verification
+    README.md              # Suite-specific workflow and outputs
     run_benchmarks.sh      # Hyperfine benchmarks: latency, full-seq, region scaling
     verify_get.sh          # Byte-identical diff against samtools faidx
     generate_report.py     # Produces REPORT.md + PNG figures
     REPORT.md              # Full GET benchmark report
     results/               # Timestamped JSON, memory CSV, figures/
-  stats/                   # Stats benchmarks + verification (v0.2)
+  stats/                   # Stats benchmarks + verification
+    README.md              # Suite-specific workflow and outputs
     run_benchmarks.sh      # Hyperfine benchmarks: full/index-only, scaling, throughput
     verify_stats.py        # BioPython verification of all stats output
     generate_report.py     # Produces REPORT.md + PNG figures
@@ -49,7 +52,7 @@ This prints a version-pins table and installs `pyfaidx` into the project `.venv`
 | --- | --- | --- | --- |
 | [hyperfine](https://github.com/sharkdp/hyperfine) | 1.12.0 | Precise timing with warmup/cache control | `apt install hyperfine` or `cargo install hyperfine` |
 | [samtools](http://www.htslib.org/) | 1.13 | Reference indexer (`samtools faidx`) | `apt install samtools` or `conda install samtools` |
-| z-fasta | current | The tool being benchmarked | `zig build -Doptimize=ReleaseFast` (from project root) |
+| z-fasta | current | The tool being benchmarked | `./zig-0.16.0/zig build -Doptimize=ReleaseFast` (from project root) |
 
 ### Comparison tools (pre-built in `tools/`)
 
@@ -79,15 +82,15 @@ If a comparison tool binary is not found, the benchmark script skips it automati
 pip install matplotlib pandas tabulate biopython
 ```
 
-### Optional: Cold-cache benchmarkss
+### Optional: Cold-cache benchmarks
 
 For cold-cache measurements, the benchmark script attempts `sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'`. This requires passwordless sudo for that specific command. Without it, benchmarks run in warm-cache mode (still valid, just different).
 
 ## Quick Start
 
 ```bash
-# 1. Build z-fasta (from project root)
-zig build -Doptimize=ReleaseFast
+# 1. Build z-fasta v0.2.5 with Zig 0.16.0 (from project root)
+./zig-0.16.0/zig build -Doptimize=ReleaseFast
 
 # 2. Download test data (~4 GB, one-time)
 bash bench/shared/download_data.sh
@@ -115,10 +118,12 @@ bash bench/get/verify_get.sh
 .venv/bin/python bench/stats/verify_stats.py
 
 # 9. Generate all reports
-python3 bench/index/generate_report.py
-python3 bench/get/generate_report.py
-python3 bench/stats/generate_report.py
+.venv/bin/python bench/index/generate_report.py
+.venv/bin/python bench/get/generate_report.py
+.venv/bin/python bench/stats/generate_report.py
 ```
+
+For suite-level details, see [index/README.md](index/README.md), [get/README.md](get/README.md), and [stats/README.md](stats/README.md).
 
 ## Output
 

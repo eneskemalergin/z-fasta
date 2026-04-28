@@ -6,7 +6,7 @@ Reads raw hyperfine JSON + CSV data from bench/stats/results/,
 produces Markdown report + PNG figures using pandas + matplotlib.
 
 Usage:
-    python3 bench/stats/generate_report.py [results_dir]
+    .venv/bin/python bench/stats/generate_report.py [results_dir]
 
 Defaults to bench/stats/results/ (latest timestamped files).
 """
@@ -48,6 +48,8 @@ def tool_color(name):
 
 def _strip_tool_prefix(name: str) -> str:
     """Extract base tool name from hyperfine label like '10mb_z-fasta-full'."""
+    if "seqkit-stats" in name:
+        return "seqkit-stats-a"
     for base in TOOL_ORDER:
         if name.endswith(base):
             return base
@@ -438,7 +440,8 @@ def main():
             "single-sequence synthetic files due to optimized FASTA parsing. "
             "z-fasta-full matches or outperforms seqkit on files with many short sequences "
             "(proteomes, transcriptomes) because composition is computed in a single pass. "
-            "Index-only time is constant at < 1 ms regardless of file size.\n"
+            "Index-only time is effectively constant regardless of file size and is dominated "
+            "by CLI startup plus reading the tiny `.zfi` header.\n"
         )
 
     # ── 4. Real datasets ──────────────────────────────────────────
@@ -461,7 +464,7 @@ def main():
         report.append("\n## Memory Usage\n")
         report.append("> RSS measured with `/usr/bin/time -v`. "
                       "z-fasta-full uses mmap for reading. RSS reflects file pages mapped by OS. "
-                      "z-fasta-indexonly reads only the tiny `.zfi` header: constant ~6 MB RSS.\n")
+                      "z-fasta-indexonly reads only the tiny `.zfi` header, so RSS stays nearly constant.\n")
         report.append(md_memory_table(mem_df))
         report.append("")
 
@@ -484,7 +487,7 @@ def main():
     report.append(
         "| Tool | Stats Support | Notes |\n"
         "| :--- | :------------ | :---- |\n"
-        "| z-fasta stats | Full (Tier 1 + Tier 2) | Index-only mode for < 1 ms stats |\n"
+        "| z-fasta stats | Full (Tier 1 + Tier 2) | Index-only mode for startup-dominated stats from `.zfi` |\n"
         "| seqkit stats | Basic counts/sizes | No N50/GC/composition breakdown |\n"
         "| samtools | No stats command | Index-only; no sequence statistics |\n"
         "| fastahack | No stats command | Index-only; no sequence statistics |\n"

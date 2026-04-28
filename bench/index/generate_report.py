@@ -6,7 +6,7 @@ Reads raw hyperfine JSON + CSV data from bench/index/results/,
 produces Markdown report + PNG figures using pandas + matplotlib.
 
 Usage:
-    python3 bench/index/generate_report.py [results_dir]
+    .venv/bin/python bench/index/generate_report.py [results_dir]
 
 Defaults to bench/index/results/ (latest timestamped files).
 """
