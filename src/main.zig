@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 
 // Module imports
@@ -72,9 +73,34 @@ fn printVersionAndExit(io: std.Io) noreturn {
     std.process.exit(0);
 }
 
-pub fn main(init: std.process.Init) void {
-    const io = init.io;
-    var args = std.process.Args.Iterator.init(init.minimal.args);
+fn writeStdoutAll(bytes: []const u8) void {
+    if (comptime builtin.os.tag == .linux) {
+        var written: usize = 0;
+        while (written < bytes.len) {
+            const result = std.os.linux.write(1, bytes[written..].ptr, bytes.len - written);
+            if (std.os.linux.errno(result) != .SUCCESS) return;
+            if (result == 0) return;
+            written += result;
+        }
+    } else {
+        var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+        defer threaded.deinit();
+        std.Io.File.writeStreamingAll(.stdout(), threaded.io(), bytes) catch {};
+    }
+}
+
+fn printHelpFastAndExit() noreturn {
+    writeStdoutAll(USAGE);
+    std.process.exit(0);
+}
+
+fn printVersionFastAndExit() noreturn {
+    writeStdoutAll("z-fasta " ++ VERSION ++ "\n");
+    std.process.exit(0);
+}
+
+pub fn main(init: std.process.Init.Minimal) void {
+    var args = std.process.Args.Iterator.init(init.args);
     _ = args.skip();
 
     const cmd = args.next() orelse {
@@ -82,11 +108,15 @@ pub fn main(init: std.process.Init) void {
     };
 
     if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) {
-        printHelpAndExit(io);
+        printHelpFastAndExit();
     }
     if (std.mem.eql(u8, cmd, "--version") or std.mem.eql(u8, cmd, "-V")) {
-        printVersionAndExit(io);
+        printVersionFastAndExit();
     }
+
+    var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
 
     if (std.mem.eql(u8, cmd, "index")) {
         runIndex(io, &args);
