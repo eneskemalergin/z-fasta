@@ -30,9 +30,15 @@ pub const IndexRecord = extern struct {
 };
 
 /// Result of loading an index (from .zfi or .fai)
+pub const LoadMode = enum {
+    records_only,
+    lookup_full_map,
+};
+
 pub const LoadedIndex = struct {
     records: []const IndexRecord,
     name_map: std.StringHashMap(usize),
+    has_name_map: bool,
     fasta_data: []align(4096) const u8,
     fasta_size: u64,
     zfi_data: ?[]align(4096) const u8,
@@ -43,17 +49,31 @@ pub const LoadedIndex = struct {
 
     pub fn deinit(self: *LoadedIndex) void {
         // munmap FASTA
-        posix.munmap(@constCast(@alignCast(self.fasta_data)));
+        posix.munmap(@alignCast(@constCast(self.fasta_data)));
         // munmap .zfi if loaded
         if (self.zfi_data) |zd| {
-            posix.munmap(@constCast(@alignCast(zd)));
+            posix.munmap(@alignCast(@constCast(zd)));
         }
         self.name_map.deinit();
         self.arena.deinit();
     }
 
     pub fn lookupName(self: *const LoadedIndex, name: []const u8) ?usize {
-        return self.name_map.get(name);
+        if (self.has_name_map) {
+            return self.name_map.get(name);
+        }
+
+        if (self.source == .zfi) {
+            var found: ?usize = null;
+            for (self.records, 0..) |rec, i| {
+                if (std.mem.eql(u8, rec.getName(self.fasta_data), name)) {
+                    found = i;
+                }
+            }
+            return found;
+        }
+
+        return null;
     }
 };
 
@@ -117,7 +137,11 @@ pub fn writeZfi(
 /// Load the index for a FASTA file. Tries .zfi first, then .fai fallback.
 /// The caller must call deinit() on the returned LoadedIndex.
 pub fn loadIndex(io: std.Io, fasta_path: []const u8) LoadedIndex {
-    return loadIndexChecked(io, fasta_path) catch |err| switch (err) {
+    return loadIndexWithMode(io, fasta_path, .lookup_full_map);
+}
+
+pub fn loadIndexWithMode(io: std.Io, fasta_path: []const u8, mode: LoadMode) LoadedIndex {
+    return loadIndexCheckedWithMode(io, fasta_path, mode) catch |err| switch (err) {
         error.FileNotFound => printErrorAndExit("error: file not found: {s}\n", .{fasta_path}),
         error.AccessDenied => printErrorAndExit("error: access denied: {s}\n", .{fasta_path}),
         error.EmptyFile => printErrorAndExit("error: file is empty: {s}\n", .{fasta_path}),
@@ -133,6 +157,10 @@ pub fn loadIndex(io: std.Io, fasta_path: []const u8) LoadedIndex {
 
 /// Load the index for a FASTA file with typed errors for testing and fallback control.
 pub fn loadIndexChecked(io: std.Io, fasta_path: []const u8) LoadIndexError!LoadedIndex {
+    return loadIndexCheckedWithMode(io, fasta_path, .lookup_full_map);
+}
+
+pub fn loadIndexCheckedWithMode(io: std.Io, fasta_path: []const u8, mode: LoadMode) LoadIndexError!LoadedIndex {
     // Open FASTA file
     const fasta_file = std.Io.Dir.cwd().openFile(io, fasta_path, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.FileNotFound,
@@ -162,8 +190,8 @@ pub fn loadIndexChecked(io: std.Io, fasta_path: []const u8) LoadIndexError!Loade
     const zfi_path = std.fmt.bufPrint(&zfi_path_buf, "{s}.zfi", .{fasta_path}) catch return error.PathTooLong;
 
     var zfi_failure: ?LoadIndexError = null;
-    switch (tryLoadZfi(io, zfi_path, fasta_data, fasta_stat) catch |err| {
-        posix.munmap(@constCast(@alignCast(fasta_data)));
+    switch (tryLoadZfi(io, zfi_path, fasta_data, fasta_stat, mode) catch |err| {
+        posix.munmap(@alignCast(@constCast(fasta_data)));
         return err;
     }) {
         .loaded => |result| return result,
@@ -175,25 +203,25 @@ pub fn loadIndexChecked(io: std.Io, fasta_path: []const u8) LoadIndexError!Loade
     // Try .fai fallback
     var fai_path_buf: [4096]u8 = undefined;
     const fai_path = std.fmt.bufPrint(&fai_path_buf, "{s}.fai", .{fasta_path}) catch {
-        posix.munmap(@constCast(@alignCast(fasta_data)));
+        posix.munmap(@alignCast(@constCast(fasta_data)));
         return error.PathTooLong;
     };
 
     switch (tryLoadFai(io, fai_path, fasta_data, fasta_stat) catch |err| {
-        posix.munmap(@constCast(@alignCast(fasta_data)));
+        posix.munmap(@alignCast(@constCast(fasta_data)));
         return err;
     }) {
         .loaded => |result| return result,
         .stale => {
-            posix.munmap(@constCast(@alignCast(fasta_data)));
+            posix.munmap(@alignCast(@constCast(fasta_data)));
             return error.StaleIndex;
         },
         .corrupt => {
-            posix.munmap(@constCast(@alignCast(fasta_data)));
+            posix.munmap(@alignCast(@constCast(fasta_data)));
             return error.CorruptIndex;
         },
         .not_found => {
-            posix.munmap(@constCast(@alignCast(fasta_data)));
+            posix.munmap(@alignCast(@constCast(fasta_data)));
             return zfi_failure orelse error.NoIndexFound;
         },
     }
@@ -204,6 +232,7 @@ fn tryLoadZfi(
     zfi_path: []const u8,
     fasta_data: []align(4096) const u8,
     fasta_stat: std.Io.File.Stat,
+    mode: LoadMode,
 ) LoadIndexError!LoadAttempt {
     const zfi_file = std.Io.Dir.cwd().openFile(io, zfi_path, .{}) catch |err| switch (err) {
         error.FileNotFound => return .not_found,
@@ -233,7 +262,7 @@ fn tryLoadZfi(
         zfi_file.handle,
         0,
     ) catch return error.MmapFailed;
-    errdefer posix.munmap(@constCast(@alignCast(zfi_data)));
+    errdefer posix.munmap(@alignCast(@constCast(zfi_data)));
 
     // Validate minimum size for header
     if (zfi_data.len < @sizeOf(ZfiHeader)) {
@@ -270,17 +299,22 @@ fn tryLoadZfi(
         }
     }
 
-    // Build name map from FASTA mmap slices
     var name_map = std.StringHashMap(usize).init(std.heap.page_allocator);
     errdefer name_map.deinit();
-    for (records, 0..) |rec, i| {
-        const name = fasta_data[rec.name_offset..][0..rec.name_len];
-        name_map.put(name, i) catch return error.OutOfMemory;
+    var has_name_map = false;
+    if (mode == .lookup_full_map) {
+        name_map.ensureTotalCapacity(@intCast(records.len)) catch return error.OutOfMemory;
+        for (records, 0..) |rec, i| {
+            const name = rec.getName(fasta_data);
+            name_map.putAssumeCapacity(name, i);
+        }
+        has_name_map = true;
     }
 
     return .{ .loaded = LoadedIndex{
         .records = records,
         .name_map = name_map,
+        .has_name_map = has_name_map,
         .fasta_data = fasta_data,
         .fasta_size = fasta_stat.size,
         .zfi_data = zfi_data,
@@ -378,6 +412,7 @@ fn tryLoadFai(
     return .{ .loaded = LoadedIndex{
         .records = records_list.items,
         .name_map = name_map,
+        .has_name_map = true,
         .fasta_data = fasta_data,
         .fasta_size = fasta_stat.size,
         .zfi_data = null,

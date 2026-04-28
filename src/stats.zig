@@ -106,7 +106,7 @@ fn getAminoAcidName(code: u8) []const u8 {
 
 /// Run the stats command.
 pub fn runStats(io: std.Io, fasta_path: []const u8, index_only: bool) void {
-    var idx = index_format.loadIndex(io, fasta_path);
+    var idx = index_format.loadIndexWithMode(io, fasta_path, .records_only);
     defer idx.deinit();
 
     const records = idx.records;
@@ -400,7 +400,7 @@ fn scanComposition(idx: *const LoadedIndex) CompositionStats {
 
     // Set madvise to sequential for full scan
     posix.madvise(
-        @constCast(@alignCast(fasta.ptr)),
+        @alignCast(@constCast(fasta.ptr)),
         fasta.len,
         posix.MADV.SEQUENTIAL,
     ) catch {};

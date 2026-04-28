@@ -257,11 +257,12 @@ fn emitRegion(resolved: ResolvedRegion, fasta: []const u8, writer: anytype) void
 /// to improve sequential page access. Output is buffered per-region and
 /// flushed in original CLI order.
 pub fn runGet(io: std.Io, fasta_path: []const u8, region_strs: []const []const u8) void {
-    var idx = index_format.loadIndex(io, fasta_path);
+    const load_mode: index_format.LoadMode = if (region_strs.len < 16) .records_only else .lookup_full_map;
+    var idx = index_format.loadIndexWithMode(io, fasta_path, load_mode);
     defer idx.deinit();
 
     // Point-access pattern: disable kernel readahead.
-    posix.madvise(@constCast(@alignCast(idx.fasta_data.ptr)), idx.fasta_data.len, posix.MADV.RANDOM) catch {};
+    posix.madvise(@alignCast(@constCast(idx.fasta_data.ptr)), idx.fasta_data.len, posix.MADV.RANDOM) catch {};
 
     // Resolve all regions before writing any output — fail-fast on bad names or
     // coordinates so we never emit partial results.

@@ -299,6 +299,36 @@ test "loadIndexChecked rejects corrupt zfi records" {
     try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, fasta_path));
 }
 
+test "loadIndexCheckedWithMode preserves duplicate lookup semantics" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "duplicate-zfi", "fa");
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+
+    const fasta_data = ">dup\nAAAA\n>dup\nCCCC\n";
+    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+    defer fasta_file.close(io);
+    try std.Io.File.writeStreamingAll(fasta_file, io, fasta_data);
+
+    const records = [_]IndexRecord{
+        .{ .name_offset = 1, .name_len = 3, .seq_offset = 5, .seq_len = 4, .line_bases = 4, .line_bytes = 5 },
+        .{ .name_offset = 11, .name_len = 3, .seq_offset = 15, .seq_len = 4, .line_bases = 4, .line_bytes = 5 },
+    };
+    try writeZfi(io, zfi_path, &records, fasta_data.len);
+
+    var full_map_idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .lookup_full_map);
+    defer full_map_idx.deinit();
+    var records_only_idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .records_only);
+    defer records_only_idx.deinit();
+
+    try std.testing.expectEqual(full_map_idx.lookupName("dup"), records_only_idx.lookupName("dup"));
+    try std.testing.expectEqual(@as(?usize, 1), records_only_idx.lookupName("dup"));
+}
+
 test "loadIndexChecked falls back to fai when zfi is stale" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
