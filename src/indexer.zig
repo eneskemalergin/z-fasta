@@ -72,6 +72,41 @@ pub fn countBases(data: []const u8) u64 {
     return count;
 }
 
+fn hasLineSeparatorAt(data: []const u8, pos: usize, sep_len: u32) bool {
+    return switch (sep_len) {
+        1 => pos < data.len and data[pos] == '\n',
+        2 => pos + 1 < data.len and data[pos] == '\r' and data[pos + 1] == '\n',
+        else => false,
+    };
+}
+
+fn countFixedWidthBases(data: []const u8, line_bases: u32, line_bytes: u32) ?u64 {
+    if (data.len == 0) return 0;
+    if (line_bases == 0 or line_bytes <= line_bases) return null;
+
+    const sep_len = line_bytes - line_bases;
+    if (sep_len != 1 and sep_len != 2) return null;
+
+    var cursor: usize = 0;
+    var bases: u64 = 0;
+    while (cursor < data.len) {
+        const remaining = data.len - cursor;
+        if (remaining >= line_bytes) {
+            if (!hasLineSeparatorAt(data, cursor + line_bases, sep_len)) return null;
+            bases += line_bases;
+            cursor += line_bytes;
+        } else {
+            if (remaining <= line_bases) return bases + remaining;
+
+            const tail_bases = remaining - sep_len;
+            if (tail_bases > line_bases) return null;
+            if (!hasLineSeparatorAt(data, cursor + tail_bases, sep_len)) return null;
+            return bases + tail_bases;
+        }
+    }
+    return bases;
+}
+
 // ============================================================================
 // Streaming Mode (mmap, default)
 // ============================================================================
@@ -115,12 +150,6 @@ pub fn streamingScan(
 
         const seq_offset: u64 = if (header_end < data.len) header_end + 1 else header_end;
         const seq_end = findNextHeaderStart(data, @intCast(seq_offset));
-        const seq_len = countBases(data[@intCast(seq_offset)..seq_end]);
-
-        if (seq_len == 0) {
-            pos = seq_end;
-            continue;
-        }
 
         // Line metrics
         var line_bases: u32 = 0;
@@ -141,6 +170,14 @@ pub fn streamingScan(
             } else {
                 line_bytes = @intCast((first_line_end - seq_offset) + 1);
             }
+        }
+
+        const seq_data = data[@intCast(seq_offset)..seq_end];
+        const seq_len = countFixedWidthBases(seq_data, line_bases, line_bytes) orelse countBases(seq_data);
+
+        if (seq_len == 0) {
+            pos = seq_end;
+            continue;
         }
 
         // Dedup check
@@ -211,12 +248,6 @@ pub fn scanHeaders(data: []const u8, allocator: std.mem.Allocator) !std.ArrayLis
 
         const seq_offset: u64 = if (header_end < data.len) header_end + 1 else header_end;
         const seq_end = findNextHeaderStart(data, @intCast(seq_offset));
-        const seq_len = countBases(data[@intCast(seq_offset)..seq_end]);
-
-        if (seq_len == 0) {
-            pos = seq_end;
-            continue;
-        }
 
         // Line metrics
         var line_bases: u32 = 0;
@@ -237,6 +268,14 @@ pub fn scanHeaders(data: []const u8, allocator: std.mem.Allocator) !std.ArrayLis
             } else {
                 line_bytes = @intCast((first_line_end - seq_offset) + 1);
             }
+        }
+
+        const seq_data = data[@intCast(seq_offset)..seq_end];
+        const seq_len = countFixedWidthBases(seq_data, line_bases, line_bytes) orelse countBases(seq_data);
+
+        if (seq_len == 0) {
+            pos = seq_end;
+            continue;
         }
 
         // Dedup check
