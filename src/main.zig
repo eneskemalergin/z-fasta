@@ -47,7 +47,9 @@ const USAGE =
     \\  z-fasta index --emit-fai genome.fa       Output FAI to stdout
     \\  z-fasta get genome.fa chr1:1000-2000     Extract region
     \\  z-fasta get genome.fa chr1               Extract full sequence
-    \\  z-fasta get genome.fa chr1 chr2 chrM     Extract multiple sequences
+    \\  z-fasta get genome.fa --bed regions.bed  Extract BED regions
+    \\  z-fasta get genome.fa --names ids.txt    Extract whole sequences from a file
+    \\  z-fasta get genome.fa --bed regions.bed --honor-strand --summary
     \\  z-fasta stats genome.fa                  Full stats with composition
     \\  z-fasta stats --index-only genome.fa     Quick index-only stats
     \\
@@ -267,6 +269,10 @@ fn runIndex(io: std.Io, args: *std.process.Args.Iterator) void {
 
 fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     var fasta_path: ?[]const u8 = null;
+    var bed_path: ?[]const u8 = null;
+    var names_path: ?[]const u8 = null;
+    var honor_strand = false;
+    var summary = false;
     // Static buffer: up to 1024 region strings without heap allocation.
     var region_buf: [1024][]const u8 = undefined;
     var region_count: usize = 0;
@@ -274,6 +280,18 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printHelpAndExit(io);
+        } else if (std.mem.eql(u8, arg, "--bed")) {
+            bed_path = args.next() orelse {
+                printErrorAndExit("error: --bed requires a path or '-'\n", .{});
+            };
+        } else if (std.mem.eql(u8, arg, "--names")) {
+            names_path = args.next() orelse {
+                printErrorAndExit("error: --names requires a path\n", .{});
+            };
+        } else if (std.mem.eql(u8, arg, "--honor-strand")) {
+            honor_strand = true;
+        } else if (std.mem.eql(u8, arg, "--summary")) {
+            summary = true;
         } else if (fasta_path == null) {
             fasta_path = arg;
         } else {
@@ -286,13 +304,19 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     }
 
     const path = fasta_path orelse {
-        printErrorAndExit("error: usage: z-fasta get <file.fasta> <region> [region ...]\n", .{});
+        printErrorAndExit("error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--honor-strand] [--summary] <region> [region ...]\n", .{});
     };
-    if (region_count == 0) {
-        printErrorAndExit("error: usage: z-fasta get <file.fasta> <region> [region ...]\n", .{});
+    if (region_count == 0 and bed_path == null and names_path == null) {
+        printErrorAndExit("error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--honor-strand] [--summary] <region> [region ...]\n", .{});
     }
 
-    getter.runGet(io, path, region_buf[0..region_count]);
+    getter.runGetWithOptions(io, path, .{
+        .region_strs = region_buf[0..region_count],
+        .bed_path = bed_path,
+        .names_path = names_path,
+        .honor_strand = honor_strand,
+        .summary = summary,
+    });
 }
 
 // ============================================================================

@@ -64,8 +64,28 @@ pub fn build(b: *std.Build) void {
     });
     const run_test_stats = b.addRunArtifact(test_stats);
 
+    const test_complement = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/complement.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_test_complement = b.addRunArtifact(test_complement);
+
+    const test_bed_parser = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bed_parser.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_test_bed_parser = b.addRunArtifact(test_bed_parser);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_test_index.step);
     test_step.dependOn(&run_test_get.step);
     test_step.dependOn(&run_test_stats.step);
+    test_step.dependOn(&run_test_complement.step);
+    test_step.dependOn(&run_test_bed_parser.step);
 }
