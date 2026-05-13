@@ -62,7 +62,7 @@ Options:
 ### Get (sequence extraction)
 
 ```bash
-z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--honor-strand] [--summary] <region> [region ...]
+z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--honor-strand] [--summary] [--chunk-size N] <region> [region ...]
 ```
 
 Extract one or more sequences or sub-regions from an indexed FASTA file. Output is **byte-identical** to `samtools faidx` for the existing positional-region path. Multiple regions are accepted in a single call; the index loads once and results stream in CLI order. BED rows and names-file entries are appended in source order ahead of later positional arguments.
@@ -88,6 +88,7 @@ Handles Ensembl-style names containing colons (e.g., `chromosome:GRCh38:1:1:2489
 | `--names file.txt` | Read one full-sequence name per line. Useful for long batch lists. |
 | `--honor-strand` | Use BED column 6. `-` emits reverse-complement output with a `:rc` header suffix. |
 | `--summary` | Print region count, total bases, elapsed time, and regions/sec to stderr. |
+| `--chunk-size N` | Process BED rows in chunks instead of resolving the entire BED in one batch. Default: `100000`. |
 
 ### Stats
 
@@ -276,7 +277,7 @@ Add `--skip-real` to the `get` / `stats` scripts to skip real dataset runs (~3 G
     - [x] BED coordinates are 0-based half-open; z-fasta converts to 1-based inclusive internally
     - [x] Mix `--bed` with positional `NAME:START-END` args in one call
     - [x] `--bed -`, `--names`, `--honor-strand`, and `--summary`
-    - [ ] Chunked BED processing for very large inputs
+    - [x] Chunked BED processing for very large inputs
     - [ ] BED verification suite and benchmark/report integration
 - [ ] v0.2.8: Reverse complement
     - [ ] `--rc` flag for `z-fasta get` to output the reverse complement of any extracted region

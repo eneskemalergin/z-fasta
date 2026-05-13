@@ -26,12 +26,13 @@ import tabulate  # noqa: F401
 COLORS = {
     "z-fasta": "#2E7D32",
     "samtools": "#1565C0",
+    "bedtools": "#6A1B9A",
     "seqkit": "#E65100",
     "fastahack": "#7B1FA2",
     "seqtk": "#00838F",
     "pyfaidx": "#F7A41D",
 }
-TOOL_ORDER = ["z-fasta", "samtools", "seqkit", "fastahack", "seqtk", "pyfaidx"]
+TOOL_ORDER = ["z-fasta", "samtools", "bedtools", "seqkit", "fastahack", "seqtk", "pyfaidx"]
 
 
 def tool_sort_key(name):
@@ -96,6 +97,10 @@ def _human_bench(name: str) -> str:
         ds, sz = m.group(1), m.group(2)
         label = {"full": "full seq", "1kb": "1 kbp region", "1mb": "1 Mbp region"}.get(sz, sz)
         return f"{ds}: {label}"
+    m = re.match(r"(\d+)regions_(default|stranded)$", name)
+    if m:
+        count, mode = m.group(1), m.group(2)
+        return f"{count} regions ({'default' if mode == 'default' else 'stranded'})"
     return name
 
 
@@ -177,6 +182,20 @@ def load_multi(results_dir: Path) -> pd.DataFrame | None:
             count = 0
         df["region_count"] = count
         df["benchmark"] = stem
+        frames.append(df)
+    if not frames:
+        return None
+    return pd.concat(frames, ignore_index=True)
+
+
+def load_bed(results_dir: Path) -> pd.DataFrame | None:
+    d = discover_latest(results_dir, "bed")
+    if not d or not d.is_dir():
+        return None
+    frames = []
+    for jf in sorted(d.glob("*.json")):
+        df = load_hyperfine_json(jf)
+        df["benchmark"] = jf.stem
         frames.append(df)
     if not frames:
         return None
@@ -392,6 +411,37 @@ def fig_real_datasets(df: pd.DataFrame, out: Path) -> Path:
     return _save(fig, out)
 
 
+def fig_bed_batch(df: pd.DataFrame, out: Path) -> Path:
+    df = _prep(df)
+    df["bench_human"] = df["benchmark"].apply(_human_bench)
+    tools = [t for t in TOOL_ORDER if t in df["tool_base"].values]
+    benchmarks = list(df["bench_human"].unique())
+
+    fig, ax = plt.subplots(figsize=(max(10, len(benchmarks) * 1.8), 5))
+    x = range(len(benchmarks))
+    width = 0.8 / max(len(tools), 1)
+
+    for i, t in enumerate(tools):
+        tdf = df[df["tool_base"] == t]
+        vals_ms = []
+        for b in benchmarks:
+            row = tdf[tdf["bench_human"] == b]
+            vals_ms.append(row["mean"].values[0] * 1000 if len(row) else 0)
+        offset = (i - len(tools) / 2 + 0.5) * width
+        bars = ax.bar([xi + offset for xi in x], vals_ms, width,
+                      label=t, color=COLORS.get(t, "#888"), alpha=0.9)
+        _bar_labels(ax, bars, vals_ms)
+
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(benchmarks, rotation=20, ha="right", fontsize=8)
+    ax.set_ylabel("Time (ms)")
+    ax.set_title("BED Batch Extraction Performance")
+    ax.legend(fontsize=8)
+    ax.grid(axis="y", alpha=0.3)
+    ax.set_axisbelow(True)
+    return _save(fig, out)
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  Markdown
 # ══════════════════════════════════════════════════════════════════════
@@ -448,6 +498,32 @@ def md_speedup_table(df: pd.DataFrame, group_col: str,
                     row["z-fasta vs fastahack"] = f"**{ratio:.1f}×** (z-fasta wins)"
                 else:
                     row["z-fasta vs fastahack"] = f"{ratio:.2f}× (fastahack faster)"
+        rows.append(row)
+    if not rows:
+        return "_No comparison data available._"
+    return pd.DataFrame(rows).to_markdown(index=False)
+
+
+def md_speedup_table_multi(df: pd.DataFrame, group_col: str, baselines: list[str]) -> str:
+    df = df.copy()
+    df["tool_base"] = df["tool"].apply(_strip_tool_prefix)
+    df["bench_human"] = df[group_col].apply(_human_bench)
+    groups = sorted(df["bench_human"].unique())
+    rows = []
+    for g in groups:
+        gdf = df[df["bench_human"] == g]
+        zf = gdf[gdf["tool_base"] == "z-fasta"]
+        if not len(zf):
+            continue
+        zf_t = zf["mean"].values[0]
+        row = {"Benchmark": g}
+        for baseline in baselines:
+            ref = gdf[gdf["tool_base"] == baseline]
+            col = f"z-fasta vs {baseline}"
+            if len(ref) and zf_t > 0:
+                row[col] = f"**{ref['mean'].values[0] / zf_t:.1f}×**"
+            else:
+                row[col] = "N/A"
         rows.append(row)
     if not rows:
         return "_No comparison data available._"
@@ -570,7 +646,24 @@ def main():
                       "Run `bench/shared/download_data.sh` then re-run benchmarks "
                       "without `--skip-real`._\n")
 
-    # ── 5. Memory ────────────────────────────────────────────────
+    # ── 5. BED batch extraction ──────────────────────────────────
+    bed_df = load_bed(results_dir)
+    if bed_df is not None and len(bed_df):
+        report.append("\n## BED Batch Extraction\n")
+        report.append(
+            "> Synthetic BED batches of 100, 1K, 10K, and 100K regions on a single indexed FASTA. "
+            "`z-fasta` runs with `--bed` and an explicit chunk size that forces multi-batch processing. "
+            "`samtools faidx -r` ignores strand, so the stranded rows isolate reverse-complement overhead for `z-fasta` and `bedtools getfasta -s`.\n"
+        )
+        report.append(md_table(bed_df, "benchmark"))
+        report.append("")
+        fig_bed_batch(bed_df, figures_dir / "bed_batch.png")
+        report.append("\n![BED Batch Extraction](results/figures/bed_batch.png)\n")
+        report.append("\n### Speedup vs samtools and bedtools\n")
+        report.append(md_speedup_table_multi(bed_df, "benchmark", ["samtools", "bedtools"]))
+        report.append("")
+
+    # ── 6. Memory ────────────────────────────────────────────────
     mem_df = load_memory(results_dir)
     if mem_df is not None and len(mem_df):
         report.append("\n## Memory Usage\n")
@@ -580,7 +673,7 @@ def main():
         report.append(md_memory_table(mem_df))
         report.append("")
 
-    # ── 6. Multi-region extraction ────────────────────────────────
+    # ── 7. Multi-region extraction ────────────────────────────────
     multi_df = load_multi(results_dir)
     if multi_df is not None and len(multi_df):
         report.append("\n## Multi-Region Extraction (v0.2.4)\n")

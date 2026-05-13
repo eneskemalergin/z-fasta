@@ -23,6 +23,7 @@ INDEX_DATA="$BENCH_ROOT/index/data"
 # ── Tools ──────────────────────────────────────────────────────────
 ZFASTA="$PROJECT_ROOT/zig-out/bin/z-fasta"
 SAMTOOLS="samtools"
+BEDTOOLS="bedtools"
 SEQKIT="$PROJECT_ROOT/tools/seqkit"
 FASTAHACK="$PROJECT_ROOT/tools/fastahack-1.0.0/fastahack"
 SEQTK="$PROJECT_ROOT/tools/seqtk/seqtk"
@@ -54,11 +55,14 @@ done
 # ── Preflight ──────────────────────────────────────────────────────
 mkdir -p "$RESULTS_DIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+TMP_WORK_DIR=$(mktemp -d "$SCRIPT_DIR/.bench_tmp.XXXXXX")
+trap 'rm -rf "$TMP_WORK_DIR"' EXIT
 
 command -v hyperfine &>/dev/null || { echo "Error: hyperfine not found (apt install hyperfine)"; exit 1; }
 [[ -x "$ZFASTA" ]]   || { echo "Error: z-fasta not found at $ZFASTA. Run: ./zig build -Doptimize=ReleaseFast"; exit 1; }
 command -v "$SAMTOOLS" &>/dev/null || { echo "Error: samtools not found"; exit 1; }
 
+HAS_BEDTOOLS=false;  command -v "$BEDTOOLS" &>/dev/null && HAS_BEDTOOLS=true
 HAS_SEQKIT=false;    [[ -x "$SEQKIT" ]]    && HAS_SEQKIT=true
 HAS_FASTAHACK=false; [[ -x "$FASTAHACK" ]] && HAS_FASTAHACK=true
 HAS_SEQTK=false;     [[ -x "$SEQTK" ]]     && HAS_SEQTK=true
@@ -84,6 +88,7 @@ echo "  Mode: $BENCH_MODE"
 echo "  Runs: $RUNS | Warmup: $WARMUP"
 echo "  z-fasta:   $ZFASTA"
 echo "  samtools:  $(which $SAMTOOLS) ($($SAMTOOLS --version | head -1))"
+echo "  bedtools:  $HAS_BEDTOOLS"
 echo "  seqkit:    $HAS_SEQKIT"
 echo "  fastahack: $HAS_FASTAHACK"
 echo "  seqtk:     $HAS_SEQTK ($SEQTK)"
@@ -233,6 +238,88 @@ measure_memory_get() {
 
     # Clean up seqtk temp file
     [[ -n "$seqtk_mem_file" ]] && rm -f "$seqtk_mem_file"
+}
+
+generate_bed_benchmark_files() {
+    local file="$1"
+    local count="$2"
+    local bed_out="$3"
+    local regions_out="$4"
+
+    read -r seqname seqlen <<< "$(longest_seq_info "$file")"
+
+    local span=100
+    [[ "$seqlen" -lt "$span" ]] && span="$seqlen"
+
+    local max_start=$(( seqlen - span ))
+    [[ "$max_start" -lt 0 ]] && max_start=0
+
+    : > "$bed_out"
+    : > "$regions_out"
+
+    for ((i = 0; i < count; i++)); do
+        local start0=0
+        if [[ "$count" -gt 1 && "$max_start" -gt 0 ]]; then
+            start0=$(( (i * max_start) / (count - 1) ))
+        fi
+        local end0=$(( start0 + span ))
+        local strand='+'
+        (( i % 3 == 0 )) && strand='-'
+
+        printf '%s\t%d\t%d\tbed_%d\t0\t%s\n' "$seqname" "$start0" "$end0" "$i" "$strand" >> "$bed_out"
+        printf '%s:%d-%d\n' "$seqname" $(( start0 + 1 )) "$end0" >> "$regions_out"
+    done
+}
+
+bench_get_bed() {
+    local file="$1"
+    local bed_file="$2"
+    local regions_file="$3"
+    local chunk_size="$4"
+    local json_out="$5"
+    local label_prefix="$6"
+    local honor_strand="$7"
+
+    local prepare_cmd=""
+    [[ -n "$CACHE_CLEAR" ]] && prepare_cmd="$CACHE_CLEAR"
+
+    local cmds=()
+    local names=()
+
+    local zf_cmd="$ZFASTA get '$file' --bed '$bed_file' --chunk-size '$chunk_size'"
+    if [[ "$honor_strand" == true ]]; then
+        zf_cmd+=" --honor-strand"
+    fi
+    zf_cmd+=" > /dev/null"
+    names+=("${label_prefix}z-fasta")
+    cmds+=("$zf_cmd")
+
+    names+=("${label_prefix}samtools")
+    cmds+=("$SAMTOOLS faidx -r '$regions_file' '$file' > /dev/null")
+
+    if $HAS_BEDTOOLS; then
+        local bt_cmd="$BEDTOOLS getfasta -fi '$file' -bed '$bed_file'"
+        if [[ "$honor_strand" == true ]]; then
+            bt_cmd+=" -s"
+        fi
+        bt_cmd+=" > /dev/null"
+        names+=("${label_prefix}bedtools")
+        cmds+=("$bt_cmd")
+    fi
+
+    local hf_args=(
+        hyperfine
+        --warmup "$WARMUP"
+        --runs "$RUNS"
+        --export-json "$json_out"
+    )
+    [[ -n "$prepare_cmd" ]] && hf_args+=(--prepare "$prepare_cmd")
+
+    for i in "${!names[@]}"; do
+        hf_args+=(-n "${names[$i]}" "${cmds[$i]}")
+    done
+
+    "${hf_args[@]}"
 }
 
 # ══════════════════════════════════════════════════════════════════════
@@ -415,11 +502,64 @@ if ! $SKIP_REAL; then
 fi
 
 # ══════════════════════════════════════════════════════════════════════
-#  5. Memory Measurement
+#  5. BED Batch Extraction
 # ══════════════════════════════════════════════════════════════════════
 
 echo "──────────────────────────────────────────────────"
-echo " [5] Memory Usage"
+echo " [5] BED Batch Extraction"
+echo "──────────────────────────────────────────────────"
+
+BED_FILE=""
+for candidate in \
+    "$INDEX_DATA/size_100mb.fasta" \
+    "$INDEX_DATA/size_50mb.fasta" \
+    "$DATA_DIR/REAL_Genome.fa" \
+    "$PROJECT_ROOT/tests/data/simple.fasta"; do
+    if [[ -f "$candidate" ]]; then
+        BED_FILE="$candidate"
+        break
+    fi
+done
+
+if [[ -n "$BED_FILE" ]]; then
+    ensure_indexes "$BED_FILE"
+    BED_DIR="$RESULTS_DIR/bed_${TIMESTAMP}"
+    mkdir -p "$BED_DIR"
+
+    BED_COUNTS=(100 1000 10000 100000)
+    BED_CHUNKS=(31 97 257 4096)
+
+    echo "  File: $BED_FILE"
+    for i in "${!BED_COUNTS[@]}"; do
+        count="${BED_COUNTS[$i]}"
+        chunk="${BED_CHUNKS[$i]}"
+        bed_path="$TMP_WORK_DIR/${count}regions.bed"
+        regions_path="$TMP_WORK_DIR/${count}regions.txt"
+
+        generate_bed_benchmark_files "$BED_FILE" "$count" "$bed_path" "$regions_path"
+
+        echo "  ${count} BED regions (default, chunk-size=${chunk})..."
+        bench_get_bed "$BED_FILE" "$bed_path" "$regions_path" "$chunk" \
+            "$BED_DIR/${count}regions_default.json" "${count}regions_default_" false
+
+        if $HAS_BEDTOOLS; then
+            echo "  ${count} BED regions (stranded, chunk-size=${chunk})..."
+            bench_get_bed "$BED_FILE" "$bed_path" "$regions_path" "$chunk" \
+                "$BED_DIR/${count}regions_stranded.json" "${count}regions_stranded_" true
+        fi
+    done
+else
+    echo "  SKIP: no suitable FASTA found for BED benchmarks"
+fi
+
+echo ""
+
+# ══════════════════════════════════════════════════════════════════════
+#  6. Memory Measurement
+# ══════════════════════════════════════════════════════════════════════
+
+echo "──────────────────────────────────────────────────"
+echo " [6] Memory Usage"
 echo "──────────────────────────────────────────────────"
 
 MEM_CSV="$RESULTS_DIR/memory_${TIMESTAMP}.csv"
@@ -468,11 +608,11 @@ echo "  Memory data → $MEM_CSV"
 echo ""
 
 # ══════════════════════════════════════════════════════════════════════
-#  6. Multi-Region Extraction (v0.2.4)
+#  7. Multi-Region Extraction (v0.2.4)
 # ══════════════════════════════════════════════════════════════════════
 
 echo "──────────────────────────────────────────────────"
-echo " [6] Multi-Region Extraction (v0.2.4)"
+echo " [7] Multi-Region Extraction (v0.2.4)"
 echo "──────────────────────────────────────────────────"
 
 # Helper: make a seqtk BED file from multiple samtools-style regions

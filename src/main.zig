@@ -36,7 +36,8 @@ const USAGE =
     \\  --low-mem    Use chunked reader instead of mmap (4 MB constant memory)
     \\
     \\Get usage:
-    \\  z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--honor-strand] [--summary] <region> [region ...]
+    \\  z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt]
+    \\               [--honor-strand] [--summary] [--chunk-size N] <region> [region ...]
     \\  Region formats: NAME, NAME:START-END, NAME:START-
     \\
     \\Stats options:
@@ -273,6 +274,7 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     var names_path: ?[]const u8 = null;
     var honor_strand = false;
     var summary = false;
+    var chunk_size: usize = 100_000;
     // Static buffer: up to 1024 region strings without heap allocation.
     var region_buf: [1024][]const u8 = undefined;
     var region_count: usize = 0;
@@ -292,6 +294,16 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
             honor_strand = true;
         } else if (std.mem.eql(u8, arg, "--summary")) {
             summary = true;
+        } else if (std.mem.eql(u8, arg, "--chunk-size")) {
+            const raw = args.next() orelse {
+                printErrorAndExit("error: --chunk-size requires a positive integer\n", .{});
+            };
+            chunk_size = std.fmt.parseInt(usize, raw, 10) catch {
+                printErrorAndExit("error: --chunk-size requires a positive integer\n", .{});
+            };
+            if (chunk_size == 0) {
+                printErrorAndExit("error: --chunk-size requires a positive integer\n", .{});
+            }
         } else if (fasta_path == null) {
             fasta_path = arg;
         } else {
@@ -304,10 +316,10 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     }
 
     const path = fasta_path orelse {
-        printErrorAndExit("error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--honor-strand] [--summary] <region> [region ...]\n", .{});
+        printErrorAndExit("error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--honor-strand] [--summary] [--chunk-size N] <region> [region ...]\n", .{});
     };
     if (region_count == 0 and bed_path == null and names_path == null) {
-        printErrorAndExit("error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--honor-strand] [--summary] <region> [region ...]\n", .{});
+        printErrorAndExit("error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--honor-strand] [--summary] [--chunk-size N] <region> [region ...]\n", .{});
     }
 
     getter.runGetWithOptions(io, path, .{
@@ -316,6 +328,7 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
         .names_path = names_path,
         .honor_strand = honor_strand,
         .summary = summary,
+        .chunk_size = chunk_size,
     });
 }
 

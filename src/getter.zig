@@ -25,11 +25,17 @@ pub const GetOptions = struct {
     names_path: ?[]const u8 = null,
     honor_strand: bool = false,
     summary: bool = false,
+    chunk_size: usize = 100_000,
 };
 
 const ParsedRequest = struct {
     region: Region,
     reverse_complement: bool,
+};
+
+const BatchStats = struct {
+    region_count: usize = 0,
+    total_bases: u64 = 0,
 };
 
 /// Parse a region string. Handles the Ensembl colon trap by parsing from the right.
@@ -444,41 +450,67 @@ fn readAllInput(allocator: std.mem.Allocator, io: std.Io, path: []const u8) []u8
     return bytes;
 }
 
+fn appendBedRegionRequest(
+    requests: *std.ArrayList(ParsedRequest),
+    region: bed_parser.BedRegion,
+    honor_strand: bool,
+    allocator: std.mem.Allocator,
+    duplicate_name: bool,
+) void {
+    if (honor_strand and region.strand == .invalid) {
+        printErrorAndExit("error: invalid BED line {d}: invalid strand\n", .{region.line_number});
+    }
+
+    const name = if (duplicate_name)
+        allocator.dupe(u8, region.chrom) catch {
+            printErrorAndExit("error: out of memory\n", .{});
+        }
+    else
+        region.chrom;
+
+    requests.append(allocator, .{
+        .region = .{
+            .name = name,
+            .start = region.start1Based(),
+            .end = region.end1BasedInclusive(),
+            .is_full = false,
+        },
+        .reverse_complement = honor_strand and region.strand == .minus,
+    }) catch {
+        printErrorAndExit("error: out of memory\n", .{});
+    };
+}
+
+fn appendBedLineRequest(
+    requests: *std.ArrayList(ParsedRequest),
+    line: []const u8,
+    line_number: usize,
+    honor_strand: bool,
+    allocator: std.mem.Allocator,
+    duplicate_name: bool,
+) void {
+    const parsed = bed_parser.parseBedLine(line, line_number) catch |err| switch (err) {
+        error.MissingChrom => printErrorAndExit("error: invalid BED line {d}: missing chrom\n", .{line_number}),
+        error.MissingStart => printErrorAndExit("error: invalid BED line {d}: missing start\n", .{line_number}),
+        error.MissingEnd => printErrorAndExit("error: invalid BED line {d}: missing end\n", .{line_number}),
+        error.InvalidStart => printErrorAndExit("error: invalid BED line {d}: invalid start\n", .{line_number}),
+        error.InvalidEnd => printErrorAndExit("error: invalid BED line {d}: invalid end\n", .{line_number}),
+        error.EmptyInterval => printErrorAndExit("error: invalid BED line {d}: end must be greater than start\n", .{line_number}),
+    };
+
+    switch (parsed) {
+        .skip => {},
+        .region => |region| appendBedRegionRequest(requests, region, honor_strand, allocator, duplicate_name),
+    }
+}
+
 fn appendBedRequests(requests: *std.ArrayList(ParsedRequest), bed_data: []const u8, honor_strand: bool, allocator: std.mem.Allocator) void {
     var lines = std.mem.splitScalar(u8, bed_data, '\n');
     var line_number: usize = 0;
 
     while (lines.next()) |line| {
         line_number += 1;
-        const parsed = bed_parser.parseBedLine(line, line_number) catch |err| switch (err) {
-            error.MissingChrom => printErrorAndExit("error: invalid BED line {d}: missing chrom\n", .{line_number}),
-            error.MissingStart => printErrorAndExit("error: invalid BED line {d}: missing start\n", .{line_number}),
-            error.MissingEnd => printErrorAndExit("error: invalid BED line {d}: missing end\n", .{line_number}),
-            error.InvalidStart => printErrorAndExit("error: invalid BED line {d}: invalid start\n", .{line_number}),
-            error.InvalidEnd => printErrorAndExit("error: invalid BED line {d}: invalid end\n", .{line_number}),
-            error.EmptyInterval => printErrorAndExit("error: invalid BED line {d}: end must be greater than start\n", .{line_number}),
-        };
-
-        switch (parsed) {
-            .skip => continue,
-            .region => |region| {
-                if (honor_strand and region.strand == .invalid) {
-                    printErrorAndExit("error: invalid BED line {d}: invalid strand\n", .{line_number});
-                }
-
-                requests.append(allocator, .{
-                    .region = .{
-                        .name = region.chrom,
-                        .start = region.start1Based(),
-                        .end = region.end1BasedInclusive(),
-                        .is_full = false,
-                    },
-                    .reverse_complement = honor_strand and region.strand == .minus,
-                }) catch {
-                    printErrorAndExit("error: out of memory\n", .{});
-                };
-            },
-        }
+        appendBedLineRequest(requests, line, line_number, honor_strand, allocator, false);
     }
 }
 
@@ -525,6 +557,146 @@ fn writeSummary(io: std.Io, region_count: usize, total_bases: u64, elapsed_ns: u
     stderr_fw.flush() catch {};
 }
 
+fn processParsedRequests(idx: *const LoadedIndex, allocator: std.mem.Allocator, requests: []const ParsedRequest, writer: anytype) BatchStats {
+    if (requests.len == 0) return .{};
+
+    const resolved = allocator.alloc(ResolvedRegion, requests.len) catch {
+        printErrorAndExit("error: out of memory\n", .{});
+    };
+
+    if (requests.len > 1 and requests.len < 16 and idx.source == .zfi and !idx.has_name_map) {
+        resolveParsedRequestsByRecordScan(idx, requests, resolved);
+    } else {
+        for (requests, 0..) |request, i| {
+            const rec_idx = idx.lookupName(request.region.name) orelse {
+                printErrorAndExit("error: sequence not found: {s}\n", .{request.region.name});
+            };
+            resolved[i] = resolveParsedRequest(idx, request, rec_idx, i);
+        }
+    }
+
+    var total_bases: u64 = 0;
+
+    if (requests.len < 16) {
+        for (resolved) |r| {
+            total_bases += r.num_bases;
+            emitRegion(r, idx.fasta_data, writer);
+        }
+    } else {
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        const sort_allocator = arena.allocator();
+
+        const sorted = sort_allocator.dupe(ResolvedRegion, resolved) catch {
+            printErrorAndExit("error: out of memory\n", .{});
+        };
+        std.mem.sort(ResolvedRegion, sorted, {}, struct {
+            fn lessThan(_: void, a: ResolvedRegion, b: ResolvedRegion) bool {
+                return a.start_byte < b.start_byte;
+            }
+        }.lessThan);
+
+        const output_bufs = sort_allocator.alloc(std.Io.Writer.Allocating, requests.len) catch {
+            printErrorAndExit("error: out of memory\n", .{});
+        };
+        for (output_bufs) |*buf| {
+            buf.* = std.Io.Writer.Allocating.init(sort_allocator);
+        }
+
+        for (sorted) |r| {
+            total_bases += r.num_bases;
+            emitRegion(r, idx.fasta_data, &output_bufs[r.original_index].writer);
+        }
+
+        for (output_bufs) |*buf| {
+            const output = buf.toArrayList();
+            writer.writeAll(output.items) catch {
+                printErrorAndExit("error: write failed\n", .{});
+            };
+        }
+    }
+
+    return .{
+        .region_count = requests.len,
+        .total_bases = total_bases,
+    };
+}
+
+fn processBedReaderChunked(
+    idx: *const LoadedIndex,
+    reader: *std.Io.Reader,
+    honor_strand: bool,
+    chunk_size: usize,
+    writer: anytype,
+) BatchStats {
+    var total = BatchStats{};
+    var line_number: usize = 0;
+    var reached_end = false;
+
+    while (true) {
+        var chunk_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        const chunk_allocator = chunk_arena.allocator();
+
+        var requests = std.ArrayList(ParsedRequest).empty;
+
+        while (requests.items.len < chunk_size) {
+            const maybe_line = reader.takeDelimiter('\n') catch |err| switch (err) {
+                error.ReadFailed => printErrorAndExit("error: failed to read BED input\n", .{}),
+                error.StreamTooLong => printErrorAndExit("error: BED line exceeds internal reader buffer; shorten the line or increase buffering in code\n", .{}),
+            };
+
+            const line = maybe_line orelse {
+                reached_end = true;
+                break;
+            };
+
+            line_number += 1;
+            appendBedLineRequest(&requests, line, line_number, honor_strand, chunk_allocator, true);
+        }
+
+        if (requests.items.len == 0) {
+            chunk_arena.deinit();
+            break;
+        }
+
+        const batch = processParsedRequests(idx, chunk_allocator, requests.items, writer);
+        total.region_count += batch.region_count;
+        total.total_bases += batch.total_bases;
+
+        chunk_arena.deinit();
+
+        if (reached_end) break;
+    }
+
+    return total;
+}
+
+fn processBedPathChunked(
+    io: std.Io,
+    idx: *const LoadedIndex,
+    path: []const u8,
+    honor_strand: bool,
+    chunk_size: usize,
+    writer: anytype,
+) BatchStats {
+    if (std.mem.eql(u8, path, "-")) {
+        var stdin_buf: [4096]u8 = undefined;
+        var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buf);
+        return processBedReaderChunked(idx, &stdin_reader.interface, honor_strand, chunk_size, writer);
+    }
+
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => printErrorAndExit("error: file not found: {s}\n", .{path}),
+        error.AccessDenied => printErrorAndExit("error: access denied: {s}\n", .{path}),
+        else => printErrorAndExit("error: failed to open file: {s}\n", .{path}),
+    };
+    defer file.close(io);
+
+    var file_buf: [4096]u8 = undefined;
+    var file_reader = file.reader(io, &file_buf);
+    return processBedReaderChunked(idx, &file_reader.interface, honor_strand, chunk_size, writer);
+}
+
 // ============================================================================
 // Public entry point
 // ============================================================================
@@ -542,17 +714,16 @@ pub fn runGet(io: std.Io, fasta_path: []const u8, region_strs: []const []const u
 }
 
 pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions) void {
+    if (options.chunk_size == 0) {
+        printErrorAndExit("error: --chunk-size must be >= 1\n", .{});
+    }
+
     var input_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer input_arena.deinit();
     const allocator = input_arena.allocator();
 
     var requests = std.ArrayList(ParsedRequest).empty;
     defer requests.deinit(allocator);
-
-    if (options.bed_path) |bed_path| {
-        const bed_data = readAllInput(allocator, io, bed_path);
-        appendBedRequests(&requests, bed_data, options.honor_strand, allocator);
-    }
 
     if (options.names_path) |names_path| {
         const names_data = readAllInput(allocator, io, names_path);
@@ -561,86 +732,35 @@ pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions
 
     appendCliRequests(&requests, options.region_strs, allocator);
 
-    if (requests.items.len == 0) {
-        printErrorAndExit("error: no regions provided\n", .{});
-    }
-
     const start_ns = if (options.summary) monotonicNs(io) else 0;
 
-    const load_mode: index_format.LoadMode = if (requests.items.len < 16) .records_only else .lookup_full_map;
+    const load_mode: index_format.LoadMode = if (options.bed_path != null or options.names_path != null or requests.items.len >= 16) .lookup_full_map else .records_only;
     var idx = index_format.loadIndexWithMode(io, fasta_path, load_mode);
     defer idx.deinit();
 
     // Point-access pattern: disable kernel readahead.
     posix.madvise(@alignCast(@constCast(idx.fasta_data.ptr)), idx.fasta_data.len, posix.MADV.RANDOM) catch {};
 
-    // Resolve all regions before writing any output — fail-fast on bad names or
-    // coordinates so we never emit partial results.
-    const resolved = allocator.alloc(ResolvedRegion, requests.items.len) catch {
-        printErrorAndExit("error: out of memory\n", .{});
-    };
-    if (requests.items.len > 1 and requests.items.len < 16 and idx.source == .zfi and !idx.has_name_map) {
-        resolveParsedRequestsByRecordScan(&idx, requests.items, resolved);
-    } else {
-        for (requests.items, 0..) |request, i| {
-            const rec_idx = idx.lookupName(request.region.name) orelse {
-                printErrorAndExit("error: sequence not found: {s}\n", .{request.region.name});
-            };
-            resolved[i] = resolveParsedRequest(&idx, request, rec_idx, i);
-        }
-    }
-
     var out_buf: [65536]u8 = undefined;
     var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
     const writer = &stdout_fw.interface;
 
-    var total_bases: u64 = 0;
+    var totals = BatchStats{};
 
-    if (requests.items.len < 16) {
-        // Direct path: small count, emit in CLI order.
-        // The mmap page cache handles random access well for a handful of regions.
-        for (resolved) |r| {
-            total_bases += r.num_bases;
-            emitRegion(r, idx.fasta_data, writer);
-        }
-    } else {
-        // Sorted path: sort by file offset for sequential I/O, write each region into
-        // its own buffer, then emit buffers in original CLI order.
-        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        defer arena.deinit();
-        const sort_allocator = arena.allocator();
+    if (options.bed_path) |bed_path| {
+        const batch = processBedPathChunked(io, &idx, bed_path, options.honor_strand, options.chunk_size, writer);
+        totals.region_count += batch.region_count;
+        totals.total_bases += batch.total_bases;
+    }
 
-        // Copy so we can sort without disturbing original order.
-        const sorted = sort_allocator.dupe(ResolvedRegion, resolved) catch {
-            printErrorAndExit("error: out of memory\n", .{});
-        };
-        std.mem.sort(ResolvedRegion, sorted, {}, struct {
-            fn lessThan(_: void, a: ResolvedRegion, b: ResolvedRegion) bool {
-                return a.start_byte < b.start_byte;
-            }
-        }.lessThan);
+    if (requests.items.len > 0) {
+        const batch = processParsedRequests(&idx, allocator, requests.items, writer);
+        totals.region_count += batch.region_count;
+        totals.total_bases += batch.total_bases;
+    }
 
-        // One output buffer per region keyed by original_index.
-        const output_bufs = sort_allocator.alloc(std.Io.Writer.Allocating, requests.items.len) catch {
-            printErrorAndExit("error: out of memory\n", .{});
-        };
-        for (output_bufs) |*buf| {
-            buf.* = std.Io.Writer.Allocating.init(sort_allocator);
-        }
-
-        // Extract in file-offset order for sequential page access.
-        for (sorted) |r| {
-            total_bases += r.num_bases;
-            emitRegion(r, idx.fasta_data, &output_bufs[r.original_index].writer);
-        }
-
-        // Emit in original CLI order.
-        for (output_bufs) |*buf| {
-            const output = buf.toArrayList();
-            writer.writeAll(output.items) catch {
-                printErrorAndExit("error: write failed\n", .{});
-            };
-        }
+    if (totals.region_count == 0) {
+        printErrorAndExit("error: no regions provided\n", .{});
     }
 
     stdout_fw.flush() catch {
@@ -648,6 +768,63 @@ pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions
     };
 
     if (options.summary) {
-        writeSummary(io, resolved.len, total_bases, monotonicNs(io) - start_ns);
+        writeSummary(io, totals.region_count, totals.total_bases, monotonicNs(io) - start_ns);
     }
+}
+
+test "processBedReaderChunked matches non-chunked extraction" {
+    const test_io = std.Io.Threaded.global_single_threaded.io();
+    var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
+    defer idx.deinit();
+
+    const bed_data =
+        "# comment\n" ++
+        "seq2\t0\t4\n" ++
+        "seq1\t0\t4\n" ++
+        "seq1\t4\t8\n";
+
+    var chunk_reader = std.Io.Reader.fixed(bed_data);
+    var chunk_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer chunk_writer.deinit();
+
+    const chunked = processBedReaderChunked(&idx, &chunk_reader, false, 2, &chunk_writer.writer);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var requests = std.ArrayList(ParsedRequest).empty;
+    defer requests.deinit(allocator);
+    appendBedRequests(&requests, bed_data, false, allocator);
+
+    var batch_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer batch_writer.deinit();
+    const batch = processParsedRequests(&idx, allocator, requests.items, &batch_writer.writer);
+
+    try std.testing.expectEqual(batch.region_count, chunked.region_count);
+    try std.testing.expectEqual(batch.total_bases, chunked.total_bases);
+    try std.testing.expectEqualStrings(batch_writer.written(), chunk_writer.written());
+}
+
+test "processBedReaderChunked preserves strand handling across chunk boundaries" {
+    const test_io = std.Io.Threaded.global_single_threaded.io();
+    var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
+    defer idx.deinit();
+
+    const bed_data =
+        "seq1\t0\t5\tname\t0\t-\n" ++
+        "seq2\t0\t4\tname\t0\t+\n";
+
+    var chunk_reader = std.Io.Reader.fixed(bed_data);
+    var chunk_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer chunk_writer.deinit();
+
+    const chunked = processBedReaderChunked(&idx, &chunk_reader, true, 1, &chunk_writer.writer);
+
+    try std.testing.expectEqual(@as(usize, 2), chunked.region_count);
+    try std.testing.expectEqual(@as(u64, 9), chunked.total_bases);
+    try std.testing.expectEqualStrings(
+        ">seq1:1-5:rc\nTACGT\n>seq2:1-4\nGGGG\n",
+        chunk_writer.written(),
+    );
 }

@@ -8,9 +8,11 @@ This suite measures `z-fasta get` region extraction latency and throughput again
 - Full-sequence extraction from 1 MB, 10 MB, 50 MB, and 100 MB files.
 - Region-size scaling from 100 bp through 1 Mbp.
 - Real dataset extraction for Genome, Transcriptome, and Proteome.
+- BED batch extraction for 100, 1K, 10K, and 100K regions in both default and strand-aware modes.
 - Peak RSS/page-fault measurements for small, large, and full-sequence regions.
 - Multi-region extraction in one CLI call for 1, 10, 50, and 100 regions.
 - Byte-for-byte verification against `samtools faidx` via [verify_get.sh](verify_get.sh) and [verify_multi_get.sh](verify_multi_get.sh).
+- BED extraction verification against `bedtools getfasta` via [verify_bed.sh](verify_bed.sh), including chunked `--bed` runs.
 
 ## Run
 
@@ -21,10 +23,12 @@ From the repository root:
 bash bench/get/run_benchmarks.sh
 bash bench/get/verify_get.sh
 bash bench/get/verify_multi_get.sh
+bash bench/get/verify_bed.sh
 .venv/bin/python bench/get/generate_report.py
 ```
 
 Use `--skip-real` to avoid downloaded real datasets, or `--skip-scaling` to omit region-size scaling.
+`verify_bed.sh` uses `tests/data/simple.fasta` by default and generates synthetic small / medium / large / x-large BED files internally. It skips cleanly when `bedtools` is not installed.
 
 ## Outputs
 
@@ -33,6 +37,7 @@ Use `--skip-real` to avoid downloaded real datasets, or `--skip-scaling` to omit
 - `results/fullseq_<timestamp>/`: full-sequence hyperfine JSON.
 - `results/scale_region_<timestamp>/`: region-size scaling JSON.
 - `results/real_<timestamp>/`: real-dataset extraction JSON.
+- `results/bed_<timestamp>/`: BED batch extraction JSON for default and stranded modes.
 - `results/multi_<timestamp>/`: multi-region extraction JSON.
 - `results/memory_<timestamp>.csv`: `/usr/bin/time` RSS and page-fault measurements.
 - `results/figures/`: regenerated PNG charts used by the report.
