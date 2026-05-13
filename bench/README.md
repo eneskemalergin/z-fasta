@@ -52,7 +52,7 @@ This prints a version-pins table and installs `pyfaidx` into the project `.venv`
 | --- | --- | --- | --- |
 | [hyperfine](https://github.com/sharkdp/hyperfine) | 1.12.0 | Precise timing with warmup/cache control | `apt install hyperfine` or `cargo install hyperfine` |
 | [samtools](http://www.htslib.org/) | 1.13 | Reference indexer (`samtools faidx`) | `apt install samtools` or `conda install samtools` |
-| z-fasta | current | The tool being benchmarked | `./zig-0.16.0/zig build -Doptimize=ReleaseFast` (from project root) |
+| z-fasta | current | The tool being benchmarked | `./zig build -Doptimize=ReleaseFast` (from project root) |
 
 ### Comparison tools (pre-built in `tools/`)
 
@@ -89,8 +89,8 @@ For cold-cache measurements, the benchmark script attempts `sudo sh -c 'echo 3 >
 ## Quick Start
 
 ```bash
-# 1. Build z-fasta v0.2.6 with Zig 0.16.0 (from project root)
-./zig-0.16.0/zig build -Doptimize=ReleaseFast
+# 1. Build z-fasta v0.2.6 with the repo-local Zig wrapper (from project root)
+./zig build -Doptimize=ReleaseFast
 
 # 2. Download test data (~4 GB, one-time)
 bash bench/shared/download_data.sh

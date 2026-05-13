@@ -17,7 +17,7 @@ This suite measures `z-fasta stats` full-scan and `--index-only` modes against t
 From the repository root:
 
 ```bash
-./zig-0.16.0/zig build -Doptimize=ReleaseFast
+./zig build -Doptimize=ReleaseFast
 bash bench/stats/run_benchmarks.sh
 .venv/bin/python bench/stats/verify_stats.py
 .venv/bin/python bench/stats/generate_report.py

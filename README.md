@@ -6,7 +6,7 @@
     SIMD-accelerated indexing, O(1) region extraction, and instant assembly stats.<br/>
     samtools-compatible FASTA indexing and extraction, benchmarked against <code>seqkit</code>, <code>fastahack</code>, and <code>pyfaidx</code>.
   </p>
-  <p>Current version: <strong>v0.2.6</strong></p>
+  <p>Latest tag: <strong>v0.2.6</strong> · Main branch includes unreleased BED/names/strand work</p>
   <br/>
   <a href="https://github.com/eneskemalergin/z-fasta/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/CI-passing-22c55e?style=for-the-badge" alt="CI" /></a>
   <a href="https://ziglang.org/download/0.16.0/"><img src="https://img.shields.io/badge/Zig-0.16.0-F7A41D?style=for-the-badge&logo=zig&logoColor=white" alt="Zig 0.16.0" /></a>
@@ -21,7 +21,7 @@ Quick links: [Supported Today](#supported-today) · [Installation](#installation
 
 ## Supported Today
 
-`z-fasta` is focused on uncompressed FASTA workflows: building indexes, extracting one or many indexed regions, and computing assembly/proteome statistics. It supports compact `.zfi` indexes and samtools-compatible `.fai` output. FASTQ is outside the current scope; BED input, reverse complement output, and compressed FASTA/BGZF streams remain roadmap items rather than current features.
+`z-fasta` is focused on uncompressed FASTA workflows: building indexes, extracting one or many indexed regions, and computing assembly/proteome statistics. It supports compact `.zfi` indexes and samtools-compatible `.fai` output. On `main`, `get` also accepts BED files, BED from stdin, names files, and optional strand-aware reverse-complement output. FASTQ and compressed FASTA/BGZF streams remain outside the current scope.
 
 ## Why z-fasta?
 
@@ -37,8 +37,8 @@ Modern bioinformatics workflows are often bottlenecked by legacy text parsers. `
 # Download Zig 0.16.0 if you are not using the vendored toolchain
 curl -L https://ziglang.org/download/0.16.0/zig-linux-x86_64-0.16.0.tar.xz | tar xJ
 
-# Build with the vendored Zig 0.16.0 toolchain
-./zig-0.16.0/zig build -Doptimize=ReleaseFast
+# Build with the repo-local Zig wrapper (uses ./zig-0.16.0/zig)
+./zig build -Doptimize=ReleaseFast
 
 # The executable is now at ./zig-out/bin/z-fasta
 ./zig-out/bin/z-fasta --help
@@ -62,10 +62,10 @@ Options:
 ### Get (sequence extraction)
 
 ```bash
-z-fasta get <file.fasta> <region> [region ...]
+z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--honor-strand] [--summary] <region> [region ...]
 ```
 
-Extract one or more sequences or sub-regions from an indexed FASTA file. Output is **byte-identical** to `samtools faidx`. Multiple regions are accepted in a single call; the index loads once and results stream in CLI order.
+Extract one or more sequences or sub-regions from an indexed FASTA file. Output is **byte-identical** to `samtools faidx` for the existing positional-region path. Multiple regions are accepted in a single call; the index loads once and results stream in CLI order. BED rows and names-file entries are appended in source order ahead of later positional arguments.
 
 Requires an index: either `.zfi` (preferred) or `.fai`. If `.zfi` is not found, falls back to `.fai` automatically.
 
@@ -78,6 +78,16 @@ Requires an index: either `.zfi` (preferred) or `.fai`. If `.zfi` is not found, 
 | `NAME:START-`    | From START to end of sequence |
 
 Handles Ensembl-style names containing colons (e.g., `chromosome:GRCh38:1:1:248956422:1`).
+
+**Additional GET flags:**
+
+| Flag | Description |
+| ---- | ----------- |
+| `--bed file.bed` | Read BED regions from a file. BED coordinates are 0-based, half-open; z-fasta converts them to 1-based inclusive internally. |
+| `--bed -` | Read BED regions from stdin. |
+| `--names file.txt` | Read one full-sequence name per line. Useful for long batch lists. |
+| `--honor-strand` | Use BED column 6. `-` emits reverse-complement output with a `:rc` header suffix. |
+| `--summary` | Print region count, total bases, elapsed time, and regions/sec to stderr. |
 
 ### Stats
 
@@ -111,6 +121,18 @@ z-fasta get genome.fa chr1:1000000-2000000
 
 # Extract multiple regions in one call (index loads once)
 z-fasta get genome.fa chr1:1000-2000 chr2:5000-6000 chrX:100-200
+
+# Extract regions from BED
+z-fasta get genome.fa --bed regions.bed
+
+# Read BED from stdin
+awk '$5 > 100' raw.bed | z-fasta get genome.fa --bed -
+
+# Extract whole sequences from a names file
+z-fasta get genome.fa --names ids.txt
+
+# Honor BED strand and print a stderr summary
+z-fasta get genome.fa --bed regions.bed --honor-strand --summary
 
 # Assembly stats (full composition scan)
 z-fasta stats genome.fa
@@ -190,7 +212,7 @@ See [bench/stats/REPORT.md](bench/stats/REPORT.md) for full results.
 bash bench/shared/download_data.sh
 
 # ── Index ─────────────────────────────────────────────────────────
-./zig-0.16.0/zig build -Doptimize=ReleaseFast
+./zig build -Doptimize=ReleaseFast
 bash bench/index/run_benchmarks.sh       # timing + memory
 bash bench/index/run_tests.sh            # 20 edge-case correctness tests
 .venv/bin/python bench/index/generate_report.py   # → bench/index/REPORT.md
@@ -209,7 +231,7 @@ bash bench/stats/run_benchmarks.sh       # full/index-only, scaling, throughput
 Full local refresh, in the same order used before publishing benchmark updates:
 
 ```bash
-./zig-0.16.0/zig build -Doptimize=ReleaseFast && bash bench/index/run_tests.sh && bash bench/get/verify_get.sh && bash bench/get/verify_multi_get.sh && .venv/bin/python bench/stats/verify_stats.py && bash bench/index/run_benchmarks.sh --runs 5 && .venv/bin/python bench/index/generate_report.py && bash bench/get/run_benchmarks.sh --runs 5 && .venv/bin/python bench/get/generate_report.py && bash bench/stats/run_benchmarks.sh --runs 5 && .venv/bin/python bench/stats/generate_report.py && bash bench/perf-recovery/run_startup.sh
+./zig build -Doptimize=ReleaseFast && bash bench/index/run_tests.sh && bash bench/get/verify_get.sh && bash bench/get/verify_multi_get.sh && .venv/bin/python bench/stats/verify_stats.py && bash bench/index/run_benchmarks.sh --runs 5 && .venv/bin/python bench/index/generate_report.py && bash bench/get/run_benchmarks.sh --runs 5 && .venv/bin/python bench/get/generate_report.py && bash bench/stats/run_benchmarks.sh --runs 5 && .venv/bin/python bench/stats/generate_report.py && bash bench/perf-recovery/run_startup.sh
 ```
 
 Add `--skip-real` to the `get` / `stats` scripts to skip real dataset runs (~3 GB downloads required otherwise). See [bench/README.md](bench/README.md) for prerequisites and full instructions.
@@ -225,13 +247,13 @@ Add `--skip-real` to the `get` / `stats` scripts to skip real dataset runs (~3 G
 
 ```bash
 # Build (debug)
-./zig-0.16.0/zig build
+./zig build
 
 # Run all tests (index + get + stats)
-./zig-0.16.0/zig build test --summary all
+./zig build test --summary all
 
 # Build optimized binary
-./zig-0.16.0/zig build -Doptimize=ReleaseFast
+./zig build -Doptimize=ReleaseFast
 ```
 
 ## Roadmap
@@ -249,14 +271,16 @@ Add `--skip-real` to the `get` / `stats` scripts to skip real dataset runs (~3 G
 
 **Near-term**
 
-- [ ] v0.2.7: BED file input
-    - [ ] `--bed regions.bed` flag for batch extraction from BED files
-    - [ ] BED coordinates are 0-based half-open; z-fasta converts to 1-based inclusive internally
-    - [ ] Mix `--bed` with positional `NAME:START-END` args in one call
-    - [ ] Enables direct comparison with `bedtools getfasta`
+- [ ] Finish the large-input side of BED support
+    - [x] `--bed regions.bed` flag for batch extraction from BED files
+    - [x] BED coordinates are 0-based half-open; z-fasta converts to 1-based inclusive internally
+    - [x] Mix `--bed` with positional `NAME:START-END` args in one call
+    - [x] `--bed -`, `--names`, `--honor-strand`, and `--summary`
+    - [ ] Chunked BED processing for very large inputs
+    - [ ] BED verification suite and benchmark/report integration
 - [ ] v0.2.8: Reverse complement
     - [ ] `--rc` flag for `z-fasta get` to output the reverse complement of any extracted region
-    - [ ] Comptime 256-element complement table, zero-cost lookup baked into the binary
+    - [x] Comptime 256-element complement table, zero-cost lookup baked into the binary
     - [ ] Works with single regions, multi-region, and `--bed` batch calls
 - [ ] v0.3.0: Validate + Tier 2 benchmarks + release polish
     - [ ] `z-fasta validate`: single-pass FASTA format checker with line-numbered error/warning output

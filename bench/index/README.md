@@ -16,7 +16,7 @@ This suite measures `z-fasta index` against FASTA indexers that produce or use F
 From the repository root:
 
 ```bash
-./zig-0.16.0/zig build -Doptimize=ReleaseFast
+./zig build -Doptimize=ReleaseFast
 bash bench/index/run_benchmarks.sh
 bash bench/index/run_tests.sh
 .venv/bin/python bench/index/generate_report.py

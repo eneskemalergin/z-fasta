@@ -5,7 +5,7 @@ Focused microbenchmarks for the v0.2.6 performance recovery work.
 ## Startup Floor
 
 ```bash
-./zig-0.16.0/zig build -Doptimize=ReleaseFast
+./zig build -Doptimize=ReleaseFast
 bash bench/perf-recovery/run_startup.sh --runs 30 --warmup 5
 ```
 

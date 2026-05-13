@@ -6,6 +6,7 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        "CHANGELOG.md",
         "src",
         "tests",
         "LICENSE",

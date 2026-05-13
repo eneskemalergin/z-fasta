@@ -36,7 +36,7 @@ const USAGE =
     \\  --low-mem    Use chunked reader instead of mmap (4 MB constant memory)
     \\
     \\Get usage:
-    \\  z-fasta get <file.fasta> <region> [region ...]
+    \\  z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--honor-strand] [--summary] <region> [region ...]
     \\  Region formats: NAME, NAME:START-END, NAME:START-
     \\
     \\Stats options:

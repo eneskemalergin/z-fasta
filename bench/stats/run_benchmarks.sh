@@ -54,7 +54,7 @@ mkdir -p "$RESULTS_DIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 command -v hyperfine &>/dev/null || { echo "Error: hyperfine not found (apt install hyperfine)"; exit 1; }
-[[ -x "$ZFASTA" ]]   || { echo "Error: z-fasta not found at $ZFASTA. Run: ./zig-0.16.0/zig build -Doptimize=ReleaseFast"; exit 1; }
+[[ -x "$ZFASTA" ]]   || { echo "Error: z-fasta not found at $ZFASTA. Run: ./zig build -Doptimize=ReleaseFast"; exit 1; }
 
 HAS_SEQKIT=false; [[ -x "$SEQKIT" ]] && HAS_SEQKIT=true
 HAS_SEQTK=false;  [[ -x "$SEQTK" ]]  && HAS_SEQTK=true

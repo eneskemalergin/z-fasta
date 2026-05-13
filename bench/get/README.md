@@ -17,7 +17,7 @@ This suite measures `z-fasta get` region extraction latency and throughput again
 From the repository root:
 
 ```bash
-./zig-0.16.0/zig build -Doptimize=ReleaseFast
+./zig build -Doptimize=ReleaseFast
 bash bench/get/run_benchmarks.sh
 bash bench/get/verify_get.sh
 bash bench/get/verify_multi_get.sh

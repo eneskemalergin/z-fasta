@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BENCH_ROOT="$(dirname "$SCRIPT_DIR")"
 PROJECT_ROOT="$(dirname "$BENCH_ROOT")"
 RESULTS_DIR="$SCRIPT_DIR/results"
-ZIG="$PROJECT_ROOT/zig-0.16.0/zig"
+ZIG="$PROJECT_ROOT/zig"
 ZFASTA="$PROJECT_ROOT/zig-out/bin/z-fasta"
 
 RUNS=30
