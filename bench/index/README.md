@@ -35,6 +35,6 @@ Use `--skip-real` to skip downloaded real datasets, or `--skip-scaling` to run o
 
 ## Notes
 
-The runner uses warm-cache mode unless passwordless sudo is available for dropping Linux page cache. The current v0.2.6 run was collected in warm-cache mode.
+The runner uses warm-cache mode unless passwordless sudo is available for dropping Linux page cache. The checked-in run was collected in warm-cache mode.
 
 `z-fasta-default` uses mmap and duplicate-name detection. `z-fasta-nodedup` disables duplicate checking. `z-fasta-lowmem` uses streaming IO to trade speed for low peak RSS.

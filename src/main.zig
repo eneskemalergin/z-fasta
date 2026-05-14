@@ -16,7 +16,7 @@ pub const writeZfi = index_format.writeZfi;
 pub const validateFasta = indexer.validateFasta;
 pub const scanHeaders = indexer.scanHeaders;
 
-const VERSION = "0.2.6";
+const VERSION = "0.2.7";
 const CHUNK_SIZE_FLAG = "--chunk-size";
 const STRAND_AWARE_FLAG = "--strand-aware";
 const STRAND_AWARE_ALIAS = "--honor-strand";
@@ -45,6 +45,7 @@ const USAGE =
     \\  --strand-aware  Respect BED column 6; '-' emits reverse-complement output
     \\                  (alias: --honor-strand)
     \\  --chunk-size -1 Process all BED rows in one batch
+    \\                  Default chunk size: 4096 BED rows
     \\
     \\Stats options:
     \\  --index-only   Only show index-derived stats (no composition scan)
@@ -298,7 +299,7 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     var names_path: ?[]const u8 = null;
     var honor_strand = false;
     var summary = false;
-    var chunk_size: usize = 100_000;
+    var chunk_size: usize = 4_096;
     // Static buffer: up to 1024 region strings without heap allocation.
     var region_buf: [1024][]const u8 = undefined;
     var region_count: usize = 0;

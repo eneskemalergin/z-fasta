@@ -25,7 +25,7 @@ pub const GetOptions = struct {
     names_path: ?[]const u8 = null,
     honor_strand: bool = false,
     summary: bool = false,
-    chunk_size: usize = 100_000,
+    chunk_size: usize = 4_096,
 };
 
 pub const chunk_size_all = std.math.maxInt(usize);

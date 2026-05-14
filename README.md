@@ -6,7 +6,7 @@
     SIMD-accelerated indexing, O(1) region extraction, and instant assembly stats.<br/>
     samtools-compatible FASTA indexing and extraction, benchmarked against <code>seqkit</code>, <code>fastahack</code>, and <code>pyfaidx</code>.
   </p>
-  <p>Latest tag: <strong>v0.2.6</strong> · Main branch includes unreleased BED/names/strand work</p>
+  <p>Latest tag: <strong>v0.2.7</strong> · BED, names-file, stdin, and strand-aware extraction included</p>
   <br/>
   <a href="https://github.com/eneskemalergin/z-fasta/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/CI-passing-22c55e?style=for-the-badge" alt="CI" /></a>
   <a href="https://ziglang.org/download/0.16.0/"><img src="https://img.shields.io/badge/Zig-0.16.0-F7A41D?style=for-the-badge&logo=zig&logoColor=white" alt="Zig 0.16.0" /></a>
@@ -21,7 +21,7 @@ Quick links: [Supported Today](#supported-today) · [Installation](#installation
 
 ## Supported Today
 
-`z-fasta` is focused on uncompressed FASTA workflows: building indexes, extracting one or many indexed regions, and computing assembly/proteome statistics. It supports compact `.zfi` indexes and samtools-compatible `.fai` output. On `main`, `get` also accepts BED files, BED from stdin, names files, and optional strand-aware reverse-complement output. FASTQ and compressed FASTA/BGZF streams remain outside the current scope.
+`z-fasta` is focused on uncompressed FASTA workflows: building indexes, extracting one or many indexed regions, and computing assembly/proteome statistics. It supports compact `.zfi` indexes and samtools-compatible `.fai` output. `get` accepts positional regions, BED files, BED from stdin, names files, and optional strand-aware reverse-complement output. FASTQ and compressed FASTA/BGZF streams remain outside the current scope.
 
 ## Why z-fasta?
 
@@ -65,7 +65,7 @@ Options:
 z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--strand-aware] [--summary] [--chunk-size N|-1] <region> [region ...]
 ```
 
-Extract one or more sequences or sub-regions from an indexed FASTA file. Output is **byte-identical** to `samtools faidx` for the existing positional-region path. Multiple regions are accepted in a single call; the index loads once and results stream in CLI order. BED rows and names-file entries are appended in source order ahead of later positional arguments.
+Extract one or more sequences or sub-regions from an indexed FASTA file. Output is **byte-identical** to `samtools faidx` for the positional-region path, and the BED / names batch flows are verified against `bedtools getfasta` and `samtools faidx -r`. Multiple regions are accepted in a single call; the index loads once and results stream in CLI order. BED rows and names-file entries are appended in source order ahead of later positional arguments.
 
 Requires an index: either `.zfi` (preferred) or `.fai`. If `.zfi` is not found, falls back to `.fai` automatically.
 
@@ -88,7 +88,7 @@ Handles Ensembl-style names containing colons (e.g., `chromosome:GRCh38:1:1:2489
 | `--names file.txt` | Read one full-sequence name per line. Useful for long batch lists. |
 | `--strand-aware` | Use BED column 6. `-` emits reverse-complement output with a `:rc` header suffix. Alias: `--honor-strand`. |
 | `--summary` | Print region count, total bases, elapsed time, and regions/sec to stderr. |
-| `--chunk-size N` | Process BED rows in batches instead of resolving the entire BED in one batch. Default: `100000`. |
+| `--chunk-size N` | Process BED rows in batches instead of resolving the entire BED in one batch. Default: `4096`, which is the current best speed/memory tradeoff on the checked benchmark workloads. |
 | `--chunk-size -1` | Process all BED rows in a single batch when memory use is acceptable. |
 
 ### Stats
@@ -203,8 +203,9 @@ See [bench/stats/REPORT.md](bench/stats/REPORT.md) for full results.
 
 - **Index:** 20/20 edge cases match `samtools faidx` (exit codes and output).
 - **Get:** 90/90 single-region and 22/22 multi-region byte-identical diff tests pass vs samtools across 5+ test files: full sequences, sub-regions, single bases, line-boundary spans, clamped ranges, duplicate regions, reversed CLI order, sort-path (≥16 regions).
+- **BED / names batch extraction:** 16/16 verification cases pass in `bench/get/verify_bed.sh`, covering default BED, `--bed -`, stranded BED vs `bedtools getfasta -s`, default BED vs `samtools faidx -r`, and `--names` batch extraction.
 - **Stats:** 107/107 BioPython verification tests pass: exact agreement on all Tier 1 and Tier 2 values across nucleotide and protein files.
-- **Unit tests:** 86/86 Zig unit tests (24 index · 30 get · 32 stats).
+- **Unit tests:** 99/99 Zig unit tests (24 index · 30 get · 32 stats · 7 complement · 6 BED parser).
 - **Messy FASTA:** z-fasta is the only tool tested that correctly indexes mixed-width and trailing-whitespace FASTA files. samtools, fastahack, and pyfaidx all reject them. See [bench/index/REPORT.md](bench/index/REPORT.md) for the full compatibility matrix.
 
 ## Benchmarking
@@ -222,6 +223,7 @@ bash bench/index/run_tests.sh            # 20 edge-case correctness tests
 # ── Get ───────────────────────────────────────────────────────────
 bash bench/get/run_benchmarks.sh         # latency, scaling, real datasets
 bash bench/get/verify_get.sh             # 90 byte-identical diff tests vs samtools
+bash bench/get/verify_bed.sh             # 16 BED / names verification cases vs bedtools + samtools
 .venv/bin/python bench/get/generate_report.py     # → bench/get/REPORT.md
 
 # ── Stats ─────────────────────────────────────────────────────────
@@ -270,16 +272,10 @@ Add `--skip-real` to the `get` / `stats` scripts to skip real dataset runs (~3 G
 - [x] Multi-region `get`: single call with N regions, index loads once, results stream in CLI order; ~2× faster than samtools across 1–100 regions (v0.2.4)
 - [x] Zig 0.16.0 migration plus benchmark/report refresh for v0.2.5
 - [x] v0.2.6 performance recovery: lower startup overhead, faster index loading, buffered GET emission, fixed-width stats/index fast paths, and refreshed benchmark reports
+- [x] v0.2.7 BED batch extraction: `--bed`, `--bed -`, `--names`, `--strand-aware`, bounded chunked processing, and verification/benchmark coverage
 
 **Near-term**
 
-- [ ] Finish the large-input side of BED support
-    - [x] `--bed regions.bed` flag for batch extraction from BED files
-    - [x] BED coordinates are 0-based half-open; z-fasta converts to 1-based inclusive internally
-    - [x] Mix `--bed` with positional `NAME:START-END` args in one call
-    - [x] `--bed -`, `--names`, `--honor-strand`, and `--summary`
-    - [x] Chunked BED processing for very large inputs
-    - [x] BED verification suite and benchmark/report integration
 - [ ] v0.2.8: Reverse complement
     - [ ] `--rc` flag for `z-fasta get` to output the reverse complement of any extracted region
     - [x] Comptime 256-element complement table, zero-cost lookup baked into the binary

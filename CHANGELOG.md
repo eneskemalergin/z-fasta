@@ -5,19 +5,25 @@ All notable changes to z-fasta will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-05-13
+
 ### Added
 
 - `src/complement.zig`: shared IUPAC complement and reverse-complement helpers for strand-aware extraction work
 - `src/bed_parser.zig`: BED line parser with 0-based half-open to 1-based inclusive conversion, comment skipping, and optional strand capture
 - `z-fasta get --bed <path|->`: BED-driven extraction from files or stdin
 - `z-fasta get --names <path>`: batch whole-sequence extraction from a plain text names file
-- `z-fasta get --honor-strand`: strand-aware BED extraction with reverse-complement output for `-` strand rows
+- `z-fasta get --strand-aware`: strand-aware BED extraction with reverse-complement output for `-` strand rows
+- `z-fasta get --honor-strand`: compatibility alias for `--strand-aware`
 - `z-fasta get --summary`: stderr-only extraction summary with region count, total bases, elapsed time, and regions/sec
 
 ### Changed
 
 - `src/getter.zig`: unified positional-region, BED, names-file, stdin, and strand-aware extraction through the same resolved-region path
 - `src/main.zig`: `get` help text and CLI parsing updated for BED, names, strand, and summary flags
+- `src/main.zig` and `src/getter.zig`: default BED `--chunk-size` lowered to `4096` after benchmark validation showed the 4K batch size matched or beat larger batches while using materially less memory
+- `src/main.zig`: VERSION bumped to 0.2.7
+- `build.zig.zon`: package version bumped to 0.2.7
 - `build.zig`: standalone module tests for `src/complement.zig` and `src/bed_parser.zig` now run as part of `zig build test`
 - `zig`: repo-local wrapper now points at the vendored Zig 0.16.0 toolchain instead of stale 0.15/0.14 paths
 
@@ -25,7 +31,8 @@ All notable changes to z-fasta will be documented in this file.
 
 - `zig build test --summary all` (99/99 tests passed)
 - `zig build -Doptimize=ReleaseFast`
-- direct release-binary checks for `--bed`, `--bed -`, `--names`, `--honor-strand`, and `--summary`
+- `bench/get/verify_bed.sh` (16/16 passed)
+- direct release-binary checks for `--bed`, `--bed -`, `--names`, `--strand-aware`, `--honor-strand`, and `--summary`
 
 ## [0.2.6] - 2026-04-27
 
