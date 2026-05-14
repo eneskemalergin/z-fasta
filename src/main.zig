@@ -17,6 +17,9 @@ pub const validateFasta = indexer.validateFasta;
 pub const scanHeaders = indexer.scanHeaders;
 
 const VERSION = "0.2.6";
+const CHUNK_SIZE_FLAG = "--chunk-size";
+const STRAND_AWARE_FLAG = "--strand-aware";
+const STRAND_AWARE_ALIAS = "--honor-strand";
 
 const USAGE =
     \\usage: z-fasta <command> [options]
@@ -37,8 +40,11 @@ const USAGE =
     \\
     \\Get usage:
     \\  z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt]
-    \\               [--honor-strand] [--summary] [--chunk-size N] <region> [region ...]
+    \\               [--strand-aware] [--summary] [--chunk-size N|-1] <region> [region ...]
     \\  Region formats: NAME, NAME:START-END, NAME:START-
+    \\  --strand-aware  Respect BED column 6; '-' emits reverse-complement output
+    \\                  (alias: --honor-strand)
+    \\  --chunk-size -1 Process all BED rows in one batch
     \\
     \\Stats options:
     \\  --index-only   Only show index-derived stats (no composition scan)
@@ -50,11 +56,29 @@ const USAGE =
     \\  z-fasta get genome.fa chr1               Extract full sequence
     \\  z-fasta get genome.fa --bed regions.bed  Extract BED regions
     \\  z-fasta get genome.fa --names ids.txt    Extract whole sequences from a file
-    \\  z-fasta get genome.fa --bed regions.bed --honor-strand --summary
+    \\  z-fasta get genome.fa --bed regions.bed --strand-aware --summary
     \\  z-fasta stats genome.fa                  Full stats with composition
     \\  z-fasta stats --index-only genome.fa     Quick index-only stats
     \\
 ;
+
+const ParseChunkSizeError = error{InvalidChunkSize};
+
+fn parseChunkSizeValue(raw: []const u8) ParseChunkSizeError!usize {
+    if (std.mem.eql(u8, raw, "-1")) return getter.chunk_size_all;
+
+    const parsed = std.fmt.parseInt(usize, raw, 10) catch {
+        return error.InvalidChunkSize;
+    };
+    if (parsed == 0) return error.InvalidChunkSize;
+    return parsed;
+}
+
+fn chunkSizeEqualsValue(arg: []const u8) ?[]const u8 {
+    const prefix = CHUNK_SIZE_FLAG ++ "=";
+    if (!std.mem.startsWith(u8, arg, prefix)) return null;
+    return arg[prefix.len..];
+}
 
 fn printErrorAndExit(comptime fmt: []const u8, args_tuple: anytype) noreturn {
     std.debug.print(fmt, args_tuple);
@@ -290,20 +314,21 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
             names_path = args.next() orelse {
                 printErrorAndExit("error: --names requires a path\n", .{});
             };
-        } else if (std.mem.eql(u8, arg, "--honor-strand")) {
+        } else if (std.mem.eql(u8, arg, STRAND_AWARE_FLAG) or std.mem.eql(u8, arg, STRAND_AWARE_ALIAS)) {
             honor_strand = true;
         } else if (std.mem.eql(u8, arg, "--summary")) {
             summary = true;
-        } else if (std.mem.eql(u8, arg, "--chunk-size")) {
+        } else if (std.mem.eql(u8, arg, CHUNK_SIZE_FLAG)) {
             const raw = args.next() orelse {
-                printErrorAndExit("error: --chunk-size requires a positive integer\n", .{});
+                printErrorAndExit("error: --chunk-size requires a positive integer or -1\n", .{});
             };
-            chunk_size = std.fmt.parseInt(usize, raw, 10) catch {
-                printErrorAndExit("error: --chunk-size requires a positive integer\n", .{});
+            chunk_size = parseChunkSizeValue(raw) catch {
+                printErrorAndExit("error: --chunk-size requires a positive integer or -1\n", .{});
             };
-            if (chunk_size == 0) {
-                printErrorAndExit("error: --chunk-size requires a positive integer\n", .{});
-            }
+        } else if (chunkSizeEqualsValue(arg)) |raw| {
+            chunk_size = parseChunkSizeValue(raw) catch {
+                printErrorAndExit("error: --chunk-size requires a positive integer or -1\n", .{});
+            };
         } else if (fasta_path == null) {
             fasta_path = arg;
         } else {
@@ -316,10 +341,10 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     }
 
     const path = fasta_path orelse {
-        printErrorAndExit("error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--honor-strand] [--summary] [--chunk-size N] <region> [region ...]\n", .{});
+        printErrorAndExit("error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--strand-aware] [--summary] [--chunk-size N|-1] <region> [region ...]\n", .{});
     };
     if (region_count == 0 and bed_path == null and names_path == null) {
-        printErrorAndExit("error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--honor-strand] [--summary] [--chunk-size N] <region> [region ...]\n", .{});
+        printErrorAndExit("error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--strand-aware] [--summary] [--chunk-size N|-1] <region> [region ...]\n", .{});
     }
 
     getter.runGetWithOptions(io, path, .{
@@ -330,6 +355,21 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
         .summary = summary,
         .chunk_size = chunk_size,
     });
+}
+
+test "parseChunkSizeValue accepts positive sizes and all sentinel" {
+    try std.testing.expectEqual(@as(usize, 4096), try parseChunkSizeValue("4096"));
+    try std.testing.expectEqual(getter.chunk_size_all, try parseChunkSizeValue("-1"));
+}
+
+test "parseChunkSizeValue rejects zero and invalid input" {
+    try std.testing.expectError(error.InvalidChunkSize, parseChunkSizeValue("0"));
+    try std.testing.expectError(error.InvalidChunkSize, parseChunkSizeValue("abc"));
+}
+
+test "chunkSizeEqualsValue parses inline assignment syntax" {
+    try std.testing.expectEqualStrings("-1", chunkSizeEqualsValue("--chunk-size=-1").?);
+    try std.testing.expect(chunkSizeEqualsValue("--chunk-size") == null);
 }
 
 // ============================================================================

@@ -28,6 +28,8 @@ pub const GetOptions = struct {
     chunk_size: usize = 100_000,
 };
 
+pub const chunk_size_all = std.math.maxInt(usize);
+
 const ParsedRequest = struct {
     region: Region,
     reverse_complement: bool,
@@ -369,11 +371,12 @@ fn emitRegionReverseComplement(resolved: ResolvedRegion, fasta: []const u8, writ
     var out_buf: [65536]u8 = undefined;
     var out_len: usize = 0;
 
+    const last_base_index = resolved.start - 1 + resolved.num_bases - 1;
+    const line_number = last_base_index / resolved.line_bases;
+    const column = last_base_index % resolved.line_bases;
+    var pos: usize = @intCast(resolved.seq_offset + (line_number * resolved.line_bytes) + column);
+
     while (bases_remaining > 0) {
-        const region_base_index = resolved.start - 1 + bases_remaining - 1;
-        const line_number = region_base_index / resolved.line_bases;
-        const column = region_base_index % resolved.line_bases;
-        const pos: usize = @intCast(resolved.seq_offset + (line_number * resolved.line_bytes) + column);
         const byte = complement.complement(fasta[pos]);
 
         if (out_len + 2 > out_buf.len) {
@@ -392,6 +395,14 @@ fn emitRegionReverseComplement(resolved: ResolvedRegion, fasta: []const u8, writ
             out_buf[out_len] = '\n';
             out_len += 1;
             line_pos = 0;
+        }
+
+        if (bases_remaining > 0) {
+            while (pos > 0) {
+                pos -= 1;
+                const prev = fasta[pos];
+                if (prev != '\n' and prev != '\r') break;
+            }
         }
     }
 
@@ -456,17 +467,25 @@ fn appendBedRegionRequest(
     honor_strand: bool,
     allocator: std.mem.Allocator,
     duplicate_name: bool,
+    last_duplicated_name: ?*?[]const u8,
 ) void {
     if (honor_strand and region.strand == .invalid) {
         printErrorAndExit("error: invalid BED line {d}: invalid strand\n", .{region.line_number});
     }
 
-    const name = if (duplicate_name)
-        allocator.dupe(u8, region.chrom) catch {
-            printErrorAndExit("error: out of memory\n", .{});
+    const name = if (duplicate_name) blk: {
+        if (last_duplicated_name) |cached_name| {
+            if (cached_name.*) |existing| {
+                if (std.mem.eql(u8, existing, region.chrom)) break :blk existing;
+            }
         }
-    else
-        region.chrom;
+
+        const duplicated = allocator.dupe(u8, region.chrom) catch {
+            printErrorAndExit("error: out of memory\n", .{});
+        };
+        if (last_duplicated_name) |cached_name| cached_name.* = duplicated;
+        break :blk duplicated;
+    } else region.chrom;
 
     requests.append(allocator, .{
         .region = .{
@@ -488,6 +507,7 @@ fn appendBedLineRequest(
     honor_strand: bool,
     allocator: std.mem.Allocator,
     duplicate_name: bool,
+    last_duplicated_name: ?*?[]const u8,
 ) void {
     const parsed = bed_parser.parseBedLine(line, line_number) catch |err| switch (err) {
         error.MissingChrom => printErrorAndExit("error: invalid BED line {d}: missing chrom\n", .{line_number}),
@@ -500,7 +520,7 @@ fn appendBedLineRequest(
 
     switch (parsed) {
         .skip => {},
-        .region => |region| appendBedRegionRequest(requests, region, honor_strand, allocator, duplicate_name),
+        .region => |region| appendBedRegionRequest(requests, region, honor_strand, allocator, duplicate_name, last_duplicated_name),
     }
 }
 
@@ -510,8 +530,22 @@ fn appendBedRequests(requests: *std.ArrayList(ParsedRequest), bed_data: []const 
 
     while (lines.next()) |line| {
         line_number += 1;
-        appendBedLineRequest(requests, line, line_number, honor_strand, allocator, false);
+        appendBedLineRequest(requests, line, line_number, honor_strand, allocator, false, null);
     }
+}
+
+fn processBedData(
+    idx: *const LoadedIndex,
+    allocator: std.mem.Allocator,
+    bed_data: []const u8,
+    honor_strand: bool,
+    writer: anytype,
+) BatchStats {
+    var requests = std.ArrayList(ParsedRequest).empty;
+    defer requests.deinit(allocator);
+
+    appendBedRequests(&requests, bed_data, honor_strand, allocator);
+    return processParsedRequests(idx, allocator, requests.items, writer);
 }
 
 fn appendNamesRequests(requests: *std.ArrayList(ParsedRequest), names_data: []const u8, allocator: std.mem.Allocator) void {
@@ -563,15 +597,37 @@ fn processParsedRequests(idx: *const LoadedIndex, allocator: std.mem.Allocator, 
     const resolved = allocator.alloc(ResolvedRegion, requests.len) catch {
         printErrorAndExit("error: out of memory\n", .{});
     };
+    var already_in_offset_order = requests.len >= 16;
+    var prev_start_byte: u64 = 0;
 
     if (requests.len > 1 and requests.len < 16 and idx.source == .zfi and !idx.has_name_map) {
         resolveParsedRequestsByRecordScan(idx, requests, resolved);
     } else {
+        var last_name: ?[]const u8 = null;
+        var last_rec_idx: usize = 0;
         for (requests, 0..) |request, i| {
-            const rec_idx = idx.lookupName(request.region.name) orelse {
-                printErrorAndExit("error: sequence not found: {s}\n", .{request.region.name});
-            };
+            const rec_idx = if (last_name) |name|
+                if (std.mem.eql(u8, name, request.region.name))
+                    last_rec_idx
+                else
+                    idx.lookupName(request.region.name) orelse {
+                        printErrorAndExit("error: sequence not found: {s}\n", .{request.region.name});
+                    }
+            else
+                idx.lookupName(request.region.name) orelse {
+                    printErrorAndExit("error: sequence not found: {s}\n", .{request.region.name});
+                };
+
+            last_name = request.region.name;
+            last_rec_idx = rec_idx;
+
             resolved[i] = resolveParsedRequest(idx, request, rec_idx, i);
+            if (already_in_offset_order) {
+                if (i > 0 and resolved[i].start_byte < prev_start_byte) {
+                    already_in_offset_order = false;
+                }
+                prev_start_byte = resolved[i].start_byte;
+            }
         }
     }
 
@@ -583,6 +639,17 @@ fn processParsedRequests(idx: *const LoadedIndex, allocator: std.mem.Allocator, 
             emitRegion(r, idx.fasta_data, writer);
         }
     } else {
+        if (already_in_offset_order) {
+            for (resolved) |r| {
+                total_bases += r.num_bases;
+                emitRegion(r, idx.fasta_data, writer);
+            }
+            return .{
+                .region_count = requests.len,
+                .total_bases = total_bases,
+            };
+        }
+
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
         const sort_allocator = arena.allocator();
@@ -636,6 +703,7 @@ fn processBedReaderChunked(
     while (true) {
         var chunk_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         const chunk_allocator = chunk_arena.allocator();
+        var last_duplicated_name: ?[]const u8 = null;
 
         var requests = std.ArrayList(ParsedRequest).empty;
 
@@ -651,7 +719,7 @@ fn processBedReaderChunked(
             };
 
             line_number += 1;
-            appendBedLineRequest(&requests, line, line_number, honor_strand, chunk_allocator, true);
+            appendBedLineRequest(&requests, line, line_number, honor_strand, chunk_allocator, true, &last_duplicated_name);
         }
 
         if (requests.items.len == 0) {
@@ -695,6 +763,18 @@ fn processBedPathChunked(
     var file_buf: [4096]u8 = undefined;
     var file_reader = file.reader(io, &file_buf);
     return processBedReaderChunked(idx, &file_reader.interface, honor_strand, chunk_size, writer);
+}
+
+fn processBedPathAllInMemory(
+    io: std.Io,
+    idx: *const LoadedIndex,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    honor_strand: bool,
+    writer: anytype,
+) BatchStats {
+    const bed_data = readAllInput(allocator, io, path);
+    return processBedData(idx, allocator, bed_data, honor_strand, writer);
 }
 
 // ============================================================================
@@ -748,7 +828,10 @@ pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions
     var totals = BatchStats{};
 
     if (options.bed_path) |bed_path| {
-        const batch = processBedPathChunked(io, &idx, bed_path, options.honor_strand, options.chunk_size, writer);
+        const batch = if (options.chunk_size == chunk_size_all)
+            processBedPathAllInMemory(io, &idx, allocator, bed_path, options.honor_strand, writer)
+        else
+            processBedPathChunked(io, &idx, bed_path, options.honor_strand, options.chunk_size, writer);
         totals.region_count += batch.region_count;
         totals.total_bases += batch.total_bases;
     }
@@ -789,17 +872,12 @@ test "processBedReaderChunked matches non-chunked extraction" {
 
     const chunked = processBedReaderChunked(&idx, &chunk_reader, false, 2, &chunk_writer.writer);
 
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var requests = std.ArrayList(ParsedRequest).empty;
-    defer requests.deinit(allocator);
-    appendBedRequests(&requests, bed_data, false, allocator);
-
     var batch_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer batch_writer.deinit();
-    const batch = processParsedRequests(&idx, allocator, requests.items, &batch_writer.writer);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const batch = processBedData(&idx, arena.allocator(), bed_data, false, &batch_writer.writer);
 
     try std.testing.expectEqual(batch.region_count, chunked.region_count);
     try std.testing.expectEqual(batch.total_bases, chunked.total_bases);

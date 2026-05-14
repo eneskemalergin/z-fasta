@@ -62,7 +62,7 @@ Options:
 ### Get (sequence extraction)
 
 ```bash
-z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--honor-strand] [--summary] [--chunk-size N] <region> [region ...]
+z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--strand-aware] [--summary] [--chunk-size N|-1] <region> [region ...]
 ```
 
 Extract one or more sequences or sub-regions from an indexed FASTA file. Output is **byte-identical** to `samtools faidx` for the existing positional-region path. Multiple regions are accepted in a single call; the index loads once and results stream in CLI order. BED rows and names-file entries are appended in source order ahead of later positional arguments.
@@ -86,9 +86,10 @@ Handles Ensembl-style names containing colons (e.g., `chromosome:GRCh38:1:1:2489
 | `--bed file.bed` | Read BED regions from a file. BED coordinates are 0-based, half-open; z-fasta converts them to 1-based inclusive internally. |
 | `--bed -` | Read BED regions from stdin. |
 | `--names file.txt` | Read one full-sequence name per line. Useful for long batch lists. |
-| `--honor-strand` | Use BED column 6. `-` emits reverse-complement output with a `:rc` header suffix. |
+| `--strand-aware` | Use BED column 6. `-` emits reverse-complement output with a `:rc` header suffix. Alias: `--honor-strand`. |
 | `--summary` | Print region count, total bases, elapsed time, and regions/sec to stderr. |
-| `--chunk-size N` | Process BED rows in chunks instead of resolving the entire BED in one batch. Default: `100000`. |
+| `--chunk-size N` | Process BED rows in batches instead of resolving the entire BED in one batch. Default: `100000`. |
+| `--chunk-size -1` | Process all BED rows in a single batch when memory use is acceptable. |
 
 ### Stats
 
@@ -132,8 +133,8 @@ awk '$5 > 100' raw.bed | z-fasta get genome.fa --bed -
 # Extract whole sequences from a names file
 z-fasta get genome.fa --names ids.txt
 
-# Honor BED strand and print a stderr summary
-z-fasta get genome.fa --bed regions.bed --honor-strand --summary
+# Respect BED strand and print a stderr summary
+z-fasta get genome.fa --bed regions.bed --strand-aware --summary
 
 # Assembly stats (full composition scan)
 z-fasta stats genome.fa
@@ -278,7 +279,7 @@ Add `--skip-real` to the `get` / `stats` scripts to skip real dataset runs (~3 G
     - [x] Mix `--bed` with positional `NAME:START-END` args in one call
     - [x] `--bed -`, `--names`, `--honor-strand`, and `--summary`
     - [x] Chunked BED processing for very large inputs
-    - [ ] BED verification suite and benchmark/report integration
+    - [x] BED verification suite and benchmark/report integration
 - [ ] v0.2.8: Reverse complement
     - [ ] `--rc` flag for `z-fasta get` to output the reverse complement of any extracted region
     - [x] Comptime 256-element complement table, zero-cost lookup baked into the binary

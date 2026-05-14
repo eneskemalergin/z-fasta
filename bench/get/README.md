@@ -12,7 +12,7 @@ This suite measures `z-fasta get` region extraction latency and throughput again
 - Peak RSS/page-fault measurements for small, large, and full-sequence regions.
 - Multi-region extraction in one CLI call for 1, 10, 50, and 100 regions.
 - Byte-for-byte verification against `samtools faidx` via [verify_get.sh](verify_get.sh) and [verify_multi_get.sh](verify_multi_get.sh).
-- BED extraction verification against `bedtools getfasta` via [verify_bed.sh](verify_bed.sh), including chunked `--bed` runs.
+- BED extraction verification against `bedtools getfasta` plus default-mode `samtools faidx -r` comparisons via [verify_bed.sh](verify_bed.sh), including chunked `--bed`, stdin BED, and `--names` runs.
 
 ## Run
 
@@ -28,7 +28,7 @@ bash bench/get/verify_bed.sh
 ```
 
 Use `--skip-real` to avoid downloaded real datasets, or `--skip-scaling` to omit region-size scaling.
-`verify_bed.sh` uses `tests/data/simple.fasta` by default and generates synthetic small / medium / large / x-large BED files internally. It skips cleanly when `bedtools` is not installed.
+`verify_bed.sh` uses `tests/data/simple.fasta` by default and generates synthetic small / medium / large / x-large BED files internally. It compares default BED output against both `bedtools getfasta` and `samtools faidx -r`, checks stranded BED output against `bedtools -s`, and covers `--names` with comments and duplicate names. It skips cleanly when `bedtools` or `samtools` is not installed.
 
 ## Outputs
 

@@ -288,7 +288,7 @@ bench_get_bed() {
 
     local zf_cmd="$ZFASTA get '$file' --bed '$bed_file' --chunk-size '$chunk_size'"
     if [[ "$honor_strand" == true ]]; then
-        zf_cmd+=" --honor-strand"
+        zf_cmd+=" --strand-aware"
     fi
     zf_cmd+=" > /dev/null"
     names+=("${label_prefix}z-fasta")
