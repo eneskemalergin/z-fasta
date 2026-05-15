@@ -856,6 +856,7 @@ def md_benchmark_summary_table(
     group_name: str = "Workload",
     baseline_tool: str = "samtools",
     preferred_tools: list[str] | None = None,
+    baseline_ratio_exempt: set[str] | None = None,
 ) -> str:
     df = df.copy()
     df["tool_base"] = df["tool"].apply(_strip_tool_prefix)
@@ -882,11 +883,24 @@ def md_benchmark_summary_table(
 
         baseline_match = gdf[gdf["tool_base"] == baseline_tool]
         baseline_mean = baseline_match["mean"].values[0] if len(baseline_match) else None
-        row[f"{baseline_tool} / z-fasta"] = format_ratio(baseline_mean, zf_mean)
+        exempt_baseline_ratio = (
+            baseline_ratio_exempt is not None
+            and (
+                group in baseline_ratio_exempt
+                or str(group).endswith("_stranded")
+                or str(group).endswith("(stranded)")
+            )
+        )
+        if exempt_baseline_ratio:
+            row[f"{baseline_tool} / z-fasta"] = "n/a (strandless)"
+        else:
+            row[f"{baseline_tool} / z-fasta"] = format_ratio(baseline_mean, zf_mean)
 
         competitors = []
         for tool in tools:
             if tool == "z-fasta":
+                continue
+            if exempt_baseline_ratio and tool == baseline_tool:
                 continue
             match = gdf[gdf["tool_base"] == tool]
             if len(match):
@@ -1196,10 +1210,26 @@ def main():
         report.append(
             "> Synthetic BED batches of 100, 1K, 10K, and 100K regions on a single indexed FASTA. "
             "`z-fasta` runs with `--bed` and an explicit chunk size that forces multi-batch processing. "
-            "`samtools faidx -r` ignores strand, so the stranded rows isolate reverse-complement overhead for `z-fasta` and `bedtools getfasta -s`.\n"
+            "`samtools faidx -r` ignores strand, so the stranded rows are not apples-to-apples against samtools: "
+            "they show the extra work `z-fasta` and `bedtools getfasta -s` do for strand handling while samtools remains a forward-only fetch baseline.\n"
         )
-        report.append(md_benchmark_summary_table(bed_df, "benchmark", preferred_tools=["z-fasta", "samtools", "bedtools"]))
+        stranded_bed_rows = {
+            "100 regions (stranded)",
+            "1000 regions (stranded)",
+            "10000 regions (stranded)",
+            "100000 regions (stranded)",
+        }
+        report.append(md_benchmark_summary_table(
+            bed_df,
+            "benchmark",
+            preferred_tools=["z-fasta", "samtools", "bedtools"],
+            baseline_ratio_exempt=stranded_bed_rows,
+        ))
         report.append("")
+        report.append(
+            "> **Interpretation:** Treat the stranded `samtools / z-fasta` ratio as an orientation-overhead reference, not as a fair feature-parity comparison. "
+            "For strand-aware equivalence, compare `z-fasta --honor-strand --rc` against `bedtools getfasta -s | seqtk seq -r` in the RC section.\n"
+        )
         fig_bed_batch(bed_df, figures_dir / "bed_batch.png")
         report.append("\n![BED Batch Extraction](results/figures/bed_batch.png)\n")
 
@@ -1238,7 +1268,7 @@ def main():
                 report.append(f"- Large-region `--rc` stays in the same low-millisecond class as forward extraction and remains {large_vs_samtools} faster than the local `samtools faidx -i` baseline on the synthetic review slice.")
             if bed_vs_baseline:
                 report.append(f"- BED `--honor-strand --rc` remains a single-pass path and is {bed_vs_baseline} faster than the local `bedtools getfasta -s | seqtk seq -r` composition on the review slice.")
-            report.append("- The checked-in RC review harness is quick by default so these comparisons can be rerun in the normal edit loop rather than as a separate long-lived benchmark session.")
+            report.append("- The inline RC review slice stays quick by default so these comparisons can be rerun in the normal edit loop without a separate benchmark entrypoint.")
 
         if rc_rss_df is not None and len(rc_rss_df):
             report.append("\n### RC RSS Snapshot\n")

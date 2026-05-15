@@ -168,7 +168,7 @@ bench_get_region() {
     # fastahack
     if $HAS_FASTAHACK; then
         names+=("${label_prefix}fastahack")
-        cmds+=("$FASTAHACK '$file' '$region' > /dev/null 2>&1")
+        cmds+=("$FASTAHACK -r '$region' '$file' > /dev/null 2>&1")
     fi
 
     # seqtk subseq (requires a BED/name file for region specification)
@@ -213,7 +213,7 @@ measure_memory_get() {
         "samtools:$SAMTOOLS faidx '$file' '$region' > /dev/null"
     )
     $HAS_SEQKIT    && tools_and_cmds+=("seqkit:$SEQKIT faidx '$file' '$region' > /dev/null 2>&1")
-    $HAS_FASTAHACK && tools_and_cmds+=("fastahack:$FASTAHACK '$file' '$region' > /dev/null 2>&1")
+    $HAS_FASTAHACK && tools_and_cmds+=("fastahack:$FASTAHACK -r '$region' '$file' > /dev/null 2>&1")
 
     # seqtk: pre-create the region file once (not per /usr/bin/time run)
     local seqtk_mem_file=""
