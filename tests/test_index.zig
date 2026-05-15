@@ -138,6 +138,20 @@ test "scanHeaders multiline sequence" {
     try std.testing.expectEqual(@as(u32, 5), rec.line_bytes);
 }
 
+test "scanHeaders counts wrapped final short line with trailing newline correctly" {
+    const data = ">chrSynthetic\nAAAAAAAA\nCCCCCCCC\nGGGG\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const records = try scanHeaders(data, arena.allocator());
+    try std.testing.expectEqual(@as(usize, 1), records.items.len);
+
+    const rec = records.items[0];
+    try std.testing.expectEqual(@as(u64, 20), rec.seq_len);
+    try std.testing.expectEqual(@as(u32, 8), rec.line_bases);
+    try std.testing.expectEqual(@as(u32, 9), rec.line_bytes);
+}
+
 test "scanHeaders handles CRLF line endings" {
     const data = ">seq1\r\nACGT\r\n";
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -256,6 +270,19 @@ test "low-mem indexing matches default across chunk boundary" {
 
     try std.testing.expectEqual(expected_count, actual_count);
     try std.testing.expectEqualStrings(expected.written(), actual.written());
+}
+
+test "streamingScan counts wrapped final short line with trailing newline correctly" {
+    const data = ">chrSynthetic\nAAAAAAAA\nCCCCCCCC\nGGGG\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    const record_count = try main.indexer.streamingScan(data, &out.writer, .fai, true, allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), record_count);
+    try std.testing.expectEqualStrings("chrSynthetic\t20\t14\t8\t9\n", out.written());
 }
 
 test "low-mem indexing rejects overlong sequence names" {

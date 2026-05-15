@@ -513,11 +513,22 @@ fn countCompositionSlice(
 pub fn detectType(counts: *const [256]u64, total: u64) SequenceType {
     if (total == 0) return .nucleotide;
 
-    // Sum A, C, G, T, N, U (case-insensitive)
+    // Sum the full IUPAC nucleotide alphabet (case-insensitive):
+    // A C G T U R Y S W K M B D H V N
     const nuc_count = counts['A'] + counts['a'] +
         counts['C'] + counts['c'] +
         counts['G'] + counts['g'] +
         counts['T'] + counts['t'] +
+        counts['R'] + counts['r'] +
+        counts['Y'] + counts['y'] +
+        counts['S'] + counts['s'] +
+        counts['W'] + counts['w'] +
+        counts['K'] + counts['k'] +
+        counts['M'] + counts['m'] +
+        counts['B'] + counts['b'] +
+        counts['D'] + counts['d'] +
+        counts['H'] + counts['h'] +
+        counts['V'] + counts['v'] +
         counts['N'] + counts['n'] +
         counts['U'] + counts['u'];
 

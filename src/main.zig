@@ -20,6 +20,10 @@ const VERSION = "0.2.7";
 const CHUNK_SIZE_FLAG = "--chunk-size";
 const STRAND_AWARE_FLAG = "--strand-aware";
 const STRAND_AWARE_ALIAS = "--honor-strand";
+const RC_FLAG = "--rc";
+const COMPLEMENT_ONLY_FLAG = "--complement-only";
+const REVERSE_ONLY_FLAG = "--reverse-only";
+const ANNOTATE_RC_FLAG = "--annotate-rc";
 
 const USAGE =
     \\usage: z-fasta <command> [options]
@@ -40,10 +44,15 @@ const USAGE =
     \\
     \\Get usage:
     \\  z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt]
-    \\               [--strand-aware] [--summary] [--chunk-size N|-1] <region> [region ...]
+    \\               [--strand-aware] [--summary] [--rc|--complement-only|--reverse-only]
+    \\               [--annotate-rc] [--chunk-size N|-1] <region> [region ...]
     \\  Region formats: NAME, NAME:START-END, NAME:START-
     \\  --strand-aware  Respect BED column 6; '-' emits reverse-complement output
     \\                  (alias: --honor-strand)
+    \\  --rc            Reverse-complement extracted sequence output
+    \\  --complement-only  Complement extracted sequence output without reversing
+    \\  --reverse-only  Reverse extracted sequence output without complementing
+    \\  --annotate-rc   Annotate transformed headers (for example: reverse complement)
     \\  --chunk-size -1 Process all BED rows in one batch
     \\                  Default chunk size: 4096 BED rows
     \\
@@ -55,6 +64,7 @@ const USAGE =
     \\  z-fasta index --emit-fai genome.fa       Output FAI to stdout
     \\  z-fasta get genome.fa chr1:1000-2000     Extract region
     \\  z-fasta get genome.fa chr1               Extract full sequence
+    \\  z-fasta get genome.fa chr1:1000-2000 --rc
     \\  z-fasta get genome.fa --bed regions.bed  Extract BED regions
     \\  z-fasta get genome.fa --names ids.txt    Extract whole sequences from a file
     \\  z-fasta get genome.fa --bed regions.bed --strand-aware --summary
@@ -64,6 +74,12 @@ const USAGE =
 ;
 
 const ParseChunkSizeError = error{InvalidChunkSize};
+const ParseTransformFlagsError = error{ConflictingTransformFlags};
+
+const ParsedTransformFlags = struct {
+    orientation: getter.Orientation,
+    annotate_transform: bool,
+};
 
 fn parseChunkSizeValue(raw: []const u8) ParseChunkSizeError!usize {
     if (std.mem.eql(u8, raw, "-1")) return getter.chunk_size_all;
@@ -79,6 +95,28 @@ fn chunkSizeEqualsValue(arg: []const u8) ?[]const u8 {
     const prefix = CHUNK_SIZE_FLAG ++ "=";
     if (!std.mem.startsWith(u8, arg, prefix)) return null;
     return arg[prefix.len..];
+}
+
+fn parseTransformFlags(rc: bool, complement_only: bool, reverse_only: bool, annotate_transform: bool) ParseTransformFlagsError!ParsedTransformFlags {
+    var selected: usize = 0;
+    if (rc) selected += 1;
+    if (complement_only) selected += 1;
+    if (reverse_only) selected += 1;
+    if (selected > 1) return error.ConflictingTransformFlags;
+
+    const orientation = if (rc)
+        getter.Orientation.reverseComplement()
+    else if (complement_only)
+        getter.Orientation.complementOnly()
+    else if (reverse_only)
+        getter.Orientation.reverseOnly()
+    else
+        getter.Orientation{};
+
+    return .{
+        .orientation = orientation,
+        .annotate_transform = annotate_transform,
+    };
 }
 
 fn printErrorAndExit(comptime fmt: []const u8, args_tuple: anytype) noreturn {
@@ -300,6 +338,10 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     var honor_strand = false;
     var summary = false;
     var chunk_size: usize = 4_096;
+    var rc = false;
+    var complement_only = false;
+    var reverse_only = false;
+    var annotate_transform = false;
     // Static buffer: up to 1024 region strings without heap allocation.
     var region_buf: [1024][]const u8 = undefined;
     var region_count: usize = 0;
@@ -319,6 +361,14 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
             honor_strand = true;
         } else if (std.mem.eql(u8, arg, "--summary")) {
             summary = true;
+        } else if (std.mem.eql(u8, arg, RC_FLAG)) {
+            rc = true;
+        } else if (std.mem.eql(u8, arg, COMPLEMENT_ONLY_FLAG)) {
+            complement_only = true;
+        } else if (std.mem.eql(u8, arg, REVERSE_ONLY_FLAG)) {
+            reverse_only = true;
+        } else if (std.mem.eql(u8, arg, ANNOTATE_RC_FLAG)) {
+            annotate_transform = true;
         } else if (std.mem.eql(u8, arg, CHUNK_SIZE_FLAG)) {
             const raw = args.next() orelse {
                 printErrorAndExit("error: --chunk-size requires a positive integer or -1\n", .{});
@@ -342,10 +392,17 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     }
 
     const path = fasta_path orelse {
-        printErrorAndExit("error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--strand-aware] [--summary] [--chunk-size N|-1] <region> [region ...]\n", .{});
+        printErrorAndExit("error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--strand-aware] [--summary] [--rc|--complement-only|--reverse-only] [--annotate-rc] [--chunk-size N|-1] <region> [region ...]\n", .{});
     };
     if (region_count == 0 and bed_path == null and names_path == null) {
-        printErrorAndExit("error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--strand-aware] [--summary] [--chunk-size N|-1] <region> [region ...]\n", .{});
+        printErrorAndExit("error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--strand-aware] [--summary] [--rc|--complement-only|--reverse-only] [--annotate-rc] [--chunk-size N|-1] <region> [region ...]\n", .{});
+    }
+
+    const transform = parseTransformFlags(rc, complement_only, reverse_only, annotate_transform) catch {
+        printErrorAndExit("error: --rc, --complement-only, and --reverse-only are mutually exclusive\n", .{});
+    };
+    if (transform.annotate_transform and transform.orientation.isIdentity()) {
+        printErrorAndExit("error: --annotate-rc requires --rc, --complement-only, or --reverse-only\n", .{});
     }
 
     getter.runGetWithOptions(io, path, .{
@@ -355,6 +412,8 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
         .honor_strand = honor_strand,
         .summary = summary,
         .chunk_size = chunk_size,
+        .orientation = transform.orientation,
+        .annotate_transform = transform.annotate_transform,
     });
 }
 
@@ -371,6 +430,27 @@ test "parseChunkSizeValue rejects zero and invalid input" {
 test "chunkSizeEqualsValue parses inline assignment syntax" {
     try std.testing.expectEqualStrings("-1", chunkSizeEqualsValue("--chunk-size=-1").?);
     try std.testing.expect(chunkSizeEqualsValue("--chunk-size") == null);
+}
+
+test "parseTransformFlags returns requested orientation" {
+    const rc = try parseTransformFlags(true, false, false, false);
+    try std.testing.expect(rc.orientation.reverse);
+    try std.testing.expect(rc.orientation.complement);
+
+    const complement_only = try parseTransformFlags(false, true, false, true);
+    try std.testing.expect(!complement_only.orientation.reverse);
+    try std.testing.expect(complement_only.orientation.complement);
+    try std.testing.expect(complement_only.annotate_transform);
+
+    const reverse_only = try parseTransformFlags(false, false, true, false);
+    try std.testing.expect(reverse_only.orientation.reverse);
+    try std.testing.expect(!reverse_only.orientation.complement);
+}
+
+test "parseTransformFlags rejects conflicting transform flags" {
+    try std.testing.expectError(error.ConflictingTransformFlags, parseTransformFlags(true, true, false, false));
+    try std.testing.expectError(error.ConflictingTransformFlags, parseTransformFlags(true, false, true, false));
+    try std.testing.expectError(error.ConflictingTransformFlags, parseTransformFlags(false, true, true, false));
 }
 
 // ============================================================================

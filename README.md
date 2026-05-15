@@ -6,7 +6,7 @@
     SIMD-accelerated indexing, O(1) region extraction, and instant assembly stats.<br/>
     samtools-compatible FASTA indexing and extraction, benchmarked against <code>seqkit</code>, <code>fastahack</code>, and <code>pyfaidx</code>.
   </p>
-  <p>Latest tag: <strong>v0.2.7</strong> · BED, names-file, stdin, and strand-aware extraction included</p>
+  <p>Latest tag: <strong>v0.2.7</strong> · main also includes v0.2.8 orientation flags for reverse, complement, and reverse-complement extraction</p>
   <br/>
   <a href="https://github.com/eneskemalergin/z-fasta/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/CI-passing-22c55e?style=for-the-badge" alt="CI" /></a>
   <a href="https://ziglang.org/download/0.16.0/"><img src="https://img.shields.io/badge/Zig-0.16.0-F7A41D?style=for-the-badge&logo=zig&logoColor=white" alt="Zig 0.16.0" /></a>
@@ -21,7 +21,7 @@ Quick links: [Supported Today](#supported-today) · [Installation](#installation
 
 ## Supported Today
 
-`z-fasta` is focused on uncompressed FASTA workflows: building indexes, extracting one or many indexed regions, and computing assembly/proteome statistics. It supports compact `.zfi` indexes and samtools-compatible `.fai` output. `get` accepts positional regions, BED files, BED from stdin, names files, and optional strand-aware reverse-complement output. FASTQ and compressed FASTA/BGZF streams remain outside the current scope.
+`z-fasta` is focused on uncompressed FASTA workflows: building indexes, extracting one or many indexed regions, and computing assembly/proteome statistics. It supports compact `.zfi` indexes and samtools-compatible `.fai` output. `get` accepts positional regions, BED files, BED from stdin, names files, strand-aware extraction, and explicit orientation transforms through `--rc`, `--reverse-only`, `--complement-only`, and `--annotate-rc`. FASTQ and compressed FASTA/BGZF streams remain outside the current scope.
 
 ## Why z-fasta?
 
@@ -62,7 +62,10 @@ Options:
 ### Get (sequence extraction)
 
 ```bash
-z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--strand-aware] [--summary] [--chunk-size N|-1] <region> [region ...]
+z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt]
+            [--strand-aware] [--summary]
+            [--rc|--complement-only|--reverse-only] [--annotate-rc]
+            [--chunk-size N|-1] <region> [region ...]
 ```
 
 Extract one or more sequences or sub-regions from an indexed FASTA file. Output is **byte-identical** to `samtools faidx` for the positional-region path, and the BED / names batch flows are verified against `bedtools getfasta` and `samtools faidx -r`. Multiple regions are accepted in a single call; the index loads once and results stream in CLI order. BED rows and names-file entries are appended in source order ahead of later positional arguments.
@@ -86,10 +89,16 @@ Handles Ensembl-style names containing colons (e.g., `chromosome:GRCh38:1:1:2489
 | `--bed file.bed` | Read BED regions from a file. BED coordinates are 0-based, half-open; z-fasta converts them to 1-based inclusive internally. |
 | `--bed -` | Read BED regions from stdin. |
 | `--names file.txt` | Read one full-sequence name per line. Useful for long batch lists. |
-| `--strand-aware` | Use BED column 6. `-` emits reverse-complement output with a `:rc` header suffix. Alias: `--honor-strand`. |
+| `--strand-aware` | Use BED column 6. `-` applies reverse-complement orientation before any global orientation flag. Alias: `--honor-strand`. |
+| `--rc` | Reverse-complement the extracted sequence. Verified against `samtools faidx -i --mark-strand no`. |
+| `--complement-only` | Complement the extracted sequence without reversing it. Mutually exclusive with `--rc` and `--reverse-only`. |
+| `--reverse-only` | Reverse the extracted sequence without complementing it. Mutually exclusive with `--rc` and `--complement-only`. |
+| `--annotate-rc` | Append a human-readable transform suffix to headers, for example `(reverse complement)`. Default headers stay samtools-style and unannotated. |
 | `--summary` | Print region count, total bases, elapsed time, and regions/sec to stderr. |
 | `--chunk-size N` | Process BED rows in batches instead of resolving the entire BED in one batch. Default: `4096`, which is the current best speed/memory tradeoff on the checked benchmark workloads. |
 | `--chunk-size -1` | Process all BED rows in a single batch when memory use is acceptable. |
+
+Complement-based transforms are rejected for protein FASTA input with a clear error. This keeps `--rc` and `--complement-only` biologically constrained to nucleotide-like records.
 
 ### Stats
 
@@ -124,6 +133,18 @@ z-fasta get genome.fa chr1:1000000-2000000
 # Extract multiple regions in one call (index loads once)
 z-fasta get genome.fa chr1:1000-2000 chr2:5000-6000 chrX:100-200
 
+# Reverse-complement a region
+z-fasta get genome.fa chr1:1000-2000 --rc
+
+# Reverse without complementing
+z-fasta get genome.fa chr1:1000-2000 --reverse-only
+
+# Complement without reversing
+z-fasta get genome.fa chr1:1000-2000 --complement-only
+
+# Add explicit transform text to the FASTA header
+z-fasta get genome.fa chr1:1000-2000 --rc --annotate-rc
+
 # Extract regions from BED
 z-fasta get genome.fa --bed regions.bed
 
@@ -135,6 +156,9 @@ z-fasta get genome.fa --names ids.txt
 
 # Respect BED strand and print a stderr summary
 z-fasta get genome.fa --bed regions.bed --strand-aware --summary
+
+# Compose BED strand handling with a global reverse-complement flip
+z-fasta get genome.fa --bed regions.bed --honor-strand --rc
 
 # Assembly stats (full composition scan)
 z-fasta stats genome.fa
@@ -174,6 +198,8 @@ See [bench/index/REPORT.md](bench/index/REPORT.md) for full scaling curves and m
 
 > Small-region extraction is O(1), but on this host the end-to-end CLI path is startup-dominated below roughly 10 kbp. The Zig 0.16 minimal startup path keeps those calls under 1 ms on synthetic warm-cache fixtures. For very large full-sequence extraction, fastahack can still win on raw write-path overhead; z-fasta stays ahead of samtools across the real-dataset GET cases.
 
+Orientation note: the shipped `--rc` path keeps the same mmap-backed extraction model and applies reverse traversal plus complement lookup during emission, rather than materializing a second copy of the region. A small checked-in measurement slice is documented in [bench/get/RC_STRATEGY.md](bench/get/RC_STRATEGY.md).
+
 **Multi-region (v0.2.4):** `z-fasta get` accepts multiple regions per call, loading the index once and streaming all results in CLI order.
 
 | Regions | z-fasta | samtools | seqtk  | Speedup vs samtools |
@@ -204,8 +230,9 @@ See [bench/stats/REPORT.md](bench/stats/REPORT.md) for full results.
 - **Index:** 20/20 edge cases match `samtools faidx` (exit codes and output).
 - **Get:** 90/90 single-region and 22/22 multi-region byte-identical diff tests pass vs samtools across 5+ test files: full sequences, sub-regions, single bases, line-boundary spans, clamped ranges, duplicate regions, reversed CLI order, sort-path (≥16 regions).
 - **BED / names batch extraction:** 16/16 verification cases pass in `bench/get/verify_bed.sh`, covering default BED, `--bed -`, stranded BED vs `bedtools getfasta -s`, default BED vs `samtools faidx -r`, and `--names` batch extraction.
+- **Reverse / complement extraction:** 19/19 verification cases pass in `bench/get/verify_rc.sh`, covering `--rc` vs `samtools faidx -i --mark-strand no`, exact-output checks for `--reverse-only`, `--complement-only`, and `--annotate-rc`, multi-region concatenation, BED `--honor-strand --rc` composition, protein rejection, and a synthetic chromosome-like full-sequence case.
 - **Stats:** 107/107 BioPython verification tests pass: exact agreement on all Tier 1 and Tier 2 values across nucleotide and protein files.
-- **Unit tests:** 99/99 Zig unit tests (24 index · 30 get · 32 stats · 7 complement · 6 BED parser).
+- **Unit tests:** 102/102 Zig unit tests (26 index · 30 get · 33 stats · 7 complement · 6 BED parser).
 - **Messy FASTA:** z-fasta is the only tool tested that correctly indexes mixed-width and trailing-whitespace FASTA files. samtools, fastahack, and pyfaidx all reject them. See [bench/index/REPORT.md](bench/index/REPORT.md) for the full compatibility matrix.
 
 ## Benchmarking
@@ -224,6 +251,7 @@ bash bench/index/run_tests.sh            # 20 edge-case correctness tests
 bash bench/get/run_benchmarks.sh         # latency, scaling, real datasets
 bash bench/get/verify_get.sh             # 90 byte-identical diff tests vs samtools
 bash bench/get/verify_bed.sh             # 16 BED / names verification cases vs bedtools + samtools
+bash bench/get/verify_rc.sh              # 19 RC / reverse / complement verification cases
 .venv/bin/python bench/get/generate_report.py     # → bench/get/REPORT.md
 
 # ── Stats ─────────────────────────────────────────────────────────
@@ -238,7 +266,7 @@ Full local refresh, in the same order used before publishing benchmark updates:
 ./zig build -Doptimize=ReleaseFast && bash bench/index/run_tests.sh && bash bench/get/verify_get.sh && bash bench/get/verify_multi_get.sh && .venv/bin/python bench/stats/verify_stats.py && bash bench/index/run_benchmarks.sh --runs 5 && .venv/bin/python bench/index/generate_report.py && bash bench/get/run_benchmarks.sh --runs 5 && .venv/bin/python bench/get/generate_report.py && bash bench/stats/run_benchmarks.sh --runs 5 && .venv/bin/python bench/stats/generate_report.py && bash bench/perf-recovery/run_startup.sh
 ```
 
-Add `--skip-real` to the `get` / `stats` scripts to skip real dataset runs (~3 GB downloads required otherwise). See [bench/README.md](bench/README.md) for prerequisites and full instructions.
+Add `--skip-real` to the `get` / `stats` scripts to skip real dataset runs (~3 GB downloads required otherwise). See [bench/README.md](bench/README.md) for prerequisites and full instructions. The shipped reverse-path note is in [bench/get/RC_STRATEGY.md](bench/get/RC_STRATEGY.md).
 
 ## Output Formats
 
@@ -276,10 +304,10 @@ Add `--skip-real` to the `get` / `stats` scripts to skip real dataset runs (~3 G
 
 **Near-term**
 
-- [ ] v0.2.8: Reverse complement
-    - [ ] `--rc` flag for `z-fasta get` to output the reverse complement of any extracted region
-    - [x] Comptime 256-element complement table, zero-cost lookup baked into the binary
-    - [ ] Works with single regions, multi-region, and `--bed` batch calls
+- [ ] v0.2.8: RC release/tag + broader optimization lock-in
+    - [x] `--rc`, `--complement-only`, `--reverse-only`, and `--annotate-rc` are implemented on `main`
+    - [x] Works with single regions, multi-region, names-file, and `--bed` / `--honor-strand` composition
+    - [ ] Final release tag and broader optimization lock-in are still pending
 - [ ] v0.3.0: Validate + Tier 2 benchmarks + release polish
     - [ ] `z-fasta validate`: single-pass FASTA format checker with line-numbered error/warning output
     - [ ] Checks: duplicate names, inconsistent line widths, invalid characters, empty sequences, missing terminal newline

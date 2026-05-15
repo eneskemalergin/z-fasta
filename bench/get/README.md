@@ -13,6 +13,9 @@ This suite measures `z-fasta get` region extraction latency and throughput again
 - Multi-region extraction in one CLI call for 1, 10, 50, and 100 regions.
 - Byte-for-byte verification against `samtools faidx` via [verify_get.sh](verify_get.sh) and [verify_multi_get.sh](verify_multi_get.sh).
 - BED extraction verification against `bedtools getfasta` plus default-mode `samtools faidx -r` comparisons via [verify_bed.sh](verify_bed.sh), including chunked `--bed`, stdin BED, and `--names` runs.
+- Reverse / complement verification via [verify_rc.sh](verify_rc.sh), including `--rc` against `samtools faidx -i --mark-strand no`, transform annotation checks, BED `--strand-aware --rc` composition, protein rejection, and a synthetic chromosome-like full-sequence fixture.
+- Focused RC lock-in benchmarking via [run_rc_review.sh](run_rc_review.sh), with a quick local profile and a heavier `--full` profile for release-grade reruns.
+- A checked-in reverse-path summary is captured in [RC_STRATEGY.md](RC_STRATEGY.md).
 
 ## Run
 
@@ -21,18 +24,24 @@ From the repository root:
 ```bash
 ./zig build -Doptimize=ReleaseFast
 bash bench/get/run_benchmarks.sh
+bash bench/get/run_rc_review.sh --quick
 bash bench/get/verify_get.sh
 bash bench/get/verify_multi_get.sh
 bash bench/get/verify_bed.sh
+bash bench/get/verify_rc.sh
 .venv/bin/python bench/get/generate_report.py
 ```
 
 Use `--skip-real` to avoid downloaded real datasets, or `--skip-scaling` to omit region-size scaling.
+`run_rc_review.sh` defaults to the quick profile so it finishes in a reasonable local-edit loop; use `--full` when you want the heavier lock-in pass.
 `verify_bed.sh` uses `tests/data/simple.fasta` by default and generates synthetic small / medium / large / x-large BED files internally. It compares default BED output against both `bedtools getfasta` and `samtools faidx -r`, checks stranded BED output against `bedtools -s`, and covers `--names` with comments and duplicate names. It skips cleanly when `bedtools` or `samtools` is not installed.
+`verify_rc.sh` uses `samtools faidx -i --mark-strand no` as the gold reference for `--rc` when available, and adds exact-output checks for `--annotate-rc`, `--reverse-only`, `--complement-only`, BED composition, the protein error path, and a wrapped full-sequence chromosome-like fixture.
 
 ## Outputs
 
 - [REPORT.md](REPORT.md): generated summary tables and chart links.
+- [RC_STRATEGY.md](RC_STRATEGY.md): shipped reverse-path note and current measurement slice.
+- `results/rc_review_<timestamp>/`: focused RC review tables, JSON, and RSS snapshots from `run_rc_review.sh`.
 - `results/single_<timestamp>/`: single-region hyperfine JSON.
 - `results/fullseq_<timestamp>/`: full-sequence hyperfine JSON.
 - `results/scale_region_<timestamp>/`: region-size scaling JSON.

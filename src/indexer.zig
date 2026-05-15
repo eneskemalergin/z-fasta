@@ -107,6 +107,12 @@ fn countFixedWidthBases(data: []const u8, line_bases: u32, line_bytes: u32) ?u64
     return bases;
 }
 
+fn countSequenceLength(data: []const u8, line_bases: u32, line_bytes: u32) u64 {
+    const fallback = countBases(data);
+    const fixed_width = countFixedWidthBases(data, line_bases, line_bytes) orelse return fallback;
+    return if (fixed_width == fallback) fixed_width else fallback;
+}
+
 // ============================================================================
 // Streaming Mode (mmap, default)
 // ============================================================================
@@ -173,7 +179,7 @@ pub fn streamingScan(
         }
 
         const seq_data = data[@intCast(seq_offset)..seq_end];
-        const seq_len = countFixedWidthBases(seq_data, line_bases, line_bytes) orelse countBases(seq_data);
+        const seq_len = countSequenceLength(seq_data, line_bases, line_bytes);
 
         if (seq_len == 0) {
             pos = seq_end;
@@ -271,7 +277,7 @@ pub fn scanHeaders(data: []const u8, allocator: std.mem.Allocator) !std.ArrayLis
         }
 
         const seq_data = data[@intCast(seq_offset)..seq_end];
-        const seq_len = countFixedWidthBases(seq_data, line_bases, line_bytes) orelse countBases(seq_data);
+        const seq_len = countSequenceLength(seq_data, line_bases, line_bytes);
 
         if (seq_len == 0) {
             pos = seq_end;

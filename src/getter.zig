@@ -3,6 +3,7 @@ const posix = std.posix;
 const complement = @import("complement.zig");
 const bed_parser = @import("bed_parser.zig");
 const index_format = @import("index_format.zig");
+const stats = @import("stats.zig");
 
 const IndexRecord = index_format.IndexRecord;
 const LoadedIndex = index_format.LoadedIndex;
@@ -19,6 +20,34 @@ pub const Region = struct {
     is_full: bool, // true if no :START-END specified
 };
 
+pub const Orientation = struct {
+    reverse: bool = false,
+    complement: bool = false,
+
+    pub fn compose(self: Orientation, other: Orientation) Orientation {
+        return .{
+            .reverse = self.reverse != other.reverse,
+            .complement = self.complement != other.complement,
+        };
+    }
+
+    pub fn isIdentity(self: Orientation) bool {
+        return !self.reverse and !self.complement;
+    }
+
+    pub fn reverseComplement() Orientation {
+        return .{ .reverse = true, .complement = true };
+    }
+
+    pub fn reverseOnly() Orientation {
+        return .{ .reverse = true, .complement = false };
+    }
+
+    pub fn complementOnly() Orientation {
+        return .{ .reverse = false, .complement = true };
+    }
+};
+
 pub const GetOptions = struct {
     region_strs: []const []const u8,
     bed_path: ?[]const u8 = null,
@@ -26,13 +55,15 @@ pub const GetOptions = struct {
     honor_strand: bool = false,
     summary: bool = false,
     chunk_size: usize = 4_096,
+    orientation: Orientation = .{},
+    annotate_transform: bool = false,
 };
 
 pub const chunk_size_all = std.math.maxInt(usize);
 
 const ParsedRequest = struct {
     region: Region,
-    reverse_complement: bool,
+    orientation: Orientation,
 };
 
 const BatchStats = struct {
@@ -163,7 +194,8 @@ pub const ResolvedRegion = struct {
     num_bases: u64, // number of bases to extract
     line_bases: u32,
     line_bytes: u32,
-    reverse_complement: bool,
+    orientation: Orientation,
+    annotate_transform: bool,
     original_index: usize, // position in CLI argument list (preserves output order)
 };
 
@@ -181,7 +213,7 @@ pub fn resolveRegion(idx: *const LoadedIndex, region_str: []const u8, original_i
 }
 
 fn resolveParsedRegion(idx: *const LoadedIndex, region: Region, rec_idx: usize, original_index: usize) ResolvedRegion {
-    return resolveParsedRequest(idx, .{ .region = region, .reverse_complement = false }, rec_idx, original_index);
+    return resolveParsedRequest(idx, .{ .region = region, .orientation = .{} }, rec_idx, original_index);
 }
 
 fn resolveParsedRequest(idx: *const LoadedIndex, request: ParsedRequest, rec_idx: usize, original_index: usize) ResolvedRegion {
@@ -230,7 +262,8 @@ fn resolveParsedRequest(idx: *const LoadedIndex, request: ParsedRequest, rec_idx
         .num_bases = num_bases,
         .line_bases = rec.line_bases,
         .line_bytes = rec.line_bytes,
-        .reverse_complement = request.reverse_complement,
+        .orientation = request.orientation,
+        .annotate_transform = false,
         .original_index = original_index,
     };
 }
@@ -288,6 +321,78 @@ fn resolveRegionsByRecordScan(idx: *const LoadedIndex, region_strs: []const []co
     }
 }
 
+fn findRecordIndex(idx: *const LoadedIndex, name: []const u8) ?usize {
+    if (idx.lookupName(name)) |rec_idx| return rec_idx;
+
+    for (idx.records, 0..) |rec, rec_idx| {
+        if (std.mem.eql(u8, rec.getName(idx.fasta_data), name)) return rec_idx;
+    }
+
+    return null;
+}
+
+fn detectRecordType(rec: IndexRecord, fasta: []const u8) stats.SequenceType {
+    var counts = [_]u64{0} ** 256;
+    var total: u64 = 0;
+    var pos: usize = @intCast(rec.seq_offset);
+    const sample_limit: u64 = @min(rec.seq_len, 100_000);
+
+    while (pos < fasta.len and total < sample_limit) : (pos += 1) {
+        const byte = fasta[pos];
+        if (byte == '\n' or byte == '\r') continue;
+        counts[byte] += 1;
+        total += 1;
+    }
+
+    return stats.detectType(&counts, total);
+}
+
+fn ensureComplementAllowed(idx: *const LoadedIndex, requests: []const ParsedRequest) void {
+    var last_name: ?[]const u8 = null;
+    var last_rec_idx: usize = 0;
+    var last_checked_rec_idx: ?usize = null;
+    var last_checked_type: stats.SequenceType = undefined;
+
+    for (requests) |request| {
+        if (!request.orientation.complement) continue;
+
+        const rec_idx = if (last_name) |name|
+            if (std.mem.eql(u8, name, request.region.name))
+                last_rec_idx
+            else
+                findRecordIndex(idx, request.region.name) orelse {
+                    printErrorAndExit("error: sequence not found: {s}\n", .{request.region.name});
+                }
+        else
+            findRecordIndex(idx, request.region.name) orelse {
+                printErrorAndExit("error: sequence not found: {s}\n", .{request.region.name});
+            };
+
+        last_name = request.region.name;
+        last_rec_idx = rec_idx;
+
+        const rec_type = if (last_checked_rec_idx) |cached_rec_idx|
+            if (cached_rec_idx == rec_idx)
+                last_checked_type
+            else blk: {
+                const detected = detectRecordType(idx.records[rec_idx], idx.fasta_data);
+                last_checked_rec_idx = rec_idx;
+                last_checked_type = detected;
+                break :blk detected;
+            }
+        else blk: {
+            const detected = detectRecordType(idx.records[rec_idx], idx.fasta_data);
+            last_checked_rec_idx = rec_idx;
+            last_checked_type = detected;
+            break :blk detected;
+        };
+
+        if (rec_type == .protein) {
+            printErrorAndExit("error: reverse complement is not defined for protein sequences: {s}\n", .{request.region.name});
+        }
+    }
+}
+
 // ============================================================================
 // Sequence emission
 // ============================================================================
@@ -295,22 +400,31 @@ fn resolveRegionsByRecordScan(idx: *const LoadedIndex, region_strs: []const []co
 /// Write FASTA output for one resolved region to `writer`.
 /// Output is wrapped at 60 bases per line (samtools default).
 fn emitRegion(resolved: ResolvedRegion, fasta: []const u8, writer: anytype) void {
+    const annotation = headerAnnotation(resolved.orientation, resolved.annotate_transform);
     if (resolved.is_full) {
-        writer.print(">{s}{s}\n", .{ resolved.name, if (resolved.reverse_complement) ":rc" else "" }) catch {
+        writer.print(">{s}{s}\n", .{ resolved.name, annotation }) catch {
             printErrorAndExit("error: write failed\n", .{});
         };
     } else {
-        writer.print(">{s}:{d}-{d}{s}\n", .{ resolved.name, resolved.start, resolved.display_end, if (resolved.reverse_complement) ":rc" else "" }) catch {
+        writer.print(">{s}:{d}-{d}{s}\n", .{ resolved.name, resolved.start, resolved.display_end, annotation }) catch {
             printErrorAndExit("error: write failed\n", .{});
         };
     }
 
-    if (resolved.reverse_complement) {
-        emitRegionReverseComplement(resolved, fasta, writer);
+    if (resolved.orientation.reverse) {
+        emitRegionBackward(resolved, fasta, writer);
         return;
     }
 
     emitRegionForward(resolved, fasta, writer);
+}
+
+fn headerAnnotation(orientation: Orientation, annotate_transform: bool) []const u8 {
+    if (!annotate_transform or orientation.isIdentity()) return "";
+    if (orientation.reverse and orientation.complement) return " (reverse complement)";
+    if (orientation.reverse) return " (reverse)";
+    if (orientation.complement) return " (complement)";
+    return "";
 }
 
 fn emitRegionForward(resolved: ResolvedRegion, fasta: []const u8, writer: anytype) void {
@@ -334,7 +448,7 @@ fn emitRegionForward(resolved: ResolvedRegion, fasta: []const u8, writer: anytyp
             out_len = 0;
         }
 
-        out_buf[out_len] = byte;
+        out_buf[out_len] = if (resolved.orientation.complement) complement.complement(byte) else byte;
         out_len += 1;
         bases_written += 1;
         line_pos += 1;
@@ -364,7 +478,7 @@ fn emitRegionForward(resolved: ResolvedRegion, fasta: []const u8, writer: anytyp
     }
 }
 
-fn emitRegionReverseComplement(resolved: ResolvedRegion, fasta: []const u8, writer: anytype) void {
+fn emitRegionBackward(resolved: ResolvedRegion, fasta: []const u8, writer: anytype) void {
     const wrap_width: usize = 60;
     var bases_remaining = resolved.num_bases;
     var line_pos: usize = 0;
@@ -377,7 +491,7 @@ fn emitRegionReverseComplement(resolved: ResolvedRegion, fasta: []const u8, writ
     var pos: usize = @intCast(resolved.seq_offset + (line_number * resolved.line_bytes) + column);
 
     while (bases_remaining > 0) {
-        const byte = complement.complement(fasta[pos]);
+        const byte = if (resolved.orientation.complement) complement.complement(fasta[pos]) else fasta[pos];
 
         if (out_len + 2 > out_buf.len) {
             writer.writeAll(out_buf[0..out_len]) catch {
@@ -465,6 +579,7 @@ fn appendBedRegionRequest(
     requests: *std.ArrayList(ParsedRequest),
     region: bed_parser.BedRegion,
     honor_strand: bool,
+    global_orientation: Orientation,
     allocator: std.mem.Allocator,
     duplicate_name: bool,
     last_duplicated_name: ?*?[]const u8,
@@ -494,7 +609,7 @@ fn appendBedRegionRequest(
             .end = region.end1BasedInclusive(),
             .is_full = false,
         },
-        .reverse_complement = honor_strand and region.strand == .minus,
+        .orientation = (if (honor_strand and region.strand == .minus) Orientation.reverseComplement() else Orientation{}).compose(global_orientation),
     }) catch {
         printErrorAndExit("error: out of memory\n", .{});
     };
@@ -505,6 +620,7 @@ fn appendBedLineRequest(
     line: []const u8,
     line_number: usize,
     honor_strand: bool,
+    global_orientation: Orientation,
     allocator: std.mem.Allocator,
     duplicate_name: bool,
     last_duplicated_name: ?*?[]const u8,
@@ -520,17 +636,17 @@ fn appendBedLineRequest(
 
     switch (parsed) {
         .skip => {},
-        .region => |region| appendBedRegionRequest(requests, region, honor_strand, allocator, duplicate_name, last_duplicated_name),
+        .region => |region| appendBedRegionRequest(requests, region, honor_strand, global_orientation, allocator, duplicate_name, last_duplicated_name),
     }
 }
 
-fn appendBedRequests(requests: *std.ArrayList(ParsedRequest), bed_data: []const u8, honor_strand: bool, allocator: std.mem.Allocator) void {
+fn appendBedRequests(requests: *std.ArrayList(ParsedRequest), bed_data: []const u8, honor_strand: bool, global_orientation: Orientation, allocator: std.mem.Allocator) void {
     var lines = std.mem.splitScalar(u8, bed_data, '\n');
     var line_number: usize = 0;
 
     while (lines.next()) |line| {
         line_number += 1;
-        appendBedLineRequest(requests, line, line_number, honor_strand, allocator, false, null);
+        appendBedLineRequest(requests, line, line_number, honor_strand, global_orientation, allocator, false, null);
     }
 }
 
@@ -539,16 +655,18 @@ fn processBedData(
     allocator: std.mem.Allocator,
     bed_data: []const u8,
     honor_strand: bool,
+    global_orientation: Orientation,
+    annotate_transform: bool,
     writer: anytype,
 ) BatchStats {
     var requests = std.ArrayList(ParsedRequest).empty;
     defer requests.deinit(allocator);
 
-    appendBedRequests(&requests, bed_data, honor_strand, allocator);
-    return processParsedRequests(idx, allocator, requests.items, writer);
+    appendBedRequests(&requests, bed_data, honor_strand, global_orientation, allocator);
+    return processParsedRequests(idx, allocator, requests.items, annotate_transform, writer);
 }
 
-fn appendNamesRequests(requests: *std.ArrayList(ParsedRequest), names_data: []const u8, allocator: std.mem.Allocator) void {
+fn appendNamesRequests(requests: *std.ArrayList(ParsedRequest), names_data: []const u8, orientation: Orientation, allocator: std.mem.Allocator) void {
     var lines = std.mem.splitScalar(u8, names_data, '\n');
     while (lines.next()) |line| {
         const trimmed = if (line.len > 0 and line[line.len - 1] == '\r') line[0 .. line.len - 1] else line;
@@ -561,18 +679,18 @@ fn appendNamesRequests(requests: *std.ArrayList(ParsedRequest), names_data: []co
                 .end = null,
                 .is_full = true,
             },
-            .reverse_complement = false,
+            .orientation = orientation,
         }) catch {
             printErrorAndExit("error: out of memory\n", .{});
         };
     }
 }
 
-fn appendCliRequests(requests: *std.ArrayList(ParsedRequest), region_strs: []const []const u8, allocator: std.mem.Allocator) void {
+fn appendCliRequests(requests: *std.ArrayList(ParsedRequest), region_strs: []const []const u8, orientation: Orientation, allocator: std.mem.Allocator) void {
     for (region_strs) |region_str| {
         requests.append(allocator, .{
             .region = parseRegion(region_str),
-            .reverse_complement = false,
+            .orientation = orientation,
         }) catch {
             printErrorAndExit("error: out of memory\n", .{});
         };
@@ -591,8 +709,10 @@ fn writeSummary(io: std.Io, region_count: usize, total_bases: u64, elapsed_ns: u
     stderr_fw.flush() catch {};
 }
 
-fn processParsedRequests(idx: *const LoadedIndex, allocator: std.mem.Allocator, requests: []const ParsedRequest, writer: anytype) BatchStats {
+fn processParsedRequests(idx: *const LoadedIndex, allocator: std.mem.Allocator, requests: []const ParsedRequest, annotate_transform: bool, writer: anytype) BatchStats {
     if (requests.len == 0) return .{};
+
+    ensureComplementAllowed(idx, requests);
 
     const resolved = allocator.alloc(ResolvedRegion, requests.len) catch {
         printErrorAndExit("error: out of memory\n", .{});
@@ -622,6 +742,7 @@ fn processParsedRequests(idx: *const LoadedIndex, allocator: std.mem.Allocator, 
             last_rec_idx = rec_idx;
 
             resolved[i] = resolveParsedRequest(idx, request, rec_idx, i);
+            resolved[i].annotate_transform = annotate_transform;
             if (already_in_offset_order) {
                 if (i > 0 and resolved[i].start_byte < prev_start_byte) {
                     already_in_offset_order = false;
@@ -629,6 +750,10 @@ fn processParsedRequests(idx: *const LoadedIndex, allocator: std.mem.Allocator, 
                 prev_start_byte = resolved[i].start_byte;
             }
         }
+    }
+
+    if (requests.len > 1 and requests.len < 16 and idx.source == .zfi and !idx.has_name_map) {
+        for (resolved) |*r| r.annotate_transform = annotate_transform;
     }
 
     var total_bases: u64 = 0;
@@ -693,7 +818,9 @@ fn processBedReaderChunked(
     idx: *const LoadedIndex,
     reader: *std.Io.Reader,
     honor_strand: bool,
+    global_orientation: Orientation,
     chunk_size: usize,
+    annotate_transform: bool,
     writer: anytype,
 ) BatchStats {
     var total = BatchStats{};
@@ -719,7 +846,7 @@ fn processBedReaderChunked(
             };
 
             line_number += 1;
-            appendBedLineRequest(&requests, line, line_number, honor_strand, chunk_allocator, true, &last_duplicated_name);
+            appendBedLineRequest(&requests, line, line_number, honor_strand, global_orientation, chunk_allocator, true, &last_duplicated_name);
         }
 
         if (requests.items.len == 0) {
@@ -727,7 +854,7 @@ fn processBedReaderChunked(
             break;
         }
 
-        const batch = processParsedRequests(idx, chunk_allocator, requests.items, writer);
+        const batch = processParsedRequests(idx, chunk_allocator, requests.items, annotate_transform, writer);
         total.region_count += batch.region_count;
         total.total_bases += batch.total_bases;
 
@@ -744,13 +871,15 @@ fn processBedPathChunked(
     idx: *const LoadedIndex,
     path: []const u8,
     honor_strand: bool,
+    global_orientation: Orientation,
     chunk_size: usize,
+    annotate_transform: bool,
     writer: anytype,
 ) BatchStats {
     if (std.mem.eql(u8, path, "-")) {
         var stdin_buf: [4096]u8 = undefined;
         var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buf);
-        return processBedReaderChunked(idx, &stdin_reader.interface, honor_strand, chunk_size, writer);
+        return processBedReaderChunked(idx, &stdin_reader.interface, honor_strand, global_orientation, chunk_size, annotate_transform, writer);
     }
 
     const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
@@ -762,7 +891,7 @@ fn processBedPathChunked(
 
     var file_buf: [4096]u8 = undefined;
     var file_reader = file.reader(io, &file_buf);
-    return processBedReaderChunked(idx, &file_reader.interface, honor_strand, chunk_size, writer);
+    return processBedReaderChunked(idx, &file_reader.interface, honor_strand, global_orientation, chunk_size, annotate_transform, writer);
 }
 
 fn processBedPathAllInMemory(
@@ -771,10 +900,12 @@ fn processBedPathAllInMemory(
     allocator: std.mem.Allocator,
     path: []const u8,
     honor_strand: bool,
+    global_orientation: Orientation,
+    annotate_transform: bool,
     writer: anytype,
 ) BatchStats {
     const bed_data = readAllInput(allocator, io, path);
-    return processBedData(idx, allocator, bed_data, honor_strand, writer);
+    return processBedData(idx, allocator, bed_data, honor_strand, global_orientation, annotate_transform, writer);
 }
 
 // ============================================================================
@@ -807,10 +938,10 @@ pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions
 
     if (options.names_path) |names_path| {
         const names_data = readAllInput(allocator, io, names_path);
-        appendNamesRequests(&requests, names_data, allocator);
+        appendNamesRequests(&requests, names_data, options.orientation, allocator);
     }
 
-    appendCliRequests(&requests, options.region_strs, allocator);
+    appendCliRequests(&requests, options.region_strs, options.orientation, allocator);
 
     const start_ns = if (options.summary) monotonicNs(io) else 0;
 
@@ -829,15 +960,15 @@ pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions
 
     if (options.bed_path) |bed_path| {
         const batch = if (options.chunk_size == chunk_size_all)
-            processBedPathAllInMemory(io, &idx, allocator, bed_path, options.honor_strand, writer)
+            processBedPathAllInMemory(io, &idx, allocator, bed_path, options.honor_strand, options.orientation, options.annotate_transform, writer)
         else
-            processBedPathChunked(io, &idx, bed_path, options.honor_strand, options.chunk_size, writer);
+            processBedPathChunked(io, &idx, bed_path, options.honor_strand, options.orientation, options.chunk_size, options.annotate_transform, writer);
         totals.region_count += batch.region_count;
         totals.total_bases += batch.total_bases;
     }
 
     if (requests.items.len > 0) {
-        const batch = processParsedRequests(&idx, allocator, requests.items, writer);
+        const batch = processParsedRequests(&idx, allocator, requests.items, options.annotate_transform, writer);
         totals.region_count += batch.region_count;
         totals.total_bases += batch.total_bases;
     }
@@ -870,14 +1001,14 @@ test "processBedReaderChunked matches non-chunked extraction" {
     var chunk_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer chunk_writer.deinit();
 
-    const chunked = processBedReaderChunked(&idx, &chunk_reader, false, 2, &chunk_writer.writer);
+    const chunked = processBedReaderChunked(&idx, &chunk_reader, false, .{}, 2, false, &chunk_writer.writer);
 
     var batch_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer batch_writer.deinit();
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const batch = processBedData(&idx, arena.allocator(), bed_data, false, &batch_writer.writer);
+    const batch = processBedData(&idx, arena.allocator(), bed_data, false, .{}, false, &batch_writer.writer);
 
     try std.testing.expectEqual(batch.region_count, chunked.region_count);
     try std.testing.expectEqual(batch.total_bases, chunked.total_bases);
@@ -897,12 +1028,68 @@ test "processBedReaderChunked preserves strand handling across chunk boundaries"
     var chunk_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer chunk_writer.deinit();
 
-    const chunked = processBedReaderChunked(&idx, &chunk_reader, true, 1, &chunk_writer.writer);
+    const chunked = processBedReaderChunked(&idx, &chunk_reader, true, .{}, 1, false, &chunk_writer.writer);
 
     try std.testing.expectEqual(@as(usize, 2), chunked.region_count);
     try std.testing.expectEqual(@as(u64, 9), chunked.total_bases);
     try std.testing.expectEqualStrings(
-        ">seq1:1-5:rc\nTACGT\n>seq2:1-4\nGGGG\n",
+        ">seq1:1-5\nTACGT\n>seq2:1-4\nGGGG\n",
         chunk_writer.written(),
+    );
+}
+
+test "orientation compose behaves like transform composition" {
+    const minus_strand = Orientation.reverseComplement();
+    const global_rc = Orientation.reverseComplement();
+    const global_reverse = Orientation.reverseOnly();
+    const global_complement = Orientation.complementOnly();
+
+    try std.testing.expect(minus_strand.compose(global_rc).isIdentity());
+    try std.testing.expectEqual(true, minus_strand.compose(global_reverse).complement);
+    try std.testing.expectEqual(false, minus_strand.compose(global_reverse).reverse);
+    try std.testing.expectEqual(true, minus_strand.compose(global_complement).reverse);
+    try std.testing.expectEqual(false, minus_strand.compose(global_complement).complement);
+}
+
+test "processParsedRequests applies complement-only and reverse-only transforms" {
+    const test_io = std.Io.Threaded.global_single_threaded.io();
+    var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
+    defer idx.deinit();
+
+    const requests = [_]ParsedRequest{
+        .{ .region = parseRegion("seq1:1-5"), .orientation = Orientation.complementOnly() },
+        .{ .region = parseRegion("seq1:1-5"), .orientation = Orientation.reverseOnly() },
+    };
+
+    var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer writer.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const batch = processParsedRequests(&idx, arena.allocator(), &requests, true, &writer.writer);
+
+    try std.testing.expectEqual(@as(usize, 2), batch.region_count);
+    try std.testing.expectEqualStrings(
+        ">seq1:1-5 (complement)\nTGCAT\n>seq1:1-5 (reverse)\nATGCA\n",
+        writer.written(),
+    );
+}
+
+test "detectRecordType classifies nucleotide and protein records" {
+    const test_io = std.Io.Threaded.global_single_threaded.io();
+
+    var nucleotide_idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
+    defer nucleotide_idx.deinit();
+    try std.testing.expectEqual(
+        stats.SequenceType.nucleotide,
+        detectRecordType(nucleotide_idx.records[0], nucleotide_idx.fasta_data),
+    );
+
+    var protein_idx = index_format.loadIndex(test_io, "tests/data/proteome.fasta");
+    defer protein_idx.deinit();
+    try std.testing.expectEqual(
+        stats.SequenceType.protein,
+        detectRecordType(protein_idx.records[0], protein_idx.fasta_data),
     );
 }

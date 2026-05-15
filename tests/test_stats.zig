@@ -114,6 +114,13 @@ test "detectType — ACGTN is nucleotide" {
     try std.testing.expectEqual(SequenceType.nucleotide, detectType(&counts, 1000));
 }
 
+test "detectType — full IUPAC ambiguity alphabet is nucleotide" {
+    var counts: [256]u64 = .{0} ** 256;
+    const letters = "ACGTURYSWKMBDHVNacgturyswkmbdhvnu";
+    for (letters) |byte| counts[byte] += 1;
+    try std.testing.expectEqual(SequenceType.nucleotide, detectType(&counts, letters.len));
+}
+
 test "detectType — mixed amino acids is protein" {
     var counts: [256]u64 = .{0} ** 256;
     counts['M'] = 100;
@@ -134,9 +141,10 @@ test "detectType — below 90% threshold is protein" {
     counts['A'] = 200;
     counts['C'] = 200;
     counts['G'] = 200;
-    // A+C+G = 600 out of 700, which is 85.7% => protein
+    // A+C+G = 600 out of 700, which is 85.7% => protein.
+    // Use letters outside the IUPAC nucleotide alphabet for the remainder.
     counts['L'] = 50;
-    counts['M'] = 50;
+    counts['F'] = 50;
     try std.testing.expectEqual(SequenceType.protein, detectType(&counts, 700));
 }
 
