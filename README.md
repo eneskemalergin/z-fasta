@@ -6,7 +6,7 @@
     SIMD-accelerated indexing, O(1) region extraction, and instant assembly stats.<br/>
     samtools-compatible FASTA indexing and extraction, benchmarked against <code>seqkit</code>, <code>fastahack</code>, and <code>pyfaidx</code>.
   </p>
-  <p>Latest tag: <strong>v0.2.7</strong> · main also includes v0.2.8 orientation flags for reverse, complement, and reverse-complement extraction</p>
+  <p>Current release: <strong>v0.2.8</strong></p>
   <br/>
   <a href="https://github.com/eneskemalergin/z-fasta/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/CI-passing-22c55e?style=for-the-badge" alt="CI" /></a>
   <a href="https://ziglang.org/download/0.16.0/"><img src="https://img.shields.io/badge/Zig-0.16.0-F7A41D?style=for-the-badge&logo=zig&logoColor=white" alt="Zig 0.16.0" /></a>
@@ -301,13 +301,10 @@ Add `--skip-real` to the `get` / `stats` scripts to skip real dataset runs (~3 G
 - [x] Zig 0.16.0 migration plus benchmark/report refresh for v0.2.5
 - [x] v0.2.6 performance recovery: lower startup overhead, faster index loading, buffered GET emission, fixed-width stats/index fast paths, and refreshed benchmark reports
 - [x] v0.2.7 BED batch extraction: `--bed`, `--bed -`, `--names`, `--strand-aware`, bounded chunked processing, and verification/benchmark coverage
+- [x] v0.2.8 reverse/complement extraction: `--rc`, `--reverse-only`, `--complement-only`, `--annotate-rc`, RC verification, and integrated RC benchmark/report coverage
 
 **Near-term**
 
-- [ ] v0.2.8: RC release/tag + broader optimization lock-in
-    - [x] `--rc`, `--complement-only`, `--reverse-only`, and `--annotate-rc` are implemented on `main`
-    - [x] Works with single regions, multi-region, names-file, and `--bed` / `--honor-strand` composition
-    - [ ] Final release tag and broader optimization lock-in are still pending
 - [ ] v0.3.0: Validate + Tier 2 benchmarks + release polish
     - [ ] `z-fasta validate`: single-pass FASTA format checker with line-numbered error/warning output
     - [ ] Checks: duplicate names, inconsistent line widths, invalid characters, empty sequences, missing terminal newline

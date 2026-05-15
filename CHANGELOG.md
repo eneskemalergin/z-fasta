@@ -3,7 +3,7 @@
 
 All notable changes to z-fasta will be documented in this file.
 
-## [Unreleased]
+## [0.2.8] - 2026-05-15
 
 ### Added
 
@@ -27,6 +27,10 @@ All notable changes to z-fasta will be documented in this file.
 ### Validation
 
 - `./zig build test --summary all` (102/102 tests passed)
+- `./zig build -Doptimize=ReleaseFast`
+- `bash bench/get/verify_get.sh` (90/90 passed)
+- `bash bench/get/verify_multi_get.sh` (22/22 passed)
+- `bash bench/get/verify_bed.sh` (16/16 passed)
 - `bash bench/get/verify_rc.sh` (19/19 passed)
 
 ## [0.2.7] - 2026-05-13

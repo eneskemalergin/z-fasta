@@ -16,7 +16,7 @@ pub const writeZfi = index_format.writeZfi;
 pub const validateFasta = indexer.validateFasta;
 pub const scanHeaders = indexer.scanHeaders;
 
-const VERSION = "0.2.7";
+const VERSION = "0.2.8";
 const CHUNK_SIZE_FLAG = "--chunk-size";
 const STRAND_AWARE_FLAG = "--strand-aware";
 const STRAND_AWARE_ALIAS = "--honor-strand";
