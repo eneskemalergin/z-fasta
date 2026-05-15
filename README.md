@@ -196,9 +196,9 @@ See [bench/index/REPORT.md](bench/index/REPORT.md) for full scaling curves and m
 | Proteome (14 MB)       | 1 kbp region    | 1.3 ms         | 10.9 ms    | 7.2 ms    | 119 ms  | **8.4×**            |
 | Transcriptome (972 MB) | 1 kbp region    | 25.3 ms        | 278.7 ms   | 220.3 ms  | 1103 ms | **11.0×**           |
 
-> Small-region extraction is O(1), but on this host the end-to-end CLI path is startup-dominated below roughly 10 kbp. The Zig 0.16 minimal startup path keeps those calls under 1 ms on synthetic warm-cache fixtures. For very large full-sequence extraction, fastahack can still win on raw write-path overhead; z-fasta stays ahead of samtools across the real-dataset GET cases.
+> Small-region extraction is O(1), but on this host the end-to-end CLI path is startup-dominated below roughly 10 kbp. The historical checked-in benchmark report for v0.2.6 was generated under a faster local benchmark environment than the current reruns; direct side-by-side rebuilds of v0.2.6, v0.2.7, and current `main` on the same machine do not reproduce a material no-flag `get` regression. For very large full-sequence extraction, fastahack can still win on raw write-path overhead; z-fasta stays ahead of samtools across the real-dataset GET cases.
 
-Orientation note: the shipped `--rc` path keeps the same mmap-backed extraction model and applies reverse traversal plus complement lookup during emission, rather than materializing a second copy of the region. A small checked-in measurement slice is documented in [bench/get/RC_STRATEGY.md](bench/get/RC_STRATEGY.md).
+Orientation note: the shipped `--rc` path keeps the same mmap-backed extraction model and applies reverse traversal plus complement lookup during emission, rather than materializing a second copy of the region. The main GET benchmark report now includes dedicated RC timing and RSS sections against `samtools faidx -i` and `bedtools getfasta | seqtk seq -r`, and the implementation choice is summarized in [bench/get/RC_STRATEGY.md](bench/get/RC_STRATEGY.md).
 
 **Multi-region (v0.2.4):** `z-fasta get` accepts multiple regions per call, loading the index once and streaming all results in CLI order.
 
@@ -211,7 +211,7 @@ Orientation note: the shipped `--rc` path keeps the same mmap-backed extraction 
 
 > Benchmarked on REAL_Transcriptome.fa (972 MB, 254,070 sequences). Latency is dominated by index resolution and output setup rather than region byte count. seqtk performs a full-file scan per call regardless of region count and is listed for reference only.
 
-See [bench/get/REPORT.md](bench/get/REPORT.md) for full results.
+Run `.venv/bin/python bench/get/generate_report.py` to regenerate the full GET report under `bench/get/REPORT.md`, including RC positional/BED comparisons and the RC memory snapshot.
 
 ### Stats: Assembly/Proteome Statistics
 

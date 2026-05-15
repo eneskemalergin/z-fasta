@@ -3,7 +3,7 @@
 # Measures region extraction performance: runtime, memory, throughput.
 # Uses hyperfine for precise timing with cache clearing between runs.
 #
-# Usage: ./run_benchmarks.sh [--runs N] [--skip-scaling] [--skip-real]
+# Usage: ./run_benchmarks.sh [--runs N] [--skip-scaling] [--skip-real] [--skip-rc] [--rc-full]
 #
 # Outputs:
 #   results/single_<timestamp>.json    — single-region latency
@@ -41,6 +41,8 @@ RUNS=5
 WARMUP=1
 SKIP_SCALING=false
 SKIP_REAL=false
+SKIP_RC=false
+RC_PROFILE="quick"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -48,6 +50,8 @@ while [[ $# -gt 0 ]]; do
         --warmup)        WARMUP="$2"; shift 2 ;;
         --skip-scaling)  SKIP_SCALING=true; shift ;;
         --skip-real)     SKIP_REAL=true; shift ;;
+        --skip-rc)       SKIP_RC=true; shift ;;
+        --rc-full)       RC_PROFILE="full"; shift ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -93,6 +97,7 @@ echo "  seqkit:    $HAS_SEQKIT"
 echo "  fastahack: $HAS_FASTAHACK"
 echo "  seqtk:     $HAS_SEQTK ($SEQTK)"
 echo "  pyfaidx:   $HAS_PYFAIDX ($PYFAIDX)"
+echo "  rc bench:  $([[ "$SKIP_RC" == true ]] && echo skipped || echo "$RC_PROFILE")"
 echo ""
 
 # ── Helper: ensure index exists for a FASTA file ──────────────────
@@ -751,10 +756,351 @@ else
     echo "  SKIP: no suitable multi-sequence file found"
 fi
 
-echo ""
+if ! $SKIP_RC; then
+    echo ""
+    echo "──────────────────────────────────────────────────"
+    echo " [8] RC Orientation Review"
+    echo "──────────────────────────────────────────────────"
 
+    rc_run_hyperfine_markdown() {
+        local markdown_out="$1"
+        local json_out="$2"
+        shift 2
+        hyperfine --warmup "$WARMUP" --runs "$RUNS" --export-markdown "$markdown_out" --export-json "$json_out" "$@"
+    }
+
+    rc_make_region() {
+        local start="$1"
+        local size="$2"
+        local end=$(( start + size - 1 ))
+        printf '%s:%d-%d' "$RC_SEQ_NAME" "$start" "$end"
+    }
+
+    rc_build_multi_command() {
+        local count="$1"
+        local with_rc="$2"
+        local args=()
+        local size=1000
+        local start=1000
+        local max_start=$(( RC_SEQ_LEN - size - 1 ))
+        local usable_span=$(( max_start - start ))
+        local step
+
+        if (( usable_span <= 0 )); then
+            echo "RC review fixture is too short for multi-region benchmarking" >&2
+            exit 1
+        fi
+
+        step=$(( usable_span / (count + 1) ))
+        if (( step < size )); then
+            step=$size
+        fi
+
+        for ((i = 0; i < count; i += 1)); do
+            args+=("$(rc_make_region $(( start + (i * step) )) "$size")")
+        done
+
+        printf '%q get %q' "$ZFASTA" "$RC_FASTA"
+        for region in "${args[@]}"; do
+            printf ' %q' "$region"
+        done
+        if [[ "$with_rc" == "true" ]]; then
+            printf ' --rc'
+        fi
+        printf ' > /dev/null'
+    }
+
+    rc_samtools_multi_command() {
+        local count="$1"
+        local size=1000
+        local start=1000
+        local max_start=$(( RC_SEQ_LEN - size - 1 ))
+        local usable_span=$(( max_start - start ))
+        local step=$(( usable_span / (count + 1) ))
+
+        if (( step < size )); then
+            step=$size
+        fi
+
+        printf '%q faidx -i --mark-strand no %q' "$SAMTOOLS" "$RC_FASTA"
+        for ((i = 0; i < count; i += 1)); do
+            printf ' %q' "$(rc_make_region $(( start + (i * step) )) "$size")"
+        done
+        printf ' > /dev/null'
+    }
+
+    rc_bedtools_seqtk_command() {
+        local bed_file="$1"
+        local stranded="$2"
+
+        if [[ "$stranded" == "true" ]]; then
+            printf '%q getfasta -fi %q -bed %q -s | %q seq -r > /dev/null' "$BEDTOOLS" "$RC_FASTA" "$bed_file" "$SEQTK"
+        else
+            printf '%q getfasta -fi %q -bed %q | %q seq -r > /dev/null' "$BEDTOOLS" "$RC_FASTA" "$bed_file" "$SEQTK"
+        fi
+    }
+
+    rc_measure_rss() {
+        local label="$1"
+        local command="$2"
+        local tmpfile="$TMP_WORK_DIR/rc_${label}.time"
+
+        bash -lc "/usr/bin/time -v $command" >/dev/null 2> "$tmpfile"
+        awk -v label="$label" '
+            /Elapsed \(wall clock\) time/ { elapsed = $NF }
+            /Maximum resident set size/ { rss = $NF }
+            END { printf "%s\t%s\t%s\n", label, elapsed, rss }
+        ' "$tmpfile"
+    }
+
+    RC_DIR="$RESULTS_DIR/rc_review_${TIMESTAMP}"
+    RC_JSON_DIR="$RC_DIR/json"
+    RC_WORK_DIR="$TMP_WORK_DIR/rc_review"
+    mkdir -p "$RC_DIR" "$RC_JSON_DIR" "$RC_WORK_DIR"
+
+    RC_FASTA="$RC_WORK_DIR/rc_review.fa"
+    RC_BED="$RC_WORK_DIR/rc_review.bed"
+    RC_BED_STRANDED="$RC_WORK_DIR/rc_review_stranded.bed"
+    RC_SEQ_NAME="chrSynthetic"
+
+    if [[ "$RC_PROFILE" == "full" ]]; then
+        RC_SEQ_LEN=8000000
+        RC_BED_COUNT=10000
+        RC_LARGE_REGION_SIZE=1000000
+        RC_MULTI_COUNT_A=10
+        RC_MULTI_COUNT_B=100
+    else
+        RC_SEQ_LEN=2000000
+        RC_BED_COUNT=2000
+        RC_LARGE_REGION_SIZE=250000
+        RC_MULTI_COUNT_A=10
+        RC_MULTI_COUNT_B=50
+    fi
+
+    echo "  Preparing synthetic RC fixture..."
+    {
+        echo ">${RC_SEQ_NAME} reverse-complement review fixture"
+        awk -v total="$RC_SEQ_LEN" -v width=60 '
+            BEGIN {
+                pattern = "ACGTNRYWSKMBDHVacgtnrywskmbdhv"
+                seq = ""
+                while (length(seq) < total) {
+                    seq = seq pattern
+                }
+                seq = substr(seq, 1, total)
+                while (length(seq) > 0) {
+                    print substr(seq, 1, width)
+                    seq = substr(seq, width + 1)
+                }
+            }
+        '
+    } > "$RC_FASTA"
+    "$ZFASTA" index "$RC_FASTA" >/dev/null
+
+    : > "$RC_BED"
+    : > "$RC_BED_STRANDED"
+    for ((i = 0; i < RC_BED_COUNT; i += 1)); do
+        s=$(( 1000 + (i * 400) ))
+        e=$(( s + 120 ))
+        printf '%s\t%d\t%d\n' "$RC_SEQ_NAME" "$s" "$e" >> "$RC_BED"
+        if ((( i % 2 ) == 0 )); then
+            strand='+'
+        else
+            strand='-'
+        fi
+        printf '%s\t%d\t%d\tregion_%05d\t0\t%s\n' "$RC_SEQ_NAME" "$s" "$e" "$i" "$strand" >> "$RC_BED_STRANDED"
+    done
+
+    RC_REGION_SMALL="$(rc_make_region 1000 100)"
+    RC_REGION_MEDIUM="$(rc_make_region 200000 10000)"
+    RC_REGION_LARGE="$(rc_make_region 200000 "$RC_LARGE_REGION_SIZE")"
+    RC_REGION_FULL="$RC_SEQ_NAME"
+    RC_MULTI_A_FORWARD="$(rc_build_multi_command "$RC_MULTI_COUNT_A" false)"
+    RC_MULTI_A_RC="$(rc_build_multi_command "$RC_MULTI_COUNT_A" true)"
+    RC_MULTI_B_FORWARD="$(rc_build_multi_command "$RC_MULTI_COUNT_B" false)"
+    RC_MULTI_B_RC="$(rc_build_multi_command "$RC_MULTI_COUNT_B" true)"
+    RC_SAMTOOLS_MULTI_A_RC=""
+    RC_SAMTOOLS_MULTI_B_RC=""
+    RC_BEDTOOLS_BED_RC=""
+    RC_BEDTOOLS_BED_STRANDED_RC=""
+
+    if [[ "$HAS_SEQTK" == true && "$HAS_BEDTOOLS" == true ]]; then
+        RC_BEDTOOLS_BED_RC="$(rc_bedtools_seqtk_command "$RC_BED" false)"
+        RC_BEDTOOLS_BED_STRANDED_RC="$(rc_bedtools_seqtk_command "$RC_BED_STRANDED" true)"
+    fi
+    RC_HAS_SAMTOOLS=true
+    if ! command -v "$SAMTOOLS" >/dev/null 2>&1; then
+        RC_HAS_SAMTOOLS=false
+    else
+        RC_SAMTOOLS_MULTI_A_RC="$(rc_samtools_multi_command "$RC_MULTI_COUNT_A")"
+        RC_SAMTOOLS_MULTI_B_RC="$(rc_samtools_multi_command "$RC_MULTI_COUNT_B")"
+    fi
+
+    echo "  profile: $RC_PROFILE (runs=$RUNS, warmup=$WARMUP, seq_len=$RC_SEQ_LEN, bed_count=$RC_BED_COUNT)"
+    echo "  [8.1] orientation small"
+    RC_ORIENTATION_SMALL_ARGS=(
+        -n forward "$ZFASTA get '$RC_FASTA' '$RC_REGION_SMALL' > /dev/null"
+        -n zf-rc "$ZFASTA get '$RC_FASTA' '$RC_REGION_SMALL' --rc > /dev/null"
+        -n reverse-only "$ZFASTA get '$RC_FASTA' '$RC_REGION_SMALL' --reverse-only > /dev/null"
+        -n complement-only "$ZFASTA get '$RC_FASTA' '$RC_REGION_SMALL' --complement-only > /dev/null"
+        -n rc-annotate "$ZFASTA get '$RC_FASTA' '$RC_REGION_SMALL' --rc --annotate-rc > /dev/null"
+    )
+    if [[ "$RC_HAS_SAMTOOLS" == true ]]; then
+        RC_ORIENTATION_SMALL_ARGS+=(
+            -n samtools-rc "$SAMTOOLS faidx -i --mark-strand no '$RC_FASTA' '$RC_REGION_SMALL' > /dev/null"
+        )
+    fi
+    rc_run_hyperfine_markdown \
+        "$RC_DIR/orientation_small.md" \
+        "$RC_JSON_DIR/orientation_small.json" \
+        "${RC_ORIENTATION_SMALL_ARGS[@]}"
+
+    echo "  [8.2] orientation medium"
+    RC_ORIENTATION_MEDIUM_ARGS=(
+        -n forward "$ZFASTA get '$RC_FASTA' '$RC_REGION_MEDIUM' > /dev/null"
+        -n zf-rc "$ZFASTA get '$RC_FASTA' '$RC_REGION_MEDIUM' --rc > /dev/null"
+        -n reverse-only "$ZFASTA get '$RC_FASTA' '$RC_REGION_MEDIUM' --reverse-only > /dev/null"
+        -n complement-only "$ZFASTA get '$RC_FASTA' '$RC_REGION_MEDIUM' --complement-only > /dev/null"
+        -n rc-annotate "$ZFASTA get '$RC_FASTA' '$RC_REGION_MEDIUM' --rc --annotate-rc > /dev/null"
+    )
+    if [[ "$RC_HAS_SAMTOOLS" == true ]]; then
+        RC_ORIENTATION_MEDIUM_ARGS+=(
+            -n samtools-rc "$SAMTOOLS faidx -i --mark-strand no '$RC_FASTA' '$RC_REGION_MEDIUM' > /dev/null"
+        )
+    fi
+    rc_run_hyperfine_markdown \
+        "$RC_DIR/orientation_medium.md" \
+        "$RC_JSON_DIR/orientation_medium.json" \
+        "${RC_ORIENTATION_MEDIUM_ARGS[@]}"
+
+    echo "  [8.3] orientation large"
+    RC_ORIENTATION_LARGE_ARGS=(
+        -n forward "$ZFASTA get '$RC_FASTA' '$RC_REGION_LARGE' > /dev/null"
+        -n zf-rc "$ZFASTA get '$RC_FASTA' '$RC_REGION_LARGE' --rc > /dev/null"
+        -n reverse-only "$ZFASTA get '$RC_FASTA' '$RC_REGION_LARGE' --reverse-only > /dev/null"
+        -n complement-only "$ZFASTA get '$RC_FASTA' '$RC_REGION_LARGE' --complement-only > /dev/null"
+        -n rc-annotate "$ZFASTA get '$RC_FASTA' '$RC_REGION_LARGE' --rc --annotate-rc > /dev/null"
+    )
+    if [[ "$RC_HAS_SAMTOOLS" == true ]]; then
+        RC_ORIENTATION_LARGE_ARGS+=(
+            -n samtools-rc "$SAMTOOLS faidx -i --mark-strand no '$RC_FASTA' '$RC_REGION_LARGE' > /dev/null"
+        )
+    fi
+    rc_run_hyperfine_markdown \
+        "$RC_DIR/orientation_large.md" \
+        "$RC_JSON_DIR/orientation_large.json" \
+        "${RC_ORIENTATION_LARGE_ARGS[@]}"
+
+    echo "  [8.4] full-sequence forward vs rc"
+    RC_FULL_ARGS=(
+        -n forward "$ZFASTA get '$RC_FASTA' '$RC_REGION_FULL' > /dev/null"
+        -n zf-rc "$ZFASTA get '$RC_FASTA' '$RC_REGION_FULL' --rc > /dev/null"
+        -n rc-annotate "$ZFASTA get '$RC_FASTA' '$RC_REGION_FULL' --rc --annotate-rc > /dev/null"
+    )
+    if [[ "$RC_HAS_SAMTOOLS" == true ]]; then
+        RC_FULL_ARGS+=(
+            -n samtools-rc "$SAMTOOLS faidx -i --mark-strand no '$RC_FASTA' '$RC_REGION_FULL' > /dev/null"
+        )
+    fi
+    rc_run_hyperfine_markdown \
+        "$RC_DIR/full_sequence.md" \
+        "$RC_JSON_DIR/full_sequence.json" \
+        "${RC_FULL_ARGS[@]}"
+
+    echo "  [8.5] multi-region no-flag regression vs rc"
+    RC_MULTI_ARGS=(
+        -n multi${RC_MULTI_COUNT_A}-forward "$RC_MULTI_A_FORWARD"
+        -n multi${RC_MULTI_COUNT_A}-zf-rc "$RC_MULTI_A_RC"
+        -n multi${RC_MULTI_COUNT_B}-forward "$RC_MULTI_B_FORWARD"
+        -n multi${RC_MULTI_COUNT_B}-zf-rc "$RC_MULTI_B_RC"
+    )
+    if [[ "$RC_HAS_SAMTOOLS" == true ]]; then
+        RC_MULTI_ARGS+=(
+            -n multi${RC_MULTI_COUNT_A}-samtools-rc "$RC_SAMTOOLS_MULTI_A_RC"
+            -n multi${RC_MULTI_COUNT_B}-samtools-rc "$RC_SAMTOOLS_MULTI_B_RC"
+        )
+    fi
+    rc_run_hyperfine_markdown \
+        "$RC_DIR/multi_region.md" \
+        "$RC_JSON_DIR/multi_region.json" \
+        "${RC_MULTI_ARGS[@]}"
+
+    echo "  [8.6] bed batch orientation overhead"
+    RC_BED_ARGS=(
+        -n bed-forward "$ZFASTA get '$RC_FASTA' --bed '$RC_BED' > /dev/null"
+        -n bed-zf-rc "$ZFASTA get '$RC_FASTA' --bed '$RC_BED' --rc > /dev/null"
+        -n bed-reverse-only "$ZFASTA get '$RC_FASTA' --bed '$RC_BED' --reverse-only > /dev/null"
+        -n bed-complement-only "$ZFASTA get '$RC_FASTA' --bed '$RC_BED' --complement-only > /dev/null"
+        -n bed-honor-strand-zf-rc "$ZFASTA get '$RC_FASTA' --bed '$RC_BED_STRANDED' --honor-strand --rc > /dev/null"
+    )
+    if [[ -n "$RC_BEDTOOLS_BED_RC" ]]; then
+        RC_BED_ARGS+=(
+            -n bed-bedtools-seqtk-rc "$RC_BEDTOOLS_BED_RC"
+            -n bed-honor-strand-bedtools-seqtk-rc "$RC_BEDTOOLS_BED_STRANDED_RC"
+        )
+    fi
+    rc_run_hyperfine_markdown \
+        "$RC_DIR/bed_batch.md" \
+        "$RC_JSON_DIR/bed_batch.json" \
+        "${RC_BED_ARGS[@]}"
+
+    {
+        printf 'label\telapsed\tmaxrss_kb\n'
+        rc_measure_rss forward "$ZFASTA get '$RC_FASTA' '$RC_REGION_LARGE' > /dev/null"
+        rc_measure_rss zf_rc "$ZFASTA get '$RC_FASTA' '$RC_REGION_LARGE' --rc > /dev/null"
+        rc_measure_rss rc_annotate "$ZFASTA get '$RC_FASTA' '$RC_REGION_LARGE' --rc --annotate-rc > /dev/null"
+        rc_measure_rss multi_b_forward "$RC_MULTI_B_FORWARD"
+        rc_measure_rss multi_b_zf_rc "$RC_MULTI_B_RC"
+        rc_measure_rss bed_forward "$ZFASTA get '$RC_FASTA' --bed '$RC_BED' > /dev/null"
+        rc_measure_rss bed_honor_strand_zf_rc "$ZFASTA get '$RC_FASTA' --bed '$RC_BED_STRANDED' --honor-strand --rc > /dev/null"
+        if [[ "$RC_HAS_SAMTOOLS" == true ]]; then
+            rc_measure_rss samtools_rc "$SAMTOOLS faidx -i --mark-strand no '$RC_FASTA' '$RC_REGION_LARGE' > /dev/null"
+            rc_measure_rss multi_b_samtools_rc "$RC_SAMTOOLS_MULTI_B_RC"
+        fi
+        if [[ -n "$RC_BEDTOOLS_BED_STRANDED_RC" ]]; then
+            rc_measure_rss bed_honor_strand_bedtools_seqtk_rc "$RC_BEDTOOLS_BED_STRANDED_RC"
+        fi
+    } > "$RC_DIR/rss.tsv"
+
+    echo "  RC outputs → $RC_DIR"
+fi
+
+echo ""
 echo "════════════════════════════════════════════════════════════════"
-echo "  GET benchmarks complete."
+echo "  All GET benchmark slices complete."
 echo "  Results in: $RESULTS_DIR"
 echo "  Run: .venv/bin/python bench/get/generate_report.py"
 echo "════════════════════════════════════════════════════════════════"
+
+MANIFEST_PATH="$RESULTS_DIR/run_${TIMESTAMP}.json"
+PRODUCED=(single fullseq bed memory multi)
+if ! $SKIP_SCALING; then
+    PRODUCED+=(scale_region)
+fi
+if ! $SKIP_REAL; then
+    PRODUCED+=(real)
+fi
+if ! $SKIP_RC; then
+    PRODUCED+=(rc_review)
+fi
+
+{
+    echo "{"
+    printf '  "timestamp": "%s",\n' "$TIMESTAMP"
+    printf '  "runs": %s,\n' "$RUNS"
+    printf '  "warmup": %s,\n' "$WARMUP"
+    printf '  "bench_mode": "%s",\n' "$BENCH_MODE"
+    printf '  "skip_scaling": %s,\n' "$([[ "$SKIP_SCALING" == true ]] && echo true || echo false)"
+    printf '  "skip_real": %s,\n' "$([[ "$SKIP_REAL" == true ]] && echo true || echo false)"
+    printf '  "skip_rc": %s,\n' "$([[ "$SKIP_RC" == true ]] && echo true || echo false)"
+    printf '  "rc_profile": "%s",\n' "$RC_PROFILE"
+    printf '  "produced": ['
+    for i in "${!PRODUCED[@]}"; do
+        if [[ "$i" -gt 0 ]]; then
+            printf ', '
+        fi
+        printf '"%s"' "${PRODUCED[$i]}"
+    done
+    printf ']\n'
+    echo "}"
+} > "$MANIFEST_PATH"

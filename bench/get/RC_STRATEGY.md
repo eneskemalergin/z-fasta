@@ -23,11 +23,12 @@ This keeps the shipped reverse path zero-allocation with respect to region size 
 
 ## Review Harness
 
-Focused RC review is now reproducible with `bash bench/get/run_rc_review.sh`.
+Focused RC review is now part of `bash bench/get/run_benchmarks.sh`.
 
 - `--quick` is the default local-edit profile: smaller synthetic fixture, lighter BED batch, lighter multi-region slice.
-- `--full` keeps the same benchmark shape but scales the synthetic fixture and batch sizes up for a heavier rerun.
+- `--rc-full` keeps the same benchmark shape but scales the synthetic fixture and batch sizes up for a heavier rerun.
 - Outputs land in `bench/get/results/rc_review_<timestamp>/` as markdown tables, JSON, and a small RSS snapshot.
+- The main GET report carries the RC timing and RSS evidence directly instead of treating it as a separate manual appendix.
 
 ## Narrow Measurement Slice
 
@@ -76,6 +77,12 @@ Quick-profile RSS snapshot:
 - large-region `--rc --annotate-rc`: `1084 kB`
 - multi-region forward / `--rc`: `2600 kB` / `2608 kB`
 - BED forward / `--honor-strand --rc`: `2112 kB` / `2104 kB`
+
+External baseline slice now carried in the main GET report:
+
+- positional `--rc` is benchmarked against `samtools faidx -i --mark-strand no`
+- BED `--rc` and `--honor-strand --rc` are benchmarked against `bedtools getfasta` plus `seqtk seq -r`
+- the checked-in report now shows both the runtime gap and the RC-specific RSS snapshot alongside the existing forward-path sections
 
 ## Optimization Finding
 

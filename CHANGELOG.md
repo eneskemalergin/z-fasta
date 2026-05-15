@@ -13,7 +13,6 @@ All notable changes to z-fasta will be documented in this file.
 - `z-fasta get --annotate-rc`: optional transform annotation for FASTA headers
 - `bench/get/verify_rc.sh`: RC / reverse / complement verification against `samtools`, `bedtools`, and `seqtk`
 - `bench/get/RC_STRATEGY.md`: checked-in note for the shipped reverse strategy and the current measurement slice
-- `bench/get/run_rc_review.sh`: focused RC lock-in benchmark harness with quick and full profiles
 
 ### Changed
 
@@ -22,7 +21,8 @@ All notable changes to z-fasta will be documented in this file.
 - `src/getter.zig`: complement validation now caches the last detected record type so BED / batch complement paths do not rescan the same record sample repeatedly
 - `src/stats.zig`: nucleotide/protein detection now treats the full IUPAC nucleotide alphabet, including lowercase ambiguity codes and `U/u`, as nucleotide-like
 - `src/indexer.zig`: fixed wrapped short-tail sequence length accounting so whole-sequence reverse extraction does not start from a trailing newline
-- `README.md` and `bench/get/README.md`: release-surface docs updated for `--rc`, `--reverse-only`, `--complement-only`, `--annotate-rc`, the RC review harness, and the checked-in reverse-strategy note
+- `bench/get/run_benchmarks.sh` and `bench/get/generate_report.py`: the main GET benchmark/report flow now includes the RC review slice by default, including RC timing and RSS comparisons against `samtools faidx -i` and `bedtools + seqtk` where applicable
+- `README.md` and `bench/get/README.md`: release-surface docs updated for `--rc`, `--reverse-only`, `--complement-only`, `--annotate-rc`, and the checked-in reverse-strategy note
 
 ### Validation
 
