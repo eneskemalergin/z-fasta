@@ -3,6 +3,10 @@
 
 All notable changes to z-fasta will be documented in this file.
 
+## [0.2.9] - Unreleased
+
+Various memory safety, optimizations and re-building benchmarking framework to work with less dependencies.
+
 ## [0.2.8] - 2026-05-15
 
 ### Added
