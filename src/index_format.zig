@@ -429,7 +429,8 @@ fn isValidZfiRecord(rec: IndexRecord, fasta_data: []align(4096) const u8) bool {
     if (rec.name_offset + rec.name_len > fasta_len) return false;
     if (fasta_data[rec.name_offset - 1] != '>') return false;
 
-    if (rec.seq_len == 0 or rec.seq_offset > fasta_len) return false;
+    if (rec.seq_len == 0) return false;
+    if (rec.seq_offset >= fasta_len) return false;
     if (rec.line_bases == 0 or rec.line_bytes == 0) return false;
     if (rec.line_bytes < rec.line_bases) return false;
 

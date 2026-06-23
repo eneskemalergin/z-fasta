@@ -61,6 +61,15 @@ pub const GetOptions = struct {
 
 pub const chunk_size_all = std.math.maxInt(usize);
 
+/// Maximum BED/names input size for the all-in-memory path (`--chunk-size -1`).
+pub const max_input_file_bytes: usize = 512 * 1024 * 1024;
+
+/// Per-region output cap for the multi-region sort buffer path (≥16 regions).
+pub const max_sort_path_region_output_bytes: u64 = 64 * 1024 * 1024;
+
+/// Total intermediate output cap for the multi-region sort buffer path.
+pub const max_sort_path_total_output_bytes: u64 = 256 * 1024 * 1024;
+
 const ParsedRequest = struct {
     region: Region,
     orientation: Orientation,
@@ -543,12 +552,37 @@ fn monotonicNs(io: std.Io) u64 {
     return @intCast(now.raw.toNanoseconds());
 }
 
+fn estimateRegionOutputBytes(resolved: ResolvedRegion) u64 {
+    const wrap_lines = resolved.num_bases / 60 + @as(u64, @intFromBool(resolved.num_bases % 60 != 0));
+    const header_len: u64 = if (resolved.is_full)
+        @intCast(resolved.name.len + 1)
+    else
+        @intCast(resolved.name.len + 32);
+    const annotation_len: u64 = if (resolved.annotate_transform) 24 else 0;
+    return resolved.num_bases + wrap_lines + header_len + annotation_len;
+}
+
+fn shouldUseSortBuffers(resolved: []const ResolvedRegion) bool {
+    var total: u64 = 0;
+    for (resolved) |r| {
+        const est = estimateRegionOutputBytes(r);
+        if (est > max_sort_path_region_output_bytes) return false;
+        total += est;
+        if (total > max_sort_path_total_output_bytes) return false;
+    }
+    return true;
+}
+
 fn readAllInput(allocator: std.mem.Allocator, io: std.Io, path: []const u8) []u8 {
     if (std.mem.eql(u8, path, "-")) {
         var stdin_buf: [4096]u8 = undefined;
         var reader = std.Io.File.stdin().reader(io, &stdin_buf);
-        return reader.interface.allocRemaining(allocator, .unlimited) catch {
-            printErrorAndExit("error: failed to read stdin\n", .{});
+        return reader.interface.allocRemaining(allocator, .limited(max_input_file_bytes)) catch |err| switch (err) {
+            error.StreamTooLong => printErrorAndExit(
+                "error: stdin exceeds {d} byte limit; use --chunk-size 4096 for large BED input\n",
+                .{max_input_file_bytes},
+            ),
+            else => printErrorAndExit("error: failed to read stdin\n", .{}),
         };
     }
 
@@ -562,6 +596,13 @@ fn readAllInput(allocator: std.mem.Allocator, io: std.Io, path: []const u8) []u8
     const stat = file.stat(io) catch {
         printErrorAndExit("error: failed to stat file: {s}\n", .{path});
     };
+
+    if (stat.size > max_input_file_bytes) {
+        printErrorAndExit(
+            "error: input file exceeds {d} byte limit: {s}; use default --chunk-size for large BED files\n",
+            .{ max_input_file_bytes, path },
+        );
+    }
 
     const bytes = allocator.alloc(u8, stat.size) catch {
         printErrorAndExit("error: out of memory\n", .{});
@@ -765,6 +806,17 @@ fn processParsedRequests(idx: *const LoadedIndex, allocator: std.mem.Allocator, 
         }
     } else {
         if (already_in_offset_order) {
+            for (resolved) |r| {
+                total_bases += r.num_bases;
+                emitRegion(r, idx.fasta_data, writer);
+            }
+            return .{
+                .region_count = requests.len,
+                .total_bases = total_bases,
+            };
+        }
+
+        if (!shouldUseSortBuffers(resolved)) {
             for (resolved) |r| {
                 total_bases += r.num_bases;
                 emitRegion(r, idx.fasta_data, writer);
@@ -1092,4 +1144,43 @@ test "detectRecordType classifies nucleotide and protein records" {
         stats.SequenceType.protein,
         detectRecordType(protein_idx.records[0], protein_idx.fasta_data),
     );
+}
+
+test "shouldUseSortBuffers accepts typical 20-region batch" {
+    var regions: [20]ResolvedRegion = undefined;
+    for (&regions, 0..) |*r, i| {
+        r.* = .{
+            .name = "seq1",
+            .start = @intCast(i + 1),
+            .display_end = @intCast(i + 1),
+            .is_full = false,
+            .start_byte = 100 + i,
+            .seq_offset = 6,
+            .num_bases = 1,
+            .line_bases = 24,
+            .line_bytes = 25,
+            .orientation = .{},
+            .annotate_transform = false,
+            .original_index = i,
+        };
+    }
+    try std.testing.expect(shouldUseSortBuffers(&regions));
+}
+
+test "shouldUseSortBuffers rejects oversized single region" {
+    const region = ResolvedRegion{
+        .name = "chr1",
+        .start = 1,
+        .display_end = max_sort_path_region_output_bytes,
+        .is_full = false,
+        .start_byte = 0,
+        .seq_offset = 0,
+        .num_bases = max_sort_path_region_output_bytes,
+        .line_bases = 60,
+        .line_bytes = 61,
+        .orientation = .{},
+        .annotate_transform = false,
+        .original_index = 0,
+    };
+    try std.testing.expect(!shouldUseSortBuffers(&.{region}));
 }

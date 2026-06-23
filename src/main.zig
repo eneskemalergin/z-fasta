@@ -289,10 +289,19 @@ fn runIndex(io: std.Io, args: *std.process.Args.Iterator) void {
             printErrorAndExit("error: path too long\n", .{});
         };
 
-        const out_file = std.Io.Dir.cwd().createFile(io, zfi_path, .{}) catch {
-            printErrorAndExit("error: cannot create: {s}\n", .{zfi_path});
+        var zfi_tmp_buf: [4096]u8 = undefined;
+        const zfi_tmp_path = std.fmt.bufPrint(&zfi_tmp_buf, "{s}.zfi.tmp", .{path}) catch {
+            printErrorAndExit("error: path too long\n", .{});
+        };
+
+        const cwd = std.Io.Dir.cwd();
+        cwd.deleteFile(io, zfi_tmp_path) catch {};
+
+        const out_file = cwd.createFile(io, zfi_tmp_path, .{}) catch {
+            printErrorAndExit("error: cannot create: {s}\n", .{zfi_tmp_path});
         };
         defer out_file.close(io);
+        errdefer cwd.deleteFile(io, zfi_tmp_path) catch {};
 
         var file_buf: [65536]u8 = undefined;
         var file_fw = out_file.writer(io, &file_buf);
@@ -314,7 +323,7 @@ fn runIndex(io: std.Io, args: *std.process.Args.Iterator) void {
         file_fw.flush() catch {};
 
         if (record_count == 0) {
-            std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+            cwd.deleteFile(io, zfi_tmp_path) catch {};
             printErrorAndExit("error: no valid sequences found in: {s}\n", .{path});
         }
 
@@ -322,6 +331,11 @@ fn runIndex(io: std.Io, args: *std.process.Args.Iterator) void {
         file_fw.seekTo(4) catch {};
         file_fw.interface.writeInt(u32, record_count, .little) catch {};
         file_fw.flush() catch {};
+
+        cwd.rename(zfi_tmp_path, cwd, zfi_path, io) catch {
+            cwd.deleteFile(io, zfi_tmp_path) catch {};
+            printErrorAndExit("error: failed to finalize index: {s}\n", .{zfi_path});
+        };
 
         std.debug.print("wrote {s} ({d} sequences)\n", .{ zfi_path, record_count });
     }

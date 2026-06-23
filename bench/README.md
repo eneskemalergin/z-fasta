@@ -32,6 +32,30 @@ bench/
     generate_report.py     # Produces REPORT.md + PNG figures
     REPORT.md              # Full STATS benchmark report
     results/               # Timestamped JSON, memory/throughput CSV, figures/
+  wrappers/                # Tier 2 wrapper benchmarks
+    bench_all.sh           # Hyperfine benchmarks for noodles-fasta, rust-bio
+    sanity_check.sh        # Correctness verification against samtools
+    results/               # Timestamped JSON output
+```
+
+## Tier 2 Rust Wrappers
+
+The `bench/wrappers/` directory contains benchmarks for Rust FASTA libraries that don't have standalone CLI tools. These wrappers are built in `tools/`:
+
+| Wrapper | Library | Indexer | Notes |
+| --- | --- | --- | --- |
+| `noodles_wrapper` | noodles-fasta 0.61 | Built-in (`noodles_fasta::fs::index()`) | Direct comparison to samtools |
+| `rustbio_wrapper` | rust-bio 2.3 | Custom (no built-in indexer) | Must be labeled as "custom indexer" in papers |
+
+Run Tier 2 benchmarks:
+
+```bash
+# Build wrappers first
+cd tools/noodles_wrapper && cargo build --release && cd ../..
+cd tools/rustbio_wrapper && cargo build --release && cd ../..
+
+# Run cross-tool comparison
+bash bench/wrappers/bench_all.sh --runs 5
 ```
 
 ## Prerequisites
@@ -61,6 +85,8 @@ This prints a version-pins table and installs `pyfaidx` into the project `.venv`
 | [seqkit](https://bioinf.shenwei.me/seqkit/) | v2.13.0 | Go-based FASTA toolkit | `tools/seqkit` |
 | [fastahack](https://github.com/ekg/fastahack) | 1.0.0 | C++ FASTA indexer | `tools/fastahack-1.0.0/fastahack` |
 | [seqtk](https://github.com/lh3/seqtk) | 1.5-r133 | C FASTA/FASTQ toolkit | `tools/seqtk/seqtk` |
+| [noodles-fasta](https://github.com/zaeleus/noodles) | 0.61 | Rust FASTA library (Tier 2) | `tools/noodles_wrapper/target/release/noodles_wrapper` |
+| [rust-bio](https://github.com/rust-bio/rust-bio) | 2.3 | Rust bioinformatics library (Tier 2) | `tools/rustbio_wrapper/target/release/rustbio_wrapper` |
 
 If a comparison tool binary is not found, the benchmark script skips it automatically.
 

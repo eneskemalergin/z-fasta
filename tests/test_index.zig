@@ -326,6 +326,29 @@ test "loadIndexChecked rejects corrupt zfi records" {
     try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, fasta_path));
 }
 
+test "loadIndexChecked rejects seq_offset at end of file" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "past-end-zfi", "fa");
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+
+    const fasta_data = ">seq1\nACGT\n";
+    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+    defer fasta_file.close(io);
+    try std.Io.File.writeStreamingAll(fasta_file, io, fasta_data);
+
+    const bad_records = [_]IndexRecord{
+        .{ .name_offset = 1, .name_len = 4, .seq_offset = fasta_data.len, .seq_len = 4, .line_bases = 4, .line_bytes = 5 },
+    };
+    try writeZfi(io, zfi_path, &bad_records, fasta_data.len);
+
+    try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, fasta_path));
+}
+
 test "loadIndexCheckedWithMode preserves duplicate lookup semantics" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
