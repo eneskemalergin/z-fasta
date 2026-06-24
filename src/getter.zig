@@ -647,6 +647,7 @@ fn appendBedRegionRequest(
     honor_strand: bool,
     global_orientation: Orientation,
     allocator: std.mem.Allocator,
+    name_allocator: std.mem.Allocator,
     duplicate_name: bool,
     last_duplicated_name: ?*?[]const u8,
 ) void {
@@ -661,7 +662,7 @@ fn appendBedRegionRequest(
             }
         }
 
-        const duplicated = allocator.dupe(u8, region.chrom) catch {
+        const duplicated = name_allocator.dupe(u8, region.chrom) catch {
             printErrorAndExit("error: out of memory\n", .{});
         };
         if (last_duplicated_name) |cached_name| cached_name.* = duplicated;
@@ -688,6 +689,7 @@ fn appendBedLineRequest(
     honor_strand: bool,
     global_orientation: Orientation,
     allocator: std.mem.Allocator,
+    name_allocator: std.mem.Allocator,
     duplicate_name: bool,
     last_duplicated_name: ?*?[]const u8,
 ) void {
@@ -702,7 +704,7 @@ fn appendBedLineRequest(
 
     switch (parsed) {
         .skip => {},
-        .region => |region| appendBedRegionRequest(requests, region, honor_strand, global_orientation, allocator, duplicate_name, last_duplicated_name),
+        .region => |region| appendBedRegionRequest(requests, region, honor_strand, global_orientation, allocator, name_allocator, duplicate_name, last_duplicated_name),
     }
 }
 
@@ -712,7 +714,7 @@ fn appendBedRequests(requests: *std.ArrayList(ParsedRequest), bed_data: []const 
 
     while (lines.next()) |line| {
         line_number += 1;
-        appendBedLineRequest(requests, line, line_number, honor_strand, global_orientation, allocator, false, null);
+        appendBedLineRequest(requests, line, line_number, honor_strand, global_orientation, allocator, allocator, false, null);
     }
 }
 
@@ -921,11 +923,13 @@ fn processBedReaderChunked(
     var total = BatchStats{};
     var line_number: usize = 0;
     var reached_end = false;
+    var name_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer name_arena.deinit();
+    var last_duplicated_name: ?[]const u8 = null;
 
     while (true) {
         var chunk_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         const chunk_allocator = chunk_arena.allocator();
-        var last_duplicated_name: ?[]const u8 = null;
 
         var requests = std.ArrayList(ParsedRequest).empty;
 
@@ -941,7 +945,7 @@ fn processBedReaderChunked(
             };
 
             line_number += 1;
-            appendBedLineRequest(&requests, line, line_number, honor_strand, global_orientation, chunk_allocator, true, &last_duplicated_name);
+            appendBedLineRequest(&requests, line, line_number, honor_strand, global_orientation, chunk_allocator, name_arena.allocator(), true, &last_duplicated_name);
         }
 
         if (requests.items.len == 0) {
@@ -1128,6 +1132,34 @@ test "processBedReaderChunked preserves strand handling across chunk boundaries"
         ">seq1:1-5\nTACGT\n>seq2:1-4\nGGGG\n",
         chunk_writer.written(),
     );
+}
+
+test "processBedReaderChunked preserves duplicate chrom cache across chunk boundaries" {
+    const test_io = std.Io.Threaded.global_single_threaded.io();
+    var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
+    defer idx.deinit();
+
+    const bed_data =
+        "seq1\t0\t4\n" ++
+        "seq1\t4\t8\n" ++
+        "seq2\t0\t4\n";
+
+    var chunk_reader = std.Io.Reader.fixed(bed_data);
+    var chunk_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer chunk_writer.deinit();
+
+    const chunked = processBedReaderChunked(&idx, &chunk_reader, false, .{}, 1, false, &chunk_writer.writer);
+
+    var batch_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer batch_writer.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const batch = processBedData(&idx, arena.allocator(), bed_data, false, .{}, false, &batch_writer.writer);
+
+    try std.testing.expectEqual(batch.region_count, chunked.region_count);
+    try std.testing.expectEqual(batch.total_bases, chunked.total_bases);
+    try std.testing.expectEqualStrings(batch_writer.written(), chunk_writer.written());
 }
 
 test "orientation compose behaves like transform composition" {

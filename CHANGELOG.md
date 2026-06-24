@@ -11,14 +11,17 @@ Various memory safety, optimizations and re-building benchmarking framework to w
 
 - `src/main.zig`: write `.zfi` indexes via a temp file and rename on success
 - `src/getter.zig`: cap multi-region sort buffers at 64 MiB per region and 256 MiB total; reject BED/names inputs over 512 MiB when `--chunk-size -1`
+- `src/getter.zig`: use `MADV.SEQUENTIAL` on multi-region sort-path reads; keep `MADV.RANDOM` for BED, reverse reads, and batches under 16 regions
 - `src/index_format.zig`: reject `.zfi` records whose `seq_offset` is past EOF
-- `src/indexer.zig`: fix ~2× genome index regression while preserving v0.2.8 `seq_len` validation on messy records
+- `src/indexer.zig`: restore fast `seq_len` counting on uniform records while keeping v0.2.8 validation on messy records
+- `src/stats.zig`: SIMD `countCompositionSlice` on the fixed-width full-scan path
 - `.gitignore`: ignore Python bytecode, caches, and `.venv/`
 
 ### Added
 
 - `bench/save_baseline.py`, `bench/compare_baseline.py`, `bench/run_all_and_baseline.sh`: local baseline snapshots under `bench/baselines/` for regression diffing
-- `src/getter.zig`: unit tests for sort-buffer cap logic
+- `src/getter.zig`: unit tests for sort-buffer caps and sequential `madvise` gating
+- `src/stats.zig`: unit test for `countCompositionSlice`
 - `tests/test_index.zig`: `seq_len` edge-case tests and `seq_offset` EOF rejection test
 
 ### Removed
@@ -27,13 +30,14 @@ Various memory safety, optimizations and re-building benchmarking framework to w
 
 ### Validation
 
-- `./zig build test --summary all` (106/106 tests passed)
+- `./zig build test --summary all` (108/108 tests passed)
 - `./zig build -Doptimize=ReleaseFast`
 - `bash bench/index/run_tests.sh` (20/20 passed)
 - `bash bench/get/verify_get.sh` (90/90 passed)
 - `bash bench/get/verify_multi_get.sh` (22/22 passed)
 - `bash bench/get/verify_bed.sh` (16/16 passed)
 - `bash bench/get/verify_rc.sh` (19/19 passed)
+- `.venv/bin/python bench/stats/verify_stats.py` (107/107 passed)
 
 ## [0.2.8] - 2026-05-15
 
