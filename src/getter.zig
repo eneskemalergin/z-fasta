@@ -222,10 +222,16 @@ pub fn resolveRegion(idx: *const LoadedIndex, region_str: []const u8, original_i
 }
 
 fn resolveParsedRegion(idx: *const LoadedIndex, region: Region, rec_idx: usize, original_index: usize) ResolvedRegion {
-    return resolveParsedRequest(idx, .{ .region = region, .orientation = .{} }, rec_idx, original_index);
+    return resolveParsedRequest(idx, .{ .region = region, .orientation = .{} }, rec_idx, original_index, false);
 }
 
-fn resolveParsedRequest(idx: *const LoadedIndex, request: ParsedRequest, rec_idx: usize, original_index: usize) ResolvedRegion {
+fn resolveParsedRequest(
+    idx: *const LoadedIndex,
+    request: ParsedRequest,
+    rec_idx: usize,
+    original_index: usize,
+    annotate_transform: bool,
+) ResolvedRegion {
     const rec = idx.records[rec_idx];
     const region = request.region;
 
@@ -272,12 +278,17 @@ fn resolveParsedRequest(idx: *const LoadedIndex, request: ParsedRequest, rec_idx
         .line_bases = rec.line_bases,
         .line_bytes = rec.line_bytes,
         .orientation = request.orientation,
-        .annotate_transform = false,
+        .annotate_transform = annotate_transform,
         .original_index = original_index,
     };
 }
 
-fn resolveParsedRequestsByRecordScan(idx: *const LoadedIndex, requests: []const ParsedRequest, resolved: []ResolvedRegion) void {
+fn resolveParsedRequestsByRecordScan(
+    idx: *const LoadedIndex,
+    requests: []const ParsedRequest,
+    resolved: []ResolvedRegion,
+    annotate_transform: bool,
+) void {
     var rec_indices = std.ArrayList(?usize).empty;
     defer rec_indices.deinit(std.heap.page_allocator);
     rec_indices.resize(std.heap.page_allocator, requests.len) catch {
@@ -298,7 +309,7 @@ fn resolveParsedRequestsByRecordScan(idx: *const LoadedIndex, requests: []const 
         const rec_idx = rec_indices.items[i] orelse {
             printErrorAndExit("error: sequence not found: {s}\n", .{request.region.name});
         };
-        resolved[i] = resolveParsedRequest(idx, request, rec_idx, i);
+        resolved[i] = resolveParsedRequest(idx, request, rec_idx, i, annotate_transform);
     }
 }
 
@@ -796,7 +807,7 @@ fn processParsedRequests(
     var prev_start_byte: u64 = 0;
 
     if (requests.len > 1 and requests.len < 16 and idx.source == .zfi and !idx.has_name_map) {
-        resolveParsedRequestsByRecordScan(idx, requests, resolved);
+        resolveParsedRequestsByRecordScan(idx, requests, resolved, annotate_transform);
     } else {
         var last_name: ?[]const u8 = null;
         var last_rec_idx: usize = 0;
@@ -816,8 +827,7 @@ fn processParsedRequests(
             last_name = request.region.name;
             last_rec_idx = rec_idx;
 
-            resolved[i] = resolveParsedRequest(idx, request, rec_idx, i);
-            resolved[i].annotate_transform = annotate_transform;
+            resolved[i] = resolveParsedRequest(idx, request, rec_idx, i, annotate_transform);
             if (already_in_offset_order) {
                 if (i > 0 and resolved[i].start_byte < prev_start_byte) {
                     already_in_offset_order = false;
@@ -825,10 +835,6 @@ fn processParsedRequests(
                 prev_start_byte = resolved[i].start_byte;
             }
         }
-    }
-
-    if (requests.len > 1 and requests.len < 16 and idx.source == .zfi and !idx.has_name_map) {
-        for (resolved) |*r| r.annotate_transform = annotate_transform;
     }
 
     const use_sort_buffers = requests.len >= 16 and !already_in_offset_order and shouldUseSortBuffers(resolved);
@@ -1196,6 +1202,33 @@ test "processParsedRequests applies complement-only and reverse-only transforms"
     try std.testing.expectEqual(@as(usize, 2), batch.region_count);
     try std.testing.expectEqualStrings(
         ">seq1:1-5 (complement)\nTGCAT\n>seq1:1-5 (reverse)\nATGCA\n",
+        writer.written(),
+    );
+}
+
+test "processParsedRequests annotates transforms on by-record-scan path" {
+    const test_io = std.Io.Threaded.global_single_threaded.io();
+    var idx = index_format.loadIndexWithMode(test_io, "tests/data/simple.fasta", .records_only);
+    defer idx.deinit();
+    try std.testing.expect(!idx.has_name_map);
+    try std.testing.expectEqual(index_format.LoadedIndex.IndexSource.zfi, idx.source);
+
+    const requests = [_]ParsedRequest{
+        .{ .region = parseRegion("seq1:1-5"), .orientation = Orientation.complementOnly() },
+        .{ .region = parseRegion("seq2:1-4"), .orientation = Orientation.reverseOnly() },
+    };
+
+    var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer writer.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const batch = processParsedRequests(&idx, arena.allocator(), &requests, true, &writer.writer, true);
+
+    try std.testing.expectEqual(@as(usize, 2), batch.region_count);
+    try std.testing.expectEqualStrings(
+        ">seq1:1-5 (complement)\nTGCAT\n>seq2:1-4 (reverse)\nGGGG\n",
         writer.written(),
     );
 }
