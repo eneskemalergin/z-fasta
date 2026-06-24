@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# verify_get.sh — Verify z-fasta get output is byte-identical to samtools faidx
+# verify_get.sh - Verify z-fasta get output is byte-identical to samtools faidx
 # Targets: non-REAL test files in tests/data/ only
 set -euo pipefail
 

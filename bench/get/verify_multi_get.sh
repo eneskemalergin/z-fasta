@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# verify_multi_get.sh — Verify z-fasta multi-region get output is byte-identical
+# verify_multi_get.sh - Verify z-fasta multi-region get output is byte-identical
 # to samtools faidx with the same arguments.
 #
 # Tests:
@@ -9,8 +9,8 @@
 #   - Overlapping regions
 #   - Duplicate regions (same region twice)
 #   - Mixed full-sequence + sub-region
-#   - 10 regions (stays under 16 → direct path)
-#   - 20 regions (>= 16 → offset-sort path)
+#   - 10 regions (stays under 16 -> direct path)
+#   - 20 regions (>= 16 -> offset-sort path)
 #   - All sequences from a file
 #
 set -euo pipefail

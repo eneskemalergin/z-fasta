@@ -8,13 +8,13 @@ const io = std.Io.Threaded.global_single_threaded.io();
 // Region parsing tests
 // ============================================================================
 
-test "parseRegion — simple name" {
+test "parseRegion - simple name" {
     const r = parseRegion("chr1");
     try std.testing.expectEqualStrings("chr1", r.name);
     try std.testing.expect(r.is_full);
 }
 
-test "parseRegion — name with range" {
+test "parseRegion - name with range" {
     const r = parseRegion("chr1:100-200");
     try std.testing.expectEqualStrings("chr1", r.name);
     try std.testing.expectEqual(@as(u64, 100), r.start);
@@ -22,7 +22,7 @@ test "parseRegion — name with range" {
     try std.testing.expect(!r.is_full);
 }
 
-test "parseRegion — name with open end" {
+test "parseRegion - name with open end" {
     const r = parseRegion("chr1:100-");
     try std.testing.expectEqualStrings("chr1", r.name);
     try std.testing.expectEqual(@as(u64, 100), r.start);
@@ -30,7 +30,7 @@ test "parseRegion — name with open end" {
     try std.testing.expect(!r.is_full);
 }
 
-test "parseRegion — Ensembl colon name with range" {
+test "parseRegion - Ensembl colon name with range" {
     const r = parseRegion("chromosome:GRCh38:1:1:248956422:1:100-200");
     try std.testing.expectEqualStrings("chromosome:GRCh38:1:1:248956422:1", r.name);
     try std.testing.expectEqual(@as(u64, 100), r.start);
@@ -38,20 +38,20 @@ test "parseRegion — Ensembl colon name with range" {
     try std.testing.expect(!r.is_full);
 }
 
-test "parseRegion — Ensembl colon name without range" {
+test "parseRegion - Ensembl colon name without range" {
     const r = parseRegion("chromosome:GRCh38:1:1:248956422:1");
     try std.testing.expectEqualStrings("chromosome:GRCh38:1:1:248956422:1", r.name);
     try std.testing.expect(r.is_full);
 }
 
-test "parseRegion — pipe-delimited protein name" {
+test "parseRegion - pipe-delimited protein name" {
     const r = parseRegion("sp|P12345|PROT_NAME:1-50");
     try std.testing.expectEqualStrings("sp|P12345|PROT_NAME", r.name);
     try std.testing.expectEqual(@as(u64, 1), r.start);
     try std.testing.expectEqual(@as(?u64, 50), r.end);
 }
 
-test "parseRegion — single base" {
+test "parseRegion - single base" {
     const r = parseRegion("chr1:1-1");
     try std.testing.expectEqualStrings("chr1", r.name);
     try std.testing.expectEqual(@as(u64, 1), r.start);
@@ -59,21 +59,21 @@ test "parseRegion — single base" {
     try std.testing.expect(!r.is_full);
 }
 
-test "parseRegion — large coordinates" {
+test "parseRegion - large coordinates" {
     const r = parseRegion("chr1:1000000-2000000");
     try std.testing.expectEqualStrings("chr1", r.name);
     try std.testing.expectEqual(@as(u64, 1_000_000), r.start);
     try std.testing.expectEqual(@as(?u64, 2_000_000), r.end);
 }
 
-test "parseRegion — name with underscore and range" {
+test "parseRegion - name with underscore and range" {
     const r = parseRegion("KI270394.1:1-100");
     try std.testing.expectEqualStrings("KI270394.1", r.name);
     try std.testing.expectEqual(@as(u64, 1), r.start);
     try std.testing.expectEqual(@as(?u64, 100), r.end);
 }
 
-test "parseRegion — name with colon but no valid range" {
+test "parseRegion - name with colon but no valid range" {
     // "1:1" looks like it could be parsed as name="1", start=1, end=null ...
     // but there's no dash, so parseRangeSuffix returns null.
     // The whole thing should be treated as a name.
@@ -82,7 +82,7 @@ test "parseRegion — name with colon but no valid range" {
     try std.testing.expect(r.is_full);
 }
 
-test "parseRegion — name only with dots" {
+test "parseRegion - name only with dots" {
     const r = parseRegion("chr1.1.2.3");
     try std.testing.expectEqualStrings("chr1.1.2.3", r.name);
     try std.testing.expect(r.is_full);
@@ -92,7 +92,7 @@ test "parseRegion — name only with dots" {
 // Index loading tests
 // ============================================================================
 
-test "loadIndex — .zfi file" {
+test "loadIndex - .zfi file" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
@@ -115,7 +115,7 @@ test "loadIndex — .zfi file" {
 // Multi-region resolution tests (v0.2.4)
 // ============================================================================
 
-test "resolveRegion — single region, full sequence" {
+test "resolveRegion - single region, full sequence" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
@@ -126,7 +126,7 @@ test "resolveRegion — single region, full sequence" {
     try std.testing.expectEqual(@as(usize, 0), r.original_index);
 }
 
-test "resolveRegion — single region, sub-range" {
+test "resolveRegion - single region, sub-range" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
@@ -138,7 +138,7 @@ test "resolveRegion — single region, sub-range" {
     try std.testing.expectEqual(@as(u64, 12), r.display_end);
 }
 
-test "resolveRegion — original_index preserved" {
+test "resolveRegion - original_index preserved" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
@@ -151,7 +151,7 @@ test "resolveRegion — original_index preserved" {
     try std.testing.expectEqual(@as(usize, 2), r2.original_index);
 }
 
-test "resolveRegion — end clamped silently" {
+test "resolveRegion - end clamped silently" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
@@ -162,7 +162,7 @@ test "resolveRegion — end clamped silently" {
     try std.testing.expectEqual(@as(u64, 9999), r.display_end);
 }
 
-test "resolveRegion — byte offset for first base" {
+test "resolveRegion - byte offset for first base" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
@@ -174,7 +174,7 @@ test "resolveRegion — byte offset for first base" {
     try std.testing.expectEqual(@as(u8, 'A'), idx.fasta_data[r.start_byte]);
 }
 
-test "resolveRegion — duplicate region allowed, same start_byte" {
+test "resolveRegion - duplicate region allowed, same start_byte" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
@@ -192,7 +192,7 @@ test "resolveRegion — duplicate region allowed, same start_byte" {
 // Edge case tests for resolveRegion (v0.2.4 bug hunt)
 // ============================================================================
 
-test "resolveRegion — open-ended region (NAME:START-) uses seq_len as end" {
+test "resolveRegion - open-ended region (NAME:START-) uses seq_len as end" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
@@ -204,7 +204,7 @@ test "resolveRegion — open-ended region (NAME:START-) uses seq_len as end" {
     try std.testing.expectEqual(@as(u64, 24), r.display_end);
 }
 
-test "resolveRegion — single-base region" {
+test "resolveRegion - single-base region" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
@@ -214,7 +214,7 @@ test "resolveRegion — single-base region" {
     try std.testing.expectEqual(@as(u8, 'A'), idx.fasta_data[r.start_byte]);
 }
 
-test "resolveRegion — last-base region" {
+test "resolveRegion - last-base region" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
@@ -226,7 +226,7 @@ test "resolveRegion — last-base region" {
     try std.testing.expectEqual(@as(u8, 'T'), byte);
 }
 
-test "resolveRegion — cross-line region (starts line 1, ends line 2)" {
+test "resolveRegion - cross-line region (starts line 1, ends line 2)" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
@@ -235,7 +235,7 @@ test "resolveRegion — cross-line region (starts line 1, ends line 2)" {
     try std.testing.expectEqual(@as(u64, 6), r.num_bases);
 }
 
-test "resolveRegion — full sequence start_byte points to first base character" {
+test "resolveRegion - full sequence start_byte points to first base character" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
@@ -246,7 +246,7 @@ test "resolveRegion — full sequence start_byte points to first base character"
     try std.testing.expectEqual(r_full.num_bases, r_range.num_bases);
 }
 
-test "resolveRegion — display_end before clamp, num_bases after clamp" {
+test "resolveRegion - display_end before clamp, num_bases after clamp" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
@@ -257,7 +257,7 @@ test "resolveRegion — display_end before clamp, num_bases after clamp" {
     try std.testing.expectEqual(@as(u64, 9999), r.display_end);
 }
 
-test "resolveRegion — proteome pipe-delimited name" {
+test "resolveRegion - proteome pipe-delimited name" {
     var idx = main.index_format.loadIndex(io, "tests/data/proteome.fasta");
     defer idx.deinit();
 
@@ -266,7 +266,7 @@ test "resolveRegion — proteome pipe-delimited name" {
     try std.testing.expectEqual(@as(u64, 10), r.num_bases);
 }
 
-test "resolveRegion — long header name (200-char sequence name)" {
+test "resolveRegion - long header name (200-char sequence name)" {
     var idx = main.index_format.loadIndex(io, "tests/data/edge_cases.fasta");
     defer idx.deinit();
 
@@ -277,7 +277,7 @@ test "resolveRegion — long header name (200-char sequence name)" {
     try std.testing.expectEqual(@as(u64, 8), r.num_bases);
 }
 
-test "resolveRegion — lowercase bases preserved (byte offset still correct)" {
+test "resolveRegion - lowercase bases preserved (byte offset still correct)" {
     var idx = main.index_format.loadIndex(io, "tests/data/edge_cases.fasta");
     defer idx.deinit();
 
@@ -288,7 +288,7 @@ test "resolveRegion — lowercase bases preserved (byte offset still correct)" {
     try std.testing.expectEqual(@as(u8, 'a'), idx.fasta_data[r.start_byte]);
 }
 
-test "resolveRegion — ordering: seq2 has higher file offset than seq1" {
+test "resolveRegion - ordering: seq2 has higher file offset than seq1" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
@@ -298,7 +298,7 @@ test "resolveRegion — ordering: seq2 has higher file offset than seq1" {
     try std.testing.expect(r2.start_byte > r1.start_byte);
 }
 
-test "resolveRegion — reversed CLI order: seq2 before seq1 in args" {
+test "resolveRegion - reversed CLI order: seq2 before seq1 in args" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
 
@@ -311,7 +311,7 @@ test "resolveRegion — reversed CLI order: seq2 before seq1 in args" {
     try std.testing.expect(r1.start_byte < r2.start_byte);
 }
 
-test "resolveRegion — nonstandard characters in sequence (stars/dashes)" {
+test "resolveRegion - nonstandard characters in sequence (stars/dashes)" {
     var idx = main.index_format.loadIndex(io, "tests/data/edge_cases.fasta");
     defer idx.deinit();
 

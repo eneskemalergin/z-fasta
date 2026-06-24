@@ -61,7 +61,7 @@ def _strip_tool_prefix(name: str) -> str:
 def _human_file(name: str) -> str:
     """Convert benchmark stem to readable label.
 
-    '10mb' → '10 MB', 'edge_cases' → 'Edge Cases', etc.
+    '10mb' -> '10 MB', 'edge_cases' -> 'Edge Cases', etc.
     """
     m = re.match(r"(\d+)mb$", name)
     if m:
@@ -340,7 +340,7 @@ def md_indexonly_speedup(df: pd.DataFrame) -> str:
             row["Index-Only"] = f"{us:.0f} μs"
             if len(full) and full["mean"].values[0] > 0:
                 sp = full["mean"].values[0] / io["mean"].values[0]
-                row["Speedup (full vs index-only)"] = f"**{sp:.0f}×**"
+                row["Speedup (full vs index-only)"] = f"**{sp:.0f}x**"
         if len(seq):
             row["seqkit-stats-a"] = f"{seq['mean'].values[0]:.4f}s"
         rows.append(row)

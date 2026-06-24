@@ -6,10 +6,10 @@
 # Usage: ./run_benchmarks.sh [--runs N] [--skip-scaling] [--skip-real] [--skip-rc] [--rc-full]
 #
 # Outputs:
-#   results/single_<timestamp>.json    — single-region latency
-#   results/fullseq_<timestamp>.json   — full-sequence extraction
-#   results/scaling_<timestamp>/       — region-size scaling
-#   results/memory_<timestamp>.csv     — memory (RSS) per tool/mode
+#   results/single_<timestamp>.json    single-region latency
+#   results/fullseq_<timestamp>.json   full-sequence extraction
+#   results/scaling_<timestamp>/       region-size scaling
+#   results/memory_<timestamp>.csv     memory (RSS) per tool/mode
 
 set -euo pipefail
 
@@ -79,9 +79,9 @@ if sudo -n sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null; then
     CACHE_CLEAR="sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'"
     WARMUP=0
     BENCH_MODE="cold (cache cleared before each run)"
-    echo "Cache clearing: enabled (sudo available) → forcing --warmup 0"
+    echo "Cache clearing: enabled (sudo available) -> forcing --warmup 0"
 else
-    echo "Cache clearing: DISABLED (no passwordless sudo) → warm-cache mode"
+    echo "Cache clearing: DISABLED (no passwordless sudo) -> warm-cache mode"
 fi
 
 echo ""
@@ -609,7 +609,7 @@ if [[ -n "$MEM_FILE" ]]; then
     done < <(measure_memory_get "$MEM_FILE" "$SEQNAME")
 fi
 
-echo "  Memory data → $MEM_CSV"
+echo "  Memory data -> $MEM_CSV"
 echo ""
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1062,7 +1062,7 @@ if ! $SKIP_RC; then
         fi
     } > "$RC_DIR/rss.tsv"
 
-    echo "  RC outputs → $RC_DIR"
+    echo "  RC outputs -> $RC_DIR"
 fi
 
 echo ""

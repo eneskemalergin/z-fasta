@@ -9,57 +9,57 @@ const SequenceType = main.stats.SequenceType;
 // formatComma tests
 // ============================================================================
 
-test "formatComma — zero" {
+test "formatComma - zero" {
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("0", formatComma(&buf, 0));
 }
 
-test "formatComma — single digit" {
+test "formatComma - single digit" {
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("5", formatComma(&buf, 5));
 }
 
-test "formatComma — three digits" {
+test "formatComma - three digits" {
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("999", formatComma(&buf, 999));
 }
 
-test "formatComma — four digits" {
+test "formatComma - four digits" {
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("1,000", formatComma(&buf, 1000));
 }
 
-test "formatComma — six digits" {
+test "formatComma - six digits" {
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("999,999", formatComma(&buf, 999_999));
 }
 
-test "formatComma — seven digits" {
+test "formatComma - seven digits" {
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("1,000,000", formatComma(&buf, 1_000_000));
 }
 
-test "formatComma — large number (billions)" {
+test "formatComma - large number (billions)" {
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("3,099,750,718", formatComma(&buf, 3_099_750_718));
 }
 
-test "formatComma — max u32" {
+test "formatComma - max u32" {
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("4,294,967,295", formatComma(&buf, 4_294_967_295));
 }
 
-test "formatComma — large u64" {
+test "formatComma - large u64" {
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("1,000,000,000,000", formatComma(&buf, 1_000_000_000_000));
 }
 
-test "formatComma — 12345" {
+test "formatComma - 12345" {
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("12,345", formatComma(&buf, 12345));
 }
 
-test "formatComma — 100" {
+test "formatComma - 100" {
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("100", formatComma(&buf, 100));
 }
@@ -68,24 +68,24 @@ test "formatComma — 100" {
 // formatSize tests
 // ============================================================================
 
-test "formatSize — bytes" {
+test "formatSize - bytes" {
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("512 B", formatSize(&buf, 512));
 }
 
-test "formatSize — kilobytes" {
+test "formatSize - kilobytes" {
     var buf: [64]u8 = undefined;
     const result = formatSize(&buf, 10 * 1024);
     try std.testing.expectEqualStrings("10.0 KB", result);
 }
 
-test "formatSize — megabytes" {
+test "formatSize - megabytes" {
     var buf: [64]u8 = undefined;
     const result = formatSize(&buf, 66 * 1024 * 1024);
     try std.testing.expectEqualStrings("66.0 MB", result);
 }
 
-test "formatSize — gigabytes" {
+test "formatSize - gigabytes" {
     var buf: [64]u8 = undefined;
     const result = formatSize(&buf, 3 * 1024 * 1024 * 1024);
     try std.testing.expectEqualStrings("3.0 GB", result);
@@ -95,7 +95,7 @@ test "formatSize — gigabytes" {
 // detectType tests
 // ============================================================================
 
-test "detectType — all ACGT is nucleotide" {
+test "detectType - all ACGT is nucleotide" {
     var counts: [256]u64 = .{0} ** 256;
     counts['A'] = 250;
     counts['C'] = 250;
@@ -104,7 +104,7 @@ test "detectType — all ACGT is nucleotide" {
     try std.testing.expectEqual(SequenceType.nucleotide, detectType(&counts, 1000));
 }
 
-test "detectType — ACGTN is nucleotide" {
+test "detectType - ACGTN is nucleotide" {
     var counts: [256]u64 = .{0} ** 256;
     counts['A'] = 200;
     counts['C'] = 200;
@@ -114,14 +114,14 @@ test "detectType — ACGTN is nucleotide" {
     try std.testing.expectEqual(SequenceType.nucleotide, detectType(&counts, 1000));
 }
 
-test "detectType — full IUPAC ambiguity alphabet is nucleotide" {
+test "detectType - full IUPAC ambiguity alphabet is nucleotide" {
     var counts: [256]u64 = .{0} ** 256;
     const letters = "ACGTURYSWKMBDHVNacgturyswkmbdhvnu";
     for (letters) |byte| counts[byte] += 1;
     try std.testing.expectEqual(SequenceType.nucleotide, detectType(&counts, letters.len));
 }
 
-test "detectType — mixed amino acids is protein" {
+test "detectType - mixed amino acids is protein" {
     var counts: [256]u64 = .{0} ** 256;
     counts['M'] = 100;
     counts['A'] = 100;
@@ -136,7 +136,7 @@ test "detectType — mixed amino acids is protein" {
     try std.testing.expectEqual(SequenceType.protein, detectType(&counts, 1000));
 }
 
-test "detectType — below 90% threshold is protein" {
+test "detectType - below 90% threshold is protein" {
     var counts: [256]u64 = .{0} ** 256;
     counts['A'] = 200;
     counts['C'] = 200;
@@ -148,7 +148,7 @@ test "detectType — below 90% threshold is protein" {
     try std.testing.expectEqual(SequenceType.protein, detectType(&counts, 700));
 }
 
-test "detectType — exactly 91% is nucleotide" {
+test "detectType - exactly 91% is nucleotide" {
     var counts: [256]u64 = .{0} ** 256;
     counts['A'] = 910;
     counts['L'] = 90;
@@ -156,12 +156,12 @@ test "detectType — exactly 91% is nucleotide" {
     try std.testing.expectEqual(SequenceType.nucleotide, detectType(&counts, 1000));
 }
 
-test "detectType — empty is nucleotide (default)" {
+test "detectType - empty is nucleotide (default)" {
     var counts: [256]u64 = .{0} ** 256;
     try std.testing.expectEqual(SequenceType.nucleotide, detectType(&counts, 0));
 }
 
-test "detectType — lowercase nucleotides" {
+test "detectType - lowercase nucleotides" {
     var counts: [256]u64 = .{0} ** 256;
     counts['a'] = 250;
     counts['c'] = 250;
@@ -200,49 +200,49 @@ fn runStatsAndCapture(allocator: std.mem.Allocator, fasta_path: []const u8, inde
     return result;
 }
 
-test "stats — simple.fasta has 2 sequences" {
+test "stats - simple.fasta has 2 sequences" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta", false);
     try std.testing.expect(std.mem.indexOf(u8, output, "Sequences:      2") != null);
 }
 
-test "stats — simple.fasta has 36 total bases" {
+test "stats - simple.fasta has 36 total bases" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta", false);
     try std.testing.expect(std.mem.indexOf(u8, output, "Total bases:    36") != null);
 }
 
-test "stats — simple.fasta detected as Nucleotide" {
+test "stats - simple.fasta detected as Nucleotide" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta", false);
     try std.testing.expect(std.mem.indexOf(u8, output, "Type:           Nucleotide") != null);
 }
 
-test "stats — proteome.fasta detected as Protein" {
+test "stats - proteome.fasta detected as Protein" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const output = try runStatsAndCapture(arena.allocator(), "tests/data/proteome.fasta", false);
     try std.testing.expect(std.mem.indexOf(u8, output, "Type:           Protein") != null);
 }
 
-test "stats — index-only does not show composition" {
+test "stats - index-only does not show composition" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta", true);
     try std.testing.expect(std.mem.indexOf(u8, output, "Composition:") == null);
 }
 
-test "stats — index-only shows placeholder type" {
+test "stats - index-only shows placeholder type" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta", true);
     try std.testing.expect(std.mem.indexOf(u8, output, "run without --index-only") != null);
 }
 
-test "stats — simple.fasta N50=24 L50=1" {
+test "stats - simple.fasta N50=24 L50=1" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta", true);
@@ -250,21 +250,21 @@ test "stats — simple.fasta N50=24 L50=1" {
     try std.testing.expect(std.mem.indexOf(u8, output, "L50:            1") != null);
 }
 
-test "stats — simple.fasta GC content" {
+test "stats - simple.fasta GC content" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta", false);
     try std.testing.expect(std.mem.indexOf(u8, output, "GC:  55.56%") != null);
 }
 
-test "stats — mixed_widths.fasta has 3 sequences" {
+test "stats - mixed_widths.fasta has 3 sequences" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const output = try runStatsAndCapture(arena.allocator(), "tests/data/mixed_widths.fasta", true);
     try std.testing.expect(std.mem.indexOf(u8, output, "Sequences:      3") != null);
 }
 
-test "stats — proteome Composition shows amino acids" {
+test "stats - proteome Composition shows amino acids" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const output = try runStatsAndCapture(arena.allocator(), "tests/data/proteome.fasta", false);

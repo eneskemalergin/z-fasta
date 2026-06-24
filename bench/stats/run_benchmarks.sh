@@ -6,10 +6,10 @@
 # Usage: ./run_benchmarks.sh [--runs N] [--skip-scaling] [--skip-real]
 #
 # Outputs:
-#   results/stats_<timestamp>/         — per-file benchmarks
-#   results/indexonly_<timestamp>/      — --index-only mode benchmarks
-#   results/scaling_<timestamp>/       — file-size scaling
-#   results/memory_<timestamp>.csv     — memory (RSS) per tool/mode
+#   results/stats_<timestamp>/         per-file benchmarks
+#   results/indexonly_<timestamp>/     --index-only mode benchmarks
+#   results/scaling_<timestamp>/       file-size scaling
+#   results/memory_<timestamp>.csv     memory (RSS) per tool/mode
 #
 # Comparison tools:
 #   - seqkit stats (Go bioinformatics toolkit)
@@ -66,9 +66,9 @@ if sudo -n sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null; then
     CACHE_CLEAR="sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'"
     WARMUP=0
     BENCH_MODE="cold (cache cleared before each run)"
-    echo "Cache clearing: enabled → forcing --warmup 0"
+    echo "Cache clearing: enabled -> forcing --warmup 0"
 else
-    echo "Cache clearing: DISABLED → warm-cache mode"
+    echo "Cache clearing: DISABLED -> warm-cache mode"
 fi
 
 echo ""
@@ -309,7 +309,7 @@ for mb in 10 50 100; do
     fi
 done
 
-echo "  Memory data → $MEM_CSV"
+echo "  Memory data -> $MEM_CSV"
 echo ""
 
 # ══════════════════════════════════════════════════════════════════════
@@ -332,7 +332,7 @@ for mb in 10 50 100 250 500 1000; do
         if [[ -n "$TIME_S" ]] && (( $(echo "$TIME_S > 0" | bc -l 2>/dev/null || echo 0) )); then
             THROUGHPUT=$(echo "scale=1; $mb / $TIME_S" | bc -l 2>/dev/null || echo "0")
             echo "z-fasta-full,$mb,$TIME_S,$THROUGHPUT" >> "$THROUGHPUT_CSV"
-            echo "  z-fasta full ${mb}MB: ${TIME_S}s → ${THROUGHPUT} MB/s"
+            echo "  z-fasta full ${mb}MB: ${TIME_S}s -> ${THROUGHPUT} MB/s"
         fi
 
         if $HAS_SEQKIT; then
@@ -340,7 +340,7 @@ for mb in 10 50 100 250 500 1000; do
             if [[ -n "$TIME_S" ]] && (( $(echo "$TIME_S > 0" | bc -l 2>/dev/null || echo 0) )); then
                 THROUGHPUT=$(echo "scale=1; $mb / $TIME_S" | bc -l 2>/dev/null || echo "0")
                 echo "seqkit-stats-a,$mb,$TIME_S,$THROUGHPUT" >> "$THROUGHPUT_CSV"
-                echo "  seqkit -a ${mb}MB: ${TIME_S}s → ${THROUGHPUT} MB/s"
+                echo "  seqkit -a ${mb}MB: ${TIME_S}s -> ${THROUGHPUT} MB/s"
             fi
         fi
 
@@ -349,13 +349,13 @@ for mb in 10 50 100 250 500 1000; do
             if [[ -n "$TIME_S" ]] && (( $(echo "$TIME_S > 0" | bc -l 2>/dev/null || echo 0) )); then
                 THROUGHPUT=$(echo "scale=1; $mb / $TIME_S" | bc -l 2>/dev/null || echo "0")
                 echo "seqtk-comp,$mb,$TIME_S,$THROUGHPUT" >> "$THROUGHPUT_CSV"
-                echo "  seqtk comp ${mb}MB: ${TIME_S}s → ${THROUGHPUT} MB/s"
+                echo "  seqtk comp ${mb}MB: ${TIME_S}s -> ${THROUGHPUT} MB/s"
             fi
         fi
     fi
 done
 
-echo "  Throughput data → $THROUGHPUT_CSV"
+echo "  Throughput data -> $THROUGHPUT_CSV"
 echo ""
 
 echo "════════════════════════════════════════════════════════════════"

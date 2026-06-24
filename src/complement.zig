@@ -40,6 +40,7 @@ pub fn complement(byte: u8) u8 {
 
 /// Write the reverse complement of `src` into `dst`.
 /// Caller must provide a same-length destination buffer.
+/// SIMD vectorization here is deferred; `get` applies complement per-byte during mmap walks.
 pub fn reverseComplementInto(dst: []u8, src: []const u8) void {
     std.debug.assert(dst.len == src.len);
 
@@ -49,7 +50,11 @@ pub fn reverseComplementInto(dst: []u8, src: []const u8) void {
 }
 
 /// Read exactly `len` bytes, reverse-complement them, and write the result.
-/// This is allocation-backed because generic readers cannot seek backwards.
+/// Allocation-backed helper for generic readers that cannot seek backward.
+///
+/// Not used by the shipped `get` command. Production RC/reverse paths walk the
+/// mmapped FASTA backward in `getter.zig` (zero extra copy of the region span).
+/// See `bench/get/RC_STRATEGY.md`. Kept exported for tests and future streaming callers.
 pub fn reverseComplementStream(allocator: std.mem.Allocator, reader: anytype, writer: anytype, len: usize) !void {
     const src = try allocator.alloc(u8, len);
     defer allocator.free(src);

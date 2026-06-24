@@ -115,14 +115,14 @@ def main() -> int:
     if regressions:
         print(f"REGRESSIONS (>{args.threshold:.0f}% slower):")
         for key, va, vb, d in sorted(regressions, key=lambda x: -x[3]):
-            print(f"  {key}: {va:.4f}s → {vb:.4f}s ({d:+.1f}%)")
+            print(f"  {key}: {va:.4f}s -> {vb:.4f}s ({d:+.1f}%)")
     else:
         print(f"No regressions above {args.threshold:.0f}% threshold.")
 
     if improvements:
         print(f"\nIMPROVEMENTS (>{args.threshold:.0f}% faster):")
         for key, va, vb, d in sorted(improvements, key=lambda x: x[3])[:10]:
-            print(f"  {key}: {va:.4f}s → {vb:.4f}s ({d:+.1f}%)")
+            print(f"  {key}: {va:.4f}s -> {vb:.4f}s ({d:+.1f}%)")
 
     return 1 if regressions else 0
 

@@ -1,15 +1,15 @@
 #!/bin/bash
 # z-fasta Benchmark Runner
 # Uses hyperfine for precise timing with cache clearing between runs.
-# Outputs raw JSON data — all analysis done by generate_report.py.
+# Outputs raw JSON data; all analysis done by generate_report.py.
 #
 # Usage: ./run_benchmarks.sh [--runs N] [--skip-scaling] [--skip-real]
 #
 # Outputs:
-#   results/perf_<timestamp>.json       — real dataset benchmarks
-#   results/scaling_<timestamp>.json    — file-size scaling
-#   results/seqscale_<timestamp>.json   — sequence-count scaling
-#   results/memory_<timestamp>.csv      — memory (RSS) per tool/mode
+#   results/perf_<timestamp>.json       real dataset benchmarks
+#   results/scaling_<timestamp>.json    file-size scaling
+#   results/seqscale_<timestamp>.json   sequence-count scaling
+#   results/memory_<timestamp>.csv      memory (RSS) per tool/mode
 
 set -euo pipefail
 
@@ -69,12 +69,12 @@ if sudo -n sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null; then
     CACHE_CLEAR="sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'"
     # Warmup is contradictory with cache clearing: the prepare command
     # drops the page cache before EVERY run (including warmup), so warmup
-    # never actually warms anything — it just wastes time.
+    # never actually warms anything, just wastes time.
     WARMUP=0
     BENCH_MODE="cold (cache cleared before each run)"
-    echo "Cache clearing: enabled (sudo available) → forcing --warmup 0"
+    echo "Cache clearing: enabled (sudo available) -> forcing --warmup 0"
 else
-    echo "Cache clearing: DISABLED (no passwordless sudo) → warm-cache mode"
+    echo "Cache clearing: DISABLED (no passwordless sudo) -> warm-cache mode"
     echo "  Tip: echo '$(whoami) ALL=(ALL) NOPASSWD: /usr/bin/sh -c sync*' | sudo tee /etc/sudoers.d/benchcache"
 fi
 

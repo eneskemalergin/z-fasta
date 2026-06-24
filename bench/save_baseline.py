@@ -3,11 +3,11 @@
 Capture a machine-readable performance baseline from bench results.
 
 Writes a timestamped directory under bench/baselines/ (gitignored) containing:
-  manifest.json   — git rev, host, CPU, optimize mode, suite timestamps
-  index.json      — condensed index metrics (real datasets + key scaling points)
-  get.json        — condensed get metrics
-  stats.json      — condensed stats metrics
-  compare.json    — flat key→seconds map for diffing against a future baseline
+  manifest.json   git rev, host, CPU, optimize mode, suite timestamps
+  index.json      condensed index metrics (real datasets + key scaling points)
+  get.json        condensed get metrics
+  stats.json      condensed stats metrics
+  compare.json    flat key->seconds map for diffing against a future baseline
 
 Usage:
     .venv/bin/python bench/save_baseline.py

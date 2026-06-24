@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-verify_stats.py — Verify z-fasta stats output against BioPython.
+verify_stats.py - Verify z-fasta stats output against BioPython.
 
 Uses BioPython (>=1.80) to independently compute all stats and compares
 against z-fasta stats output. Runs on non-REAL test files only.
@@ -22,7 +22,7 @@ from pathlib import Path
 from Bio import SeqIO
 
 # ---------------------------------------------------------------------------
-# Config — paths are relative to project root (script resolves its own location)
+# Config: paths are relative to project root (script resolves its own location)
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -52,7 +52,7 @@ def passed(label: str):
 def failed(label: str, expected, got):
     global FAIL_COUNT
     FAIL_COUNT += 1
-    print(f"  FAIL: {label} — expected {expected}, got {got}")
+    print(f"  FAIL: {label}; expected {expected}, got {got}")
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +111,7 @@ def compute_stats(fasta_path: str) -> dict:
     else:
         median = (sorted_desc[num_seqs // 2 - 1] + sorted_desc[num_seqs // 2]) // 2
 
-    # N50/L50/N90/L90/AU — matching Zig's ceiling thresholds
+    # N50/L50/N90/L90/AU; matching Zig's ceiling thresholds
     threshold_50 = (total_bases + 1) // 2  # ceiling
     threshold_90 = (total_bases * 9 + 9) // 10  # ceiling
 

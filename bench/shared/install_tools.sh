@@ -66,7 +66,7 @@ check_pyfaidx() {
         return 0
     fi
 
-    warn "pyfaidx not found at pin $PYFAIDX_PIN — installing into venv"
+    warn "pyfaidx not found at pin $PYFAIDX_PIN; installing into venv"
     "$VENV/bin/pip" install --quiet "pyfaidx==$PYFAIDX_PIN"
     ver=$("$VENV/bin/python" -c "import pyfaidx; print(pyfaidx.__version__)" 2>/dev/null || true)
     if [[ "$ver" == "$PYFAIDX_PIN" ]]; then
@@ -93,7 +93,7 @@ check_seqtk() {
         ok "seqtk $ver ($bin)"
     else
         warn "seqtk version mismatch: got '$ver', expected '$SEQTK_PIN'"
-        warn "Pin may need updating — tool still usable"
+        warn "Pin may need updating; tool still usable"
     fi
 }
 
@@ -109,7 +109,7 @@ check_fastahack() {
     fi
     # fastahack has no --version flag; version is embedded in the directory name
     ok "fastahack $FASTAHACK_PIN ($bin)"
-    ok "  Note: no standalone version flag — version derived from directory name"
+    ok "  Note: no standalone version flag; version derived from directory name"
 }
 
 # ── Check seqkit (pre-built) ───────────────────────────────────────────────────
@@ -128,7 +128,7 @@ check_seqkit() {
         ok "seqkit $ver ($bin)"
     else
         warn "seqkit version mismatch: got '$ver', expected 'v$SEQKIT_PIN'"
-        warn "Pin may need updating — tool still usable"
+        warn "Pin may need updating; tool still usable"
     fi
 }
 
@@ -185,7 +185,7 @@ print_pins() {
 # ── Main ───────────────────────────────────────────────────────────────────────
 main() {
     echo ""
-    echo "z-fasta v0.2.5 — benchmark tool verification"
+    echo "z-fasta v0.2.5 - benchmark tool verification"
     echo "=============================================="
     local fail_count=0
 
@@ -205,9 +205,9 @@ main() {
 
     echo ""
     if [[ "$fail_count" -eq 0 ]]; then
-        echo -e "${GREEN}All tools verified. Ready to run benchmarks.${NC}"
+        echo -e "${GREEN}All tools verified; ready to run benchmarks.${NC}"
     else
-        echo -e "${RED}${fail_count} tool(s) missing or misconfigured. Fix above before running benchmarks.${NC}"
+        echo -e "${RED}${fail_count} tool(s) missing or misconfigured; fix above before running benchmarks.${NC}"
         exit 1
     fi
 }

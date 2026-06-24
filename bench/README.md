@@ -7,7 +7,7 @@ This directory contains all benchmarking and verification infrastructure, organi
 ```plaintext
 bench/
   shared/                  # Shared infrastructure
-    download_data.sh       # Downloads REAL_* files → bench/shared/data/
+    download_data.sh       # Downloads REAL_* files -> bench/shared/data/
     data/                  # REAL_Genome.fa, REAL_Transcriptome.fa, REAL_Proteome.fasta
   index/                   # Indexer benchmarks
     README.md              # Suite-specific workflow and outputs
@@ -197,7 +197,7 @@ Snapshots land in `bench/baselines/<YYYYMMDD_HHMMSS>_<git-rev>/` (gitignored):
 | --- | --- |
 | `manifest.json` | Git rev, host/CPU, binary version, bundle timestamps, headline timings |
 | `index.json` / `get.json` / `stats.json` | Condensed per-suite metrics |
-| `compare.json` | Flat `suite.section.param.tool → seconds` map for diffing |
+| `compare.json` | Flat `suite.section.param.tool -> seconds` map for diffing |
 
 Compare two snapshots:
 

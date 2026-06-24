@@ -101,7 +101,7 @@ def discover_latest(results_dir: Path, prefix: str) -> Path | None:
 def load_perf(results_dir: Path) -> pd.DataFrame | None:
     """Load real-dataset perf results into a single DataFrame.
 
-    Adds a 'dataset' column from filename (e.g. Genome.json → Genome).
+    Adds a 'dataset' column from filename (e.g. Genome.json -> Genome).
     """
     d = discover_latest(results_dir, "perf")
     if not d:
@@ -438,7 +438,7 @@ def fig_edge_heatmap(df: pd.DataFrame, out: Path) -> Path:
 
 def md_perf_table(df: pd.DataFrame) -> str:
     """Markdown table of performance results per dataset."""
-    # Pivot to dataset × tool, format as "mean ± stddev"
+    # Pivot to dataset x tool, format as "mean ± stddev"
     def fmt(row):
         return f"{row['mean']:.4f}s ±{row['stddev']:.4f}"
 
@@ -475,7 +475,7 @@ def md_speedup_table(df: pd.DataFrame) -> str:
 
 
 def md_scaling_table(df: pd.DataFrame, param_col: str, param_label: str) -> str:
-    """Markdown table: param × tool mean times."""
+    """Markdown table: param x tool mean times."""
     pivot = df.pivot_table(
         index=param_col, columns="tool", values="mean", aggfunc="first"
     )

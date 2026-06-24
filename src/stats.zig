@@ -337,7 +337,7 @@ pub fn runStats(io: std.Io, fasta_path: []const u8, index_only: bool) void {
             const soft_pct = if (f_total > 0) @as(f64, @floatFromInt(c.lowercase_count)) / f_total * 100.0 else 0.0;
             writer.print("  Soft-masked: {d:.2}%\n", .{soft_pct}) catch {};
         } else {
-            // Protein stats — top 3 most frequent amino acids
+            // Protein stats: top 3 most frequent amino acids
             const f_total: f64 = @floatFromInt(c.total_bases);
 
             // Collect amino acid counts (combine upper+lower)

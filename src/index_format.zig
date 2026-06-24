@@ -2,7 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 
 // ============================================================================
-// Types — shared by indexer, getter, stats
+// Types - shared by indexer, getter, stats
 // ============================================================================
 
 /// ZFI binary format magic + header
@@ -14,7 +14,12 @@ pub const ZfiHeader = extern struct {
     source_size: u64,
 };
 
-/// Index record for ZFI output (40 bytes padded)
+/// Index record for ZFI output (40 bytes padded).
+///
+/// For `.zfi` indexes, `name_offset` / `name_len` point into the mmap'd FASTA (byte after `>`).
+/// For `.fai` fallback loads, both are zero: names live only in `LoadedIndex.name_map`
+/// (see `tryLoadFai`). Do not call `getName` on `.fai` records; use `lookupName` or
+/// `LoadedIndex.name_map` instead.
 pub const IndexRecord = extern struct {
     name_offset: u64,
     name_len: u16,
@@ -25,6 +30,7 @@ pub const IndexRecord = extern struct {
     line_bytes: u32,
 
     pub fn getName(self: IndexRecord, data: []const u8) []const u8 {
+        // Valid for `.zfi` records only (`name_offset` > 0). `.fai` records store 0/0.
         return data[self.name_offset..][0..self.name_len];
     }
 };
@@ -35,6 +41,11 @@ pub const LoadMode = enum {
     lookup_full_map,
 };
 
+/// Loaded FASTA + index state (from `.zfi` or samtools-compatible `.fai`).
+///
+/// `source` tells which index format was loaded. `.fai` records keep `name_offset` /
+/// `name_len` at zero; sequence coordinates are valid, but names are resolved through
+/// `name_map` (always built for `.fai`). `.zfi` records embed name slices into `fasta_data`.
 pub const LoadedIndex = struct {
     records: []const IndexRecord,
     name_map: std.StringHashMap(usize),
@@ -131,7 +142,7 @@ pub fn writeZfi(
 }
 
 // ============================================================================
-// Shared index loader — loads .zfi or falls back to .fai
+// Shared index loader - loads .zfi or falls back to .fai
 // ============================================================================
 
 /// Load the index for a FASTA file. Tries .zfi first, then .fai fallback.
@@ -385,9 +396,7 @@ fn tryLoadFai(
         const line_bases = std.fmt.parseInt(u32, lb_str, 10) catch return .corrupt;
         const line_bytes = std.fmt.parseInt(u32, lbytes_str, 10) catch return .corrupt;
 
-        // For .fai records, name_offset/name_len refer to the name in fai_data
-        // which is arena-owned. We DON'T scan the FASTA to recover name offsets.
-        // Instead we store 0/0 and rely on the name_map for lookups.
+        // `.fai` rows do not carry FASTA name offsets; names are arena-owned in `name_map`.
         const rec = IndexRecord{
             .name_offset = 0,
             .name_len = 0,

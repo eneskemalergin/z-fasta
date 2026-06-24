@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# verify_rc.sh — Verify z-fasta RC / reverse / complement extraction behavior.
+# verify_rc.sh - Verify z-fasta RC / reverse / complement extraction behavior.
 #
 # Coverage:
 #   - --rc for single regions against samtools faidx -i --mark-strand no

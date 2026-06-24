@@ -129,10 +129,10 @@ def _human_bench(name: str) -> str:
     """Convert raw benchmark stem to human-readable string.
 
     Examples:
-        'size_10mb_100bp'    → '10 MB / 100 bp'
-        'size_100mb_10kbp'   → '100 MB / 10 kbp'
-        '10mb_full'          → '10 MB (full)'
-        '100bp'              → '100 bp'
+        'size_10mb_100bp'    -> '10 MB / 100 bp'
+        'size_100mb_10kbp'   -> '100 MB / 10 kbp'
+        '10mb_full'          -> '10 MB (full)'
+        '100bp'              -> '100 bp'
         'Genome_1kb'         -> 'Genome: 1 kbp region'
         'Genome_full'        -> 'Genome: full seq'
     """
@@ -539,7 +539,7 @@ def fig_speedup_vs(df: pd.DataFrame, baseline: str, title: str, out: Path) -> Pa
     for bar, val in zip(bars, sdf["speedup"]):
         sign = "faster" if val >= 1 else "slower"
         ax.text(bar.get_width() + 0.05, bar.get_y() + bar.get_height() / 2,
-                f"{val:.1f}× {sign}", va="center", fontweight="bold", fontsize=9)
+                f"{val:.1f}x {sign}", va="center", fontweight="bold", fontsize=9)
     ax.axvline(x=1, color="gray", linestyle="--", alpha=0.6, linewidth=1.5)
     ax.set_xlabel(f"Speedup (z-fasta vs {baseline}; >1 = z-fasta wins)")
     ax.set_title(title)
@@ -1110,7 +1110,7 @@ def rc_speedup_text(df: pd.DataFrame, slice_name: str, zf_name: str, baseline_na
     if zf.empty or baseline.empty:
         return None
     ratio = baseline["mean"].values[0] / zf["mean"].values[0]
-    return f"**{ratio:.1f}×**"
+    return f"**{ratio:.1f}x**"
 
 
 # ══════════════════════════════════════════════════════════════════════

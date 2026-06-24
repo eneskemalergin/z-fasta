@@ -175,9 +175,9 @@ All timings on AMD Ryzen 9 3950X, warm cache.
 
 | Dataset       | Size   | z-fasta (no-dedup) | samtools | fastahack | pyfaidx | Speedup vs samtools |
 | ------------- | ------ | ------------------ | -------- | --------- | ------- | ------------------- |
-| Human Genome  | 3.0 GB | 0.39s              | 9.03s    | 21.73s    | 27.48s  | **22.9×**           |
-| Transcriptome | 972 MB | 0.093s             | 1.79s    | 5.72s     | 6.50s   | **19.3×**           |
-| Proteome      | 66 MB  | 0.0056s            | 0.055s   | 0.275s    | 0.368s  | **10.0×**           |
+| Human Genome  | 3.0 GB | 0.39s              | 9.03s    | 21.73s    | 27.48s  | **22.9x**           |
+| Transcriptome | 972 MB | 0.093s             | 1.79s    | 5.72s     | 6.50s   | **19.3x**           |
+| Proteome      | 66 MB  | 0.0056s            | 0.055s   | 0.275s    | 0.368s  | **10.0x**           |
 
 | Mode         | Genome timing | Memory behavior                                                                  |
 | ------------ | ------------- | -------------------------------------------------------------------------------- |
@@ -192,9 +192,9 @@ See [bench/index/REPORT.md](bench/index/REPORT.md) for full scaling curves and m
 
 | Dataset                | Region          | z-fasta        | samtools   | seqtk     | pyfaidx | Speedup vs samtools |
 | ---------------------- | --------------- | -------------- | ---------- | --------- | ------- | ------------------- |
-| Any (warm cache)       | 100 bp – 10 kbp | **0.7–0.9 ms** | 1.5–1.6 ms | 4–34 ms   | ~60 ms  | **1.8–2.1×**        |
-| Proteome (14 MB)       | 1 kbp region    | 1.3 ms         | 10.9 ms    | 7.2 ms    | 119 ms  | **8.4×**            |
-| Transcriptome (972 MB) | 1 kbp region    | 25.3 ms        | 278.7 ms   | 220.3 ms  | 1103 ms | **11.0×**           |
+| Any (warm cache)       | 100 bp – 10 kbp | **0.7–0.9 ms** | 1.5–1.6 ms | 4–34 ms   | ~60 ms  | **1.8–2.1x**        |
+| Proteome (14 MB)       | 1 kbp region    | 1.3 ms         | 10.9 ms    | 7.2 ms    | 119 ms  | **8.4x**            |
+| Transcriptome (972 MB) | 1 kbp region    | 25.3 ms        | 278.7 ms   | 220.3 ms  | 1103 ms | **11.0x**           |
 
 > Small-region extraction is O(1), but on this host the end-to-end CLI path is startup-dominated below roughly 10 kbp. The historical checked-in benchmark report for v0.2.6 was generated under a faster local benchmark environment than the current reruns; direct side-by-side rebuilds of v0.2.6, v0.2.7, and current `main` on the same machine do not reproduce a material no-flag `get` regression. For very large full-sequence extraction, fastahack can still win on raw write-path overhead; z-fasta stays ahead of samtools across the real-dataset GET cases.
 
@@ -204,10 +204,10 @@ Orientation note: the shipped `--rc` path keeps the same mmap-backed extraction 
 
 | Regions | z-fasta | samtools | seqtk  | Speedup vs samtools |
 | ------- | ------- | -------- | ------ | ------------------- |
-| 1       | 25.6 ms | 289 ms   | 221 ms | **11.3×**           |
-| 10      | 33.8 ms | 283 ms   | 226 ms | **8.4×**            |
-| 50      | 66.7 ms | 292 ms   | 225 ms | **4.4×**            |
-| 100     | 66.7 ms | 279 ms   | 222 ms | **4.2×**            |
+| 1       | 25.6 ms | 289 ms   | 221 ms | **11.3x**           |
+| 10      | 33.8 ms | 283 ms   | 226 ms | **8.4x**            |
+| 50      | 66.7 ms | 292 ms   | 225 ms | **4.4x**            |
+| 100     | 66.7 ms | 279 ms   | 222 ms | **4.2x**            |
 
 > Benchmarked on REAL_Transcriptome.fa (972 MB, 254,070 sequences). Latency is dominated by index resolution and output setup rather than region byte count. seqtk performs a full-file scan per call regardless of region count and is listed for reference only.
 
@@ -217,10 +217,10 @@ Run `.venv/bin/python bench/get/generate_report.py` to regenerate the full GET r
 
 | Mode       | Dataset              | z-fasta     | seqkit -a | seqtk comp | Speedup vs seqkit -a |
 | ---------- | -------------------- | ----------- | --------- | ---------- | -------------------- |
-| Index-only | Genome (3.0 GB)      | **0.9 ms**  | 17.45 s   | N/A        | **~19,000×**         |
-| Index-only | Proteome (14 MB)     | **2.9 ms**  | 57.8 ms   | N/A        | **~20×**             |
-| Full scan  | 1 GB single-seq file | **0.78 s**  | 5.62 s    | 2.65 s     | **~7×**              |
-| Full scan  | Proteome (14 MB)     | **11.8 ms** | 57.8 ms   | 93.0 ms    | **~4.9×**            |
+| Index-only | Genome (3.0 GB)      | **0.9 ms**  | 17.45 s   | N/A        | **~19,000x**         |
+| Index-only | Proteome (14 MB)     | **2.9 ms**  | 57.8 ms   | N/A        | **~20x**             |
+| Full scan  | 1 GB single-seq file | **0.78 s**  | 5.62 s    | 2.65 s     | **~7x**              |
+| Full scan  | Proteome (14 MB)     | **11.8 ms** | 57.8 ms   | 93.0 ms    | **~4.9x**            |
 
 > Index-only time is effectively constant with file size and is best described as startup-dominated. It reads `.zfi` index data and computes length-derived metrics without scanning FASTA sequence bytes. Full-scan throughput on synthetic files is ~1.3 GB/s, and the latest benchmark report has z-fasta ahead of seqkit on the real genome/proteome/transcriptome stats cases while still computing richer statistics.
 See [bench/stats/REPORT.md](bench/stats/REPORT.md) for full results.
@@ -245,19 +245,19 @@ bash bench/shared/download_data.sh
 ./zig build -Doptimize=ReleaseFast
 bash bench/index/run_benchmarks.sh       # timing + memory
 bash bench/index/run_tests.sh            # 20 edge-case correctness tests
-.venv/bin/python bench/index/generate_report.py   # → bench/index/REPORT.md
+.venv/bin/python bench/index/generate_report.py   # -> bench/index/REPORT.md
 
 # ── Get ───────────────────────────────────────────────────────────
 bash bench/get/run_benchmarks.sh         # latency, scaling, real datasets
 bash bench/get/verify_get.sh             # 90 byte-identical diff tests vs samtools
 bash bench/get/verify_bed.sh             # 16 BED / names verification cases vs bedtools + samtools
 bash bench/get/verify_rc.sh              # 19 RC / reverse / complement verification cases
-.venv/bin/python bench/get/generate_report.py     # → bench/get/REPORT.md
+.venv/bin/python bench/get/generate_report.py     # -> bench/get/REPORT.md
 
 # ── Stats ─────────────────────────────────────────────────────────
 bash bench/stats/run_benchmarks.sh       # full/index-only, scaling, throughput
 .venv/bin/python bench/stats/verify_stats.py  # 107 BioPython verification tests
-.venv/bin/python bench/stats/generate_report.py   # → bench/stats/REPORT.md
+.venv/bin/python bench/stats/generate_report.py   # -> bench/stats/REPORT.md
 ```
 
 Full local refresh, in the same order used before publishing benchmark updates:
@@ -297,7 +297,7 @@ Add `--skip-real` to the `get` / `stats` scripts to skip real dataset runs (~3 G
 - [x] `z-fasta stats`: Assembly/proteome statistics with index-only mode (v0.2)
 - [x] Unified benchmark suite with per-module reports and figures (v0.2.2)
 - [x] Expanded tool comparison: pyfaidx, seqtk added across all benchmark modules; messy FASTA compatibility matrix (v0.2.3)
-- [x] Multi-region `get`: single call with N regions, index loads once, results stream in CLI order; ~2× faster than samtools across 1–100 regions (v0.2.4)
+- [x] Multi-region `get`: single call with N regions, index loads once, results stream in CLI order; ~2x faster than samtools across 1–100 regions (v0.2.4)
 - [x] Zig 0.16.0 migration plus benchmark/report refresh for v0.2.5
 - [x] v0.2.6 performance recovery: lower startup overhead, faster index loading, buffered GET emission, fixed-width stats/index fast paths, and refreshed benchmark reports
 - [x] v0.2.7 BED batch extraction: `--bed`, `--bed -`, `--names`, `--strand-aware`, bounded chunked processing, and verification/benchmark coverage

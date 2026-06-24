@@ -82,9 +82,9 @@ const BatchStats = struct {
 
 /// Parse a region string. Handles the Ensembl colon trap by parsing from the right.
 /// Accepted formats:
-///   NAME              — full sequence
-///   NAME:START-END    — 1-based, inclusive
-///   NAME:START-       — from START to end
+///   NAME              full sequence
+///   NAME:START-END    1-based, inclusive
+///   NAME:START-       from START to end
 pub fn parseRegion(input: []const u8) Region {
     if (input.len == 0) {
         printErrorAndExit("error: empty region string\n", .{});
@@ -121,7 +121,7 @@ pub fn parseRegion(input: []const u8) Region {
         }
 
         // If the suffix didn't parse as a valid range, the ':' is part of the name.
-        // But there might be other colons further left — keep trying.
+        // But there might be other colons further left; keep trying.
         var search_end = cp;
         while (search_end > 0) {
             var i: usize = search_end;
@@ -151,7 +151,7 @@ pub fn parseRegion(input: []const u8) Region {
         }
     }
 
-    // No valid region suffix found — treat entire input as sequence name
+    // No valid region suffix found; treat entire input as sequence name
     return Region{
         .name = input,
         .start = 1,
@@ -192,12 +192,12 @@ fn parseRangeSuffix(suffix: []const u8) ?RangeParsed {
 
 /// A fully resolved, validated extraction request.
 /// Byte offset and length are pre-computed so extraction is a single mmap
-/// slice walk — no further index lookups required.
+/// slice walk; no further index lookups required.
 pub const ResolvedRegion = struct {
     name: []const u8, // sequence name for FASTA header
     start: u64, // 1-based inclusive (validated)
     display_end: u64, // end value for header (pre-clamp, samtools convention)
-    is_full: bool, // true → emit ">NAME", false → emit ">NAME:start-display_end"
+    is_full: bool, // true -> emit ">NAME", false -> emit ">NAME:start-display_end"
     start_byte: u64, // absolute byte offset into fasta_data for first base
     seq_offset: u64,
     num_bases: u64, // number of bases to extract
@@ -284,10 +284,10 @@ fn resolveParsedRequest(
 }
 
 /// Resolve CLI batches (2..15 regions) loaded with `.records_only` (no name hash map).
-/// Scans every index record against every request: O(records × regions). At most 14
+/// Scans every index record against every request: O(records x regions). At most 14
 /// regions here, so a hash map would add setup and cache pressure without a measurable
 /// win. Batches of 16+ load `.lookup_full_map` and use `lookupName` instead. Revisit if
-/// the sub-16 threshold rises materially (plan V6).
+/// the sub-16 threshold rises materially.
 fn resolveParsedRequestsByRecordScan(
     idx: *const LoadedIndex,
     requests: []const ParsedRequest,

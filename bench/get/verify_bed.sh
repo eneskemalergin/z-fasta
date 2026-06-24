@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# verify_bed.sh — Verify z-fasta BED and names extraction against bedtools and samtools.
+# verify_bed.sh - Verify z-fasta BED and names extraction against bedtools and samtools.
 #
 # Coverage:
 #   - chunked BED extraction for small / medium / large / x-large inputs

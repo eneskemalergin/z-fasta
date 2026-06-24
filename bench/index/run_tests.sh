@@ -1,12 +1,12 @@
 #!/bin/bash
 # z-fasta Edge Case / Correctness Tests
 # Generates 20 edge case FASTA files, runs each tool, diffs outputs.
-# Outputs raw CSV — all formatting done by generate_report.py.
+# Outputs raw CSV; all formatting done by generate_report.py.
 #
 # Usage: ./run_tests.sh
 #
 # Outputs:
-#   results/tests_<timestamp>.csv  — per-case exit codes + match status
+#   results/tests_<timestamp>.csv  per-case exit codes + match status
 
 set -euo pipefail
 
@@ -157,14 +157,14 @@ for file in "$EDGE_DIR"/*.fasta; do
     $SAMTOOLS faidx "$file" 2>/dev/null || true
 
     if [[ $zf_exit -ne 0 && $sam_exit -ne 0 ]]; then
-        # Both rejected — that's agreement
+        # Both rejected; that's agreement
         match="MATCH"
     elif [[ $zf_exit -ne 0 || $sam_exit -ne 0 ]]; then
         # One succeeded, one failed
         match="DIFF"
         echo "--- FAILURE: $name (exit codes differ: zf=$zf_exit sam=$sam_exit) ---" >> "$FAIL_LOG"
     elif [[ -f "${file}.fai" ]]; then
-        # Both succeeded — diff the .fai content
+        # Both succeeded; diff the .fai content
         if diff -q /tmp/zf_edge_test.fai "${file}.fai" &>/dev/null; then
             match="MATCH"
         else
