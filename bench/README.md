@@ -159,3 +159,52 @@ For suite-level details, see [index/README.md](index/README.md), [get/README.md]
 - `*/results/figures/`: PNG charts
 - `*/results/*.csv`, `*/results/*/`: Raw data (gitignored, regenerated)
 - `shared/data/`: Real datasets (gitignored, downloaded by script)
+
+## Performance baselines (local, gitignored)
+
+The baseline scripts are an **additive layer** on top of the existing bench flow. They do not replace `generate_report.py`, `REPORT.md`, or the raw `results/` trees.
+
+| Layer | Role | Output |
+| --- | --- | --- |
+| `run_benchmarks.sh` (per suite) | Produce hyperfine JSON + memory CSV | `bench/*/results/` |
+| `generate_report.py` | Human-readable tables and figures | `REPORT.md`, `results/figures/` |
+| `save_baseline.py` | Condensed snapshot for regression diffing | `bench/baselines/<stamp>_<rev>/` |
+| `compare_baseline.py` | Diff two snapshots | stdout; exit 1 on regressions |
+
+`compare.json` holds **timing only** (flat hyperfine means). Memory RSS and page faults stay in the per-suite `memory_*.csv` files and `REPORT.md`; they are copied into `index.json` / `get.json` / `stats.json` but are not part of the regression gate yet.
+
+**Use one coherent bench run per snapshot.** `save_baseline.py` groups artifacts by bundle timestamp (same logic as `generate_report.py` for GET). If you run index today and get yesterday, the snapshot mixes runs and prints `bundle_warnings`. Prefer:
+
+```bash
+bash bench/run_all_and_baseline.sh
+```
+
+Faster iteration while developing:
+
+```bash
+bash bench/run_all_and_baseline.sh --skip-scaling --skip-rc --label my-run
+```
+
+Or step by step after a full suite pass:
+
+```bash
+.venv/bin/python bench/save_baseline.py --label optional-note
+```
+
+Snapshots land in `bench/baselines/<YYYYMMDD_HHMMSS>_<git-rev>/` (gitignored):
+
+| File | Contents |
+| --- | --- |
+| `manifest.json` | Git rev, host/CPU, binary version, bundle timestamps, headline timings |
+| `index.json` / `get.json` / `stats.json` | Condensed per-suite metrics |
+| `compare.json` | Flat `suite.section.param.tool → seconds` map for diffing |
+
+Compare two snapshots:
+
+```bash
+.venv/bin/python bench/compare_baseline.py bench/baselines/<old> bench/baselines/<new> --z-fasta-only
+```
+
+`bench/baselines/LATEST` points at the most recent snapshot on this machine.
+
+**Release gate:** run the full suite before tagging; compare against `LATEST` or the previous release baseline. Investigate any z-fasta regression above ~5–10%.

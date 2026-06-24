@@ -152,6 +152,36 @@ test "scanHeaders counts wrapped final short line with trailing newline correctl
     try std.testing.expectEqual(@as(u32, 9), rec.line_bytes);
 }
 
+test "scanHeaders counts trailing whitespace lines via base scan fallback" {
+    const data = ">seq1\nACGTACGT  \nACGT\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const records = try scanHeaders(data, arena.allocator());
+    try std.testing.expectEqual(@as(usize, 1), records.items.len);
+    try std.testing.expectEqual(@as(u64, 12), records.items[0].seq_len);
+}
+
+test "scanHeaders counts record with trailing newline before next header" {
+    const data = ">a\nAAAA\n>next\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const records = try scanHeaders(data, arena.allocator());
+    try std.testing.expectEqual(@as(usize, 1), records.items.len);
+    try std.testing.expectEqual(@as(u64, 4), records.items[0].seq_len);
+}
+
+test "scanHeaders cross-checks non-dense first line against countBases" {
+    const data = ">seq\nACGT    \nACGTACGT\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const records = try scanHeaders(data, arena.allocator());
+    try std.testing.expectEqual(@as(usize, 1), records.items.len);
+    try std.testing.expectEqual(@as(u64, 12), records.items[0].seq_len);
+}
+
 test "scanHeaders handles CRLF line endings" {
     const data = ">seq1\r\nACGT\r\n";
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

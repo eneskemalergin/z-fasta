@@ -80,6 +80,15 @@ fn hasLineSeparatorAt(data: []const u8, pos: usize, sep_len: u32) bool {
     };
 }
 
+fn countDenseBasesInRange(data: []const u8, start: usize, end: usize) u64 {
+    var count: u64 = 0;
+    var i = start;
+    while (i < end) : (i += 1) {
+        if (data[i] > ' ') count += 1;
+    }
+    return count;
+}
+
 fn countFixedWidthBases(data: []const u8, line_bases: u32, line_bytes: u32) ?u64 {
     if (data.len == 0) return 0;
     if (line_bases == 0 or line_bytes <= line_bases) return null;
@@ -93,24 +102,57 @@ fn countFixedWidthBases(data: []const u8, line_bases: u32, line_bytes: u32) ?u64
         const remaining = data.len - cursor;
         if (remaining >= line_bytes) {
             if (!hasLineSeparatorAt(data, cursor + line_bases, sep_len)) return null;
+            // Padding before the separator means line_bases over-counts; use the base scan.
+            if (data[cursor + line_bases - 1] <= ' ') return null;
             bases += line_bases;
             cursor += line_bytes;
         } else {
-            if (remaining <= line_bases) return bases + remaining;
+            if (remaining <= line_bases) {
+                // remaining < line_bytes can still span multiple wrapped lines; reject those.
+                const tail = data[cursor..];
+                if (tail.len > 1) {
+                    const interior = tail[0 .. tail.len - 1];
+                    if (std.mem.indexOfScalar(u8, interior, '\n') != null) return null;
+                    if (std.mem.indexOfScalar(u8, interior, '\r') != null) return null;
+                }
+                return bases + countDenseBasesInRange(data, cursor, data.len);
+            }
 
             const tail_bases = remaining - sep_len;
             if (tail_bases > line_bases) return null;
             if (!hasLineSeparatorAt(data, cursor + tail_bases, sep_len)) return null;
+            if (tail_bases > 0 and data[cursor + tail_bases - 1] <= ' ') return null;
             return bases + tail_bases;
         }
     }
     return bases;
 }
 
+fn trimTrailingRecordNewlines(data: []const u8) []const u8 {
+    var end = data.len;
+    while (end > 0) {
+        const c = data[end - 1];
+        if (c != '\n' and c != '\r') break;
+        end -= 1;
+    }
+    return data[0..end];
+}
+
+fn firstLineIsDense(line_bases: u32, line_bytes: u32) bool {
+    if (line_bases == 0 or line_bytes <= line_bases) return false;
+    const sep_len = line_bytes - line_bases;
+    return (sep_len == 1 or sep_len == 2) and line_bases + sep_len == line_bytes;
+}
+
 fn countSequenceLength(data: []const u8, line_bases: u32, line_bytes: u32) u64 {
-    const fallback = countBases(data);
-    const fixed_width = countFixedWidthBases(data, line_bases, line_bytes) orelse return fallback;
-    return if (fixed_width == fallback) fixed_width else fallback;
+    const body = trimTrailingRecordNewlines(data);
+    const fixed_width = countFixedWidthBases(body, line_bases, line_bytes) orelse return countBases(body);
+    // Padded first lines break fixed-width math; verify against a full base count.
+    if (!firstLineIsDense(line_bases, line_bytes)) {
+        const fallback = countBases(body);
+        return if (fixed_width == fallback) fixed_width else fallback;
+    }
+    return fixed_width;
 }
 
 // ============================================================================

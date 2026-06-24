@@ -9,19 +9,25 @@ Various memory safety, optimizations and re-building benchmarking framework to w
 
 ### Changed
 
-- `src/main.zig`: `.zfi` indexes write to `{path}.zfi.tmp` and rename on success so a killed run does not leave a corrupt index
-- `src/getter.zig`: multi-region sort buffers (≥16 regions) cap at 64 MiB per region and 256 MiB total; oversized batches stream in CLI order instead
-- `src/getter.zig`: `readAllInput` rejects BED and names files over 512 MiB when `--chunk-size -1` loads the full input into memory
-- `src/index_format.zig`: reject `.zfi` records whose `seq_offset` points past the end of the FASTA
+- `src/main.zig`: write `.zfi` indexes via a temp file and rename on success
+- `src/getter.zig`: cap multi-region sort buffers at 64 MiB per region and 256 MiB total; reject BED/names inputs over 512 MiB when `--chunk-size -1`
+- `src/index_format.zig`: reject `.zfi` records whose `seq_offset` is past EOF
+- `src/indexer.zig`: fix ~2× genome index regression while preserving v0.2.8 `seq_len` validation on messy records
+- `.gitignore`: ignore Python bytecode, caches, and `.venv/`
 
 ### Added
 
+- `bench/save_baseline.py`, `bench/compare_baseline.py`, `bench/run_all_and_baseline.sh`: local baseline snapshots under `bench/baselines/` for regression diffing
 - `src/getter.zig`: unit tests for sort-buffer cap logic
-- `tests/test_index.zig`: unit test for `seq_offset` at end-of-file rejection
+- `tests/test_index.zig`: `seq_len` edge-case tests and `seq_offset` EOF rejection test
+
+### Removed
+
+- Tracked `__pycache__/*.pyc` files
 
 ### Validation
 
-- `./zig build test --summary all` (103/103 tests passed)
+- `./zig build test --summary all` (106/106 tests passed)
 - `./zig build -Doptimize=ReleaseFast`
 - `bash bench/index/run_tests.sh` (20/20 passed)
 - `bash bench/get/verify_get.sh` (90/90 passed)
