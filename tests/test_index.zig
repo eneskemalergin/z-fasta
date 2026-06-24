@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const main = @import("main");
 const validateFasta = main.validateFasta;
 const scanHeaders = main.scanHeaders;
@@ -8,7 +9,53 @@ const IndexRecord = main.IndexRecord;
 const writeZfi = main.writeZfi;
 const ZfiHeader = main.ZfiHeader;
 const ZFI_MAGIC = main.ZFI_MAGIC;
+const c = std.c;
 const io = std.Io.Threaded.global_single_threaded.io();
+
+fn supportsPosixFutimens() bool {
+    return switch (builtin.os.tag) {
+        .linux, .dragonfly, .freebsd, .netbsd, .openbsd, .illumos,
+        .macos, .ios, .tvos, .watchos, .visionos, .driverkit, .maccatalyst => true,
+        else => false,
+    };
+}
+
+fn uniqueArtifactPath(allocator: std.mem.Allocator, stem: []const u8, ext: []const u8) ![]u8 {
+    try std.Io.Dir.cwd().createDirPath(io, "zig-cache/test-artifacts");
+    const now = std.Io.Clock.Timestamp.now(io, .awake);
+    const nanos: u64 = @intCast(now.raw.toNanoseconds());
+    return std.fmt.allocPrint(allocator, "zig-cache/test-artifacts/{s}-{d}.{s}", .{
+        stem,
+        nanos,
+        ext,
+    });
+}
+
+fn markFileStaleOneHourAgo(file: std.Io.File) !void {
+    if (!supportsPosixFutimens()) return error.SkipZigTest;
+
+    switch (builtin.os.tag) {
+        .linux => {
+            var now: std.os.linux.timespec = undefined;
+            if (std.os.linux.errno(std.os.linux.clock_gettime(.REALTIME, &now)) != .SUCCESS) {
+                return error.Unexpected;
+            }
+            const stale: std.os.linux.timespec = .{ .sec = now.sec - 3600, .nsec = now.nsec };
+            if (std.os.linux.errno(std.os.linux.futimens(file.handle, &.{ stale, stale })) != .SUCCESS) {
+                return error.Unexpected;
+            }
+        },
+        .dragonfly, .freebsd, .netbsd, .openbsd, .illumos,
+        .macos, .ios, .tvos, .watchos, .visionos, .driverkit, .maccatalyst,
+        => {
+            var now: c.timespec = undefined;
+            if (c.clock_gettime(c.CLOCK.REALTIME, &now) != 0) return error.Unexpected;
+            const stale: c.timespec = .{ .sec = now.sec - 3600, .nsec = now.nsec };
+            if (c.futimens(file.handle, &.{ stale, stale }) != 0) return error.Unexpected;
+        },
+        else => return error.SkipZigTest,
+    }
+}
 
 // ============================================================================
 // Test helper: read file into memory
@@ -21,18 +68,6 @@ fn readTestFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     const data = try allocator.alloc(u8, @intCast(stat.size));
     const bytes_read = try std.Io.File.readPositionalAll(file, io, data, 0);
     return data[0..bytes_read];
-}
-
-fn uniqueArtifactPath(allocator: std.mem.Allocator, stem: []const u8, ext: []const u8) ![]u8 {
-    try std.Io.Dir.cwd().createDirPath(io, "zig-cache/test-artifacts");
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
-    const nanos: u64 = @intCast(@as(i128, ts.sec) * std.time.ns_per_s + ts.nsec);
-    return std.fmt.allocPrint(allocator, "zig-cache/test-artifacts/{s}-{d}.{s}", .{
-        stem,
-        nanos,
-        ext,
-    });
 }
 
 // ============================================================================
@@ -438,12 +473,9 @@ test "loadIndexChecked falls back to fai when zfi is stale" {
     _ = try main.indexer.streamingScan(fasta_data, &fai_fw.interface, .fai, true, allocator);
     try fai_fw.flush();
 
-    var now: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.REALTIME, &now);
-    const stale_time: std.os.linux.timespec = .{ .sec = now.sec - 3600, .nsec = now.nsec };
     const zfi_file = try std.Io.Dir.cwd().openFile(io, zfi_path, .{});
     defer zfi_file.close(io);
-    try std.testing.expectEqual(@as(usize, 0), std.os.linux.futimens(zfi_file.handle, &.{ stale_time, stale_time }));
+    try markFileStaleOneHourAgo(zfi_file);
 
     var idx = try loadIndexChecked(io, fasta_path);
     defer idx.deinit();

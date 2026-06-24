@@ -283,6 +283,11 @@ fn resolveParsedRequest(
     };
 }
 
+/// Resolve CLI batches (2..15 regions) loaded with `.records_only` (no name hash map).
+/// Scans every index record against every request: O(records × regions). At most 14
+/// regions here, so a hash map would add setup and cache pressure without a measurable
+/// win. Batches of 16+ load `.lookup_full_map` and use `lookupName` instead. Revisit if
+/// the sub-16 threshold rises materially (plan V6).
 fn resolveParsedRequestsByRecordScan(
     idx: *const LoadedIndex,
     requests: []const ParsedRequest,
@@ -806,6 +811,7 @@ fn processParsedRequests(
     var already_in_offset_order = requests.len >= 16;
     var prev_start_byte: u64 = 0;
 
+    // `.records_only` + 2..15 regions: by-record scan (see resolveParsedRequestsByRecordScan).
     if (requests.len > 1 and requests.len < 16 and idx.source == .zfi and !idx.has_name_map) {
         resolveParsedRequestsByRecordScan(idx, requests, resolved, annotate_transform);
     } else {

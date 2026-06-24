@@ -32,13 +32,15 @@ pub fn build(b: *std.Build) void {
     });
 
     // Index tests
+    const test_index_module = b.createModule(.{
+        .root_source_file = b.path("tests/test_index.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "main", .module = main_module }},
+    });
+    test_index_module.link_libc = true;
     const test_index = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/test_index.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "main", .module = main_module }},
-        }),
+        .root_module = test_index_module,
     });
     const run_test_index = b.addRunArtifact(test_index);
 
