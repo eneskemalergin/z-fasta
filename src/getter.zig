@@ -573,6 +573,31 @@ fn shouldUseSortBuffers(resolved: []const ResolvedRegion) bool {
     return true;
 }
 
+fn batchHasReverseReads(resolved: []const ResolvedRegion) bool {
+    for (resolved) |r| {
+        if (r.orientation.reverse) return true;
+    }
+    return false;
+}
+
+fn shouldAdviseSequentialMmap(
+    requests_len: usize,
+    already_in_offset_order: bool,
+    use_sort_buffers: bool,
+    has_reverse_reads: bool,
+    allow_sequential_madvise: bool,
+) bool {
+    if (!allow_sequential_madvise) return false;
+    if (requests_len < 16) return false;
+    if (has_reverse_reads) return false;
+    if (already_in_offset_order) return true;
+    return use_sort_buffers;
+}
+
+fn adviseFastaMmap(fasta: []const u8, advice: u32) void {
+    posix.madvise(@alignCast(@constCast(fasta.ptr)), fasta.len, advice) catch {};
+}
+
 fn readAllInput(allocator: std.mem.Allocator, io: std.Io, path: []const u8) []u8 {
     if (std.mem.eql(u8, path, "-")) {
         var stdin_buf: [4096]u8 = undefined;
@@ -704,7 +729,7 @@ fn processBedData(
     defer requests.deinit(allocator);
 
     appendBedRequests(&requests, bed_data, honor_strand, global_orientation, allocator);
-    return processParsedRequests(idx, allocator, requests.items, annotate_transform, writer);
+    return processParsedRequests(idx, allocator, requests.items, annotate_transform, writer, false);
 }
 
 fn appendNamesRequests(requests: *std.ArrayList(ParsedRequest), names_data: []const u8, orientation: Orientation, allocator: std.mem.Allocator) void {
@@ -750,7 +775,14 @@ fn writeSummary(io: std.Io, region_count: usize, total_bases: u64, elapsed_ns: u
     stderr_fw.flush() catch {};
 }
 
-fn processParsedRequests(idx: *const LoadedIndex, allocator: std.mem.Allocator, requests: []const ParsedRequest, annotate_transform: bool, writer: anytype) BatchStats {
+fn processParsedRequests(
+    idx: *const LoadedIndex,
+    allocator: std.mem.Allocator,
+    requests: []const ParsedRequest,
+    annotate_transform: bool,
+    writer: anytype,
+    allow_sequential_madvise: bool,
+) BatchStats {
     if (requests.len == 0) return .{};
 
     ensureComplementAllowed(idx, requests);
@@ -797,6 +829,17 @@ fn processParsedRequests(idx: *const LoadedIndex, allocator: std.mem.Allocator, 
         for (resolved) |*r| r.annotate_transform = annotate_transform;
     }
 
+    const use_sort_buffers = requests.len >= 16 and !already_in_offset_order and shouldUseSortBuffers(resolved);
+    const sequential_mmap = shouldAdviseSequentialMmap(
+        requests.len,
+        already_in_offset_order,
+        use_sort_buffers,
+        batchHasReverseReads(resolved),
+        allow_sequential_madvise,
+    );
+    const mmap_advice: u32 = if (sequential_mmap) posix.MADV.SEQUENTIAL else posix.MADV.RANDOM;
+    adviseFastaMmap(idx.fasta_data, mmap_advice);
+
     var total_bases: u64 = 0;
 
     if (requests.len < 16) {
@@ -816,7 +859,7 @@ fn processParsedRequests(idx: *const LoadedIndex, allocator: std.mem.Allocator, 
             };
         }
 
-        if (!shouldUseSortBuffers(resolved)) {
+        if (!use_sort_buffers) {
             for (resolved) |r| {
                 total_bases += r.num_bases;
                 emitRegion(r, idx.fasta_data, writer);
@@ -906,7 +949,7 @@ fn processBedReaderChunked(
             break;
         }
 
-        const batch = processParsedRequests(idx, chunk_allocator, requests.items, annotate_transform, writer);
+        const batch = processParsedRequests(idx, chunk_allocator, requests.items, annotate_transform, writer, false);
         total.region_count += batch.region_count;
         total.total_bases += batch.total_bases;
 
@@ -1001,9 +1044,6 @@ pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions
     var idx = index_format.loadIndexWithMode(io, fasta_path, load_mode);
     defer idx.deinit();
 
-    // Point-access pattern: disable kernel readahead.
-    posix.madvise(@alignCast(@constCast(idx.fasta_data.ptr)), idx.fasta_data.len, posix.MADV.RANDOM) catch {};
-
     var out_buf: [65536]u8 = undefined;
     var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
     const writer = &stdout_fw.interface;
@@ -1020,7 +1060,7 @@ pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions
     }
 
     if (requests.items.len > 0) {
-        const batch = processParsedRequests(&idx, allocator, requests.items, options.annotate_transform, writer);
+        const batch = processParsedRequests(&idx, allocator, requests.items, options.annotate_transform, writer, true);
         totals.region_count += batch.region_count;
         totals.total_bases += batch.total_bases;
     }
@@ -1119,7 +1159,7 @@ test "processParsedRequests applies complement-only and reverse-only transforms"
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const batch = processParsedRequests(&idx, arena.allocator(), &requests, true, &writer.writer);
+    const batch = processParsedRequests(&idx, arena.allocator(), &requests, true, &writer.writer, true);
 
     try std.testing.expectEqual(@as(usize, 2), batch.region_count);
     try std.testing.expectEqualStrings(
@@ -1183,4 +1223,13 @@ test "shouldUseSortBuffers rejects oversized single region" {
         .original_index = 0,
     };
     try std.testing.expect(!shouldUseSortBuffers(&.{region}));
+}
+
+test "shouldAdviseSequentialMmap for CLI multi-region sort path" {
+    try std.testing.expect(shouldAdviseSequentialMmap(100, false, true, false, true));
+    try std.testing.expect(shouldAdviseSequentialMmap(100, true, false, false, true));
+    try std.testing.expect(!shouldAdviseSequentialMmap(100, false, true, true, true));
+    try std.testing.expect(!shouldAdviseSequentialMmap(100, false, true, false, false));
+    try std.testing.expect(!shouldAdviseSequentialMmap(10, false, false, false, true));
+    try std.testing.expect(!shouldAdviseSequentialMmap(100, false, false, false, true));
 }
