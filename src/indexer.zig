@@ -159,12 +159,12 @@ fn countSequenceLength(data: []const u8, line_bases: u32, line_bytes: u32) u64 {
 // Streaming Mode (mmap, default)
 // ============================================================================
 
-pub fn streamingScan(
+fn scanFastaRecords(
     data: []const u8,
-    writer: anytype,
-    mode: OutputMode,
     enable_dedup: bool,
     allocator: std.mem.Allocator,
+    ctx: anytype,
+    comptime emitRecord: fn (@TypeOf(ctx), IndexRecord, []const u8) anyerror!void,
 ) !u32 {
     var seen_names: ?std.StringHashMap(void) = null;
     if (enable_dedup) {
@@ -223,44 +223,56 @@ pub fn streamingScan(
         const seq_data = data[@intCast(seq_offset)..seq_end];
         const seq_len = countSequenceLength(seq_data, line_bases, line_bytes);
 
-        if (seq_len == 0) {
-            pos = seq_end;
-            continue;
-        }
+        pos = seq_end;
+        if (seq_len == 0) continue;
 
-        // Dedup check
         const name = data[name_offset..][0..name_len];
         if (seen_names) |*seen| {
             const gop = try seen.getOrPut(name);
-            if (gop.found_existing) {
-                pos = seq_end;
-                continue;
-            }
+            if (gop.found_existing) continue;
         }
 
-        // Write record
-        switch (mode) {
-            .fai => {
-                try writer.print("{s}\t{d}\t{d}\t{d}\t{d}\n", .{
-                    name, seq_len, seq_offset, line_bases, line_bytes,
-                });
-            },
-            .zfi => {
-                const rec = IndexRecord{
-                    .name_offset = @intCast(name_offset),
-                    .name_len = name_len,
-                    .seq_offset = seq_offset,
-                    .seq_len = seq_len,
-                    .line_bases = line_bases,
-                    .line_bytes = line_bytes,
-                };
-                try writer.writeAll(std.mem.asBytes(&rec));
-            },
-        }
+        const rec = IndexRecord{
+            .name_offset = @intCast(name_offset),
+            .name_len = name_len,
+            .seq_offset = seq_offset,
+            .seq_len = seq_len,
+            .line_bases = line_bases,
+            .line_bytes = line_bytes,
+        };
+        try emitRecord(ctx, rec, name);
         record_count += 1;
-        pos = seq_end;
     }
     return record_count;
+}
+
+pub fn streamingScan(
+    data: []const u8,
+    writer: anytype,
+    mode: OutputMode,
+    enable_dedup: bool,
+    allocator: std.mem.Allocator,
+) !u32 {
+    const Ctx = struct {
+        writer: @TypeOf(writer),
+        mode: OutputMode,
+
+        fn emit(ctx: *@This(), rec: IndexRecord, name: []const u8) !void {
+            switch (ctx.mode) {
+                .fai => {
+                    try ctx.writer.print("{s}\t{d}\t{d}\t{d}\t{d}\n", .{
+                        name, rec.seq_len, rec.seq_offset, rec.line_bases, rec.line_bytes,
+                    });
+                },
+                .zfi => {
+                    try ctx.writer.writeAll(std.mem.asBytes(&rec));
+                },
+            }
+        }
+    };
+
+    var ctx = Ctx{ .writer = writer, .mode = mode };
+    return scanFastaRecords(data, enable_dedup, allocator, &ctx, Ctx.emit);
 }
 
 /// Scans FASTA data and returns index records as ArrayList (for testing).
@@ -269,82 +281,18 @@ pub fn scanHeaders(data: []const u8, allocator: std.mem.Allocator) !std.ArrayLis
     var records: std.ArrayList(IndexRecord) = .empty;
     errdefer records.deinit(allocator);
 
-    var seen_names = std.StringHashMap(void).init(allocator);
-    defer seen_names.deinit();
+    const Ctx = struct {
+        list: *std.ArrayList(IndexRecord),
+        record_allocator: std.mem.Allocator,
 
-    var pos: usize = 0;
-    while (pos < data.len) {
-        pos = findNextHeaderStart(data, pos);
-        if (pos >= data.len) break;
-
-        const name_offset = pos + 1;
-        var name_end = name_offset;
-        while (name_end < data.len and
-            data[name_end] != ' ' and
-            data[name_end] != '\t' and
-            data[name_end] != '\n' and
-            data[name_end] != '\r')
-        {
-            name_end += 1;
+        fn emit(ctx: *@This(), rec: IndexRecord, name: []const u8) !void {
+            _ = name;
+            try ctx.list.append(ctx.record_allocator, rec);
         }
-        const name_len: u16 = @intCast(name_end - name_offset);
+    };
 
-        var header_end = name_end;
-        while (header_end < data.len and data[header_end] != '\n') {
-            header_end += 1;
-        }
-
-        const seq_offset: u64 = if (header_end < data.len) header_end + 1 else header_end;
-        const seq_end = findNextHeaderStart(data, @intCast(seq_offset));
-
-        // Line metrics
-        var line_bases: u32 = 0;
-        var line_bytes: u32 = 0;
-        if (seq_offset < seq_end) {
-            var first_line_end: usize = @intCast(seq_offset);
-            while (first_line_end < seq_end and data[first_line_end] != '\n') {
-                first_line_end += 1;
-            }
-            var base_count: u32 = 0;
-            var j: usize = @intCast(seq_offset);
-            while (j < first_line_end) : (j += 1) {
-                if (data[j] > ' ') base_count += 1;
-            }
-            line_bases = base_count;
-            if (first_line_end < seq_end) {
-                line_bytes = @intCast((first_line_end + 1) - seq_offset);
-            } else {
-                line_bytes = @intCast((first_line_end - seq_offset) + 1);
-            }
-        }
-
-        const seq_data = data[@intCast(seq_offset)..seq_end];
-        const seq_len = countSequenceLength(seq_data, line_bases, line_bytes);
-
-        if (seq_len == 0) {
-            pos = seq_end;
-            continue;
-        }
-
-        // Dedup check
-        const name = data[name_offset..][0..name_len];
-        const gop = try seen_names.getOrPut(name);
-        if (gop.found_existing) {
-            pos = seq_end;
-            continue;
-        }
-
-        try records.append(allocator, IndexRecord{
-            .name_offset = @intCast(name_offset),
-            .name_len = name_len,
-            .seq_offset = seq_offset,
-            .seq_len = seq_len,
-            .line_bases = line_bases,
-            .line_bytes = line_bytes,
-        });
-
-        pos = seq_end;
-    }
+    var ctx = Ctx{ .list = &records, .record_allocator = allocator };
+    _ = try scanFastaRecords(data, true, allocator, &ctx, Ctx.emit);
     return records;
 }
 
