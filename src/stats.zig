@@ -6,6 +6,9 @@ const IndexRecord = index_format.IndexRecord;
 const LoadedIndex = index_format.LoadedIndex;
 const printErrorAndExit = index_format.printErrorAndExit;
 
+const SIMD_CHUNK_SIZE = 32;
+const SimdVec = @Vector(SIMD_CHUNK_SIZE, u8);
+
 // ============================================================================
 // Stats computation
 // ============================================================================
@@ -500,13 +503,40 @@ fn countCompositionSlice(
     total_bases: *u64,
     lowercase_count: *u64,
 ) void {
-    for (data) |byte| {
+    const a_vec: SimdVec = @splat('a');
+    const z_vec: SimdVec = @splat('z');
+
+    var pos: usize = 0;
+    while (pos + SIMD_CHUNK_SIZE <= data.len) {
+        const chunk: SimdVec = data[pos..][0..SIMD_CHUNK_SIZE].*;
+        inline for (0..SIMD_CHUNK_SIZE) |j| {
+            counts[chunk[j]] += 1;
+        }
+        total_bases.* += SIMD_CHUNK_SIZE;
+        const lower_mask = (chunk >= a_vec) & (chunk <= z_vec);
+        lowercase_count.* += @popCount(@as(u32, @bitCast(lower_mask)));
+        pos += SIMD_CHUNK_SIZE;
+    }
+    while (pos < data.len) : (pos += 1) {
+        const byte = data[pos];
         counts[byte] += 1;
         total_bases.* += 1;
         if (byte >= 'a' and byte <= 'z') {
             lowercase_count.* += 1;
         }
     }
+}
+
+test "countCompositionSlice tallies composition and lowercase" {
+    var counts: [256]u64 = .{0} ** 256;
+    var total: u64 = 0;
+    var lowercase: u64 = 0;
+    countCompositionSlice("ACGTacgtNN", &counts, &total, &lowercase);
+    try std.testing.expectEqual(@as(u64, 10), total);
+    try std.testing.expectEqual(@as(u64, 4), lowercase);
+    try std.testing.expectEqual(@as(u64, 2), counts['A']);
+    try std.testing.expectEqual(@as(u64, 2), counts['a']);
+    try std.testing.expectEqual(@as(u64, 2), counts['N']);
 }
 
 /// Detect if sequences are nucleotide or protein based on first 100K bases.
