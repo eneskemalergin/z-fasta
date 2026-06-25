@@ -3,7 +3,7 @@
 
 All notable changes to z-fasta will be documented in this file.
 
-## [0.2.9] - Unreleased
+## [0.2.9] - 2026-06-24
 
 Various memory safety, optimizations and re-building benchmarking framework to work with less dependencies. Also some code cleanup, standardization.
 
@@ -16,6 +16,12 @@ Various memory safety, optimizations and re-building benchmarking framework to w
 - `src/indexer.zig`: restore fast `seq_len` counting on uniform records while keeping v0.2.8 validation on messy records
 - `src/stats.zig`: SIMD `countCompositionSlice` on the fixed-width full-scan path
 - `.gitignore`: ignore Python bytecode, caches, and `.venv/`
+- `src/main.zig`: route CLI errors through `index_format.printErrorAndExit`; flush stdout before `--emit-fai` error exit; VERSION bumped to 0.2.9; help text for `--low-mem`, `--no-dedup`, region cap, and `--chunk-size 1`
+- `build.zig.zon`: package version bumped to 0.2.9
+- `src/indexer.zig`: flush stdout before `--low-mem` error exit
+- `src/getter.zig`: clearer BED `StreamTooLong` error (line number and 4096-byte buffer limit); `detectRecordType` documents base-not-byte sampling
+- `src/stats.zig`: reuse one 64-byte `formatComma` buffer (byte-identical output)
+- `README.md`: index/get flag docs aligned with CLI help
 
 ### Added
 
@@ -27,6 +33,7 @@ Various memory safety, optimizations and re-building benchmarking framework to w
 ### Removed
 
 - Tracked `__pycache__/*.pyc` files
+- `src/getter.zig`: dead `resolveRegionsByRecordScan`
 
 ### Validation
 

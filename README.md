@@ -305,6 +305,7 @@ Add `--skip-real` to the `get` / `stats` scripts to skip real dataset runs (~3 G
 - [x] v0.2.6 performance recovery: lower startup overhead, faster index loading, buffered GET emission, fixed-width stats/index fast paths, and refreshed benchmark reports
 - [x] v0.2.7 BED batch extraction: `--bed`, `--bed -`, `--names`, `--strand-aware`, bounded chunked processing, and verification/benchmark coverage
 - [x] v0.2.8 reverse/complement extraction: `--rc`, `--reverse-only`, `--complement-only`, `--annotate-rc`, RC verification, and integrated RC benchmark/report coverage
+- [x] v0.2.9 overall quality improvements around memory safety, performance optimization, and code cleanup.
 
 **Near-term**
 
