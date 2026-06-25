@@ -109,7 +109,7 @@ const LoadAttempt = union(enum) {
 };
 
 // ============================================================================
-// Error helper (same pattern as main.zig)
+// Error helper (shared by main, getter, indexer)
 // ============================================================================
 
 pub fn printErrorAndExit(comptime fmt: []const u8, args: anytype) noreturn {

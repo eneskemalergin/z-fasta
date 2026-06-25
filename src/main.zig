@@ -16,6 +16,8 @@ pub const writeZfi = index_format.writeZfi;
 pub const validateFasta = indexer.validateFasta;
 pub const scanHeaders = indexer.scanHeaders;
 
+const printErrorAndExit = index_format.printErrorAndExit;
+
 const VERSION = "0.2.9";
 const CHUNK_SIZE_FLAG = "--chunk-size";
 const STRAND_AWARE_FLAG = "--strand-aware";
@@ -120,11 +122,6 @@ fn parseTransformFlags(rc: bool, complement_only: bool, reverse_only: bool, anno
         .orientation = orientation,
         .annotate_transform = annotate_transform,
     };
-}
-
-fn printErrorAndExit(comptime fmt: []const u8, args_tuple: anytype) noreturn {
-    std.debug.print(fmt, args_tuple);
-    std.process.exit(1);
 }
 
 fn printUsageAndExit() noreturn {
@@ -279,11 +276,13 @@ fn runIndex(io: std.Io, args: *std.process.Args.Iterator) void {
         var out_buf: [65536]u8 = undefined;
         var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
         const record_count = indexer.streamingScan(data, &stdout_fw.interface, .fai, enable_dedup, arena.allocator()) catch {
+            stdout_fw.flush() catch {};
             printErrorAndExit("error: failed to scan/write\n", .{});
         };
         stdout_fw.flush() catch {};
 
         if (record_count == 0) {
+            stdout_fw.flush() catch {};
             printErrorAndExit("error: no valid sequences found in: {s}\n", .{path});
         }
     } else {

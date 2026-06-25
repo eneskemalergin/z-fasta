@@ -526,12 +526,19 @@ pub fn runChunkedMode(io: std.Io, path: []const u8) void {
     var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
 
     const record_count = scanChunkedReader(&file_reader.interface, &stdout_fw.interface, &seen_names, allocator) catch |err| switch (err) {
-        error.HeaderTooLong => err_exit("error: sequence name exceeds {d} bytes in --low-mem mode: {s}\n", .{ MAX_LOW_MEM_NAME_LEN, path }),
-        else => err_exit("error: processing failed\n", .{}),
+        error.HeaderTooLong => {
+            stdout_fw.flush() catch {};
+            err_exit("error: sequence name exceeds {d} bytes in --low-mem mode: {s}\n", .{ MAX_LOW_MEM_NAME_LEN, path });
+        },
+        else => {
+            stdout_fw.flush() catch {};
+            err_exit("error: processing failed\n", .{});
+        },
     };
     stdout_fw.flush() catch {};
 
     if (record_count == 0) {
+        stdout_fw.flush() catch {};
         err_exit("error: no valid sequences found in: {s}\n", .{path});
     }
 }

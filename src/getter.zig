@@ -64,6 +64,9 @@ pub const chunk_size_all = std.math.maxInt(usize);
 /// Maximum BED/names input size for the all-in-memory path (`--chunk-size -1`).
 pub const max_input_file_bytes: usize = 512 * 1024 * 1024;
 
+/// Per-line buffer for chunked BED streaming (`takeDelimiter` limit).
+pub const bed_line_reader_buffer_bytes = 4096;
+
 /// Per-region output cap for the multi-region sort buffer path (≥16 regions).
 pub const max_sort_path_region_output_bytes: u64 = 64 * 1024 * 1024;
 
@@ -950,7 +953,10 @@ fn processBedReaderChunked(
         while (requests.items.len < chunk_size) {
             const maybe_line = reader.takeDelimiter('\n') catch |err| switch (err) {
                 error.ReadFailed => printErrorAndExit("error: failed to read BED input\n", .{}),
-                error.StreamTooLong => printErrorAndExit("error: BED line exceeds internal reader buffer; shorten the line or increase buffering in code\n", .{}),
+                error.StreamTooLong => printErrorAndExit(
+                    "error: BED line {d} exceeds {d}-byte reader buffer (no newline within limit)\n",
+                    .{ line_number + 1, bed_line_reader_buffer_bytes },
+                ),
             };
 
             const line = maybe_line orelse {
@@ -990,7 +996,7 @@ fn processBedPathChunked(
     writer: anytype,
 ) BatchStats {
     if (std.mem.eql(u8, path, "-")) {
-        var stdin_buf: [4096]u8 = undefined;
+        var stdin_buf: [bed_line_reader_buffer_bytes]u8 = undefined;
         var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buf);
         return processBedReaderChunked(idx, &stdin_reader.interface, honor_strand, global_orientation, chunk_size, annotate_transform, writer);
     }
@@ -1002,7 +1008,7 @@ fn processBedPathChunked(
     };
     defer file.close(io);
 
-    var file_buf: [4096]u8 = undefined;
+    var file_buf: [bed_line_reader_buffer_bytes]u8 = undefined;
     var file_reader = file.reader(io, &file_buf);
     return processBedReaderChunked(idx, &file_reader.interface, honor_strand, global_orientation, chunk_size, annotate_transform, writer);
 }
