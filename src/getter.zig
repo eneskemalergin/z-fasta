@@ -321,34 +321,6 @@ fn resolveParsedRequestsByRecordScan(
     }
 }
 
-fn resolveRegionsByRecordScan(idx: *const LoadedIndex, region_strs: []const []const u8, resolved: []ResolvedRegion) void {
-    var regions_buf: [1024]Region = undefined;
-    var rec_indices_buf: [1024]?usize = undefined;
-    const regions = regions_buf[0..region_strs.len];
-    const rec_indices = rec_indices_buf[0..region_strs.len];
-
-    for (region_strs, 0..) |rs, i| {
-        regions[i] = parseRegion(rs);
-        rec_indices[i] = null;
-    }
-
-    for (idx.records, 0..) |rec, rec_idx| {
-        const rec_name = rec.getName(idx.fasta_data);
-        for (regions, 0..) |region, region_idx| {
-            if (std.mem.eql(u8, rec_name, region.name)) {
-                rec_indices[region_idx] = rec_idx;
-            }
-        }
-    }
-
-    for (regions, 0..) |region, i| {
-        const rec_idx = rec_indices[i] orelse {
-            printErrorAndExit("error: sequence not found: {s}\n", .{region.name});
-        };
-        resolved[i] = resolveParsedRegion(idx, region, rec_idx, i);
-    }
-}
-
 fn findRecordIndex(idx: *const LoadedIndex, name: []const u8) ?usize {
     if (idx.lookupName(name)) |rec_idx| return rec_idx;
 

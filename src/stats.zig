@@ -213,18 +213,7 @@ pub fn runStats(io: std.Io, fasta_path: []const u8, index_only: bool) void {
     var size_buf: [64]u8 = undefined;
     const size_str = formatSize(&size_buf, idx.fasta_size);
 
-    var cb1: [64]u8 = undefined;
-    var cb2: [64]u8 = undefined;
-    var cb3: [64]u8 = undefined;
-    var cb4: [64]u8 = undefined;
-    var cb5: [64]u8 = undefined;
-    var cb6: [64]u8 = undefined;
-    var cb7: [64]u8 = undefined;
-    var cb8: [64]u8 = undefined;
-    var cb9: [64]u8 = undefined;
-    var cb10: [64]u8 = undefined;
-    var cb11: [64]u8 = undefined;
-    var cb12: [64]u8 = undefined;
+    var comma_buf: [64]u8 = undefined;
 
     const index_ext: []const u8 = switch (idx.source) {
         .zfi => ".zfi",
@@ -236,44 +225,49 @@ pub fn runStats(io: std.Io, fasta_path: []const u8, index_only: bool) void {
         .protein => "Protein",
     } else "(run without --index-only for composition)";
 
-    writer.print(
-        \\File:           {s} ({s} on disk)
-        \\Index:          {s}{s}
-        \\Type:           {s}
-        \\Sequences:      {s}
-        \\Total bases:    {s}
-        \\Shortest:       {s} ({s})
-        \\Longest:        {s} ({s})
-        \\Mean:           {s}
-        \\Median:         {s}
-        \\N50:            {s}
-        \\L50:            {s}
-        \\N90:            {s}
-        \\L90:            {s}
-        \\AU:             {s}
-        \\Duplicates:     {d}
-        \\
-    , .{
-        fasta_path,
-        size_str,
-        fasta_path,
-        index_ext,
-        type_str,
-        formatComma(&cb1, @intCast(num_seqs)),
-        formatComma(&cb2, total_bases),
-        formatComma(&cb3, records[shortest_idx].seq_len),
-        shortest_name,
-        formatComma(&cb4, records[longest_idx].seq_len),
-        longest_name,
-        formatComma(&cb5, mean),
-        formatComma(&cb6, median),
-        formatComma(&cb7, n50),
-        formatComma(&cb8, @intCast(l50)),
-        formatComma(&cb9, n90),
-        formatComma(&cb10, @intCast(l90)),
-        formatComma(&cb11, au),
-        duplicates,
-    }) catch {
+    writer.print("File:           {s} ({s} on disk)\n", .{ fasta_path, size_str }) catch {
+        printErrorAndExit("error: write failed\n", .{});
+    };
+    writer.print("Index:          {s}{s}\n", .{ fasta_path, index_ext }) catch {
+        printErrorAndExit("error: write failed\n", .{});
+    };
+    writer.print("Type:           {s}\n", .{type_str}) catch {
+        printErrorAndExit("error: write failed\n", .{});
+    };
+    writer.print("Sequences:      {s}\n", .{formatComma(&comma_buf, @intCast(num_seqs))}) catch {
+        printErrorAndExit("error: write failed\n", .{});
+    };
+    writer.print("Total bases:    {s}\n", .{formatComma(&comma_buf, total_bases)}) catch {
+        printErrorAndExit("error: write failed\n", .{});
+    };
+    writer.print("Shortest:       {s} ({s})\n", .{ formatComma(&comma_buf, records[shortest_idx].seq_len), shortest_name }) catch {
+        printErrorAndExit("error: write failed\n", .{});
+    };
+    writer.print("Longest:        {s} ({s})\n", .{ formatComma(&comma_buf, records[longest_idx].seq_len), longest_name }) catch {
+        printErrorAndExit("error: write failed\n", .{});
+    };
+    writer.print("Mean:           {s}\n", .{formatComma(&comma_buf, mean)}) catch {
+        printErrorAndExit("error: write failed\n", .{});
+    };
+    writer.print("Median:         {s}\n", .{formatComma(&comma_buf, median)}) catch {
+        printErrorAndExit("error: write failed\n", .{});
+    };
+    writer.print("N50:            {s}\n", .{formatComma(&comma_buf, n50)}) catch {
+        printErrorAndExit("error: write failed\n", .{});
+    };
+    writer.print("L50:            {s}\n", .{formatComma(&comma_buf, @intCast(l50))}) catch {
+        printErrorAndExit("error: write failed\n", .{});
+    };
+    writer.print("N90:            {s}\n", .{formatComma(&comma_buf, n90)}) catch {
+        printErrorAndExit("error: write failed\n", .{});
+    };
+    writer.print("L90:            {s}\n", .{formatComma(&comma_buf, @intCast(l90))}) catch {
+        printErrorAndExit("error: write failed\n", .{});
+    };
+    writer.print("AU:             {s}\n", .{formatComma(&comma_buf, au)}) catch {
+        printErrorAndExit("error: write failed\n", .{});
+    };
+    writer.print("Duplicates:     {d}\n", .{duplicates}) catch {
         printErrorAndExit("error: write failed\n", .{});
     };
 
@@ -331,7 +325,7 @@ pub fn runStats(io: std.Io, fasta_path: []const u8, index_only: bool) void {
             }
 
             // N content
-            writer.print("  N content: {s}\n", .{formatComma(&cb12, n_count)}) catch {};
+            writer.print("  N content: {s}\n", .{formatComma(&comma_buf, n_count)}) catch {};
 
             // Soft-masked
             const soft_pct = if (f_total > 0) @as(f64, @floatFromInt(c.lowercase_count)) / f_total * 100.0 else 0.0;
