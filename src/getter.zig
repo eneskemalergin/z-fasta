@@ -356,6 +356,8 @@ fn findRecordIndex(idx: *const LoadedIndex, name: []const u8) ?usize {
     return null;
 }
 
+/// Classify a record as nucleotide or protein from a prefix of its sequence.
+/// `sample_limit` counts sequence bases (non-newline bytes), not raw file bytes.
 fn detectRecordType(rec: IndexRecord, fasta: []const u8) stats.SequenceType {
     var counts = [_]u64{0} ** 256;
     var total: u64 = 0;

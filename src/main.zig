@@ -16,7 +16,7 @@ pub const writeZfi = index_format.writeZfi;
 pub const validateFasta = indexer.validateFasta;
 pub const scanHeaders = indexer.scanHeaders;
 
-const VERSION = "0.2.8";
+const VERSION = "0.2.9";
 const CHUNK_SIZE_FLAG = "--chunk-size";
 const STRAND_AWARE_FLAG = "--strand-aware";
 const STRAND_AWARE_ALIAS = "--honor-strand";
@@ -39,8 +39,9 @@ const USAGE =
     \\
     \\Index options:
     \\  --emit-fai   Output FAI format to stdout (default: create .zfi file)
-    \\  --no-dedup   Disable duplicate name filtering (default: dedup ON)
-    \\  --low-mem    Use chunked reader instead of mmap (4 MB constant memory)
+    \\  --no-dedup   Keep duplicate sequence names in the index (default: first wins
+    \\               at index time). get resolves duplicate names to the last record.
+    \\  --low-mem    Stream FAI to stdout only (no .zfi file; 4 MB constant memory)
     \\
     \\Get usage:
     \\  z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt]
@@ -53,8 +54,10 @@ const USAGE =
     \\  --complement-only  Complement extracted sequence output without reversing
     \\  --reverse-only  Reverse extracted sequence output without complementing
     \\  --annotate-rc   Annotate transformed headers (for example: reverse complement)
+    \\  --chunk-size N  Process BED rows in batches of N (default: 4096). Use 1 only
+    \\                  for debugging: one row per batch, high per-row arena overhead.
     \\  --chunk-size -1 Process all BED rows in one batch
-    \\                  Default chunk size: 4096 BED rows
+    \\  Positional regions: max 1024 per invocation. BED and --names are not capped here.
     \\
     \\Stats options:
     \\  --index-only   Only show index-derived stats (no composition scan)

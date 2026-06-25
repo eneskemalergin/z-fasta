@@ -6,7 +6,7 @@
     SIMD-accelerated indexing, O(1) region extraction, and instant assembly stats.<br/>
     samtools-compatible FASTA indexing and extraction, benchmarked against <code>seqkit</code>, <code>fastahack</code>, and <code>pyfaidx</code>.
   </p>
-  <p>Current release: <strong>v0.2.8</strong></p>
+  <p>Current release: <strong>v0.2.9</strong></p>
   <br/>
   <a href="https://github.com/eneskemalergin/z-fasta/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/CI-passing-22c55e?style=for-the-badge" alt="CI" /></a>
   <a href="https://ziglang.org/download/0.16.0/"><img src="https://img.shields.io/badge/Zig-0.16.0-F7A41D?style=for-the-badge&logo=zig&logoColor=white" alt="Zig 0.16.0" /></a>
@@ -53,8 +53,9 @@ z-fasta index [options] <file.fasta>
 
 Options:
   --emit-fai    Output FAI format to stdout (default: create .zfi binary file)
-  --no-dedup    Disable duplicate name filtering (maximizes speed)
-  --low-mem     Use chunked reader instead of mmap (limits RAM to 4 MB)
+  --no-dedup    Keep duplicate sequence names in the index (default: first wins at
+                index time). get resolves duplicate names to the last record.
+  --low-mem     Stream FAI to stdout only (no .zfi file; limits RAM to 4 MB)
   --help        Show help message
   --version     Print version
 ```
@@ -95,8 +96,10 @@ Handles Ensembl-style names containing colons (e.g., `chromosome:GRCh38:1:1:2489
 | `--reverse-only` | Reverse the extracted sequence without complementing it. Mutually exclusive with `--rc` and `--complement-only`. |
 | `--annotate-rc` | Append a human-readable transform suffix to headers, for example `(reverse complement)`. Default headers stay samtools-style and unannotated. |
 | `--summary` | Print region count, total bases, elapsed time, and regions/sec to stderr. |
-| `--chunk-size N` | Process BED rows in batches instead of resolving the entire BED in one batch. Default: `4096`, which is the current best speed/memory tradeoff on the checked benchmark workloads. |
+| `--chunk-size N` | Process BED rows in batches of `N` instead of resolving the entire BED in one batch. Default: `4096`, which is the current best speed/memory tradeoff on the checked benchmark workloads. Use `1` only for debugging: one row per batch, high per-row arena overhead. |
 | `--chunk-size -1` | Process all BED rows in a single batch when memory use is acceptable. |
+
+Positional CLI regions are capped at **1024** per invocation (`error: too many regions`). BED files and `--names` lists are not subject to that cap (large inputs use chunked BED processing or the 512 MiB all-in-memory limit for `--chunk-size -1`).
 
 Complement-based transforms are rejected for protein FASTA input with a clear error. This keeps `--rc` and `--complement-only` biologically constrained to nucleotide-like records.
 
