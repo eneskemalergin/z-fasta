@@ -84,10 +84,20 @@ pub fn build(b: *std.Build) void {
     });
     const run_test_bed_parser = b.addRunArtifact(test_bed_parser);
 
+    const test_validator = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/validator.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_test_validator = b.addRunArtifact(test_validator);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_test_index.step);
     test_step.dependOn(&run_test_get.step);
     test_step.dependOn(&run_test_stats.step);
     test_step.dependOn(&run_test_complement.step);
     test_step.dependOn(&run_test_bed_parser.step);
+    test_step.dependOn(&run_test_validator.step);
 }

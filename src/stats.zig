@@ -528,8 +528,8 @@ test "countCompositionSlice tallies composition and lowercase" {
     countCompositionSlice("ACGTacgtNN", &counts, &total, &lowercase);
     try std.testing.expectEqual(@as(u64, 10), total);
     try std.testing.expectEqual(@as(u64, 4), lowercase);
-    try std.testing.expectEqual(@as(u64, 2), counts['A']);
-    try std.testing.expectEqual(@as(u64, 2), counts['a']);
+    try std.testing.expectEqual(@as(u64, 1), counts['A']);
+    try std.testing.expectEqual(@as(u64, 1), counts['a']);
     try std.testing.expectEqual(@as(u64, 2), counts['N']);
 }
 

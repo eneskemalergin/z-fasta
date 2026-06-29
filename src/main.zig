@@ -7,6 +7,7 @@ pub const index_format = @import("index_format.zig");
 pub const indexer = @import("indexer.zig");
 pub const getter = @import("getter.zig");
 pub const stats = @import("stats.zig");
+pub const validator = @import("validator.zig");
 
 // Re-exports for backward compatibility (tests import these)
 pub const IndexRecord = index_format.IndexRecord;
@@ -34,6 +35,7 @@ const USAGE =
     \\  index    Build a FASTA index (.zfi binary or .fai text)
     \\  get      Extract a sequence or region from a FASTA file
     \\  stats    Show statistics for a FASTA file
+    \\  validate Check FASTA structure, alphabets, headers, and fix safe format issues
     \\
     \\General options:
     \\  --help       Show this help message
@@ -64,6 +66,17 @@ const USAGE =
     \\Stats options:
     \\  --index-only   Only show index-derived stats (no composition scan)
     \\
+    \\Validate usage:
+    \\  z-fasta validate [options] <file.fasta>
+    \\  --strict                 Treat warnings as errors
+    \\  --json                   Emit JSON Lines instead of text
+    \\  --summary                With --json, emit one summary object
+    \\  --fix -o <file.fasta>    Write a fixed FASTA to a separate output path
+    \\  --fix-format-only        With --fix, proceed despite alphabet errors
+    \\  --schema NAME            Header schema: uniprot or refseq
+    \\  --custom-alphabet CHARS  Override nucleotide/protein alphabet checks
+    \\  --max-header-len N       Warn on headers longer than N bytes (default: 1024)
+    \\
     \\Examples:
     \\  z-fasta index genome.fa                  Create .zfi binary index
     \\  z-fasta index --emit-fai genome.fa       Output FAI to stdout
@@ -75,6 +88,8 @@ const USAGE =
     \\  z-fasta get genome.fa --bed regions.bed --strand-aware --summary
     \\  z-fasta stats genome.fa                  Full stats with composition
     \\  z-fasta stats --index-only genome.fa     Quick index-only stats
+    \\  z-fasta validate genome.fa               Check FASTA validity
+    \\  z-fasta validate --json --summary genome.fa
     \\
 ;
 
@@ -190,6 +205,8 @@ pub fn main(init: std.process.Init.Minimal) void {
         runGetCmd(io, &args);
     } else if (std.mem.eql(u8, cmd, "stats")) {
         runStatsCmd(io, &args);
+    } else if (std.mem.eql(u8, cmd, "validate")) {
+        runValidateCmd(io, &args);
     } else {
         printUsageAndExit();
     }
@@ -492,4 +509,81 @@ fn runStatsCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     };
 
     stats.runStats(io, path, index_only);
+}
+
+// ============================================================================
+// Subcommand: validate
+// ============================================================================
+
+fn runValidateCmd(io: std.Io, args: *std.process.Args.Iterator) void {
+    var fasta_path: ?[]const u8 = null;
+    var options = validator.Options{};
+    var saw_json = false;
+    var saw_summary = false;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            printHelpAndExit(io);
+        } else if (std.mem.eql(u8, arg, "--strict")) {
+            options.strict = true;
+        } else if (std.mem.eql(u8, arg, "--json")) {
+            saw_json = true;
+            options.output_mode = if (saw_summary) .json_summary else .json_lines;
+        } else if (std.mem.eql(u8, arg, "--summary")) {
+            saw_summary = true;
+            options.output_mode = .json_summary;
+        } else if (std.mem.eql(u8, arg, "--fix")) {
+            options.fix = true;
+        } else if (std.mem.eql(u8, arg, "--fix-format-only")) {
+            options.fix_format_only = true;
+        } else if (std.mem.eql(u8, arg, "-o")) {
+            options.output_path = args.next() orelse {
+                printErrorAndExit("error: -o requires an output path\n", .{});
+            };
+        } else if (std.mem.eql(u8, arg, "--schema")) {
+            const raw = args.next() orelse {
+                printErrorAndExit("error: --schema requires uniprot or refseq\n", .{});
+            };
+            options.schema = parseValidateSchema(raw);
+        } else if (std.mem.eql(u8, arg, "--custom-alphabet")) {
+            options.custom_alphabet = args.next() orelse {
+                printErrorAndExit("error: --custom-alphabet requires characters\n", .{});
+            };
+        } else if (std.mem.eql(u8, arg, "--max-header-len")) {
+            const raw = args.next() orelse {
+                printErrorAndExit("error: --max-header-len requires a positive integer\n", .{});
+            };
+            options.max_header_len = parsePositiveUsize(raw, "--max-header-len");
+        } else if (fasta_path == null) {
+            fasta_path = arg;
+        } else {
+            printErrorAndExit("error: validate accepts exactly one FASTA path\n", .{});
+        }
+    }
+
+    if (saw_summary and !saw_json) {
+        printErrorAndExit("error: validate --summary requires --json\n", .{});
+    }
+
+    const path = fasta_path orelse {
+        printErrorAndExit("error: usage: z-fasta validate [options] <file.fasta>\n", .{});
+    };
+
+    validator.runValidate(io, path, options);
+}
+
+fn parseValidateSchema(raw: []const u8) validator.Schema {
+    if (std.mem.eql(u8, raw, "uniprot")) return .uniprot;
+    if (std.mem.eql(u8, raw, "refseq")) return .refseq;
+    printErrorAndExit("error: --schema must be uniprot or refseq\n", .{});
+}
+
+fn parsePositiveUsize(raw: []const u8, comptime flag: []const u8) usize {
+    const parsed = std.fmt.parseInt(usize, raw, 10) catch {
+        printErrorAndExit("error: {s} requires a positive integer\n", .{flag});
+    };
+    if (parsed == 0) {
+        printErrorAndExit("error: {s} requires a positive integer\n", .{flag});
+    }
+    return parsed;
 }
