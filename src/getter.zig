@@ -206,6 +206,7 @@ pub const ResolvedRegion = struct {
     num_bases: u64, // number of bases to extract
     line_bases: u32,
     line_bytes: u32,
+    side_table: []const index_format.SideTableLine,
     orientation: Orientation,
     annotate_transform: bool,
     original_index: usize, // position in CLI argument list (preserves output order)
@@ -264,11 +265,8 @@ fn resolveParsedRequest(
 
     const num_bases = end - start + 1;
 
-    // O(1) byte offset formula
-    const base_index = start - 1;
-    const line_number = base_index / rec.line_bases;
-    const column = base_index % rec.line_bases;
-    const start_byte = rec.seq_offset + (line_number * rec.line_bytes) + column;
+    const side_table = idx.sideTableLines(rec);
+    const start_byte = byteOffsetForBase(idx.fasta_data, rec, side_table, start - 1);
 
     return ResolvedRegion{
         .name = region.name,
@@ -280,10 +278,49 @@ fn resolveParsedRequest(
         .num_bases = num_bases,
         .line_bases = rec.line_bases,
         .line_bytes = rec.line_bytes,
+        .side_table = side_table,
         .orientation = request.orientation,
         .annotate_transform = annotate_transform,
         .original_index = original_index,
     };
+}
+
+fn byteOffsetForBase(
+    fasta: []const u8,
+    rec: IndexRecord,
+    side_table: []const index_format.SideTableLine,
+    base_index: u64,
+) u64 {
+    if (side_table.len == 0) {
+        const line_number = base_index / rec.line_bases;
+        const column = base_index % rec.line_bases;
+        return rec.seq_offset + (line_number * rec.line_bytes) + column;
+    }
+
+    var lo: usize = 0;
+    var hi: usize = side_table.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (side_table[mid].base_start <= base_index) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    const line_idx = if (lo == 0) 0 else lo - 1;
+    const line = side_table[line_idx];
+    const column = base_index - line.base_start;
+
+    var seen: u64 = 0;
+    var pos: usize = @intCast(line.byte_offset);
+    const end = @min(fasta.len, pos + @as(usize, @intCast(line.line_bytes)));
+    while (pos < end) : (pos += 1) {
+        if (fasta[pos] <= ' ') continue;
+        if (seen == column) return @intCast(pos);
+        seen += 1;
+    }
+
+    printErrorAndExit("error: corrupt non-uniform index side table\n", .{});
 }
 
 /// Resolve CLI batches (2..15 regions) loaded with `.records_only` (no name hash map).
@@ -341,7 +378,7 @@ fn detectRecordType(rec: IndexRecord, fasta: []const u8) stats.SequenceType {
 
     while (pos < fasta.len and total < sample_limit) : (pos += 1) {
         const byte = fasta[pos];
-        if (byte == '\n' or byte == '\r') continue;
+        if (byte <= ' ') continue;
         counts[byte] += 1;
         total += 1;
     }
@@ -441,7 +478,7 @@ fn emitRegionForward(resolved: ResolvedRegion, fasta: []const u8, writer: anytyp
         const byte = fasta[pos];
         pos += 1;
 
-        if (byte == '\n' or byte == '\r') continue;
+        if (byte <= ' ') continue;
 
         if (out_len + 2 > out_buf.len) {
             writer.writeAll(out_buf[0..out_len]) catch {
@@ -488,9 +525,15 @@ fn emitRegionBackward(resolved: ResolvedRegion, fasta: []const u8, writer: anyty
     var out_len: usize = 0;
 
     const last_base_index = resolved.start - 1 + resolved.num_bases - 1;
-    const line_number = last_base_index / resolved.line_bases;
-    const column = last_base_index % resolved.line_bases;
-    var pos: usize = @intCast(resolved.seq_offset + (line_number * resolved.line_bytes) + column);
+    const rec = IndexRecord{
+        .name_offset = 1,
+        .name_len = 1,
+        .seq_offset = resolved.seq_offset,
+        .seq_len = resolved.start - 1 + resolved.num_bases,
+        .line_bases = resolved.line_bases,
+        .line_bytes = resolved.line_bytes,
+    };
+    var pos: usize = @intCast(byteOffsetForBase(fasta, rec, resolved.side_table, last_base_index));
 
     while (bases_remaining > 0) {
         const byte = if (resolved.orientation.complement) complement.complement(fasta[pos]) else fasta[pos];
@@ -517,7 +560,7 @@ fn emitRegionBackward(resolved: ResolvedRegion, fasta: []const u8, writer: anyty
             while (pos > 0) {
                 pos -= 1;
                 const prev = fasta[pos];
-                if (prev != '\n' and prev != '\r') break;
+                if (prev > ' ') break;
             }
         }
     }
@@ -1250,6 +1293,7 @@ test "shouldUseSortBuffers accepts typical 20-region batch" {
             .num_bases = 1,
             .line_bases = 24,
             .line_bytes = 25,
+            .side_table = &.{},
             .orientation = .{},
             .annotate_transform = false,
             .original_index = i,
@@ -1269,6 +1313,7 @@ test "shouldUseSortBuffers rejects oversized single region" {
         .num_bases = max_sort_path_region_output_bytes,
         .line_bases = 60,
         .line_bytes = 61,
+        .side_table = &.{},
         .orientation = .{},
         .annotate_transform = false,
         .original_index = 0,
@@ -1283,4 +1328,80 @@ test "shouldAdviseSequentialMmap for CLI multi-region sort path" {
     try std.testing.expect(!shouldAdviseSequentialMmap(100, false, true, false, false));
     try std.testing.expect(!shouldAdviseSequentialMmap(10, false, false, false, true));
     try std.testing.expect(!shouldAdviseSequentialMmap(100, false, false, false, true));
+}
+
+test "emitRegion handles non-uniform side-table forward extraction" {
+    const fasta = ">seq\nAAA\nCCCC \nGG\n";
+    const side_table = [_]index_format.SideTableLine{
+        .{ .base_start = 0, .byte_offset = 5, .line_bytes = 4, .line_bases = 3 },
+        .{ .base_start = 3, .byte_offset = 9, .line_bytes = 6, .line_bases = 4 },
+        .{ .base_start = 7, .byte_offset = 15, .line_bytes = 3, .line_bases = 2 },
+    };
+    const rec = IndexRecord{
+        .name_offset = 1,
+        .name_len = 3,
+        .seq_offset = 5,
+        .seq_len = 9,
+        .line_bases = 3,
+        .line_bytes = 4,
+    };
+
+    var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer writer.deinit();
+
+    emitRegion(.{
+        .name = "seq",
+        .start = 2,
+        .display_end = 8,
+        .is_full = false,
+        .start_byte = byteOffsetForBase(fasta, rec, &side_table, 1),
+        .seq_offset = 5,
+        .num_bases = 7,
+        .line_bases = 3,
+        .line_bytes = 4,
+        .side_table = &side_table,
+        .orientation = .{},
+        .annotate_transform = false,
+        .original_index = 0,
+    }, fasta, &writer.writer);
+
+    try std.testing.expectEqualStrings(">seq:2-8\nAACCCCG\n", writer.written());
+}
+
+test "emitRegion handles non-uniform side-table reverse complement extraction" {
+    const fasta = ">seq\nAAA\nCCCC \nGG\n";
+    const side_table = [_]index_format.SideTableLine{
+        .{ .base_start = 0, .byte_offset = 5, .line_bytes = 4, .line_bases = 3 },
+        .{ .base_start = 3, .byte_offset = 9, .line_bytes = 6, .line_bases = 4 },
+        .{ .base_start = 7, .byte_offset = 15, .line_bytes = 3, .line_bases = 2 },
+    };
+    const rec = IndexRecord{
+        .name_offset = 1,
+        .name_len = 3,
+        .seq_offset = 5,
+        .seq_len = 9,
+        .line_bases = 3,
+        .line_bytes = 4,
+    };
+
+    var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer writer.deinit();
+
+    emitRegion(.{
+        .name = "seq",
+        .start = 2,
+        .display_end = 8,
+        .is_full = false,
+        .start_byte = byteOffsetForBase(fasta, rec, &side_table, 1),
+        .seq_offset = 5,
+        .num_bases = 7,
+        .line_bases = 3,
+        .line_bytes = 4,
+        .side_table = &side_table,
+        .orientation = Orientation.reverseComplement(),
+        .annotate_transform = false,
+        .original_index = 0,
+    }, fasta, &writer.writer);
+
+    try std.testing.expectEqualStrings(">seq:2-8\nCGGGGTT\n", writer.written());
 }

@@ -322,33 +322,35 @@ fn runIndex(io: std.Io, args: *std.process.Args.Iterator) void {
         defer out_file.close(io);
         errdefer cwd.deleteFile(io, zfi_tmp_path) catch {};
 
-        var file_buf: [65536]u8 = undefined;
-        var file_fw = out_file.writer(io, &file_buf);
-        const writer = &file_fw.interface;
-
-        const dummy_header = index_format.ZfiHeader{
-            .magic = index_format.ZFI_MAGIC,
-            .record_count = 0,
-            .source_size = data.len,
-        };
-        writer.writeAll(std.mem.asBytes(&dummy_header)) catch {
-            printErrorAndExit("error: write failed\n", .{});
-        };
-
-        const record_count = indexer.streamingScan(data, writer, .zfi, enable_dedup, arena.allocator()) catch {
+        var zfi_index = indexer.scanZfiIndex(data, enable_dedup, arena.allocator()) catch {
             printErrorAndExit("error: scan failed\n", .{});
         };
+        defer zfi_index.deinit(arena.allocator());
 
-        file_fw.flush() catch {};
-
-        if (record_count == 0) {
+        if (zfi_index.records.items.len == 0) {
             cwd.deleteFile(io, zfi_tmp_path) catch {};
             printErrorAndExit("error: no valid sequences found in: {s}\n", .{path});
         }
 
-        // Fix record_count in header
-        file_fw.seekTo(4) catch {};
-        file_fw.interface.writeInt(u32, record_count, .little) catch {};
+        var file_buf: [65536]u8 = undefined;
+        var file_fw = out_file.writer(io, &file_buf);
+        const writer = &file_fw.interface;
+
+        const header = index_format.ZfiHeader{
+            .magic = index_format.ZFI_MAGIC,
+            .record_count = @intCast(zfi_index.records.items.len),
+            .source_size = data.len,
+        };
+        writer.writeAll(std.mem.asBytes(&header)) catch {
+            printErrorAndExit("error: write failed\n", .{});
+        };
+        writer.writeAll(std.mem.sliceAsBytes(zfi_index.records.items)) catch {
+            printErrorAndExit("error: write failed\n", .{});
+        };
+        writer.writeAll(zfi_index.side_tables.items) catch {
+            printErrorAndExit("error: write failed\n", .{});
+        };
+
         file_fw.flush() catch {};
 
         cwd.rename(zfi_tmp_path, cwd, zfi_path, io) catch {
@@ -356,7 +358,7 @@ fn runIndex(io: std.Io, args: *std.process.Args.Iterator) void {
             printErrorAndExit("error: failed to finalize index: {s}\n", .{zfi_path});
         };
 
-        std.debug.print("wrote {s} ({d} sequences)\n", .{ zfi_path, record_count });
+        std.debug.print("wrote {s} ({d} sequences)\n", .{ zfi_path, zfi_index.records.items.len });
     }
 }
 

@@ -316,6 +316,33 @@ test "IndexRecord has consistent size" {
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(IndexRecord));
 }
 
+test "SideTableLine has explicit v0.3 size" {
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(main.index_format.SideTableLine));
+}
+
+test "scanZfiIndex marks non-uniform records and appends side table" {
+    const data = ">seq\nAAA\nCCCC\nGG\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var zfi_index = try main.indexer.scanZfiIndex(data, true, allocator);
+    defer zfi_index.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), zfi_index.records.items.len);
+    const rec = zfi_index.records.items[0];
+    try std.testing.expect(!rec.isUniformWidth());
+    try std.testing.expectEqual(
+        @as(u64, @sizeOf(ZfiHeader) + @sizeOf(IndexRecord)),
+        rec.sideTableOffset(),
+    );
+
+    try std.testing.expectEqual(
+        @as(u64, 3),
+        std.mem.readInt(u64, zfi_index.side_tables.items[0..@sizeOf(u64)], .little),
+    );
+}
+
 test "low-mem indexing matches default across chunk boundary" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

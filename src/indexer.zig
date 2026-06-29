@@ -18,6 +18,29 @@ const MAX_LOW_MEM_NAME_LEN = 4096;
 
 pub const OutputMode = enum { fai, zfi };
 
+pub const ZfiIndex = struct {
+    records: std.ArrayList(IndexRecord),
+    side_tables: std.ArrayList(u8),
+
+    pub fn deinit(self: *ZfiIndex, allocator: std.mem.Allocator) void {
+        self.records.deinit(allocator);
+        self.side_tables.deinit(allocator);
+    }
+};
+
+const LineMetrics = struct {
+    seq_len: u64 = 0,
+    line_bases: u32 = 0,
+    line_bytes: u32 = 0,
+    is_uniform_width: bool = true,
+    line_count: u64 = 0,
+};
+
+const SequenceLengthInfo = struct {
+    seq_len: u64,
+    uses_uniform_formula: bool,
+};
+
 // ============================================================================
 // SIMD Helpers
 // ============================================================================
@@ -144,15 +167,149 @@ fn firstLineIsDense(line_bases: u32, line_bytes: u32) bool {
     return (sep_len == 1 or sep_len == 2) and line_bases + sep_len == line_bytes;
 }
 
-fn countSequenceLength(data: []const u8, line_bases: u32, line_bytes: u32) u64 {
+fn measureSequenceLength(data: []const u8, line_bases: u32, line_bytes: u32) SequenceLengthInfo {
     const body = trimTrailingRecordNewlines(data);
-    const fixed_width = countFixedWidthBases(body, line_bases, line_bytes) orelse return countBases(body);
+    const fixed_width = countFixedWidthBases(body, line_bases, line_bytes) orelse return .{
+        .seq_len = countBases(body),
+        .uses_uniform_formula = false,
+    };
     // Padded first lines break fixed-width math; verify against a full base count.
     if (!firstLineIsDense(line_bases, line_bytes)) {
         const fallback = countBases(body);
-        return if (fixed_width == fallback) fixed_width else fallback;
+        return .{
+            .seq_len = if (fixed_width == fallback) fixed_width else fallback,
+            .uses_uniform_formula = fixed_width == fallback,
+        };
     }
-    return fixed_width;
+    return .{
+        .seq_len = fixed_width,
+        .uses_uniform_formula = true,
+    };
+}
+
+fn countSequenceLength(data: []const u8, line_bases: u32, line_bytes: u32) u64 {
+    return measureSequenceLength(data, line_bases, line_bytes).seq_len;
+}
+
+fn findNextNewline(data: []const u8, start: usize, end: usize) usize {
+    var pos = start;
+    while (pos < end and data[pos] != '\n') : (pos += 1) {}
+    return pos;
+}
+
+fn countDenseBasesInLine(data: []const u8, start: usize, end: usize) u32 {
+    var count: u32 = 0;
+    var pos = start;
+    while (pos < end) : (pos += 1) {
+        if (data[pos] > ' ') count += 1;
+    }
+    return count;
+}
+
+fn scanLineMetrics(data: []const u8, seq_offset: usize, seq_end: usize) LineMetrics {
+    var metrics = LineMetrics{};
+    var pos = seq_offset;
+
+    var first_bases: u32 = 0;
+    var first_actual_bytes: u32 = 0;
+    var pending_bases: u32 = 0;
+    var pending_actual_bytes: u32 = 0;
+    var have_pending = false;
+
+    while (pos < seq_end) {
+        const line_start = pos;
+        const line_end = findNextNewline(data, pos, seq_end);
+        const has_lf = line_end < seq_end;
+        var content_end = line_end;
+        if (content_end > line_start and data[content_end - 1] == '\r') {
+            content_end -= 1;
+        }
+
+        const bases = countDenseBasesInLine(data, line_start, content_end);
+        const actual_bytes: u32 = @intCast((if (has_lf) line_end + 1 else line_end) - line_start);
+        if (bases > 0) {
+            metrics.seq_len += bases;
+            metrics.line_count += 1;
+
+            if (metrics.line_count == 1) {
+                first_bases = bases;
+                first_actual_bytes = actual_bytes;
+                metrics.line_bases = bases;
+                metrics.line_bytes = if (has_lf) actual_bytes else actual_bytes + 1;
+            } else if (have_pending) {
+                if (pending_bases != first_bases or pending_actual_bytes != first_actual_bytes) {
+                    metrics.is_uniform_width = false;
+                }
+            }
+
+            pending_bases = bases;
+            pending_actual_bytes = actual_bytes;
+            have_pending = true;
+        }
+
+        if (!has_lf) break;
+        pos = line_end + 1;
+    }
+
+    if (metrics.line_count > 1 and have_pending) {
+        if (pending_bases > first_bases or pending_actual_bytes > first_actual_bytes) {
+            metrics.is_uniform_width = false;
+        }
+    }
+
+    return metrics;
+}
+
+fn appendSideTable(
+    data: []const u8,
+    seq_offset: usize,
+    seq_end: usize,
+    table: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+) !u64 {
+    const local_offset = table.items.len;
+    const metrics = scanLineMetrics(data, seq_offset, seq_end);
+    try table.appendSlice(allocator, std.mem.asBytes(&metrics.line_count));
+
+    var pos = seq_offset;
+    var base_start: u64 = 0;
+    while (pos < seq_end) {
+        const line_start = pos;
+        const line_end = findNextNewline(data, pos, seq_end);
+        const has_lf = line_end < seq_end;
+        var content_end = line_end;
+        if (content_end > line_start and data[content_end - 1] == '\r') {
+            content_end -= 1;
+        }
+
+        const bases = countDenseBasesInLine(data, line_start, content_end);
+        if (bases > 0) {
+            const actual_bytes = (if (has_lf) line_end + 1 else line_end) - line_start;
+            const entry = index_format.SideTableLine{
+                .base_start = base_start,
+                .byte_offset = @intCast(line_start),
+                .line_bytes = @intCast(actual_bytes),
+                .line_bases = bases,
+            };
+            try table.appendSlice(allocator, std.mem.asBytes(&entry));
+            base_start += bases;
+        }
+
+        if (!has_lf) break;
+        pos = line_end + 1;
+    }
+
+    return @intCast(local_offset);
+}
+
+fn finalizeSideTableOffsets(index: *ZfiIndex) !void {
+    const side_table_base = @sizeOf(index_format.ZfiHeader) + index.records.items.len * @sizeOf(IndexRecord);
+    for (index.records.items) |*rec| {
+        if (!rec.isUniformWidth()) {
+            const local_offset = rec.sideTableOffset();
+            try rec.markNonUniform(side_table_base + local_offset);
+        }
+    }
 }
 
 // ============================================================================
@@ -164,7 +321,7 @@ fn scanFastaRecords(
     enable_dedup: bool,
     allocator: std.mem.Allocator,
     ctx: anytype,
-    comptime emitRecord: fn (@TypeOf(ctx), IndexRecord, []const u8) anyerror!void,
+    comptime emitRecord: fn (@TypeOf(ctx), IndexRecord, []const u8, []const u8, usize, bool) anyerror!void,
 ) !u32 {
     var seen_names: ?std.StringHashMap(void) = null;
     if (enable_dedup) {
@@ -199,7 +356,6 @@ fn scanFastaRecords(
         const seq_offset: u64 = if (header_end < data.len) header_end + 1 else header_end;
         const seq_end = findNextHeaderStart(data, @intCast(seq_offset));
 
-        // Line metrics
         var line_bases: u32 = 0;
         var line_bytes: u32 = 0;
         if (seq_offset < seq_end) {
@@ -221,7 +377,8 @@ fn scanFastaRecords(
         }
 
         const seq_data = data[@intCast(seq_offset)..seq_end];
-        const seq_len = countSequenceLength(seq_data, line_bases, line_bytes);
+        const seq_info = measureSequenceLength(seq_data, line_bases, line_bytes);
+        const seq_len = seq_info.seq_len;
 
         pos = seq_end;
         if (seq_len == 0) continue;
@@ -240,7 +397,7 @@ fn scanFastaRecords(
             .line_bases = line_bases,
             .line_bytes = line_bytes,
         };
-        try emitRecord(ctx, rec, name);
+        try emitRecord(ctx, rec, name, seq_data, @intCast(seq_offset), seq_info.uses_uniform_formula);
         record_count += 1;
     }
     return record_count;
@@ -257,7 +414,10 @@ pub fn streamingScan(
         writer: @TypeOf(writer),
         mode: OutputMode,
 
-        fn emit(ctx: *@This(), rec: IndexRecord, name: []const u8) !void {
+        fn emit(ctx: *@This(), rec: IndexRecord, name: []const u8, seq_data: []const u8, seq_offset: usize, uses_uniform_formula: bool) !void {
+            _ = seq_data;
+            _ = seq_offset;
+            _ = uses_uniform_formula;
             switch (ctx.mode) {
                 .fai => {
                     try ctx.writer.print("{s}\t{d}\t{d}\t{d}\t{d}\n", .{
@@ -275,6 +435,35 @@ pub fn streamingScan(
     return scanFastaRecords(data, enable_dedup, allocator, &ctx, Ctx.emit);
 }
 
+pub fn scanZfiIndex(data: []const u8, enable_dedup: bool, allocator: std.mem.Allocator) !ZfiIndex {
+    var index = ZfiIndex{
+        .records = .empty,
+        .side_tables = .empty,
+    };
+    errdefer index.deinit(allocator);
+
+    const Ctx = struct {
+        index: *ZfiIndex,
+        data: []const u8,
+        allocator: std.mem.Allocator,
+
+        fn emit(ctx: *@This(), rec_in: IndexRecord, name: []const u8, seq_data: []const u8, seq_offset: usize, uses_uniform_formula: bool) !void {
+            _ = name;
+            var rec = rec_in;
+            if (!uses_uniform_formula) {
+                const local_offset = try appendSideTable(ctx.data, seq_offset, seq_offset + seq_data.len, &ctx.index.side_tables, ctx.allocator);
+                try rec.markNonUniform(local_offset);
+            }
+            try ctx.index.records.append(ctx.allocator, rec);
+        }
+    };
+
+    var ctx = Ctx{ .index = &index, .data = data, .allocator = allocator };
+    _ = try scanFastaRecords(data, enable_dedup, allocator, &ctx, Ctx.emit);
+    try finalizeSideTableOffsets(&index);
+    return index;
+}
+
 /// Scans FASTA data and returns index records as ArrayList (for testing).
 /// Use streamingScan for production (lower memory).
 pub fn scanHeaders(data: []const u8, allocator: std.mem.Allocator) !std.ArrayList(IndexRecord) {
@@ -285,8 +474,11 @@ pub fn scanHeaders(data: []const u8, allocator: std.mem.Allocator) !std.ArrayLis
         list: *std.ArrayList(IndexRecord),
         record_allocator: std.mem.Allocator,
 
-        fn emit(ctx: *@This(), rec: IndexRecord, name: []const u8) !void {
+        fn emit(ctx: *@This(), rec: IndexRecord, name: []const u8, seq_data: []const u8, seq_offset: usize, uses_uniform_formula: bool) !void {
             _ = name;
+            _ = seq_data;
+            _ = seq_offset;
+            _ = uses_uniform_formula;
             try ctx.list.append(ctx.record_allocator, rec);
         }
     };

@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BENCH_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROJECT_DIR="$(cd "$BENCH_ROOT/.." && pwd)"
 TMPDIR_LOCAL="$SCRIPT_DIR/.verify_tmp"
+MESSY_DIR="$PROJECT_DIR/bench/index/messy_variants"
 mkdir -p "$TMPDIR_LOCAL"
 trap 'rm -rf "$TMPDIR_LOCAL"' EXIT
 
@@ -29,6 +30,35 @@ verify() {
     "$SAMTOOLS" faidx "$fasta" "$region" > "$TMPDIR_LOCAL/st.tmp" 2>/dev/null || { fail "$desc (samtools err)"; return; }
     "$ZFASTA" get "$fasta" "$region" > "$TMPDIR_LOCAL/zf.tmp" 2>/dev/null || { fail "$desc (z-fasta err)"; return; }
     diff -q "$TMPDIR_LOCAL/st.tmp" "$TMPDIR_LOCAL/zf.tmp" > /dev/null 2>&1 && pass "$desc" || fail "$desc"
+}
+
+verify_expected() {
+    local fasta="$1" region="$2" desc="$3" expected="$4"
+    printf "%s" "$expected" > "$TMPDIR_LOCAL/expected.tmp"
+    "$ZFASTA" get "$fasta" "$region" > "$TMPDIR_LOCAL/zf.tmp" 2>/dev/null || { fail "$desc (z-fasta err)"; return; }
+    diff -q "$TMPDIR_LOCAL/expected.tmp" "$TMPDIR_LOCAL/zf.tmp" > /dev/null 2>&1 && pass "$desc" || fail "$desc"
+}
+
+write_expected_region() {
+    local fasta="$1" name="$2" start="$3" end="$4" out="$5"
+    python - "$fasta" "$name" "$start" "$end" "$out" <<'PY'
+from pathlib import Path
+import sys
+
+fasta, name, start, end, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
+seqs = {}
+current = None
+for raw in Path(fasta).read_text().splitlines():
+    if raw.startswith(">"):
+        current = raw[1:].split()[0]
+        seqs[current] = []
+    elif current is not None:
+        seqs[current].append("".join(ch for ch in raw if not ch.isspace()))
+
+seq = "".join(seqs[name])[start - 1:end]
+header = f">{name}:{start}-{end}"
+Path(out).write_text(header + "\n" + seq + "\n")
+PY
 }
 
 test_sequence() {
@@ -76,6 +106,24 @@ test_file() {
     done < "${fasta}.fai"
 }
 
+test_mixed_width_fixture() {
+    local fasta="$TMPDIR_LOCAL/mixed_widths.fasta"
+    cp tests/data/mixed_widths.fasta "$fasta"
+    "$SAMTOOLS" faidx "$fasta" >/dev/null 2>&1 || { echo "SKIP mixed_widths temp fixture (samtools faidx failed)"; return; }
+    "$ZFASTA" index "$fasta" >/dev/null 2>&1 || { fail "mixed_widths temp fixture (z-fasta index err)"; return; }
+    test_file "$fasta"
+}
+
+test_non_uniform_fixture() {
+    local source_fasta="$1" name="$2" start="$3" end="$4" desc="$5"
+    local fasta="$TMPDIR_LOCAL/${name}_${start}_${end}.fasta"
+    cp "$source_fasta" "$fasta"
+    "$ZFASTA" index "$fasta" >/dev/null 2>&1 || { fail "$desc (z-fasta index err)"; return; }
+    write_expected_region "$fasta" "$name" "$start" "$end" "$TMPDIR_LOCAL/expected.tmp"
+    "$ZFASTA" get "$fasta" "${name}:${start}-${end}" > "$TMPDIR_LOCAL/zf.tmp" 2>/dev/null || { fail "$desc (z-fasta err)"; return; }
+    diff -q "$TMPDIR_LOCAL/expected.tmp" "$TMPDIR_LOCAL/zf.tmp" > /dev/null 2>&1 && pass "$desc" || fail "$desc"
+}
+
 echo "z-fasta get verification against samtools faidx"
 echo "================================================"
 
@@ -84,10 +132,14 @@ for f in \
     tests/data/simple.fasta \
     tests/data/proteome.fasta \
     tests/data/single.fasta \
-    tests/data/edge_cases.fasta \
-    tests/data/mixed_widths.fasta; do
+    tests/data/edge_cases.fasta; do
     [ -f "$f" ] && test_file "$f"
 done
+test_mixed_width_fixture
+test_non_uniform_fixture "$MESSY_DIR/mixed_line_widths.fasta" mixed_line_widths 3 24 "non-uniform mixed-width region"
+test_non_uniform_fixture "$MESSY_DIR/trailing_whitespace.fasta" trailing_whitespace 7 20 "non-uniform trailing-whitespace region"
+test_non_uniform_fixture "$MESSY_DIR/blank_lines.fasta" blank_lines 5 16 "non-uniform blank-line region"
+test_non_uniform_fixture "$MESSY_DIR/mixed_crlf_lf.fasta" mixed_crlf_lf 3 18 "non-uniform mixed-CRLF region"
 
 echo ""
 echo "================================================"

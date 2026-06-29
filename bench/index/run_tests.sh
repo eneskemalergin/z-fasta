@@ -15,6 +15,7 @@ BENCH_ROOT="$(dirname "$SCRIPT_DIR")"
 PROJECT_ROOT="$(dirname "$BENCH_ROOT")"
 RESULTS_DIR="$SCRIPT_DIR/results"
 EDGE_DIR="$SCRIPT_DIR/edge_cases"
+MESSY_DIR="$SCRIPT_DIR/messy_variants"
 
 # ── Tools ──────────────────────────────────────────────────────────
 ZFASTA="$PROJECT_ROOT/zig-out/bin/z-fasta"
@@ -25,7 +26,7 @@ FASTAHACK="$PROJECT_ROOT/tools/fastahack-1.0.0/fastahack"
 HAS_SEQKIT=false;    [[ -x "$SEQKIT" ]]    && HAS_SEQKIT=true
 HAS_FASTAHACK=false; [[ -x "$FASTAHACK" ]] && HAS_FASTAHACK=true
 
-mkdir -p "$RESULTS_DIR" "$EDGE_DIR"
+mkdir -p "$RESULTS_DIR" "$EDGE_DIR" "$MESSY_DIR"
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 CSV="$RESULTS_DIR/tests_${TIMESTAMP}.csv"
@@ -194,6 +195,116 @@ for file in "$EDGE_DIR"/*.fasta; do
     # Clean up
     rm -f "${file}.fai" "${file}.zfi" /tmp/zf_edge_test.fai 2>/dev/null || true
 done
+
+check_zfi_side_table() {
+    local zfi="$1"
+    local expected="$2"
+
+    python - "$zfi" "$expected" <<'PY'
+from pathlib import Path
+import sys
+
+zfi = Path(sys.argv[1])
+expected = sys.argv[2]
+data = zfi.read_bytes()
+if len(data) < 16 or data[:4] != b"ZFI\x02":
+    raise SystemExit(1)
+
+record_count = int.from_bytes(data[4:8], "little")
+has_side_table = False
+for idx in range(record_count):
+    offset = 16 + idx * 40
+    if offset + 40 > len(data):
+        raise SystemExit(1)
+    pad = data[offset + 10:offset + 16]
+    if pad[0] & 1:
+        has_side_table = True
+
+if expected == "side-table":
+    raise SystemExit(0 if has_side_table else 1)
+if expected == "uniform":
+    raise SystemExit(0 if not has_side_table else 1)
+raise SystemExit(1)
+PY
+}
+
+run_messy_case() {
+    local file="$1"
+    local expected_behavior="$2"
+    local expected_zfi="$3"
+    local name
+    name=$(basename "$file" .fasta)
+
+    total=$((total + 1))
+
+    rm -f "${file}.fai" "${file}.zfi" 2>/dev/null || true
+
+    zf_exit=0
+    "$ZFASTA" index --emit-fai "$file" > /tmp/zf_edge_test.fai 2>/dev/null || zf_exit=$?
+
+    rm -f "${file}.fai" 2>/dev/null || true
+    sam_exit=0
+    $SAMTOOLS faidx "$file" 2>/dev/null || sam_exit=$?
+
+    seq_exit=0
+    if $HAS_SEQKIT; then
+        rm -f "${file}.fai" 2>/dev/null || true
+        "$SEQKIT" faidx "$file" > /dev/null 2>&1 || seq_exit=$?
+    fi
+
+    fh_exit=0
+    if $HAS_FASTAHACK; then
+        rm -f "${file}.fai" 2>/dev/null || true
+        "$FASTAHACK" -i "$file" > /dev/null 2>&1 || fh_exit=$?
+    fi
+
+    match="DIFF"
+    if [[ "$expected_behavior" == "match-samtools" ]]; then
+        rm -f "${file}.fai" "${file}.zfi" 2>/dev/null || true
+        $SAMTOOLS faidx "$file" 2>/dev/null || true
+        if [[ $zf_exit -eq 0 && $sam_exit -eq 0 && -f "${file}.fai" ]] \
+            && diff -q /tmp/zf_edge_test.fai "${file}.fai" &>/dev/null; then
+            match="MATCH"
+        fi
+    elif [[ "$expected_behavior" == "zfasta-only" ]]; then
+        if [[ $zf_exit -eq 0 && $sam_exit -ne 0 ]]; then
+            match="MATCH"
+        fi
+    fi
+
+    zfi_status="ok"
+    if [[ $zf_exit -eq 0 ]]; then
+        "$ZFASTA" index "$file" > /dev/null 2>&1 || zfi_status="index-failed"
+        if [[ "$zfi_status" == "ok" ]]; then
+            check_zfi_side_table "${file}.zfi" "$expected_zfi" || zfi_status="bad-zfi"
+        fi
+    fi
+
+    if [[ "$zfi_status" != "ok" ]]; then
+        match="DIFF"
+        echo "--- FAILURE: $name (ZFI side-table check: $zfi_status) ---" >> "$FAIL_LOG"
+    fi
+
+    echo "$name,$zf_exit,$sam_exit,$seq_exit,$fh_exit,$match" >> "$CSV"
+
+    if [[ "$match" == "MATCH" ]]; then
+        sym="✓"; pass=$((pass + 1))
+    else
+        sym="✗"; fail=$((fail + 1))
+        echo "--- FAILURE: $name (expected=$expected_behavior zfi=$expected_zfi zf=$zf_exit sam=$sam_exit) ---" >> "$FAIL_LOG"
+    fi
+    echo "  $sym  $name  (zf=$zf_exit sam=$sam_exit seq=$seq_exit fh=$fh_exit zfi=$expected_zfi) $match"
+
+    rm -f "${file}.fai" "${file}.zfi" /tmp/zf_edge_test.fai 2>/dev/null || true
+}
+
+echo ""
+echo "Messy FASTA variants:"
+run_messy_case "$MESSY_DIR/uniform_control.fasta" match-samtools uniform
+run_messy_case "$MESSY_DIR/mixed_line_widths.fasta" zfasta-only side-table
+run_messy_case "$MESSY_DIR/trailing_whitespace.fasta" zfasta-only side-table
+run_messy_case "$MESSY_DIR/blank_lines.fasta" zfasta-only side-table
+run_messy_case "$MESSY_DIR/mixed_crlf_lf.fasta" zfasta-only side-table
 
 echo ""
 echo "════════════════════════════════════════════════════════════════"

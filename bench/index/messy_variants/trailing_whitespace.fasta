@@ -1,0 +1,4 @@
+>trailing_whitespace spaces and tabs after sequence bytes
+AAAACCCC    
+GGGGTTTT	
+CCCCAAAA

@@ -410,6 +410,24 @@ fn scanComposition(idx: *const LoadedIndex) CompositionStats {
     for (idx.records) |rec| {
         if (rec.seq_len == 0) continue;
 
+        if (!rec.isUniformWidth()) {
+            const side_table = idx.sideTableLines(rec);
+            for (side_table) |line| {
+                const start: usize = @intCast(line.byte_offset);
+                const end = @min(fasta.len, start + @as(usize, @intCast(line.line_bytes)));
+                for (fasta[start..end]) |byte| {
+                    if (byte > ' ') {
+                        counts[byte] += 1;
+                        total_bases += 1;
+                        if (byte >= 'a' and byte <= 'z') {
+                            lowercase_count += 1;
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
         const start: usize = @intCast(rec.seq_offset);
 
         if (tryScanFixedWidthRecord(fasta, rec, start, &counts, &total_bases, &lowercase_count)) {
@@ -440,7 +458,7 @@ fn scanComposition(idx: *const LoadedIndex) CompositionStats {
         // Branchless byte counting
         const region = fasta[start..end];
         for (region) |byte| {
-            if (byte != '\n' and byte != '\r') {
+            if (byte > ' ') {
                 counts[byte] += 1;
                 total_bases += 1;
                 if (byte >= 'a' and byte <= 'z') {

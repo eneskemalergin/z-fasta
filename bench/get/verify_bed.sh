@@ -13,6 +13,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TMPDIR_LOCAL="$SCRIPT_DIR/.verify_bed_tmp"
+MESSY_DIR="$PROJECT_DIR/bench/index/messy_variants"
 mkdir -p "$TMPDIR_LOCAL"
 trap 'rm -rf "$TMPDIR_LOCAL"' EXIT
 
@@ -165,6 +166,20 @@ EOF
     done
 }
 
+generate_mixed_width_fixture() {
+    local fasta_out="$1" bed_out="$2"
+
+    cp "$PROJECT_DIR/tests/data/mixed_widths.fasta" "$fasta_out"
+    "$ZFASTA" index "$fasta_out" >/dev/null 2>&1 \
+        || { fail_raw "mixed-width fixture setup (z-fasta index err)" "setup" "$bed_out" "z-fasta" "$bed_out"; return 1; }
+
+    cat > "$bed_out" <<'EOF'
+mixed1	54	75	mixed1_span	0	+
+mixed2	74	95	mixed2_span	0	-
+mixed3	57	72	mixed3_span	0	+
+EOF
+}
+
 normalize_fasta_against_bed() {
     local fasta_in="$1" bed_in="$2" honor_strand="$3" fasta_out="$4"
 
@@ -304,6 +319,50 @@ verify_names_case() {
     fi
 }
 
+verify_expected_bed_case() {
+    local desc="$1" fasta="$2" bed="$3" expected_file="$4"
+
+    "$ZFASTA" get "$fasta" --bed "$bed" > "$TMPDIR_LOCAL/zf.tmp" 2>/dev/null \
+        || { fail_raw "$desc (z-fasta err)" "expected" "$expected_file" "z-fasta" "$TMPDIR_LOCAL/zf.tmp"; return; }
+
+    if diff -q "$expected_file" "$TMPDIR_LOCAL/zf.tmp" >/dev/null 2>&1; then
+        pass "$desc"
+    else
+        fail_raw "$desc" "expected" "$expected_file" "z-fasta" "$TMPDIR_LOCAL/zf.tmp"
+    fi
+}
+
+write_expected_bed_regions() {
+    local fasta="$1" bed="$2" out="$3"
+    python - "$fasta" "$bed" "$out" <<'PY'
+from pathlib import Path
+import sys
+
+fasta, bed, out = sys.argv[1], sys.argv[2], sys.argv[3]
+seqs = {}
+current = None
+for raw in Path(fasta).read_text().splitlines():
+    if raw.startswith(">"):
+        current = raw[1:].split()[0]
+        seqs[current] = []
+    elif current is not None:
+        seqs[current].append("".join(ch for ch in raw if not ch.isspace()))
+
+parts = []
+for raw in Path(bed).read_text().splitlines():
+    if not raw or raw.startswith("#") or raw.startswith("track") or raw.startswith("browser"):
+        continue
+    fields = raw.split("\t")
+    chrom = fields[0]
+    start0 = int(fields[1])
+    end0 = int(fields[2])
+    seq = "".join(seqs[chrom])[start0:end0]
+    parts.append(f">{chrom}:{start0 + 1}-{end0}\n{seq}\n")
+
+Path(out).write_text("".join(parts))
+PY
+}
+
 run_size_suite() {
     local label="$1" count="$2" chunk_size="$3"
     local bed_file="$TMPDIR_LOCAL/${label}.bed"
@@ -335,6 +394,28 @@ run_size_suite "x-large" "$XLARGE_COUNT" "$XLARGE_CHUNK"
 echo ""
 echo "=== names-file extraction ==="
 verify_names_case "names file vs samtools" "$FASTA" "$NAMES_FILE"
+
+echo ""
+echo "=== mixed-width FASTA BED extraction ==="
+MIXED_FASTA="$TMPDIR_LOCAL/mixed_widths.fasta"
+MIXED_BED="$TMPDIR_LOCAL/mixed_widths.bed"
+generate_mixed_width_fixture "$MIXED_FASTA" "$MIXED_BED"
+verify_bed_case "mixed-width default BED file" "$MIXED_FASTA" "$MIXED_BED" 2 0 0
+verify_samtools_bed_case "mixed-width default BED file vs samtools" "$MIXED_FASTA" "$MIXED_BED" 2 0
+verify_bed_case "mixed-width stranded BED file" "$MIXED_FASTA" "$MIXED_BED" 2 1 0
+
+echo ""
+echo "=== non-uniform FASTA BED extraction ==="
+NON_UNIFORM_FASTA="$TMPDIR_LOCAL/mixed_line_widths_nonuniform.fasta"
+NON_UNIFORM_BED="$TMPDIR_LOCAL/non_uniform.bed"
+cp "$MESSY_DIR/mixed_line_widths.fasta" "$NON_UNIFORM_FASTA"
+"$ZFASTA" index "$NON_UNIFORM_FASTA" >/dev/null 2>&1
+cat > "$NON_UNIFORM_BED" <<'EOF'
+mixed_line_widths	2	24	span	0	+
+mixed_line_widths	12	28	span2	0	+
+EOF
+write_expected_bed_regions "$NON_UNIFORM_FASTA" "$NON_UNIFORM_BED" "$TMPDIR_LOCAL/non_uniform_expected.fa"
+verify_expected_bed_case "non-uniform default BED file" "$NON_UNIFORM_FASTA" "$NON_UNIFORM_BED" "$TMPDIR_LOCAL/non_uniform_expected.fa"
 
 echo ""
 echo "================================================"

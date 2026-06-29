@@ -15,6 +15,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TMPDIR_LOCAL="$SCRIPT_DIR/.verify_rc_tmp"
+MESSY_DIR="$PROJECT_DIR/bench/index/messy_variants"
 mkdir -p "$TMPDIR_LOCAL"
 trap 'rm -rf "$TMPDIR_LOCAL"' EXIT
 
@@ -111,6 +112,36 @@ write_chrom_fixture() {
 
     "$ZFASTA" index "$TMPDIR_LOCAL/chrom_like.fasta" >/dev/null 2>&1 \
         || { fail_msg "synthetic chromosome fixture setup" "z-fasta index failed for generated chromosome-like FASTA"; exit 1; }
+}
+
+write_mixed_width_fixture() {
+    cp "$PROJECT_DIR/tests/data/mixed_widths.fasta" "$TMPDIR_LOCAL/mixed_widths.fasta"
+    "$SAMTOOLS" faidx "$TMPDIR_LOCAL/mixed_widths.fasta" >/dev/null 2>&1 \
+        || { fail_msg "mixed-width fixture setup" "samtools faidx failed for mixed_widths.fasta"; exit 1; }
+    "$ZFASTA" index "$TMPDIR_LOCAL/mixed_widths.fasta" >/dev/null 2>&1 \
+        || { fail_msg "mixed-width fixture setup" "z-fasta index failed for mixed_widths.fasta"; exit 1; }
+}
+
+write_expected_rc_region() {
+    local fasta="$1" name="$2" start="$3" end="$4" out="$5"
+    python - "$fasta" "$name" "$start" "$end" "$out" <<'PY'
+from pathlib import Path
+import sys
+
+fasta, name, start, end, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
+comp = str.maketrans("ACGTUacgtuNn", "TGCAAtgcaaNn")
+seqs = {}
+current = None
+for raw in Path(fasta).read_text().splitlines():
+    if raw.startswith(">"):
+        current = raw[1:].split()[0]
+        seqs[current] = []
+    elif current is not None:
+        seqs[current].append("".join(ch for ch in raw if not ch.isspace()))
+
+seq = "".join(seqs[name])[start - 1:end].translate(comp)[::-1]
+Path(out).write_text(f">{name}:{start}-{end}\n{seq}\n")
+PY
 }
 
 verify_rc_region() {
@@ -296,6 +327,16 @@ verify_rc_region "$TMPDIR_LOCAL/iupac.fasta" iupac_all:1-33 "synthetic IUPAC ful
 
 write_chrom_fixture
 verify_rc_region "$TMPDIR_LOCAL/chrom_like.fasta" chrSynthetic "synthetic chromosome-like full-sequence --rc vs samtools"
+
+write_mixed_width_fixture
+verify_rc_region "$TMPDIR_LOCAL/mixed_widths.fasta" mixed1:55-75 "mixed-width region --rc vs samtools"
+
+cp "$MESSY_DIR/mixed_line_widths.fasta" "$TMPDIR_LOCAL/mixed_line_widths_nonuniform.fasta"
+"$ZFASTA" index "$TMPDIR_LOCAL/mixed_line_widths_nonuniform.fasta" >/dev/null 2>&1 \
+    || { fail_msg "non-uniform fixture setup" "z-fasta index failed for mixed_line_widths.fasta"; exit 1; }
+write_expected_rc_region "$TMPDIR_LOCAL/mixed_line_widths_nonuniform.fasta" mixed_line_widths 3 24 "$TMPDIR_LOCAL/expected_non_uniform_rc.fa"
+verify_exact_output "non-uniform mixed-width region --rc exact output" "$TMPDIR_LOCAL/expected_non_uniform_rc.fa" \
+    get "$TMPDIR_LOCAL/mixed_line_widths_nonuniform.fasta" mixed_line_widths:3-24 --rc
 
 cat > "$TMPDIR_LOCAL/expected_iupac_complement.fa" <<'EOF'
 >iupac_all:1-33 (complement)

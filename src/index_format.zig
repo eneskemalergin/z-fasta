@@ -5,13 +5,29 @@ const posix = std.posix;
 // Types - shared by indexer, getter, stats
 // ============================================================================
 
-/// ZFI binary format magic + header
-pub const ZFI_MAGIC: [4]u8 = .{ 'Z', 'F', 'I', 0x01 };
+/// ZFI binary format magic + header.
+pub const ZFI_MAGIC_V1: [4]u8 = .{ 'Z', 'F', 'I', 0x01 };
+pub const ZFI_MAGIC: [4]u8 = .{ 'Z', 'F', 'I', 0x02 };
+
+const NON_UNIFORM_WIDTH_FLAG: u8 = 1;
+const SIDE_TABLE_OFFSET_BYTES = 5;
+const MAX_SIDE_TABLE_OFFSET = (1 << (SIDE_TABLE_OFFSET_BYTES * 8)) - 1;
 
 pub const ZfiHeader = extern struct {
     magic: [4]u8,
     record_count: u32,
     source_size: u64,
+};
+
+/// One line entry for non-uniform FASTA records.
+///
+/// `base_start` is the 0-based sequence coordinate of the first base on this line.
+/// It makes side-table lookup a binary search instead of a linear prefix sum.
+pub const SideTableLine = extern struct {
+    base_start: u64,
+    byte_offset: u64,
+    line_bytes: u64,
+    line_bases: u64,
 };
 
 /// Index record for ZFI output (40 bytes padded).
@@ -20,6 +36,11 @@ pub const ZfiHeader = extern struct {
 /// For `.fai` fallback loads, both are zero: names live only in `LoadedIndex.name_map`
 /// (see `tryLoadFai`). Do not call `getName` on `.fai` records; use `lookupName` or
 /// `LoadedIndex.name_map` instead.
+///
+/// v0.3 stores non-uniform-width metadata in `_pad` so uniform records remain
+/// byte-identical to v0.2 records. `_pad[0] & 1 == 0` means the classic O(1)
+/// line formula applies. Non-uniform records store a 40-bit little-endian
+/// absolute `.zfi` side-table offset in `_pad[1..6]`.
 pub const IndexRecord = extern struct {
     name_offset: u64,
     name_len: u16,
@@ -32,6 +53,27 @@ pub const IndexRecord = extern struct {
     pub fn getName(self: IndexRecord, data: []const u8) []const u8 {
         // Valid for `.zfi` records only (`name_offset` > 0). `.fai` records store 0/0.
         return data[self.name_offset..][0..self.name_len];
+    }
+
+    pub fn isUniformWidth(self: IndexRecord) bool {
+        return (self._pad[0] & NON_UNIFORM_WIDTH_FLAG) == 0;
+    }
+
+    pub fn sideTableOffset(self: IndexRecord) u64 {
+        var offset: u64 = 0;
+        inline for (0..SIDE_TABLE_OFFSET_BYTES) |i| {
+            offset |= @as(u64, self._pad[i + 1]) << (i * 8);
+        }
+        return offset;
+    }
+
+    pub fn markNonUniform(self: *IndexRecord, offset: u64) !void {
+        if (offset > MAX_SIDE_TABLE_OFFSET) return error.SideTableOffsetTooLarge;
+        self._pad = .{0} ** 6;
+        self._pad[0] = NON_UNIFORM_WIDTH_FLAG;
+        inline for (0..SIDE_TABLE_OFFSET_BYTES) |i| {
+            self._pad[i + 1] = @intCast((offset >> (i * 8)) & 0xff);
+        }
     }
 };
 
@@ -85,6 +127,19 @@ pub const LoadedIndex = struct {
         }
 
         return null;
+    }
+
+    pub fn sideTableLines(self: *const LoadedIndex, rec: IndexRecord) []const SideTableLine {
+        if (rec.isUniformWidth()) return &.{};
+
+        const zfi = self.zfi_data.?;
+        const offset: usize = @intCast(rec.sideTableOffset());
+        const count: *const u64 = @ptrCast(@alignCast(zfi[offset..].ptr));
+        const line_bytes = zfi[offset + @sizeOf(u64) ..];
+        return @as(
+            [*]const SideTableLine,
+            @ptrCast(@alignCast(line_bytes.ptr)),
+        )[0..count.*];
     }
 };
 
@@ -282,7 +337,9 @@ fn tryLoadZfi(
 
     // Validate magic
     const header: *const ZfiHeader = @ptrCast(@alignCast(zfi_data.ptr));
-    if (!std.mem.eql(u8, &header.magic, &ZFI_MAGIC)) {
+    const is_v1 = std.mem.eql(u8, &header.magic, &ZFI_MAGIC_V1);
+    const is_v2 = std.mem.eql(u8, &header.magic, &ZFI_MAGIC);
+    if (!is_v1 and !is_v2) {
         return .corrupt;
     }
 
@@ -305,7 +362,7 @@ fn tryLoadZfi(
     )[0..header.record_count];
 
     for (records) |rec| {
-        if (!isValidZfiRecord(rec, fasta_data)) {
+        if (!isValidZfiRecord(rec, fasta_data, zfi_data, is_v2)) {
             return .corrupt;
         }
     }
@@ -430,7 +487,12 @@ fn tryLoadFai(
     } };
 }
 
-fn isValidZfiRecord(rec: IndexRecord, fasta_data: []align(4096) const u8) bool {
+fn isValidZfiRecord(
+    rec: IndexRecord,
+    fasta_data: []align(4096) const u8,
+    zfi_data: []align(4096) const u8,
+    is_v2: bool,
+) bool {
     const fasta_len = fasta_data.len;
 
     if (rec.name_offset == 0 or rec.name_offset > fasta_len) return false;
@@ -443,6 +505,11 @@ fn isValidZfiRecord(rec: IndexRecord, fasta_data: []align(4096) const u8) bool {
     if (rec.line_bases == 0 or rec.line_bytes == 0) return false;
     if (rec.line_bytes < rec.line_bases) return false;
 
+    if (!rec.isUniformWidth()) {
+        if (!is_v2) return false;
+        return isValidSideTable(rec, fasta_len, zfi_data);
+    }
+
     const full_lines: u128 = rec.seq_len / rec.line_bases;
     const remainder: u128 = rec.seq_len % rec.line_bases;
     var region_end: u128 = rec.seq_offset;
@@ -453,4 +520,40 @@ fn isValidZfiRecord(rec: IndexRecord, fasta_data: []align(4096) const u8) bool {
     }
 
     return region_end <= fasta_len;
+}
+
+fn isValidSideTable(rec: IndexRecord, fasta_len: usize, zfi_data: []align(4096) const u8) bool {
+    const offset: usize = @intCast(rec.sideTableOffset());
+    if (offset < @sizeOf(ZfiHeader)) return false;
+    if (offset + @sizeOf(u64) > zfi_data.len) return false;
+
+    const count_ptr: *const u64 = @ptrCast(@alignCast(zfi_data[offset..].ptr));
+    const line_count = count_ptr.*;
+    if (line_count == 0) return false;
+    if (line_count > std.math.maxInt(usize) / @sizeOf(SideTableLine)) return false;
+
+    const table_bytes = @as(usize, @intCast(line_count)) * @sizeOf(SideTableLine);
+    const lines_offset = offset + @sizeOf(u64);
+    if (lines_offset + table_bytes > zfi_data.len) return false;
+
+    const lines = @as(
+        [*]const SideTableLine,
+        @ptrCast(@alignCast(zfi_data[lines_offset..].ptr)),
+    )[0..@intCast(line_count)];
+
+    var expected_base_start: u64 = 0;
+    var previous_byte_offset: u64 = 0;
+    for (lines, 0..) |line, i| {
+        if (line.base_start != expected_base_start) return false;
+        if (line.line_bases == 0 or line.line_bytes == 0) return false;
+        if (line.line_bytes < line.line_bases) return false;
+        if (line.byte_offset >= fasta_len) return false;
+        if (line.byte_offset + line.line_bytes > fasta_len) return false;
+        if (i > 0 and line.byte_offset <= previous_byte_offset) return false;
+
+        expected_base_start += line.line_bases;
+        previous_byte_offset = line.byte_offset;
+    }
+
+    return expected_base_start == rec.seq_len;
 }
