@@ -24,8 +24,6 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write, BufWriter};
 use std::path::PathBuf;
 
-use bio::alphabets::dna::revcomp;
-use bio::io::bed;
 use bio::io::fasta;
 
 fn usage() -> ! {
@@ -105,6 +103,21 @@ fn parse_get_args<'a>(args: &'a [String]) -> Result<GetConfig<'a>, String> {
 // ════════════════════════════════════════════════════════════════════
 //  Helpers
 // ════════════════════════════════════════════════════════════════════
+
+/// IUPAC reverse complement (also handles U/u uracil).
+fn revcomp(seq: &[u8]) -> Vec<u8> {
+    seq.iter().rev().map(|&b| match b {
+        b'A' => b'T', b'C' => b'G', b'G' => b'C', b'T' => b'A', b'U' => b'A',
+        b'W' => b'W', b'S' => b'S', b'M' => b'K', b'K' => b'M',
+        b'R' => b'Y', b'Y' => b'R', b'B' => b'V', b'D' => b'H',
+        b'H' => b'D', b'V' => b'B', b'N' => b'N',
+        b'a' => b't', b'c' => b'g', b'g' => b'c', b't' => b'a', b'u' => b'a',
+        b'w' => b'w', b's' => b's', b'm' => b'k', b'k' => b'm',
+        b'r' => b'y', b'y' => b'r', b'b' => b'v', b'd' => b'h',
+        b'h' => b'd', b'v' => b'b', b'n' => b'n',
+        _ => b'N',
+    }).collect()
+}
 
 /// Parse a region string into chrom and optional (1-based inclusive) coordinates.
 fn parse_region(s: &str) -> (&str, Option<(u64, u64)>) {
@@ -386,27 +399,38 @@ fn cmd_get_bed(config: &GetConfig) -> io::Result<()> {
 
     let mut reader = open_reader(config.fasta)?;
     let bed_file = File::open(bed_path)?;
-    let mut bed_reader = bed::Reader::new(BufReader::new(bed_file));
+    let bed_reader = BufReader::new(bed_file);
     let stdout = io::stdout();
     let mut out = BufWriter::new(stdout.lock());
     let mut seq_buf = Vec::new();
 
-    for result in bed_reader.records() {
-        let record = result?;
-        let chrom = record.chrom().to_string();
-        let start = record.start();
-        let end = record.end();
+    for line in bed_reader.lines() {
+        let line = line?;
+        if line.is_empty() || line.starts_with('#') || line.starts_with("track") || line.starts_with("browser") {
+            continue;
+        }
 
-        let rc_this = if config.honor_strand {
-            config.rc && record.strand() == Some(bio::bio_types::strand::Strand::Reverse)
-        } else {
-            config.rc
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() < 3 {
+            continue;
+        }
+
+        let chrom = fields[0].to_string();
+        let start: u64 = fields[1].parse().map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("Invalid BED start: {e}"))
+        })?;
+        let end: u64 = fields[2].parse().map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("Invalid BED end: {e}"))
+        })?;
+
+        let name = fields.get(3).filter(|s| !s.is_empty() && **s != ".");
+        let header = match name {
+            Some(n) => n.to_string(),
+            None => format!("{}:{}-{}", chrom, start + 1, end),
         };
 
-        let header = match record.name() {
-            Some(name) if !name.is_empty() => name.to_string(),
-            _ => format!("{}:{}-{}", chrom, start + 1, end),
-        };
+        let strand = fields.get(5).copied();
+        let rc_this = config.rc && (!config.honor_strand || strand == Some("-"));
 
         fetch_into(&mut reader, &chrom, start, end, &mut seq_buf)?;
         write_fasta(&mut out, &header, &seq_buf, rc_this)?;

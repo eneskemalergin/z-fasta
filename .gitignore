@@ -6,8 +6,14 @@ zig-cache/
 # Local Zig installation (download separately)
 zig-*/
 
-# Local tools (samtools, seqkit - download separately)
-tools/
+# Downloaded tool binaries (prebuilt, not built from source)
+tools/fastahack-*/
+tools/seqkit
+tools/seqtk/
+tools/zebrac
+
+# Rust wrapper build artifacts (source is tracked)
+tools/*/target/
 
 # Local zig wrapper (uses project-local zig installation)
 /zig
@@ -31,13 +37,13 @@ bench/get/results/*
 !bench/get/results/figures/
 bench/stats/results/*
 !bench/stats/results/figures/
-bench/perf-recovery/results/*
 
 # Performance baselines (machine-local snapshots; use bench/save_baseline.py)
 bench/baselines/
 
 # Temp dirs from verify scripts
-bench/get/.verify_tmp/
+bench/get/.verify*
+bench/get/.bench*
 
 # Python
 __pycache__/
@@ -56,8 +62,11 @@ htmlcov/
 plan/
 assets/
 
-# Experiments (dev only)
-experiments/
+# Experiments (dev only; track harness scripts, not local data/results)
+experiments/*
+!experiments/25g_index_stress/
+experiments/25g_index_stress/data/
+experiments/25g_index_stress/results/
 
 # Index files (generated during testing)
 *.fai

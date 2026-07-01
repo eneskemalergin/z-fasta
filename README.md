@@ -232,8 +232,7 @@ See [bench/stats/REPORT.md](bench/stats/REPORT.md) for full results.
 
 - **Index:** 20/20 edge cases match `samtools faidx` (exit codes and output).
 - **Get:** 90/90 single-region and 22/22 multi-region byte-identical diff tests pass vs samtools across 5+ test files: full sequences, sub-regions, single bases, line-boundary spans, clamped ranges, duplicate regions, reversed CLI order, sort-path (≥16 regions).
-- **BED / names batch extraction:** 16/16 verification cases pass in `bench/get/verify_bed.sh`, covering default BED, `--bed -`, stranded BED vs `bedtools getfasta -s`, default BED vs `samtools faidx -r`, and `--names` batch extraction.
-- **Reverse / complement extraction:** 19/19 verification cases pass in `bench/get/verify_rc.sh`, covering `--rc` vs `samtools faidx -i --mark-strand no`, exact-output checks for `--reverse-only`, `--complement-only`, and `--annotate-rc`, multi-region concatenation, BED `--honor-strand --rc` composition, protein rejection, and a synthetic chromosome-like full-sequence case.
+- **BED / names / reverse complement:** 263/263 verification cases pass in `bench/get/verify.sh`, covering single-region, multi-region, BED batch (sized suites + stdin + stranded), names-file, and all reverse-complement modes (single/multi/BED/protein rejection) against samtools, bedtools, seqtk, and Tier 2 Rust wrappers.
 - **Stats:** 107/107 BioPython verification tests pass: exact agreement on all Tier 1 and Tier 2 values across nucleotide and protein files.
 - **Unit tests:** 102/102 Zig unit tests (26 index · 30 get · 33 stats · 7 complement · 6 BED parser).
 - **Messy FASTA:** z-fasta is the only tool tested that correctly indexes mixed-width and trailing-whitespace FASTA files. samtools, fastahack, and pyfaidx all reject them. See [bench/index/REPORT.md](bench/index/REPORT.md) for the full compatibility matrix.
@@ -246,15 +245,13 @@ bash bench/shared/download_data.sh
 
 # ── Index ─────────────────────────────────────────────────────────
 ./zig build -Doptimize=ReleaseFast
-bash bench/index/run_benchmarks.sh       # timing + memory
-bash bench/index/run_tests.sh            # 20 edge-case correctness tests
+bash bench/index/run.sh                       # full suite (tests + benchmarks + messy + report)
+bash bench/index/run.sh --skip-report         # benchmarks only; report separately
 .venv/bin/python bench/index/generate_report.py   # -> bench/index/REPORT.md
 
 # ── Get ───────────────────────────────────────────────────────────
 bash bench/get/run_benchmarks.sh         # latency, scaling, real datasets
-bash bench/get/verify_get.sh             # 90 byte-identical diff tests vs samtools
-bash bench/get/verify_bed.sh             # 16 BED / names verification cases vs bedtools + samtools
-bash bench/get/verify_rc.sh              # 19 RC / reverse / complement verification cases
+bash bench/get/verify.sh                 # 263 verification cases (single/multi/BED/RC)
 .venv/bin/python bench/get/generate_report.py     # -> bench/get/REPORT.md
 
 # ── Stats ─────────────────────────────────────────────────────────
@@ -266,7 +263,7 @@ bash bench/stats/run_benchmarks.sh       # full/index-only, scaling, throughput
 Full local refresh, in the same order used before publishing benchmark updates:
 
 ```bash
-./zig build -Doptimize=ReleaseFast && bash bench/index/run_tests.sh && bash bench/get/verify_get.sh && bash bench/get/verify_multi_get.sh && .venv/bin/python bench/stats/verify_stats.py && bash bench/index/run_benchmarks.sh --runs 5 && .venv/bin/python bench/index/generate_report.py && bash bench/get/run_benchmarks.sh --runs 5 && .venv/bin/python bench/get/generate_report.py && bash bench/stats/run_benchmarks.sh --runs 5 && .venv/bin/python bench/stats/generate_report.py && bash bench/perf-recovery/run_startup.sh
+./zig build -Doptimize=ReleaseFast && bash bench/index/run.sh --skip-report --runs 5 --warmup 1 && .venv/bin/python bench/index/generate_report.py && bash bench/get/run_benchmarks.sh --runs 5 --warmup 1 && .venv/bin/python bench/get/generate_report.py && bash bench/stats/run_benchmarks.sh --runs 5 --warmup 1 && .venv/bin/python bench/stats/generate_report.py && .venv/bin/python bench/save_baseline.py --label full-refresh
 ```
 
 Add `--skip-real` to the `get` / `stats` scripts to skip real dataset runs (~3 GB downloads required otherwise). See [bench/README.md](bench/README.md) for prerequisites and full instructions. The shipped reverse-path note is in [bench/get/RC_STRATEGY.md](bench/get/RC_STRATEGY.md).
