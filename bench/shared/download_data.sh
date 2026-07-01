@@ -3,6 +3,10 @@
 # Download real datasets for benchmarking z-fasta
 # Total size: ~4.1 GB uncompressed
 #
+# TODO(v0.3-bench): Emit a dataset manifest with source URLs, expected
+# filenames, byte sizes, and checksums. The zebrac baseline layer should be
+# able to record exactly which dataset revision produced a run.
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

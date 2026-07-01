@@ -12,6 +12,11 @@
 #   samtools  1.13       (system)
 #   hyperfine 1.12.0     (system)
 #
+# TODO(v0.3-bench): Rework this around shared/tools.sh. Add zebrac,
+# bedtools, noodles_wrapper, and rustbio_wrapper checks; make hyperfine
+# legacy/optional; stop treating .venv as a general benchmark dependency
+# installer except for plotting/report packages.
+#
 # Usage:
 #   bash bench/shared/install_tools.sh
 #
