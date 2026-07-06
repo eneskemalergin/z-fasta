@@ -55,7 +55,7 @@ Options:
   --emit-fai    Output FAI format to stdout (default: create .zfi binary file)
   --no-dedup    Keep duplicate sequence names in the index (default: first wins at
                 index time). get resolves duplicate names to the last record.
-  --low-mem     Stream FAI to stdout only (no .zfi file; limits RAM to 4 MB)
+  --low-mem     Stream input with bounded RAM; same outputs as default index
   --help        Show help message
   --version     Print version
 ```
@@ -73,35 +73,23 @@ Extract one or more sequences or sub-regions from an indexed FASTA file. Output 
 
 Requires an index: either `.zfi` (preferred) or `.fai`. If `.zfi` is not found, falls back to `.fai` automatically.
 
-**Region formats:**
+**Region formats:** `NAME` (full sequence); `NAME:START-END` (1-based inclusive sub-region); `NAME:START-` (from START through end of sequence). Ensembl-style names with colons work (for example `chromosome:GRCh38:1:1:248956422:1`).
 
-| Format           | Description                   |
-| ---------------- | ----------------------------- |
-| `NAME`           | Full sequence                 |
-| `NAME:START-END` | 1-based, inclusive sub-region |
-| `NAME:START-`    | From START to end of sequence |
+**GET flags:**
 
-Handles Ensembl-style names containing colons (e.g., `chromosome:GRCh38:1:1:248956422:1`).
+- **`--bed file.bed`** / **`--bed -`**: BED regions from a file or stdin. Coordinates are 0-based half-open; z-fasta converts to 1-based inclusive internally.
+- **`--names file.txt`**: one full-sequence name per line for long batch lists.
+- **`--strand-aware`** (alias **`--honor-strand`**): read BED column 6; `-` applies reverse-complement before any global orientation flag.
+- **`--rc`**: reverse-complement output. Verified against `samtools faidx -i --mark-strand no`. Mutually exclusive with **`--complement-only`** and **`--reverse-only`**.
+- **`--complement-only`**: complement without reverse. Nucleotide records only.
+- **`--reverse-only`**: reverse without complement.
+- **`--annotate-rc`**: append a transform suffix to headers (for example `(reverse complement)`). Default output stays samtools-style.
+- **`--summary`**: print region count, total bases, elapsed time, and regions/sec to stderr.
+- **`--chunk-size N`**: BED batch size (default `4096`). Use `1` only for debugging. **`--chunk-size -1`**: load all BED rows in one batch when memory allows (names/BED inputs over 512 MiB are rejected with `-1`).
 
-**Additional GET flags:**
+Positional CLI regions are capped at **1024** per invocation (`error: too many regions`). BED and **`--names`** lists are not subject to that cap.
 
-| Flag | Description |
-| ---- | ----------- |
-| `--bed file.bed` | Read BED regions from a file. BED coordinates are 0-based, half-open; z-fasta converts them to 1-based inclusive internally. |
-| `--bed -` | Read BED regions from stdin. |
-| `--names file.txt` | Read one full-sequence name per line. Useful for long batch lists. |
-| `--strand-aware` | Use BED column 6. `-` applies reverse-complement orientation before any global orientation flag. Alias: `--honor-strand`. |
-| `--rc` | Reverse-complement the extracted sequence. Verified against `samtools faidx -i --mark-strand no`. |
-| `--complement-only` | Complement the extracted sequence without reversing it. Mutually exclusive with `--rc` and `--reverse-only`. |
-| `--reverse-only` | Reverse the extracted sequence without complementing it. Mutually exclusive with `--rc` and `--complement-only`. |
-| `--annotate-rc` | Append a human-readable transform suffix to headers, for example `(reverse complement)`. Default headers stay samtools-style and unannotated. |
-| `--summary` | Print region count, total bases, elapsed time, and regions/sec to stderr. |
-| `--chunk-size N` | Process BED rows in batches of `N` instead of resolving the entire BED in one batch. Default: `4096`, which is the current best speed/memory tradeoff on the checked benchmark workloads. Use `1` only for debugging: one row per batch, high per-row arena overhead. |
-| `--chunk-size -1` | Process all BED rows in a single batch when memory use is acceptable. |
-
-Positional CLI regions are capped at **1024** per invocation (`error: too many regions`). BED files and `--names` lists are not subject to that cap (large inputs use chunked BED processing or the 512 MiB all-in-memory limit for `--chunk-size -1`).
-
-Complement-based transforms are rejected for protein FASTA input with a clear error. This keeps `--rc` and `--complement-only` biologically constrained to nucleotide-like records.
+Complement-based transforms error on protein FASTA input so **`--rc`** and **`--complement-only`** stay nucleotide-only.
 
 ### Stats
 
@@ -182,26 +170,24 @@ All timings on AMD Ryzen 9 3950X, warm cache.
 | Transcriptome | 972 MB | 0.093s             | 1.79s    | 5.72s     | 6.50s   | **19.3x**           |
 | Proteome      | 66 MB  | 0.0056s            | 0.055s   | 0.275s    | 0.368s  | **10.0x**           |
 
-| Mode         | Genome timing | Memory behavior                                                                  |
-| ------------ | ------------- | -------------------------------------------------------------------------------- |
-| `--no-dedup` | **0.39s**     | Fastest on repeated-name-free inputs. mmap-backed; MaxRSS reflects mapped pages. |
-| `default`    | 0.40s         | Deduplicates names while staying in the same mmap-backed performance class.      |
-| `--low-mem`  | 2.46s         | Streaming path; measured at 4.5 MB MaxRSS on the genome benchmark.               |
+**Index modes** on Genome (warm cache; [bench/index/REPORT.md](bench/index/REPORT.md) run `20260706_134943`): **default** mmap ~0.40s, RSS ≈ mapped FASTA size; **`--low-mem`** stream ~1.61s FAI / ~3.4 MB RSS, same `.zfi` bytes as default; **`--no-dedup`** ~0.38s; **`--emit-fai`** writes FAI to stdout only (no on-disk `.zfi`).
+
+Both default and **`--low-mem`** write the same `.zfi` unless **`--emit-fai`** is set. The gap is how the FASTA is read during the build, not the on-disk format.
 
 > _`mmap` modes show RSS close to the mapped FASTA size because `/usr/bin/time -v` counts mapped pages, not just private heap._
-See [bench/index/REPORT.md](bench/index/REPORT.md) for full scaling curves and memory analysis.
+> See [bench/index/REPORT.md](bench/index/REPORT.md) for full scaling curves and memory analysis.
 
 ### Get: O(1) Region Extraction
 
-| Dataset                | Region          | z-fasta        | samtools   | seqtk     | pyfaidx | Speedup vs samtools |
-| ---------------------- | --------------- | -------------- | ---------- | --------- | ------- | ------------------- |
-| Any (warm cache)       | 100 bp – 10 kbp | **0.7–0.9 ms** | 1.5–1.6 ms | 4–34 ms   | ~60 ms  | **1.8–2.1x**        |
-| Proteome (14 MB)       | 1 kbp region    | 1.3 ms         | 10.9 ms    | 7.2 ms    | 119 ms  | **8.4x**            |
-| Transcriptome (972 MB) | 1 kbp region    | 25.3 ms        | 278.7 ms   | 220.3 ms  | 1103 ms | **11.0x**           |
+| Dataset                | Region          | z-fasta        | samtools   | seqtk    | pyfaidx | Speedup vs samtools |
+| ---------------------- | --------------- | -------------- | ---------- | -------- | ------- | ------------------- |
+| Any (warm cache)       | 100 bp - 10 kbp | **0.7-0.9 ms** | 1.5-1.6 ms | 4-34 ms  | ~60 ms  | **1.8-2.1x**        |
+| Proteome (14 MB)       | 1 kbp region    | 1.3 ms         | 10.9 ms    | 7.2 ms   | 119 ms  | **8.4x**            |
+| Transcriptome (972 MB) | 1 kbp region    | 25.3 ms        | 278.7 ms   | 220.3 ms | 1103 ms | **11.0x**           |
 
 > Small-region extraction is O(1), but on this host the end-to-end CLI path is startup-dominated below roughly 10 kbp. The historical checked-in benchmark report for v0.2.6 was generated under a faster local benchmark environment than the current reruns; direct side-by-side rebuilds of v0.2.6, v0.2.7, and current `main` on the same machine do not reproduce a material no-flag `get` regression. For very large full-sequence extraction, fastahack can still win on raw write-path overhead; z-fasta stays ahead of samtools across the real-dataset GET cases.
 
-Orientation note: the shipped `--rc` path keeps the same mmap-backed extraction model and applies reverse traversal plus complement lookup during emission, rather than materializing a second copy of the region. The main GET benchmark report now includes dedicated RC timing and RSS sections against `samtools faidx -i` and `bedtools getfasta | seqtk seq -r`, and the implementation choice is summarized in [bench/get/RC_STRATEGY.md](bench/get/RC_STRATEGY.md).
+Orientation note: **`--rc`** uses the same mmap-backed extraction path and applies reverse traversal plus complement lookup during emission instead of materializing a second copy of the region.
 
 **Multi-region (v0.2.4):** `z-fasta get` accepts multiple regions per call, loading the index once and streaming all results in CLI order.
 
@@ -213,8 +199,8 @@ Orientation note: the shipped `--rc` path keeps the same mmap-backed extraction 
 | 100     | 66.7 ms | 279 ms   | 222 ms | **4.2x**            |
 
 > Benchmarked on REAL_Transcriptome.fa (972 MB, 254,070 sequences). Latency is dominated by index resolution and output setup rather than region byte count. seqtk performs a full-file scan per call regardless of region count and is listed for reference only.
-
-Run `.venv/bin/python bench/get/generate_report.py` to regenerate the full GET report under `bench/get/REPORT.md`, including RC positional/BED comparisons and the RC memory snapshot.
+>
+> GET and stats benchmark reports (`bench/get/REPORT.md`, `bench/stats/REPORT.md`) are from pre-cleanup runs; perf harnesses are pending rebuild for v0.3.0. Index numbers above are from [bench/index/REPORT.md](bench/index/REPORT.md) run `20260706_134943`.
 
 ### Stats: Assembly/Proteome Statistics
 
@@ -225,17 +211,15 @@ Run `.venv/bin/python bench/get/generate_report.py` to regenerate the full GET r
 | Full scan  | 1 GB single-seq file | **0.78 s**  | 5.62 s    | 2.65 s     | **~7x**              |
 | Full scan  | Proteome (14 MB)     | **11.8 ms** | 57.8 ms   | 93.0 ms    | **~4.9x**            |
 
-> Index-only time is effectively constant with file size and is best described as startup-dominated. It reads `.zfi` index data and computes length-derived metrics without scanning FASTA sequence bytes. Full-scan throughput on synthetic files is ~1.3 GB/s, and the latest benchmark report has z-fasta ahead of seqkit on the real genome/proteome/transcriptome stats cases while still computing richer statistics.
-See [bench/stats/REPORT.md](bench/stats/REPORT.md) for full results.
+> Historical stats benchmarks; harness and `bench/stats/REPORT.md` pending rebuild. Index-only mode reads `.zfi` without scanning sequence bytes.
 
 ### Correctness
 
-- **Index:** 20/20 edge cases match `samtools faidx` (exit codes and output).
-- **Get:** 90/90 single-region and 22/22 multi-region byte-identical diff tests pass vs samtools across 5+ test files: full sequences, sub-regions, single bases, line-boundary spans, clamped ranges, duplicate regions, reversed CLI order, sort-path (≥16 regions).
-- **BED / names / reverse complement:** 263/263 verification cases pass in `bench/get/verify.sh`, covering single-region, multi-region, BED batch (sized suites + stdin + stranded), names-file, and all reverse-complement modes (single/multi/BED/protein rejection) against samtools, bedtools, seqtk, and Tier 2 Rust wrappers.
-- **Stats:** 107/107 BioPython verification tests pass: exact agreement on all Tier 1 and Tier 2 values across nucleotide and protein files.
-- **Unit tests:** 102/102 Zig unit tests (26 index · 30 get · 33 stats · 7 complement · 6 BED parser).
-- **Messy FASTA:** z-fasta is the only tool tested that correctly indexes mixed-width and trailing-whitespace FASTA files. samtools, fastahack, and pyfaidx all reject them. See [bench/index/REPORT.md](bench/index/REPORT.md) for the full compatibility matrix.
+- **Index:** edge-case and messy-variant correctness via `bench/index/run.sh` (`edge_cases/` generated on the fly; `messy_variants/` checked in).
+- **Get:** verification in `bench/get/verify.sh` (single/multi-region, BED, names, RC, messy FASTA) against samtools, bedtools, and seqtk where applicable.
+- **Stats:** verification harness pending rebuild (removed in v0.3.0 bench cleanup).
+- **Unit tests:** `./zig build test` (index, get, stats, complement, BED parser, validator).
+- **Messy FASTA:** z-fasta indexes mixed-width and trailing-whitespace FASTA files that samtools, fastahack, and pyfaidx reject. See [bench/index/REPORT.md](bench/index/REPORT.md) for the compatibility matrix.
 
 ## Benchmarking
 
@@ -243,37 +227,24 @@ See [bench/stats/REPORT.md](bench/stats/REPORT.md) for full results.
 # Download real test data (~4 GB, one-time)
 bash bench/shared/download_data.sh
 
-# ── Index ─────────────────────────────────────────────────────────
+# Index (full suite: correctness, zebrac perf, messy zebrac, report)
 ./zig build -Doptimize=ReleaseFast
-bash bench/index/run.sh                       # full suite (tests + benchmarks + messy + report)
+bash bench/index/run.sh
 bash bench/index/run.sh --skip-report         # benchmarks only; report separately
+
+# Get verification (bench perf report pending rebuild)
+bash bench/get/verify.sh
+
+# Regenerate index report after a benchmark run
 .venv/bin/python bench/index/generate_report.py   # -> bench/index/REPORT.md
-
-# ── Get ───────────────────────────────────────────────────────────
-bash bench/get/run_benchmarks.sh         # latency, scaling, real datasets
-bash bench/get/verify.sh                 # 263 verification cases (single/multi/BED/RC)
-.venv/bin/python bench/get/generate_report.py     # -> bench/get/REPORT.md
-
-# ── Stats ─────────────────────────────────────────────────────────
-bash bench/stats/run_benchmarks.sh       # full/index-only, scaling, throughput
-.venv/bin/python bench/stats/verify_stats.py  # 107 BioPython verification tests
-.venv/bin/python bench/stats/generate_report.py   # -> bench/stats/REPORT.md
 ```
 
-Full local refresh, in the same order used before publishing benchmark updates:
-
-```bash
-./zig build -Doptimize=ReleaseFast && bash bench/index/run.sh --skip-report --runs 5 --warmup 1 && .venv/bin/python bench/index/generate_report.py && bash bench/get/run_benchmarks.sh --runs 5 --warmup 1 && .venv/bin/python bench/get/generate_report.py && bash bench/stats/run_benchmarks.sh --runs 5 --warmup 1 && .venv/bin/python bench/stats/generate_report.py && .venv/bin/python bench/save_baseline.py --label full-refresh
-```
-
-Add `--skip-real` to the `get` / `stats` scripts to skip real dataset runs (~3 GB downloads required otherwise). See [bench/README.md](bench/README.md) for prerequisites and full instructions. The shipped reverse-path note is in [bench/get/RC_STRATEGY.md](bench/get/RC_STRATEGY.md).
+See [bench/index/README.md](bench/index/README.md) for index runner flags. GET/stats zebrac suites and baseline snapshots (`bench/save_baseline.py`) were removed in the July 2026 bench cleanup and are planned to return in v0.3.0.
 
 ## Output Formats
 
-| Format | Flag         | Description                                                |
-| ------ | ------------ | ---------------------------------------------------------- |
-| `.zfi` | _(default)_  | Compact binary index. Fast to read/write programmatically. |
-| `.fai` | `--emit-fai` | Tab-separated text, identical to `samtools faidx` output.  |
+- **`.zfi`** (default): compact binary index for fast programmatic read/write.
+- **`.fai`** (`--emit-fai`): tab-separated text, byte-identical to `samtools faidx` output.
 
 ## Development
 
@@ -297,7 +268,7 @@ Add `--skip-real` to the `get` / `stats` scripts to skip real dataset runs (~3 G
 - [x] `z-fasta stats`: Assembly/proteome statistics with index-only mode (v0.2)
 - [x] Unified benchmark suite with per-module reports and figures (v0.2.2)
 - [x] Expanded tool comparison: pyfaidx, seqtk added across all benchmark modules; messy FASTA compatibility matrix (v0.2.3)
-- [x] Multi-region `get`: single call with N regions, index loads once, results stream in CLI order; ~2x faster than samtools across 1–100 regions (v0.2.4)
+- [x] Multi-region `get`: single call with N regions, index loads once, results stream in CLI order; ~2x faster than samtools across 1-100 regions (v0.2.4)
 - [x] Zig 0.16.0 migration plus benchmark/report refresh for v0.2.5
 - [x] v0.2.6 performance recovery: lower startup overhead, faster index loading, buffered GET emission, fixed-width stats/index fast paths, and refreshed benchmark reports
 - [x] v0.2.7 BED batch extraction: `--bed`, `--bed -`, `--names`, `--strand-aware`, bounded chunked processing, and verification/benchmark coverage

@@ -330,6 +330,24 @@ bench_add_command() {
         "$input_bytes" "" "$json_out" "$(shell_command "$script")"
 }
 
+# Write `.zfi` (z-fasta) and `.fai` (samtools) on REAL_* fixtures after zebrac.
+# Zebrac lanes delete sidecars between commands; the report size table reads these files.
+preserve_real_index_sidecars() {
+    bench_require_tool z-fasta
+    echo "  Preserving REAL_* index sidecars for report (.zfi + .fai)..."
+    local fa
+    for fa in \
+        "$DATA_DIR/REAL_Genome.fa" \
+        "$DATA_DIR/REAL_Transcriptome.fa" \
+        "$DATA_DIR/REAL_Proteome.fasta"; do
+        [[ -f "$fa" ]] || continue
+        "$ZFASTA" index "$fa" > /dev/null
+        if bench_has_tool samtools; then
+            samtools faidx "$fa" > /dev/null 2>&1 || true
+        fi
+    done
+}
+
 bench_file() {
     local file="$1" json_out="$2" metadata_jsonl="$3"
     local section="${4:-index}" workload="${5:-$(basename "$json_out" .json)}"
@@ -351,6 +369,7 @@ bench_file() {
     qn="$(quote_arg "$NOODLES")"
     qr="$(quote_arg "$RUSTBIO")"
     local clean="rm -f ${qf}.fai ${qf}.zfi"
+    local clean_zfi="rm -f ${qf}.zfi"
     local nbytes
     nbytes="$(file_size_bytes "$file")"
 
@@ -362,7 +381,7 @@ bench_file() {
         bench_add_command "$section" "$workload" "z-fasta-nodedup" "z-fasta" "$json_out" \
             "$clean; $qz index --emit-fai --no-dedup $qf > /dev/null" "$nbytes"
         bench_add_command "$section" "$workload" "z-fasta-lowmem" "z-fasta" "$json_out" \
-            "$clean; $qz index --low-mem $qf > /dev/null" "$nbytes"
+            "$clean; $qz index --low-mem --emit-fai $qf > /dev/null" "$nbytes"
     fi
 
     bench_add_command "$section" "$workload" "samtools" "samtools" "$json_out" \
@@ -377,6 +396,13 @@ bench_file() {
         "$clean; $qn index $qf" "$nbytes"
     bench_has_tool rustbio && bench_add_command "$section" "$workload" "rustbio-custom-index" "rustbio" "$json_out" \
         "$clean; $qr index $qf" "$nbytes"
+
+    # Last: production `.zfi` lane. Only remove `.zfi` so competitor `.fai` remains for
+    # the report on-disk size table (`bench/index/generate_report.py`).
+    if [[ "$bench_mode" != "headline" ]]; then
+        bench_add_command "$section" "$workload" "z-fasta-zfi" "z-fasta" "$json_out" \
+            "$clean_zfi; $qz index $qf > /dev/null" "$nbytes"
+    fi
 
     zebrac_run_current_group "$json_out" "$metadata_jsonl"
     zebrac_clear_commands
@@ -607,6 +633,7 @@ run_benchmarks() {
                 echo "  $name ($(du -h "$file" | cut -f1))"
                 bench_file "$file" "$perf_dir/${name}.json" "$METADATA_JSONL" index "$name" all
             done
+            preserve_real_index_sidecars
         fi
         echo ""
     fi

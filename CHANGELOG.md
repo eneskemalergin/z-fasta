@@ -5,49 +5,37 @@ All notable changes to z-fasta will be documented in this file.
 
 ## [0.3.0] - Unreleased
 
+Ongoing release: messy-FASTA `.zfi` v2, streaming `index --low-mem`, `validate`, and a rebuilt index benchmark suite. GET and stats perf reports and baseline snapshot scripts were removed in the July bench cleanup; `bench/get/verify.sh` remains (messy FASTA cases included). Stats verification is pending rebuild.
+
 ### Added
 
-- `src/validator.zig`: new `validate` subcommand for FASTA structure, alphabet, and header validation with human-readable text, JSON Lines, and JSON summary output modes
-- `z-fasta validate`: checks for duplicate names, invalid characters, null bytes, UTF-8 BOM, inconsistent line widths, trailing whitespace, empty sequences, missing terminal newlines, mixed line endings, long headers, and schema violations
-- `z-fasta validate --strict`: promotes all warnings to errors (exit code 1)
-- `z-fasta validate --json`: streaming JSON Lines output with `schema_version: "v1"` on every event
-- `z-fasta validate --json --summary`: single JSON object with counts and first examples per kind
-- `z-fasta validate --fix -o <file>`: writes a fixed FASTA with format-level issues resolved (BOM stripped, lines rewrapped to modal width, line endings normalized, trailing whitespace removed, terminal newline appended)
-- `z-fasta validate --fix-format-only`: proceeds with format fixes even when character-level errors exist
-- `z-fasta validate --schema uniprot` and `--schema refseq`: header schema validation for UniProt (`sp|`, `tr|`, `db|`) and RefSeq (`NC_`, `NM_`, `NR_`, etc.) formats
-- `z-fasta validate --custom-alphabet "ACGTN..."`: overrides the built-in nucleotide or protein alphabet
-- `z-fasta validate --max-header-len N`: warns when headers exceed N bytes (default: 1024)
-- `src/index_format.zig`: `.zfi` v2 format with per-record `is_uniform_width` flag and side-table offset for non-uniform FASTA records; backward-compatible with v0.2.x (uniform records are byte-identical)
-- `src/indexer.zig`: `scanZfiIndex()` detects non-uniform-width records and writes side-tables with per-line `(base_start, byte_offset, line_bytes, line_bases)` triples
-- `src/getter.zig`: binary search over side-table for non-uniform records; O(log L) per base lookup where L is the number of lines in the sequence
-- `bench/index/run.sh`: unified index suite runner combining correctness tests, zebrac performance benchmarks, messy FASTA zebrac, and report generation
-- `bench/shared/zebrac_runner.sh`: shared zebrac harness with configurable runs, warmup, duration, and metadata JSONL output
-- `bench/shared/tools.sh`: source of truth for local tool paths and Tier 1/Tier 2 labels
-- `tests/test_index.zig`: side-table validation tests for v0.2 to v0.3 index compatibility
+- **`z-fasta validate`**: structure, alphabet, and header checks (duplicate names, invalid characters, null bytes, UTF-8 BOM, inconsistent line widths, trailing whitespace, empty sequences, missing terminal newlines, mixed line endings, long headers, schema violations). Output modes: human text; `--json` JSON Lines (`schema_version: "v1"` per event); `--json --summary` aggregate object. `--strict` promotes warnings to errors. `--fix -o <file>` rewrites format issues (BOM stripped, modal-width rewrap, normalized line endings, trimmed trailing whitespace, terminal newline). Also `--fix-format-only`, `--schema uniprot` (`sp|`, `tr|`, `db|`), `--schema refseq` (`NC_`, `NM_`, `NR_`, ...), `--custom-alphabet`, and `--max-header-len N` (default 1024).
+- **`.zfi` v2** (`ZFI\x02`): per-record `is_uniform_width` flag and side-table offset for non-uniform (messy) FASTA. Side tables store per-line `(base_start, byte_offset, line_bytes, line_bases)` triples. Uniform records stay byte-identical to v0.2.x v1 indexes.
+- **`get` side-table lookup**: binary search on side tables for non-uniform records (O(log L) per base; L is line count).
+- **`index --low-mem` streaming `.zfi`**: bounded-RAM build path. Output bytes match mmap `index` on simple and messy fixtures. `--emit-fai` writes FAI to stdout (same as mmap).
+- **`tests/test_index.zig`**: v0.2 to v0.3 side-table and index compatibility coverage.
+- **`build.zig`**: `test_validator` target for validator unit tests.
 
 ### Changed
 
-- `src/index_format.zig`: `.zfi` magic bumped from `ZFI\x01` to `ZFI\x02`; v0.3 reads both v1 and v2 formats
-- `src/indexer.zig`: `scanFastaRecords` now passes sequence data and uniform-width flag to the emit callback for side-table construction
-- `src/main.zig`: index writing uses `scanZfiIndex()` with in-memory record and side-table arrays instead of streaming write with a dummy header
-- `src/stats.zig`: composition scan handles non-uniform records via side-table; whitespace check uses `byte > ' '` instead of explicit `\n`/`\r` comparison
-- `build.zig`: added `test_validator` target for `src/validator.zig` unit tests
-- `bench/save_baseline.py` and `bench/compare_baseline.py`: replace the old hyperfine-only baseline path with normalized `bench.baseline.v2` snapshots that ingest zebrac JSON, hyperfine JSON, metadata JSONL, memory CSVs, and throughput CSVs
-- `bench/README.md`: rewritten with new layout, runner documentation, and verification workflow
-- `bench/get/verify_get.sh` and `bench/get/verify_bed.sh`: added messy FASTA verification cases
-- `bench/stats/verify_stats.py`: added messy FASTA stats verification
-- `README.md`: updated benchmark commands to use `bench/index/run.sh` and the new verification workflow
+- **Default mmap `index`**: writes `.zfi` via `scanZfiIndex()` with in-memory record and side-table arrays (replaces dummy-header streaming write). `scanFastaRecords` passes sequence data and uniform-width flag to the emit callback. v0.3 reads both `ZFI\x01` and `ZFI\x02`.
+- **`index --low-mem`**: default output is `{file}.zfi` (was FAI-only in v0.2.x). Shares line-metrics semantics with mmap via `ChunkParseState` and `LineMetricsBuilder`. Removed duplicate `StreamingParseState` parser.
+- **`stats`**: composition and whitespace checks follow side tables on non-uniform records. Whitespace uses `byte > ' '` instead of explicit `\n`/`\r` tests.
+- **Index benchmark suite** (`bench/index/run.sh`, `bench/index/README.md`, `bench/index/generate_report.py`, `bench/index/REPORT.md`): single runner for correctness, zebrac perf, messy zebrac, and report generation. Shared `bench/shared/zebrac_runner.sh` and `bench/shared/tools.sh`. Mode comparison uses `--emit-fai` for FAI parity. `z-fasta-zfi` lane benchmarks production `.zfi` (mmap). `preserve_real_index_sidecars()` retains on-disk `.zfi` and `.fai` for size tables. Report section *z-fasta Production Index (.zfi)* covers wall time, RSS, and format overhead. Latest full run `20260706_134943` (Genome: default FAI 0.38s; `--low-mem` FAI 1.61s at 3.39 MB RSS; production `.zfi` 0.40s).
+- **GET verification**: `bench/get/verify.sh` unified harness (replaces `verify_get.sh`, `verify_bed.sh`, `verify_rc.sh`, and related scripts) with messy FASTA BED, region, and RC cases.
+- **`README.md`**: benchmark commands point at `bench/index/run.sh` and the updated verification workflow.
 
 ### Fixed
 
-- `src/getter.zig`: `get` on messy (non-uniform-width) FASTAs now retrieves correctly using the v0.2 index format extension; previously emitted garbage or failed silently on mixed-width files
-- `src/index_format.zig`: v0.2.x binaries emit a clear upgrade error when encountering v0.3 `.zfi` files with the new magic
+- **`get` on messy FASTAs**: correct extraction via v2 side tables. Previously returned garbage or failed silently on mixed-width files.
+- **`index --low-mem`**: skip throwaway side-table work on uniform records (fixes RSS and instruction blow-up on large genomes).
 
 ### Removed
 
-- `bench/wrappers/`: retire the obsolete standalone Tier 2 hyperfine lane now that Rust wrappers are integrated into the main index/get/stats suites
-- `bench/index/run_benchmarks.sh` and `bench/index/run_tests.sh`: replaced by `bench/index/run.sh`
-- `bench/index/results/figures/scaling_seqs.png` and `speedup.png`: removed legacy figure files
+- `bench/wrappers/`: obsolete Tier 2 hyperfine lane (Rust wrappers live in main index, get, and stats suites).
+- `bench/index/run_benchmarks.sh` and `bench/index/run_tests.sh` (replaced by `bench/index/run.sh`).
+- `bench/index/results/figures/scaling_seqs.png` and `speedup.png` (legacy figures).
+- **Bench cleanup (July 2026, pending rebuild)**: `bench/save_baseline.py`, `bench/compare_baseline.py`, `bench/run_all_and_baseline.sh`; GET/stats benchmark runners, reports, and `bench/stats/verify_stats.py`; split GET verify scripts (logic consolidated into `bench/get/verify.sh`). `bench/baselines/BASELINES.md` documents the intended `bench.baseline.v2` schema for when snapshot tooling returns.
 
 ## [0.2.9] - 2026-06-24
 

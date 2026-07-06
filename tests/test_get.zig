@@ -112,7 +112,7 @@ test "loadIndex - .zfi file" {
 }
 
 // ============================================================================
-// Multi-region resolution tests (v0.2.4)
+// Multi-region resolution tests
 // ============================================================================
 
 test "resolveRegion - single region, full sequence" {
@@ -189,7 +189,7 @@ test "resolveRegion - duplicate region allowed, same start_byte" {
 }
 
 // ============================================================================
-// Edge case tests for resolveRegion (v0.2.4 bug hunt)
+// resolveRegion edge cases
 // ============================================================================
 
 test "resolveRegion - open-ended region (NAME:START-) uses seq_len as end" {
@@ -319,4 +319,143 @@ test "resolveRegion - nonstandard characters in sequence (stars/dashes)" {
     const r = resolveRegion(&idx, "nonstandard:1-10", 0);
     try std.testing.expectEqual(@as(u64, 10), r.num_bases);
     try std.testing.expectEqual(@as(u8, 'A'), idx.fasta_data[r.start_byte]);
+}
+
+// ============================================================================
+// Low-mem index get
+// ============================================================================
+
+fn uniqueArtifactPath(allocator: std.mem.Allocator, stem: []const u8, ext: []const u8) ![]u8 {
+    try std.Io.Dir.cwd().createDirPath(io, "zig-cache/test-artifacts");
+    const now = std.Io.Clock.Timestamp.now(io, .awake);
+    const nanos: u64 = @intCast(now.raw.toNanoseconds());
+    return std.fmt.allocPrint(allocator, "zig-cache/test-artifacts/{s}-{d}.{s}", .{
+        stem,
+        nanos,
+        ext,
+    });
+}
+
+fn writeFastaArtifact(allocator: std.mem.Allocator, stem: []const u8, data: []const u8) ![]const u8 {
+    const path = try uniqueArtifactPath(allocator, stem, "fa");
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
+    try std.Io.File.writeStreamingAll(file, io, data);
+    return path;
+}
+
+fn writeMmapZfi(allocator: std.mem.Allocator, fasta_path: []const u8, data: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var index = try main.indexer.scanZfiIndex(data, true, arena.allocator());
+    defer index.deinit(arena.allocator());
+
+    var zfi_path_buf: [4096]u8 = undefined;
+    const zfi_path = try std.fmt.bufPrint(&zfi_path_buf, "{s}.zfi", .{fasta_path});
+    try main.indexer.writeZfiIndexFile(io, zfi_path, &index, data.len);
+}
+
+fn writeStreamingZfi(allocator: std.mem.Allocator, fasta_path: []const u8, data: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var index = try main.indexer.scanZfiIndexStreamingData(data, true, arena.allocator());
+    defer index.deinit(arena.allocator());
+
+    var zfi_path_buf: [4096]u8 = undefined;
+    const zfi_path = try std.fmt.bufPrint(&zfi_path_buf, "{s}.zfi", .{fasta_path});
+    try main.indexer.writeZfiIndexFile(io, zfi_path, &index, data.len);
+}
+
+fn captureExtractRegion(allocator: std.mem.Allocator, fasta_path: []const u8, region: []const u8) ![]u8 {
+    var idx = try main.index_format.loadIndexChecked(io, fasta_path);
+    defer idx.deinit();
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    main.getter.extractRegion(&idx, region, &out.writer);
+    return out.toOwnedSlice();
+}
+
+test "get on low-mem zfi matches mmap zfi for simple.fasta seq1:1-10" {
+    const data = @embedFile("data/simple.fasta");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mmap_path = try writeFastaArtifact(allocator, "get-mmap", data);
+    const low_path = try writeFastaArtifact(allocator, "get-low", data);
+    const mmap_zfi = try std.fmt.allocPrint(allocator, "{s}.zfi", .{mmap_path});
+    const low_zfi = try std.fmt.allocPrint(allocator, "{s}.zfi", .{low_path});
+    defer std.Io.Dir.cwd().deleteFile(io, mmap_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, mmap_zfi) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, low_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, low_zfi) catch {};
+
+    try writeMmapZfi(allocator, mmap_path, data);
+    try writeStreamingZfi(allocator, low_path, data);
+
+    const mmap_out = try captureExtractRegion(allocator, mmap_path, "seq1:1-10");
+    const low_out = try captureExtractRegion(allocator, low_path, "seq1:1-10");
+    try std.testing.expectEqualStrings(mmap_out, low_out);
+}
+
+test "get on low-mem zfi output for simple.fasta seq1:1-10" {
+    const data = @embedFile("data/simple.fasta");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const path = try writeFastaArtifact(allocator, "get-sam", data);
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{path});
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+
+    try writeStreamingZfi(allocator, path, data);
+
+    const got = try captureExtractRegion(allocator, path, "seq1:1-10");
+    const expected =
+        \\>seq1:1-10
+        \\ACGTACGTAC
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected, got);
+}
+
+test "get on messy mixed_line_widths after low-mem index" {
+    const data =
+        \\>mixed_line_widths internal line widths vary
+        \\AAAACCCCGGGG
+        \\TTTTAA
+        \\AACCCCGGGGTT
+        \\TT
+        \\
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mmap_path = try writeFastaArtifact(allocator, "get-messy-mmap", data);
+    const low_path = try writeFastaArtifact(allocator, "get-messy-low", data);
+    const mmap_zfi = try std.fmt.allocPrint(allocator, "{s}.zfi", .{mmap_path});
+    const low_zfi = try std.fmt.allocPrint(allocator, "{s}.zfi", .{low_path});
+    defer std.Io.Dir.cwd().deleteFile(io, mmap_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, mmap_zfi) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, low_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, low_zfi) catch {};
+
+    try writeMmapZfi(allocator, mmap_path, data);
+    try writeStreamingZfi(allocator, low_path, data);
+
+    const region = "mixed_line_widths:3-24";
+    const mmap_out = try captureExtractRegion(allocator, mmap_path, region);
+    const low_out = try captureExtractRegion(allocator, low_path, region);
+    try std.testing.expectEqualStrings(mmap_out, low_out);
+
+    const expected =
+        \\>mixed_line_widths:3-24
+        \\AACCCCGGGGTTTTAAAACCCC
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected, low_out);
 }

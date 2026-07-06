@@ -49,6 +49,7 @@ COLORS = {
     "z-fasta-default": "#F7A41D",  # Zig gold
     "z-fasta-nodedup": "#FBC02D",
     "z-fasta-lowmem": "#FFF59D",
+    "z-fasta-zfi": "#E65100",  # deep orange (production on-disk path)
     "noodles": "#C45C26",  # rust bronze
     "rustbio-custom-index": "#8B3A2A",  # rust red-brown
     "samtools": "#555555",  # C grey (GitHub linguist)
@@ -60,6 +61,7 @@ DISPLAY_NAMES = {
     "z-fasta-default": "z-fasta",
     "z-fasta-nodedup": "z-fasta --no-dedup",
     "z-fasta-lowmem": "z-fasta --low-mem",
+    "z-fasta-zfi": "z-fasta (.zfi)",
     "samtools": "samtools",
     "seqkit": "seqkit",
     "fastahack": "fastahack",
@@ -71,6 +73,7 @@ TOOL_ORDER = [
     "z-fasta-default",
     "z-fasta-nodedup",
     "z-fasta-lowmem",
+    "z-fasta-zfi",
     "samtools",
     "seqkit",
     "fastahack",
@@ -173,6 +176,19 @@ MODE_COMPARISON_TOOLS = [
     "z-fasta-lowmem",
     "noodles",
     "samtools",
+]
+
+# Production `.zfi` on disk vs FAI competitors (real datasets only).
+ZFI_PRODUCTION_TOOLS = [
+    "z-fasta-zfi",
+    "noodles",
+    "samtools",
+]
+
+# z-fasta stdout FAI vs on-disk `.zfi` (format overhead).
+ZFI_FORMAT_COMPARE_TOOLS = [
+    "z-fasta-default",
+    "z-fasta-zfi",
 ]
 
 # Headline real-dataset chart: z-fasta default plus competitors (fixed order).
@@ -1562,6 +1578,45 @@ def parse_fai_stats(fai_path: Path) -> tuple[int, int]:
     return records, total_len
 
 
+def parse_zfi_stats(zfi_path: Path) -> tuple[int, int]:
+    """Return (record_count, file_bytes) from a ZFI v2 header."""
+    data = zfi_path.read_bytes()
+    if len(data) < 16 or data[:3] != b"ZFI":
+        return 0, len(data)
+    count = int.from_bytes(data[4:8], "little")
+    return count, len(data)
+
+
+def load_index_format_stats(data_dir: Path) -> list[dict]:
+    """On-disk `.zfi` vs `.fai` sizes for real benchmark fixtures."""
+    rows: list[dict] = []
+    for spec in REAL_DATASETS:
+        fasta = data_dir / spec["file"]
+        if not fasta.is_file():
+            continue
+        zfi_path = data_dir / f"{spec['file']}.zfi"
+        fai_path = data_dir / f"{spec['file']}.fai"
+        row: dict = {
+            "dataset": spec["id"],
+            "fasta_bytes": fasta.stat().st_size,
+        }
+        if zfi_path.is_file():
+            zfi_records, zfi_bytes = parse_zfi_stats(zfi_path)
+            row["zfi_bytes"] = zfi_bytes
+            row["zfi_records"] = zfi_records
+            row["zfi_bytes_per_rec"] = zfi_bytes / zfi_records if zfi_records else None
+        if fai_path.is_file():
+            fai_records, _ = parse_fai_stats(fai_path)
+            fai_bytes = fai_path.stat().st_size
+            row["fai_bytes"] = fai_bytes
+            row["fai_records"] = fai_records
+            row["fai_bytes_per_line"] = fai_bytes / fai_records if fai_records else None
+        if row.get("zfi_bytes") and row.get("fai_bytes"):
+            row["fai_over_zfi"] = row["fai_bytes"] / row["zfi_bytes"]
+        rows.append(row)
+    return rows
+
+
 def load_real_dataset_stats(data_dir: Path) -> list[dict]:
     """Read on-disk sizes and FAI entry counts for real benchmark fixtures."""
     stats: list[dict] = []
@@ -1636,6 +1691,8 @@ def md_overview(manifest: dict | None) -> str:
         "variants (ragged wrap, trailing spaces, CRLF exports). z-fasta indexes some "
         "messy inputs with a side-table `.zfi`; samtools, noodles, and rust-bio follow "
         "strict FAI line-width rules.",
+        "**Production index (`.zfi`):** after **z-fasta Mode Comparison**, on-disk `.zfi` size "
+        "and optional build timings vs FAI competitors. Cross-tool perf tables stay FAI-only.",
         "**Charts** highlight z-fasta, samtools, seqkit, noodles, and rust-bio. "
         "**Tables** keep all nine tool configurations when present in the run.",
     ]
@@ -1838,8 +1895,9 @@ def md_performance_real_datasets(df: pd.DataFrame, nums: ReportCounters) -> str:
     f_perf = nums.next_figure()
     blocks = [
         "Headline comparison on the three human reference datasets (see **Data used**). "
-        "**z-fasta** is the default build (mmap + dedup). `--no-dedup` and `--low-mem` "
-        "are compared in the mode section below.",
+        "**z-fasta** in this table is `index --emit-fai` (FAI to stdout, mmap + dedup). "
+        "CLI default `index` writes `.zfi`; see **z-fasta Production Index (.zfi)**. "
+        "`--no-dedup` and `--low-mem` are in **z-fasta Mode Comparison**.",
         f"**Table {t_wall}:** Zebrac wall time per dataset (seconds, mean ± stddev, warm cache). "
         "Lower is better. Tool order: z-fasta, noodles, rust-bio, samtools, seqkit, "
         "fastahack, pyfaidx.",
@@ -2182,6 +2240,280 @@ def md_mode_comparison_section(
             "- Legend is shared under the middle facet."
         ),
     ]
+    return "\n\n".join(blocks)
+
+
+def md_zfi_size_prose(index_stats: list[dict]) -> str:
+    """Prose summary of on-disk `.zfi` vs `.fai` from benchmark fixtures."""
+    if not index_stats:
+        return (
+            "No index files found under `bench/shared/data/`. Run "
+            "`bench/shared/download_data.sh` to generate sidecars."
+        )
+
+    lines = [
+        "Each uniform entry is a fixed 40-byte `IndexRecord` (`src/index_format.zig`). "
+        "FAI lines grow with sequence name length plus five tab-separated numeric fields. "
+        "Non-uniform (messy) records add side-table bytes on top of the 40-byte header.",
+    ]
+    by_id = {row["dataset"]: row for row in index_stats}
+
+    tx = by_id.get("Transcriptome")
+    if tx and tx.get("fai_over_zfi") and tx.get("zfi_records"):
+        lines.append(
+            f"On **Transcriptome** ({tx['zfi_records']:,} entries), `.zfi` is "
+            f"{format_file_size(tx['zfi_bytes'])} vs `.fai` "
+            f"{format_file_size(tx['fai_bytes'])} "
+            f"(FAI / ZFI = {tx['fai_over_zfi']:.2f}x; about "
+            f"{tx['zfi_bytes_per_rec']:.0f} B per record vs "
+            f"{tx['fai_bytes_per_line']:.0f} B per FAI line). Long GENCODE names favor "
+            "the binary layout."
+        )
+
+    genome = by_id.get("Genome")
+    if genome and genome.get("fai_over_zfi") and genome.get("zfi_records"):
+        if genome["fai_over_zfi"] < 1.0:
+            lines.append(
+                f"On **Genome** ({genome['zfi_records']:,} sequences), short chromosome names "
+                f"make `.fai` smaller (FAI / ZFI = {genome['fai_over_zfi']:.2f}x; "
+                f"~{genome['fai_bytes_per_line']:.0f} B per FAI line vs "
+                f"~{genome['zfi_bytes_per_rec']:.0f} B per record). Fixed 40-byte records "
+                "carry overhead when names are only a few characters."
+            )
+        else:
+            lines.append(
+                f"On **Genome** ({genome['zfi_records']:,} sequences), "
+                f"FAI / ZFI = {genome['fai_over_zfi']:.2f}x."
+            )
+
+    proteome = by_id.get("Proteome")
+    if proteome and proteome.get("fai_over_zfi") and proteome.get("zfi_records"):
+        if abs(proteome["fai_over_zfi"] - 1.0) < 0.05:
+            lines.append(
+                f"On **Proteome** ({proteome['zfi_records']:,} entries), sizes are about "
+                f"equal (FAI / ZFI = {proteome['fai_over_zfi']:.2f}x) because UniProt IDs "
+                "are already compact in text form."
+            )
+
+    if any(
+        row.get("fai_bytes") and not row.get("zfi_bytes") for row in index_stats
+    ):
+        lines.append(
+            "`.zfi` sidecars were missing on disk when this report was built. "
+            "Run `bash bench/index/run.sh` (real-dataset section) or "
+            "`./zig-out/bin/z-fasta index` on each REAL_* file before regenerating."
+        )
+
+    return " ".join(lines)
+
+
+def md_zfi_index_size_table(stats: list[dict]) -> str:
+    """On-disk `.zfi` vs `.fai` size comparison from benchmark fixtures."""
+    if not stats:
+        return "_No index files found under `bench/shared/data/`._"
+
+    headers = [
+        "Dataset",
+        "Records",
+        "`.zfi`",
+        "`.fai`",
+        "FAI / ZFI",
+        "ZFI B/rec",
+        "FAI B/line",
+    ]
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |",
+    ]
+    for row in sorted(stats, key=lambda r: dataset_sort_key(r["dataset"])):
+        records = row.get("zfi_records") or row.get("fai_records")
+        rec_s = f"{records:,}" if records else "n/a"
+        zfi_s = format_file_size(row["zfi_bytes"]) if row.get("zfi_bytes") else "n/a"
+        fai_s = format_file_size(row["fai_bytes"]) if row.get("fai_bytes") else "n/a"
+        ratio = row.get("fai_over_zfi")
+        ratio_s = f"{ratio:.2f}x" if ratio else "n/a"
+        zfi_bpr = row.get("zfi_bytes_per_rec")
+        fai_bpl = row.get("fai_bytes_per_line")
+        zfi_bpr_s = f"{zfi_bpr:.0f}" if zfi_bpr else "n/a"
+        fai_bpl_s = f"{fai_bpl:.0f}" if fai_bpl else "n/a"
+        lines.append(
+            f"| {row['dataset']} | {rec_s} | {zfi_s} | {fai_s} | {ratio_s} | "
+            f"{zfi_bpr_s} | {fai_bpl_s} |"
+        )
+    return "\n".join(lines)
+
+
+def md_zfi_production_wall_table(df: pd.DataFrame) -> str:
+    """Production `.zfi` wall time with speedup vs FAI competitors (no duplicate columns)."""
+    work = df[df["dataset"].isin(DATASET_ORDER)].copy()
+    if work.empty or work[work["tool"] == "z-fasta-zfi"].empty:
+        return "_No production timing data._"
+
+    lines = [
+        "| dataset | z-fasta (.zfi) | vs noodles | vs samtools |",
+        "| --- | --- | --- | --- |",
+    ]
+    for dataset in DATASET_ORDER:
+        zfi = work[(work["dataset"] == dataset) & (work["tool"] == "z-fasta-zfi")]
+        if zfi.empty:
+            continue
+        zfi_s = float(zfi["mean"].values[0])
+        zfi_std = float(zfi["stddev"].values[0])
+        cells = [dataset, f"{zfi_s:.4f}s ±{zfi_std:.4f}"]
+        for peer in ("noodles", "samtools"):
+            hit = work[(work["dataset"] == dataset) & (work["tool"] == peer)]
+            if hit.empty or zfi_s <= 0:
+                cells.append("n/a")
+            else:
+                cells.append(f"{float(hit['mean'].values[0]) / zfi_s:.2f}x")
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines) if len(lines) > 2 else "_No production timing data._"
+
+
+def md_zfi_production_rss_table(df: pd.DataFrame) -> str:
+    """Peak RSS for mmap `.zfi` vs streaming `--low-mem` vs bench FAI default."""
+    return md_tool_pivot_table(
+        df,
+        ["z-fasta-default", "z-fasta-lowmem", "z-fasta-zfi"],
+        "dataset",
+        "peak_rss_mb",
+        lambda row: f"{row['peak_rss_mb']:.2f} MB",
+        empty_msg="_No RSS data for z-fasta production lanes._",
+    )
+
+
+def md_zfi_format_overhead_table(df: pd.DataFrame) -> str:
+    """z-fasta stdout FAI (`--emit-fai`) vs on-disk `.zfi` wall time."""
+    work = filter_tools(df, ZFI_FORMAT_COMPARE_TOOLS)
+    if work.empty:
+        return "_No format comparison data (re-run benchmarks after `run.sh` update)._"
+    rows: list[dict] = []
+    for dataset in sorted(work["dataset"].unique(), key=dataset_sort_key):
+        fai_row = work[(work["dataset"] == dataset) & (work["tool"] == "z-fasta-default")]
+        zfi_row = work[(work["dataset"] == dataset) & (work["tool"] == "z-fasta-zfi")]
+        if fai_row.empty or zfi_row.empty:
+            continue
+        fai_s = float(fai_row["mean"].values[0])
+        zfi_s = float(zfi_row["mean"].values[0])
+        rows.append(
+            {
+                "dataset": dataset,
+                "fai_s": fai_s,
+                "zfi_s": zfi_s,
+                "zfi_over_fai": zfi_s / fai_s if fai_s > 0 else None,
+            }
+        )
+    if not rows:
+        return "_No paired FAI vs ZFI timings._"
+    lines = [
+        "| Dataset | `--emit-fai` (s) | `.zfi` on disk (s) | ZFI / FAI |",
+        "| --- | --- | --- | --- |",
+    ]
+    for row in rows:
+        ratio_s = f"{row['zfi_over_fai']:.2f}x" if row["zfi_over_fai"] else "n/a"
+        lines.append(
+            f"| {row['dataset']} | {row['fai_s']:.4f} | {row['zfi_s']:.4f} | {ratio_s} |"
+        )
+    return "\n".join(lines)
+
+
+def md_zfi_production_section(
+    perf_df: pd.DataFrame,
+    data_dir: Path,
+    nums: ReportCounters,
+) -> str:
+    """On-disk `.zfi` rationale, size table, and optional build timings."""
+    index_stats = load_index_format_stats(data_dir)
+    has_zfi_timing = not filter_tools(perf_df, ["z-fasta-zfi"]).empty
+
+    t_size = nums.next_table()
+    t_wall = nums.next_table()
+    t_rss = nums.next_table()
+    t_fmt = nums.next_table()
+
+    blocks: list[str] = [
+        (
+            "Cross-tool performance tables use FAI text (`index --emit-fai` for z-fasta; "
+            "`.fai` on disk for samtools and noodles). That keeps competitor timing fair. "
+            "Default `z-fasta index` writes a binary `.zfi` file instead."
+        ),
+        (
+            "### On-disk size\n\n"
+            + md_zfi_size_prose(index_stats)
+            + f"\n\n**Table {t_size}:** Index file size on the three real datasets "
+            "(`bench/shared/data/`). FAI / ZFI above 1.0 means the text `.fai` is larger."
+        ),
+        md_zfi_index_size_table(index_stats),
+        (
+            "### Load path\n\n"
+            "`loadIndex` opens `.zfi` first, then falls back to `.fai`. For `.zfi`, the "
+            "record array is a zero-copy view of mmap'd index bytes. For `.fai`, the loader "
+            "reads the file, parses tab-separated lines, builds a record array, and copies "
+            "every sequence name into an arena hash map (`tryLoadFai` in `index_format.zig`). "
+            "`.zfi` entries also store `name_offset` / `name_len` into the mmap'd FASTA; "
+            "FAI rows leave those fields zero and keep names only in the hash map. "
+            "`stats --index-only` and small `get` batches can load `.zfi` in "
+            "`.records_only` mode and skip the name hash entirely."
+        ),
+        (
+            "### Messy FASTA\n\n"
+            "FAI assumes one `line_bases` / `line_bytes` pair per record. z-fasta indexes "
+            "irregular wrap, trailing whitespace, blank lines, and mixed CRLF/LF using "
+            "per-record side tables (see **Messy FASTA Compatibility**). Use "
+            "`index --emit-fai` or rely on `.fai` fallback when you need samtools-compatible "
+            "text on disk."
+        ),
+        (
+            "### Integrity\n\n"
+            "The `.zfi` header stores `source_size`. Load rejects the index when that value "
+            "does not match the FASTA file size, in addition to mtime staleness checks."
+        ),
+    ]
+
+    if has_zfi_timing:
+        blocks.extend(
+            [
+                (
+                    f"### Index build time\n\n"
+                    f"**Table {t_wall}:** Wall time for `z-fasta index` (production `.zfi`). "
+                    "**vs noodles** / **vs samtools** = competitor wall time divided by "
+                    "z-fasta (values above `1x` mean z-fasta is faster). Noodles and samtools "
+                    "numbers are the same zebrac samples as **z-fasta Mode Comparison**."
+                ),
+                md_zfi_production_wall_table(perf_df),
+                (
+                    f"### Peak RSS\n\n"
+                    "Production `.zfi` uses mmap like the bench default (`--emit-fai`). "
+                    "`--low-mem` is the low-RSS path (streaming FAI). Do not read `.zfi` as "
+                    "a low-memory index format."
+                ),
+                (
+                    f"**Table {t_rss}:** Peak RSS for bench FAI default, `--low-mem --emit-fai`, "
+                    "and production `.zfi` (zebrac mean)."
+                ),
+                md_zfi_production_rss_table(perf_df),
+                "<details>",
+                (
+                    f"<summary><strong>Table {t_fmt}:</strong> z-fasta stdout FAI "
+                    "(`--emit-fai`, used in cross-tool tables) vs on-disk `.zfi` "
+                    "(`index` default).</summary>"
+                ),
+                "",
+                md_zfi_format_overhead_table(perf_df),
+                "</details>",
+                (
+                    "Production `index` (mmap plus `.zfi` write) tracks `index --emit-fai` "
+                    "within a few percent on these fixtures; see Table {fmt}. Competitors only "
+                    "emit FAI, so Table {wall} is the fair on-disk index comparison."
+                ).format(fmt=t_fmt, wall=t_wall),
+            ]
+        )
+    else:
+        blocks.append(
+            "_Index build timings for `z-fasta (.zfi)` appear after the next "
+            "`bench/index/run.sh` run (zebrac lane `z-fasta-zfi`)._"
+        )
+
     return "\n\n".join(blocks)
 
 
@@ -2670,9 +3002,11 @@ def md_tools_tested(tools: dict[str, str] | None = None, z_fasta: str | None = N
 
     zf = f" ({z_fasta})" if z_fasta else ""
     return (
-        f"- **z-fasta (default){zf}:** mmap + dedup; default index mode.\n"
-        "- **z-fasta (`--no-dedup`):** skips duplicate-name checking.\n"
-        "- **z-fasta (`--low-mem`):** streaming IO, low peak RSS.\n"
+        f"- **z-fasta (bench FAI){zf}:** `index --emit-fai`, mmap + dedup; stdout FAI for "
+        "cross-tool tables.\n"
+        "- **z-fasta (production `.zfi`):** `index`, mmap + dedup; writes `.zfi` on disk.\n"
+        "- **z-fasta (`--no-dedup`):** `index --emit-fai --no-dedup`.\n"
+        "- **z-fasta (`--low-mem`):** `index --low-mem --emit-fai`, streaming IO, low peak RSS.\n"
         f"- **samtools{version_note('samtools')}:** `samtools faidx`, industry reference.\n"
         f"- **seqkit{version_note('seqkit')}:** `seqkit faidx`, Go toolkit.\n"
         f"- **fastahack{version_note('fastahack')}:** `fastahack -i`, indexes on first access.\n"
@@ -2908,6 +3242,19 @@ def main():
         )
         if p:
             generated_figs.append(str(p))
+
+    if perf_df is not None and len(perf_df):
+        index_stats = load_index_format_stats(project_root / "bench" / "shared" / "data")
+        has_zfi_lane = not filter_tools(perf_df, ["z-fasta-zfi"]).empty
+        if index_stats or has_zfi_lane:
+            section("z-fasta Production Index (.zfi)")
+            report_lines.append(
+                md_zfi_production_section(
+                    perf_df,
+                    project_root / "bench" / "shared" / "data",
+                    nums,
+                )
+            )
 
     if test_df is not None and len(test_df):
         section("Edge Case Correctness")

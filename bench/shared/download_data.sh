@@ -56,3 +56,21 @@ echo
 echo "=== Download Complete ==="
 echo
 du -h REAL_* 2>/dev/null || echo "No files downloaded"
+
+PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
+ZFASTA="$PROJECT_ROOT/zig-out/bin/z-fasta"
+if [[ -x "$ZFASTA" ]]; then
+    echo
+    echo "=== Reference indexes (.zfi + .fai) ==="
+    for fa in REAL_Genome.fa REAL_Transcriptome.fa REAL_Proteome.fasta; do
+        [[ -f "$fa" ]] || continue
+        if [[ ! -f "${fa}.zfi" ]]; then
+            echo "  indexing $fa -> .zfi"
+            "$ZFASTA" index "$fa"
+        fi
+        if [[ ! -f "${fa}.fai" ]] && command -v samtools >/dev/null 2>&1; then
+            echo "  indexing $fa -> .fai (samtools)"
+            samtools faidx "$fa"
+        fi
+    done
+fi

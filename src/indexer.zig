@@ -1,5 +1,13 @@
+//! FASTA indexing: mmap slice scan and chunked `--low-mem` reader.
+//!
+//! `scanFastaRecords` walks a byte slice and invokes a per-record callback. Offsets in
+//! `IndexRecord` and side-table lines are absolute positions in the FASTA file.
+//!
+//! Shared line-metrics rules: `countBasesInLineSlice`, `LineMetricsBuilder`, and
+//! `scanLineMetrics`. Mmap record length uses `measureSequenceLength` on the full
+//! sequence slice; streaming FAI sums per-line metrics from `ChunkParseState`.
+
 const std = @import("std");
-const posix = std.posix;
 const index_format = @import("index_format.zig");
 
 pub const IndexRecord = index_format.IndexRecord;
@@ -7,16 +15,35 @@ pub const ZfiHeader = index_format.ZfiHeader;
 pub const ZFI_MAGIC = index_format.ZFI_MAGIC;
 pub const writeZfi = index_format.writeZfi;
 
-// ============================================================================
-// SIMD constants
-// ============================================================================
-
 const SIMD_CHUNK_SIZE = 32;
 const SimdVec = @Vector(SIMD_CHUNK_SIZE, u8);
-const CHUNK_SIZE = 4 * 1024 * 1024; // 4 MB buffer for --low-mem mode
-const MAX_LOW_MEM_NAME_LEN = 4096;
+pub const low_mem_chunk_size = 1 * 1024 * 1024;
+const FILE_IO_BUF_SIZE = 8 * 1024;
+pub const max_index_name_len = std.math.maxInt(u16);
+
+const DedupSeen = std.HashMap(
+    u64,
+    void,
+    std.hash_map.AutoContext(u64),
+    std.hash_map.default_max_load_percentage,
+);
+
+fn hashSequenceName(name: []const u8) u64 {
+    return std.hash.Wyhash.hash(0, name);
+}
 
 pub const OutputMode = enum { fai, zfi };
+
+/// One parsed FASTA record passed to `scanFastaRecords` emit callbacks.
+pub const FastaRecordEmit = struct {
+    record: IndexRecord,
+    name: []const u8,
+    /// Sequence region in the scan buffer (header newline through next header or EOF).
+    seq_data: []const u8,
+    uses_uniform_formula: bool,
+    /// Incremental side-table bytes for streaming `.zfi` (line count + `SideTableLine` rows).
+    streaming_side_table: []const u8 = &.{},
+};
 
 pub const ZfiIndex = struct {
     records: std.ArrayList(IndexRecord),
@@ -40,10 +67,6 @@ const SequenceLengthInfo = struct {
     seq_len: u64,
     uses_uniform_formula: bool,
 };
-
-// ============================================================================
-// SIMD Helpers
-// ============================================================================
 
 fn findNextGt(data: []const u8, start: usize) usize {
     var pos = start;
@@ -103,13 +126,29 @@ fn hasLineSeparatorAt(data: []const u8, pos: usize, sep_len: u32) bool {
     };
 }
 
-fn countDenseBasesInRange(data: []const u8, start: usize, end: usize) u64 {
-    var count: u64 = 0;
-    var i = start;
-    while (i < end) : (i += 1) {
-        if (data[i] > ' ') count += 1;
+fn lineSliceHasWhitespace(data: []const u8, start: usize, end: usize) bool {
+    var pos = start;
+    while (pos + SIMD_CHUNK_SIZE <= end) {
+        const chunk: SimdVec = data[pos..][0..SIMD_CHUNK_SIZE].*;
+        const space_char: SimdVec = @splat(' ');
+        const mask = chunk <= space_char;
+        if (@reduce(.Or, mask)) return true;
+        pos += SIMD_CHUNK_SIZE;
     }
-    return count;
+    while (pos < end) : (pos += 1) {
+        if (data[pos] <= ' ') return true;
+    }
+    return false;
+}
+
+/// Bases in one sequence line's content slice (no trailing `\n`/`\r`).
+/// Dense lines (no bytes `<= ' '`) use length only; otherwise falls back to `countBases`.
+fn countBasesInLineSlice(data: []const u8, start: usize, end: usize) u32 {
+    if (start >= end) return 0;
+    if (!lineSliceHasWhitespace(data, start, end)) {
+        return @intCast(end - start);
+    }
+    return @intCast(countBases(data[start..end]));
 }
 
 fn countFixedWidthBases(data: []const u8, line_bases: u32, line_bytes: u32) ?u64 {
@@ -125,20 +164,18 @@ fn countFixedWidthBases(data: []const u8, line_bases: u32, line_bytes: u32) ?u64
         const remaining = data.len - cursor;
         if (remaining >= line_bytes) {
             if (!hasLineSeparatorAt(data, cursor + line_bases, sep_len)) return null;
-            // Padding before the separator means line_bases over-counts; use the base scan.
             if (data[cursor + line_bases - 1] <= ' ') return null;
             bases += line_bases;
             cursor += line_bytes;
         } else {
             if (remaining <= line_bases) {
-                // remaining < line_bytes can still span multiple wrapped lines; reject those.
                 const tail = data[cursor..];
                 if (tail.len > 1) {
                     const interior = tail[0 .. tail.len - 1];
                     if (std.mem.indexOfScalar(u8, interior, '\n') != null) return null;
                     if (std.mem.indexOfScalar(u8, interior, '\r') != null) return null;
                 }
-                return bases + countDenseBasesInRange(data, cursor, data.len);
+                return bases + countBasesInLineSlice(data, cursor, data.len);
             }
 
             const tail_bases = remaining - sep_len;
@@ -173,7 +210,6 @@ fn measureSequenceLength(data: []const u8, line_bases: u32, line_bytes: u32) Seq
         .seq_len = countBases(body),
         .uses_uniform_formula = false,
     };
-    // Padded first lines break fixed-width math; verify against a full base count.
     if (!firstLineIsDense(line_bases, line_bytes)) {
         const fallback = countBases(body);
         return .{
@@ -187,34 +223,79 @@ fn measureSequenceLength(data: []const u8, line_bases: u32, line_bytes: u32) Seq
     };
 }
 
-fn countSequenceLength(data: []const u8, line_bases: u32, line_bytes: u32) u64 {
-    return measureSequenceLength(data, line_bases, line_bytes).seq_len;
-}
-
 fn findNextNewline(data: []const u8, start: usize, end: usize) usize {
     var pos = start;
-    while (pos < end and data[pos] != '\n') : (pos += 1) {}
-    return pos;
+    while (pos + SIMD_CHUNK_SIZE <= end) {
+        const chunk: SimdVec = data[pos..][0..SIMD_CHUNK_SIZE].*;
+        const mask = chunk == @as(SimdVec, @splat('\n'));
+        if (@reduce(.Or, mask)) {
+            inline for (0..SIMD_CHUNK_SIZE) |j| {
+                if (mask[j]) return pos + j;
+            }
+        }
+        pos += SIMD_CHUNK_SIZE;
+    }
+    while (pos < end) : (pos += 1) {
+        if (data[pos] == '\n') return pos;
+    }
+    return end;
 }
 
-fn countDenseBasesInLine(data: []const u8, start: usize, end: usize) u32 {
-    var count: u32 = 0;
-    var pos = start;
-    while (pos < end) : (pos += 1) {
-        if (data[pos] > ' ') count += 1;
+const LineMetricsBuilder = struct {
+    metrics: LineMetrics = .{},
+    first_actual_bytes: u32 = 0,
+    pending_bases: u32 = 0,
+    pending_actual_bytes: u32 = 0,
+    have_pending: bool = false,
+
+    fn ingestLine(self: *LineMetricsBuilder, bases: u32, actual_bytes: u32, has_lf: bool) void {
+        if (bases == 0) return;
+        self.metrics.seq_len += bases;
+        self.metrics.line_count += 1;
+
+        if (self.metrics.line_count == 1) {
+            self.first_actual_bytes = actual_bytes;
+            self.metrics.line_bases = bases;
+            self.metrics.line_bytes = if (has_lf) actual_bytes else actual_bytes + 1;
+        } else if (self.have_pending) {
+            if (self.pending_bases != self.metrics.line_bases or
+                self.pending_actual_bytes != self.first_actual_bytes)
+            {
+                self.metrics.is_uniform_width = false;
+            }
+        }
+
+        self.pending_bases = bases;
+        self.pending_actual_bytes = actual_bytes;
+        self.have_pending = true;
     }
-    return count;
+
+    fn finish(self: *LineMetricsBuilder) LineMetrics {
+        if (self.metrics.line_count > 1 and self.have_pending) {
+            if (self.pending_bases > self.metrics.line_bases or
+                self.pending_actual_bytes > self.first_actual_bytes)
+            {
+                self.metrics.is_uniform_width = false;
+            }
+        }
+        return self.metrics;
+    }
+};
+
+fn sequenceLengthInfoFromMetrics(metrics: LineMetrics) SequenceLengthInfo {
+    if (metrics.seq_len == 0) return .{ .seq_len = 0, .uses_uniform_formula = false };
+    if (!metrics.is_uniform_width or metrics.line_bases == 0) {
+        return .{ .seq_len = metrics.seq_len, .uses_uniform_formula = false };
+    }
+    return .{
+        .seq_len = metrics.seq_len,
+        .uses_uniform_formula = firstLineIsDense(metrics.line_bases, metrics.line_bytes),
+    };
 }
 
 fn scanLineMetrics(data: []const u8, seq_offset: usize, seq_end: usize) LineMetrics {
-    var metrics = LineMetrics{};
+    var builder = LineMetricsBuilder{};
     var pos = seq_offset;
-
-    var first_bases: u32 = 0;
-    var first_actual_bytes: u32 = 0;
-    var pending_bases: u32 = 0;
-    var pending_actual_bytes: u32 = 0;
-    var have_pending = false;
 
     while (pos < seq_end) {
         const line_start = pos;
@@ -225,52 +306,30 @@ fn scanLineMetrics(data: []const u8, seq_offset: usize, seq_end: usize) LineMetr
             content_end -= 1;
         }
 
-        const bases = countDenseBasesInLine(data, line_start, content_end);
+        const bases = countBasesInLineSlice(data, line_start, content_end);
         const actual_bytes: u32 = @intCast((if (has_lf) line_end + 1 else line_end) - line_start);
-        if (bases > 0) {
-            metrics.seq_len += bases;
-            metrics.line_count += 1;
-
-            if (metrics.line_count == 1) {
-                first_bases = bases;
-                first_actual_bytes = actual_bytes;
-                metrics.line_bases = bases;
-                metrics.line_bytes = if (has_lf) actual_bytes else actual_bytes + 1;
-            } else if (have_pending) {
-                if (pending_bases != first_bases or pending_actual_bytes != first_actual_bytes) {
-                    metrics.is_uniform_width = false;
-                }
-            }
-
-            pending_bases = bases;
-            pending_actual_bytes = actual_bytes;
-            have_pending = true;
-        }
+        builder.ingestLine(bases, actual_bytes, has_lf);
 
         if (!has_lf) break;
         pos = line_end + 1;
     }
 
-    if (metrics.line_count > 1 and have_pending) {
-        if (pending_bases > first_bases or pending_actual_bytes > first_actual_bytes) {
-            metrics.is_uniform_width = false;
-        }
-    }
-
-    return metrics;
+    return builder.finish();
 }
 
 fn appendSideTable(
     data: []const u8,
     seq_offset: usize,
     seq_end: usize,
+    file_base_offset: u64,
     table: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
 ) !u64 {
     const local_offset = table.items.len;
-    const metrics = scanLineMetrics(data, seq_offset, seq_end);
-    try table.appendSlice(allocator, std.mem.asBytes(&metrics.line_count));
+    var line_count: u64 = 0;
+    try table.appendSlice(allocator, std.mem.asBytes(&line_count));
 
+    var builder = LineMetricsBuilder{};
     var pos = seq_offset;
     var base_start: u64 = 0;
     while (pos < seq_end) {
@@ -282,13 +341,15 @@ fn appendSideTable(
             content_end -= 1;
         }
 
-        const bases = countDenseBasesInLine(data, line_start, content_end);
+        const bases = countBasesInLineSlice(data, line_start, content_end);
+        const actual_bytes: u32 = @intCast((if (has_lf) line_end + 1 else line_end) - line_start);
+        builder.ingestLine(bases, actual_bytes, has_lf);
+
         if (bases > 0) {
-            const actual_bytes = (if (has_lf) line_end + 1 else line_end) - line_start;
             const entry = index_format.SideTableLine{
                 .base_start = base_start,
-                .byte_offset = @intCast(line_start),
-                .line_bytes = @intCast(actual_bytes),
+                .byte_offset = @intCast(file_base_offset + line_start),
+                .line_bytes = actual_bytes,
                 .line_bases = bases,
             };
             try table.appendSlice(allocator, std.mem.asBytes(&entry));
@@ -299,6 +360,8 @@ fn appendSideTable(
         pos = line_end + 1;
     }
 
+    const metrics = builder.finish();
+    @memcpy(table.items[local_offset..][0..@sizeOf(u64)], std.mem.asBytes(&metrics.line_count));
     return @intCast(local_offset);
 }
 
@@ -312,22 +375,26 @@ fn finalizeSideTableOffsets(index: *ZfiIndex) !void {
     }
 }
 
-// ============================================================================
-// Streaming Mode (mmap, default)
-// ============================================================================
-
-fn scanFastaRecords(
+pub fn scanFastaRecords(
     data: []const u8,
+    file_base_offset: u64,
     enable_dedup: bool,
+    dedup_names: ?*std.StringHashMap(void),
+    max_name_len: ?usize,
     allocator: std.mem.Allocator,
     ctx: anytype,
-    comptime emitRecord: fn (@TypeOf(ctx), IndexRecord, []const u8, []const u8, usize, bool) anyerror!void,
+    comptime emitRecord: fn (@TypeOf(ctx), FastaRecordEmit) anyerror!void,
 ) !u32 {
-    var seen_names: ?std.StringHashMap(void) = null;
-    if (enable_dedup) {
-        seen_names = std.StringHashMap(void).init(allocator);
+    var local_dedup: ?std.StringHashMap(void) = null;
+    if (enable_dedup and dedup_names == null) {
+        local_dedup = std.StringHashMap(void).init(allocator);
     }
-    defer if (seen_names) |*s| s.deinit();
+    defer if (local_dedup) |*s| s.deinit();
+
+    const seen_names: ?*std.StringHashMap(void) = if (enable_dedup)
+        dedup_names orelse &local_dedup.?
+    else
+        null;
 
     var record_count: u32 = 0;
     var pos: usize = 0;
@@ -336,8 +403,8 @@ fn scanFastaRecords(
         pos = findNextHeaderStart(data, pos);
         if (pos >= data.len) break;
 
-        const name_offset = pos + 1;
-        var name_end = name_offset;
+        const name_local = pos + 1;
+        var name_end = name_local;
         while (name_end < data.len and
             data[name_end] != ' ' and
             data[name_end] != '\t' and
@@ -346,58 +413,62 @@ fn scanFastaRecords(
         {
             name_end += 1;
         }
-        const name_len: u16 = @intCast(name_end - name_offset);
+        if (max_name_len) |limit| {
+            if (name_end - name_local > limit) return error.HeaderTooLong;
+        }
+        const name_len: u16 = @intCast(name_end - name_local);
 
         var header_end = name_end;
         while (header_end < data.len and data[header_end] != '\n') {
             header_end += 1;
         }
 
-        const seq_offset: u64 = if (header_end < data.len) header_end + 1 else header_end;
-        const seq_end = findNextHeaderStart(data, @intCast(seq_offset));
+        const seq_local: usize = if (header_end < data.len) header_end + 1 else header_end;
+        const seq_end = findNextHeaderStart(data, seq_local);
 
         var line_bases: u32 = 0;
         var line_bytes: u32 = 0;
-        if (seq_offset < seq_end) {
-            var first_line_end: usize = @intCast(seq_offset);
-            while (first_line_end < seq_end and data[first_line_end] != '\n') {
-                first_line_end += 1;
+        if (seq_local < seq_end) {
+            const first_line_end = findNextNewline(data, seq_local, seq_end);
+            const has_lf = first_line_end < seq_end;
+            var content_end = first_line_end;
+            if (content_end > seq_local and data[content_end - 1] == '\r') {
+                content_end -= 1;
             }
-            var base_count: u32 = 0;
-            var j: usize = @intCast(seq_offset);
-            while (j < first_line_end) : (j += 1) {
-                if (data[j] > ' ') base_count += 1;
-            }
-            line_bases = base_count;
-            if (first_line_end < seq_end) {
-                line_bytes = @intCast((first_line_end + 1) - seq_offset);
-            } else {
-                line_bytes = @intCast((first_line_end - seq_offset) + 1);
-            }
+            line_bases = countBasesInLineSlice(data, seq_local, content_end);
+            line_bytes = if (has_lf)
+                @intCast((first_line_end + 1) - seq_local)
+            else
+                @intCast((first_line_end - seq_local) + 1);
         }
 
-        const seq_data = data[@intCast(seq_offset)..seq_end];
+        const seq_data = data[seq_local..seq_end];
         const seq_info = measureSequenceLength(seq_data, line_bases, line_bytes);
         const seq_len = seq_info.seq_len;
 
         pos = seq_end;
         if (seq_len == 0) continue;
 
-        const name = data[name_offset..][0..name_len];
-        if (seen_names) |*seen| {
+        const name = data[name_local..][0..name_len];
+        if (seen_names) |seen| {
             const gop = try seen.getOrPut(name);
             if (gop.found_existing) continue;
         }
 
         const rec = IndexRecord{
-            .name_offset = @intCast(name_offset),
+            .name_offset = file_base_offset + @as(u64, @intCast(name_local)),
             .name_len = name_len,
-            .seq_offset = seq_offset,
+            .seq_offset = file_base_offset + @as(u64, @intCast(seq_local)),
             .seq_len = seq_len,
             .line_bases = line_bases,
             .line_bytes = line_bytes,
         };
-        try emitRecord(ctx, rec, name, seq_data, @intCast(seq_offset), seq_info.uses_uniform_formula);
+        try emitRecord(ctx, .{
+            .record = rec,
+            .name = name,
+            .seq_data = seq_data,
+            .uses_uniform_formula = seq_info.uses_uniform_formula,
+        });
         record_count += 1;
     }
     return record_count;
@@ -414,14 +485,12 @@ pub fn streamingScan(
         writer: @TypeOf(writer),
         mode: OutputMode,
 
-        fn emit(ctx: *@This(), rec: IndexRecord, name: []const u8, seq_data: []const u8, seq_offset: usize, uses_uniform_formula: bool) !void {
-            _ = seq_data;
-            _ = seq_offset;
-            _ = uses_uniform_formula;
+        fn emit(ctx: *@This(), emit_info: FastaRecordEmit) !void {
+            const rec = emit_info.record;
             switch (ctx.mode) {
                 .fai => {
                     try ctx.writer.print("{s}\t{d}\t{d}\t{d}\t{d}\n", .{
-                        name, rec.seq_len, rec.seq_offset, rec.line_bases, rec.line_bytes,
+                        emit_info.name, rec.seq_len, rec.seq_offset, rec.line_bases, rec.line_bytes,
                     });
                 },
                 .zfi => {
@@ -432,7 +501,7 @@ pub fn streamingScan(
     };
 
     var ctx = Ctx{ .writer = writer, .mode = mode };
-    return scanFastaRecords(data, enable_dedup, allocator, &ctx, Ctx.emit);
+    return scanFastaRecords(data, 0, enable_dedup, null, null, allocator, &ctx, Ctx.emit);
 }
 
 pub fn scanZfiIndex(data: []const u8, enable_dedup: bool, allocator: std.mem.Allocator) !ZfiIndex {
@@ -445,28 +514,127 @@ pub fn scanZfiIndex(data: []const u8, enable_dedup: bool, allocator: std.mem.All
     const Ctx = struct {
         index: *ZfiIndex,
         data: []const u8,
+        file_base_offset: u64,
         allocator: std.mem.Allocator,
 
-        fn emit(ctx: *@This(), rec_in: IndexRecord, name: []const u8, seq_data: []const u8, seq_offset: usize, uses_uniform_formula: bool) !void {
-            _ = name;
-            var rec = rec_in;
-            if (!uses_uniform_formula) {
-                const local_offset = try appendSideTable(ctx.data, seq_offset, seq_offset + seq_data.len, &ctx.index.side_tables, ctx.allocator);
+        fn emit(ctx: *@This(), emit_info: FastaRecordEmit) !void {
+            var rec = emit_info.record;
+            if (!emit_info.uses_uniform_formula) {
+                const seq_local: usize = @intCast(rec.seq_offset - ctx.file_base_offset);
+                const local_offset = try appendSideTable(
+                    ctx.data,
+                    seq_local,
+                    seq_local + emit_info.seq_data.len,
+                    ctx.file_base_offset,
+                    &ctx.index.side_tables,
+                    ctx.allocator,
+                );
                 try rec.markNonUniform(local_offset);
             }
             try ctx.index.records.append(ctx.allocator, rec);
         }
     };
 
-    var ctx = Ctx{ .index = &index, .data = data, .allocator = allocator };
-    _ = try scanFastaRecords(data, enable_dedup, allocator, &ctx, Ctx.emit);
+    var ctx = Ctx{ .index = &index, .data = data, .file_base_offset = 0, .allocator = allocator };
+    _ = try scanFastaRecords(data, 0, enable_dedup, null, null, allocator, &ctx, Ctx.emit);
     try finalizeSideTableOffsets(&index);
     return index;
 }
 
+pub fn scanZfiIndexStreaming(
+    reader: *std.Io.Reader,
+    read_buf: []u8,
+    enable_dedup: bool,
+    allocator: std.mem.Allocator,
+) !ZfiIndex {
+    var index = ZfiIndex{
+        .records = .empty,
+        .side_tables = .empty,
+    };
+    errdefer index.deinit(allocator);
+
+    const Ctx = struct {
+        index: *ZfiIndex,
+        allocator: std.mem.Allocator,
+
+        fn emit(ctx: *@This(), emit_info: FastaRecordEmit) !void {
+            var rec = emit_info.record;
+            if (!emit_info.uses_uniform_formula) {
+                const local_offset = ctx.index.side_tables.items.len;
+                try ctx.index.side_tables.appendSlice(ctx.allocator, emit_info.streaming_side_table);
+                try rec.markNonUniform(local_offset);
+            }
+            try ctx.index.records.append(ctx.allocator, rec);
+        }
+    };
+
+    var ctx = Ctx{ .index = &index, .allocator = allocator };
+    _ = try scanFastaReader(reader, read_buf, enable_dedup, null, allocator, true, &ctx, Ctx.emit);
+    try finalizeSideTableOffsets(&index);
+    return index;
+}
+
+pub fn scanZfiIndexStreamingData(
+    data: []const u8,
+    enable_dedup: bool,
+    allocator: std.mem.Allocator,
+) !ZfiIndex {
+    var r = std.Io.Reader.fixed(data);
+    var read_buf: [low_mem_chunk_size]u8 = undefined;
+    return scanZfiIndexStreaming(&r, &read_buf, enable_dedup, allocator);
+}
+
+/// Writes a `ZfiIndex` to a `.zfi` file (header, records, side tables).
+pub fn writeZfiIndexFile(
+    io: std.Io,
+    path: []const u8,
+    index: *const ZfiIndex,
+    source_size: u64,
+) !void {
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
+
+    var file_buf: [65536]u8 = undefined;
+    var file_fw = file.writer(io, &file_buf);
+    const writer = &file_fw.interface;
+
+    const header = ZfiHeader{
+        .magic = ZFI_MAGIC,
+        .record_count = @intCast(index.records.items.len),
+        .source_size = source_size,
+    };
+    try writer.writeAll(std.mem.asBytes(&header));
+    try writer.writeAll(std.mem.sliceAsBytes(index.records.items));
+    try writer.writeAll(index.side_tables.items);
+    try file_fw.flush();
+}
+
+/// Serializes a `ZfiIndex` to the on-disk `.zfi` v2 byte layout.
+pub fn zfiIndexToBytes(index: *const ZfiIndex, source_size: u64, allocator: std.mem.Allocator) ![]u8 {
+    const header = ZfiHeader{
+        .magic = ZFI_MAGIC,
+        .record_count = @intCast(index.records.items.len),
+        .source_size = source_size,
+    };
+    const records_bytes = std.mem.sliceAsBytes(index.records.items);
+    const out = try allocator.alloc(u8, @sizeOf(ZfiHeader) + records_bytes.len + index.side_tables.items.len);
+    @memcpy(out[0..@sizeOf(ZfiHeader)], std.mem.asBytes(&header));
+    @memcpy(out[@sizeOf(ZfiHeader) .. @sizeOf(ZfiHeader) + records_bytes.len], records_bytes);
+    @memcpy(out[@sizeOf(ZfiHeader) + records_bytes.len ..], index.side_tables.items);
+    return out;
+}
+
 /// Scans FASTA data and returns index records as ArrayList (for testing).
-/// Use streamingScan for production (lower memory).
 pub fn scanHeaders(data: []const u8, allocator: std.mem.Allocator) !std.ArrayList(IndexRecord) {
+    return scanHeadersAt(data, 0, allocator);
+}
+
+/// Like `scanHeaders` but `file_base_offset` is added to every stored file offset.
+pub fn scanHeadersAt(
+    data: []const u8,
+    file_base_offset: u64,
+    allocator: std.mem.Allocator,
+) !std.ArrayList(IndexRecord) {
     var records: std.ArrayList(IndexRecord) = .empty;
     errdefer records.deinit(allocator);
 
@@ -474,226 +642,450 @@ pub fn scanHeaders(data: []const u8, allocator: std.mem.Allocator) !std.ArrayLis
         list: *std.ArrayList(IndexRecord),
         record_allocator: std.mem.Allocator,
 
-        fn emit(ctx: *@This(), rec: IndexRecord, name: []const u8, seq_data: []const u8, seq_offset: usize, uses_uniform_formula: bool) !void {
-            _ = name;
-            _ = seq_data;
-            _ = seq_offset;
-            _ = uses_uniform_formula;
-            try ctx.list.append(ctx.record_allocator, rec);
+        fn emit(ctx: *@This(), emit_info: FastaRecordEmit) !void {
+            try ctx.list.append(ctx.record_allocator, emit_info.record);
         }
     };
 
     var ctx = Ctx{ .list = &records, .record_allocator = allocator };
-    _ = try scanFastaRecords(data, true, allocator, &ctx, Ctx.emit);
+    _ = try scanFastaRecords(data, file_base_offset, true, null, null, allocator, &ctx, Ctx.emit);
     return records;
 }
 
-// ============================================================================
-// Chunked Mode (--low-mem, 4 MB constant memory + dedup hash set)
-// ============================================================================
-
-const ChunkState = struct {
-    name_buf: [MAX_LOW_MEM_NAME_LEN]u8 = undefined,
-    name_len: u16 = 0,
-    seq_offset: u64 = 0,
-    seq_len: u64 = 0,
-    line_bases: u32 = 0,
-    line_bytes: u32 = 0,
-    first_line_seen: bool = false,
-    has_header: bool = false,
-    is_duplicate: bool = false,
-    file_offset: u64 = 0,
-    record_count: u32 = 0,
-};
-
-const HeaderParseState = struct {
-    line_len: usize = 0,
-    parsing_name: bool = true,
-};
-
-const SequenceLineState = struct {
-    line_len: usize = 0,
-    base_count: u32 = 0,
-};
-
-fn finalizeChunkedRecord(state: *ChunkState, writer: anytype) !void {
-    if (!state.has_header or state.seq_len == 0 or state.is_duplicate) return;
-
-    try writer.print("{s}\t{d}\t{d}\t{d}\t{d}\n", .{
-        state.name_buf[0..state.name_len],
-        state.seq_len,
-        state.seq_offset,
-        state.line_bases,
-        state.line_bytes,
-    });
-    state.record_count += 1;
-}
-
-fn resetChunkedSequence(state: *ChunkState) void {
-    state.seq_offset = 0;
-    state.seq_len = 0;
-    state.line_bases = 0;
-    state.line_bytes = 0;
-    state.first_line_seen = false;
-}
-
-fn startChunkedHeader(state: *ChunkState) void {
-    state.has_header = true;
-    state.name_len = 0;
-    state.is_duplicate = false;
-    resetChunkedSequence(state);
-}
-
-fn parseChunkedHeaderByte(
-    state: *ChunkState,
-    parse_state: *HeaderParseState,
-    byte: u8,
-) !void {
-    parse_state.line_len += 1;
-    if (!parse_state.parsing_name) return;
-
-    if (byte == ' ' or byte == '\t' or byte == '\r') {
-        parse_state.parsing_name = false;
-        return;
-    }
-
-    if (state.name_len >= MAX_LOW_MEM_NAME_LEN) {
-        return error.HeaderTooLong;
-    }
-    state.name_buf[state.name_len] = byte;
-    state.name_len += 1;
-}
-
-fn finalizeChunkedHeader(
-    state: *ChunkState,
-    seen_names: *std.StringHashMap(void),
+const ChunkParseState = struct {
     allocator: std.mem.Allocator,
+    zfi_mode: bool = false,
+    active: bool = false,
+    in_header: bool = false,
+    parsing_name: bool = false,
+    is_duplicate: bool = false,
+    at_line_start: bool = true,
+    header_start_offset: u64 = 0,
+    name: std.ArrayList(u8) = .empty,
+    seq_offset: u64 = 0,
+    seq_offset_set: bool = false,
+    line_builder: LineMetricsBuilder = .{},
+    in_pending_line: bool = false,
+    pending_line_bases: u32 = 0,
+    pending_line_bytes: u32 = 0,
+    pending_line_file_offset: u64 = 0,
+    side_table: std.ArrayList(u8) = .empty,
+    side_base_start: u64 = 0,
+    side_table_active: bool = false,
+    deferred_side_line: ?struct {
+        bases: u32,
+        actual_bytes: u32,
+        line_file_offset: u64,
+    } = null,
+
+    fn ensureSideTableHeader(self: *ChunkParseState) !void {
+        if (self.side_table.items.len >= @sizeOf(u64)) return;
+        var line_count: u64 = 0;
+        try self.side_table.appendSlice(self.allocator, std.mem.asBytes(&line_count));
+    }
+
+    fn activateSideTable(self: *ChunkParseState) !void {
+        if (self.side_table_active) return;
+        self.side_table_active = true;
+        try self.ensureSideTableHeader();
+        if (self.deferred_side_line) |deferred| {
+            try self.appendSideTableLine(deferred.bases, deferred.actual_bytes, deferred.line_file_offset);
+            self.deferred_side_line = null;
+        }
+    }
+
+    fn startHeader(self: *ChunkParseState, header_start_offset: u64) !void {
+        self.active = true;
+        self.in_header = true;
+        self.parsing_name = true;
+        self.is_duplicate = false;
+        self.at_line_start = false;
+        self.header_start_offset = header_start_offset;
+        self.name.clearRetainingCapacity();
+        self.seq_offset = 0;
+        self.seq_offset_set = false;
+        self.line_builder = .{};
+        self.in_pending_line = false;
+        self.pending_line_bases = 0;
+        self.pending_line_bytes = 0;
+        self.pending_line_file_offset = 0;
+        self.side_base_start = 0;
+        self.side_table.clearRetainingCapacity();
+        self.side_table_active = false;
+        self.deferred_side_line = null;
+    }
+
+    fn appendSideTableLine(
+        self: *ChunkParseState,
+        bases: u32,
+        actual_bytes: u32,
+        line_file_offset: u64,
+    ) !void {
+        const entry = index_format.SideTableLine{
+            .base_start = self.side_base_start,
+            .byte_offset = line_file_offset,
+            .line_bytes = actual_bytes,
+            .line_bases = bases,
+        };
+        try self.side_table.appendSlice(self.allocator, std.mem.asBytes(&entry));
+        self.side_base_start += bases;
+    }
+
+    fn recordSequenceLine(
+        self: *ChunkParseState,
+        bases: u32,
+        actual_bytes: u32,
+        has_lf: bool,
+        line_file_offset: u64,
+    ) !void {
+        self.line_builder.ingestLine(bases, actual_bytes, has_lf);
+
+        if (!self.zfi_mode or bases == 0) return;
+
+        const metrics = self.line_builder.metrics;
+        const matches_stride = metrics.line_bases > 0 and
+            bases == metrics.line_bases and
+            actual_bytes == self.line_builder.first_actual_bytes;
+        const can_use_formula = metrics.is_uniform_width and matches_stride and
+            firstLineIsDense(metrics.line_bases, metrics.line_bytes);
+
+        if (can_use_formula) {
+            if (metrics.line_count == 1) {
+                self.deferred_side_line = .{
+                    .bases = bases,
+                    .actual_bytes = actual_bytes,
+                    .line_file_offset = line_file_offset,
+                };
+            } else {
+                self.deferred_side_line = null;
+            }
+            return;
+        }
+
+        try self.activateSideTable();
+        try self.appendSideTableLine(bases, actual_bytes, line_file_offset);
+    }
+
+    fn noteSeqOffset(self: *ChunkParseState, data: []const u8, line_file_offset: u64) void {
+        if (self.seq_offset_set) return;
+        var pos: usize = 0;
+        while (pos < data.len and data[pos] <= ' ') pos += 1;
+        if (pos < data.len) {
+            self.seq_offset = line_file_offset + @as(u64, @intCast(pos));
+            self.seq_offset_set = true;
+        }
+    }
+
+    fn ingestSequenceLine(
+        self: *ChunkParseState,
+        data: []const u8,
+        line_start: usize,
+        line_end: usize,
+        has_lf: bool,
+        line_file_offset: u64,
+    ) !void {
+        var content_end = line_end;
+        if (content_end > line_start and data[content_end - 1] == '\r') {
+            content_end -= 1;
+        }
+
+        const actual_bytes: u32 = @intCast((if (has_lf) line_end + 1 else line_end) - line_start);
+        const bases = countBasesInLineSlice(data, line_start, content_end);
+        if (bases > 0 and !self.seq_offset_set) {
+            self.noteSeqOffset(data[line_start..content_end], line_file_offset);
+        }
+
+        try self.recordSequenceLine(bases, actual_bytes, has_lf, line_file_offset);
+        self.at_line_start = has_lf;
+        self.in_pending_line = false;
+        self.pending_line_bases = 0;
+        self.pending_line_bytes = 0;
+    }
+
+    fn appendPendingFragment(self: *ChunkParseState, fragment: []const u8, fragment_file_offset: u64) void {
+        if (!self.in_pending_line) {
+            self.in_pending_line = true;
+            self.pending_line_bases = 0;
+            self.pending_line_bytes = 0;
+            self.pending_line_file_offset = fragment_file_offset;
+        }
+        self.noteSeqOffset(fragment, fragment_file_offset);
+        self.pending_line_bases += countBasesInLineSlice(fragment, 0, fragment.len);
+        self.pending_line_bytes += @intCast(fragment.len);
+    }
+
+    fn commitPendingLine(self: *ChunkParseState, has_lf: bool) !void {
+        if (!self.in_pending_line and self.pending_line_bytes == 0) return;
+        try self.recordSequenceLine(
+            self.pending_line_bases,
+            self.pending_line_bytes,
+            has_lf,
+            self.pending_line_file_offset,
+        );
+        self.at_line_start = has_lf;
+        self.in_pending_line = false;
+        self.pending_line_bases = 0;
+        self.pending_line_bytes = 0;
+    }
+
+    fn finalizeHeader(self: *ChunkParseState, seen_names: ?*DedupSeen) !void {
+        self.in_header = false;
+        const name = self.name.items;
+        if (seen_names) |seen| {
+            const key = hashSequenceName(name);
+            const gop = try seen.getOrPut(key);
+            if (gop.found_existing) self.is_duplicate = true;
+        }
+        self.at_line_start = true;
+    }
+
+    fn emitRecordIfReady(
+        self: *ChunkParseState,
+        ctx: anytype,
+        comptime emitRecord: fn (@TypeOf(ctx), FastaRecordEmit) anyerror!void,
+        record_count: *u32,
+    ) !void {
+        try self.commitPendingLine(false);
+        const metrics = self.line_builder.finish();
+        const seq_info = sequenceLengthInfoFromMetrics(metrics);
+        if (seq_info.seq_len == 0 or self.is_duplicate) return;
+
+        const name_len: u16 = @intCast(self.name.items.len);
+        var side_table_slice: []const u8 = &.{};
+        if (!seq_info.uses_uniform_formula and self.zfi_mode) {
+            if (!self.side_table_active) {
+                return error.MissingSideTable;
+            }
+            @memcpy(self.side_table.items[0..@sizeOf(u64)], std.mem.asBytes(&metrics.line_count));
+            side_table_slice = self.side_table.items;
+        }
+        try emitRecord(ctx, .{
+            .record = .{
+                .name_offset = self.header_start_offset + 1,
+                .name_len = name_len,
+                .seq_offset = self.seq_offset,
+                .seq_len = seq_info.seq_len,
+                .line_bases = metrics.line_bases,
+                .line_bytes = metrics.line_bytes,
+            },
+            .name = self.name.items,
+            .seq_data = &.{},
+            .uses_uniform_formula = seq_info.uses_uniform_formula,
+            .streaming_side_table = side_table_slice,
+        });
+        record_count.* += 1;
+    }
+};
+
+fn processChunkBytes(
+    state: *ChunkParseState,
+    data: []const u8,
+    file_offset: u64,
+    max_name_len: ?usize,
+    seen_names: ?*DedupSeen,
+    ctx: anytype,
+    comptime emitRecord: fn (@TypeOf(ctx), FastaRecordEmit) anyerror!void,
+    record_count: *u32,
 ) !void {
-    const name_slice = state.name_buf[0..state.name_len];
-    const name_copy = try allocator.dupe(u8, name_slice);
-    const gop = try seen_names.getOrPut(name_copy);
-    if (gop.found_existing) {
-        allocator.free(name_copy);
-        state.is_duplicate = true;
-    } else {
-        state.is_duplicate = false;
+    var i: usize = 0;
+
+    if (state.in_pending_line) {
+        const nl = findNextNewline(data, 0, data.len);
+        if (nl >= data.len) {
+            state.appendPendingFragment(data, file_offset);
+            return;
+        }
+
+        state.appendPendingFragment(data[0..nl], file_offset);
+        state.pending_line_bytes += 1;
+        try state.commitPendingLine(true);
+        i = nl + 1;
+    }
+
+    while (i < data.len) {
+        const byte_offset = file_offset + @as(u64, @intCast(i));
+        const byte = data[i];
+
+        if (state.at_line_start and byte == '>') {
+            if (state.active) {
+                try state.emitRecordIfReady(ctx, emitRecord, record_count);
+            }
+            try state.startHeader(byte_offset);
+            i += 1;
+            continue;
+        }
+
+        if (state.in_header) {
+            if (byte == '\n') {
+                try state.finalizeHeader(seen_names);
+                i += 1;
+                continue;
+            }
+            if (state.parsing_name) {
+                if (byte == ' ' or byte == '\t' or byte == '\r') {
+                    state.parsing_name = false;
+                } else {
+                    if (max_name_len) |limit| {
+                        if (state.name.items.len >= limit) return error.HeaderTooLong;
+                    }
+                    try state.name.append(state.allocator, byte);
+                    if (state.name.items.len > max_index_name_len) return error.HeaderTooLong;
+                }
+            }
+            i += 1;
+            continue;
+        }
+
+        if (!state.active) {
+            state.at_line_start = byte == '\n';
+            i += 1;
+            continue;
+        }
+
+        const line_start = i;
+        const nl = findNextNewline(data, i, data.len);
+        if (nl >= data.len) {
+            state.appendPendingFragment(
+                data[line_start..],
+                file_offset + @as(u64, @intCast(line_start)),
+            );
+            return;
+        }
+
+        try state.ingestSequenceLine(
+            data,
+            line_start,
+            nl,
+            true,
+            file_offset + @as(u64, @intCast(line_start)),
+        );
+        i = nl + 1;
     }
 }
 
-fn seedSequenceLine(line_state: *SequenceLineState, byte: u8) void {
-    line_state.line_len = 1;
-    line_state.base_count = if (byte > ' ') 1 else 0;
-}
-
-fn parseSequenceLineByte(line_state: *SequenceLineState, byte: u8) void {
-    line_state.line_len += 1;
-    if (byte > ' ') line_state.base_count += 1;
-}
-
-fn finalizeSequenceLine(state: *ChunkState, line_state: SequenceLineState) void {
-    state.seq_len += line_state.base_count;
-    if (!state.first_line_seen and line_state.base_count > 0) {
-        state.line_bases = line_state.base_count;
-        state.line_bytes = @intCast(line_state.line_len + 1);
-        state.first_line_seen = true;
+pub fn scanFastaReader(
+    reader: *std.Io.Reader,
+    read_buf: []u8,
+    enable_dedup: bool,
+    max_name_len: ?usize,
+    allocator: std.mem.Allocator,
+    zfi_mode: bool,
+    ctx: anytype,
+    comptime emitRecord: fn (@TypeOf(ctx), FastaRecordEmit) anyerror!void,
+) !u32 {
+    var dedup_names: ?DedupSeen = null;
+    if (enable_dedup) {
+        dedup_names = DedupSeen.init(allocator);
     }
+    defer if (dedup_names) |*seen| seen.deinit();
+
+    var state = ChunkParseState{ .allocator = allocator, .zfi_mode = zfi_mode };
+    defer state.name.deinit(allocator);
+    defer if (zfi_mode) state.side_table.deinit(allocator);
+    var record_count: u32 = 0;
+    var file_offset: u64 = 0;
+    const dedup_ptr: ?*DedupSeen = if (dedup_names) |*s| s else null;
+
+    while (true) {
+        const n = reader.readSliceShort(read_buf) catch |err| return err;
+        if (n == 0) break;
+        try processChunkBytes(
+            &state,
+            read_buf[0..n],
+            file_offset,
+            max_name_len,
+            dedup_ptr,
+            ctx,
+            emitRecord,
+            &record_count,
+        );
+        file_offset += @intCast(n);
+    }
+
+    if (state.active) {
+        try state.emitRecordIfReady(ctx, emitRecord, &record_count);
+    }
+
+    return record_count;
 }
+
+const FaiEmitBuffer = struct {
+    writer: *std.Io.Writer,
+    buf: [65536]u8 = undefined,
+    len: usize = 0,
+
+    fn flush(self: *FaiEmitBuffer) !void {
+        if (self.len == 0) return;
+        try self.writer.writeAll(self.buf[0..self.len]);
+        self.len = 0;
+    }
+
+    fn emitRecord(self: *FaiEmitBuffer, emit_info: FastaRecordEmit) !void {
+        const rec = emit_info.record;
+        var suffix_buf: [128]u8 = undefined;
+        const suffix = try std.fmt.bufPrint(
+            &suffix_buf,
+            "\t{d}\t{d}\t{d}\t{d}\n",
+            .{ rec.seq_len, rec.seq_offset, rec.line_bases, rec.line_bytes },
+        );
+        const total = emit_info.name.len + suffix.len;
+        if (total > self.buf.len) {
+            try self.flush();
+            try self.writer.writeAll(emit_info.name);
+            try self.writer.writeAll(suffix);
+            return;
+        }
+        if (self.len + total > self.buf.len) try self.flush();
+        @memcpy(self.buf[self.len..][0..emit_info.name.len], emit_info.name);
+        self.len += emit_info.name.len;
+        @memcpy(self.buf[self.len..][0..suffix.len], suffix);
+        self.len += suffix.len;
+    }
+};
 
 fn scanChunkedReader(
     reader: *std.Io.Reader,
+    read_buf: []u8,
     writer: anytype,
-    seen_names: *std.StringHashMap(void),
+    enable_dedup: bool,
     allocator: std.mem.Allocator,
 ) !u32 {
-    var state = ChunkState{};
-    var line_start = true;
+    var fai_buf = FaiEmitBuffer{ .writer = writer };
+    const Ctx = struct {
+        buffer: *FaiEmitBuffer,
 
-    while (true) {
-        const byte = reader.takeByte() catch |err| switch (err) {
-            error.EndOfStream => break,
-            else => return err,
-        };
-
-        if (line_start and byte == '>') {
-            try finalizeChunkedRecord(&state, writer);
-            startChunkedHeader(&state);
-
-            var header_state = HeaderParseState{};
-            while (true) {
-                const header_byte = reader.takeByte() catch |err| switch (err) {
-                    error.EndOfStream => {
-                        try finalizeChunkedHeader(&state, seen_names, allocator);
-                        state.file_offset += header_state.line_len + 1;
-                        return state.record_count;
-                    },
-                    else => return err,
-                };
-
-                if (header_byte == '\n') {
-                    try finalizeChunkedHeader(&state, seen_names, allocator);
-                    state.file_offset += header_state.line_len + 2;
-                    line_start = true;
-                    break;
-                }
-                try parseChunkedHeaderByte(&state, &header_state, header_byte);
-            }
-            continue;
+        fn emit(ctx: *@This(), emit_info: FastaRecordEmit) !void {
+            try ctx.buffer.emitRecord(emit_info);
         }
+    };
 
-        if (!state.has_header) {
-            line_start = byte == '\n';
-            state.file_offset += 1;
-            continue;
-        }
-
-        var seq_line = SequenceLineState{};
-        seedSequenceLine(&seq_line, byte);
-
-        while (true) {
-            const seq_byte = reader.takeByte() catch |err| switch (err) {
-                error.EndOfStream => {
-                    if (seq_line.base_count > 0 and state.seq_len == 0) {
-                        state.seq_offset = state.file_offset;
-                    }
-                    finalizeSequenceLine(&state, seq_line);
-                    state.file_offset += seq_line.line_len;
-                    try finalizeChunkedRecord(&state, writer);
-                    return state.record_count;
-                },
-                else => return err,
-            };
-
-            if (seq_byte == '\n') {
-                if (seq_line.base_count > 0 and state.seq_len == 0) {
-                    state.seq_offset = state.file_offset;
-                }
-                finalizeSequenceLine(&state, seq_line);
-                state.file_offset += seq_line.line_len + 1;
-                line_start = true;
-                break;
-            }
-
-            parseSequenceLineByte(&seq_line, seq_byte);
-        }
-    }
-
-    try finalizeChunkedRecord(&state, writer);
-    return state.record_count;
+    var ctx = Ctx{ .buffer = &fai_buf };
+    const count = try scanFastaReader(reader, read_buf, enable_dedup, null, allocator, false, &ctx, Ctx.emit);
+    try fai_buf.flush();
+    return count;
 }
 
 pub fn scanChunkedData(
     data: []const u8,
     writer: anytype,
+    enable_dedup: bool,
     allocator: std.mem.Allocator,
 ) !u32 {
     var r = std.Io.Reader.fixed(data);
-    var seen_names = std.StringHashMap(void).init(allocator);
-    defer seen_names.deinit();
-
-    return scanChunkedReader(&r, writer, &seen_names, allocator);
+    var read_buf: [low_mem_chunk_size]u8 = undefined;
+    return scanChunkedReader(&r, &read_buf, writer, enable_dedup, allocator);
 }
 
-pub fn runChunkedMode(io: std.Io, path: []const u8) void {
+pub fn runChunkedMode(io: std.Io, path: []const u8, enable_dedup: bool) void {
+    runIndexLowMem(io, path, true, enable_dedup);
+}
+
+pub fn runIndexLowMem(
+    io: std.Io,
+    path: []const u8,
+    emit_fai: bool,
+    enable_dedup: bool,
+) void {
     const err_exit = index_format.printErrorAndExit;
 
     const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| {
@@ -705,34 +1097,87 @@ pub fn runChunkedMode(io: std.Io, path: []const u8) void {
     };
     defer file.close(io);
 
+    const stat = file.stat(io) catch {
+        err_exit("error: failed to stat file: {s}\n", .{path});
+    };
+    if (stat.size == 0) {
+        err_exit("error: file is empty: {s}\n", .{path});
+    }
+
+    var first_byte: [1]u8 = undefined;
+    const first_read = file.readPositional(io, &.{&first_byte}, 0) catch {
+        err_exit("error: failed to read file: {s}\n", .{path});
+    };
+    if (first_read == 0 or first_byte[0] != '>') {
+        err_exit("error: not a FASTA file: {s}\n", .{path});
+    }
+
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var seen_names = std.StringHashMap(void).init(allocator);
-    defer seen_names.deinit();
+    var io_buf: [FILE_IO_BUF_SIZE]u8 = undefined;
+    var read_buf: [low_mem_chunk_size]u8 = undefined;
+    var file_reader = file.reader(io, &io_buf);
 
-    var read_buf: [CHUNK_SIZE]u8 = undefined;
-    var file_reader = file.reader(io, &read_buf);
-    var out_buf: [65536]u8 = undefined;
-    var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
+    if (emit_fai) {
+        var out_buf: [65536]u8 = undefined;
+        var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
 
-    const record_count = scanChunkedReader(&file_reader.interface, &stdout_fw.interface, &seen_names, allocator) catch |err| switch (err) {
-        error.HeaderTooLong => {
-            stdout_fw.flush() catch {};
-            err_exit("error: sequence name exceeds {d} bytes in --low-mem mode: {s}\n", .{ MAX_LOW_MEM_NAME_LEN, path });
-        },
-        else => {
-            stdout_fw.flush() catch {};
-            err_exit("error: processing failed\n", .{});
-        },
-    };
-    stdout_fw.flush() catch {};
-
-    if (record_count == 0) {
+        const record_count = scanChunkedReader(&file_reader.interface, &read_buf, &stdout_fw.interface, enable_dedup, allocator) catch |err| switch (err) {
+            error.HeaderTooLong => {
+                stdout_fw.flush() catch {};
+                err_exit("error: sequence name exceeds {d} bytes: {s}\n", .{ max_index_name_len, path });
+            },
+            else => {
+                stdout_fw.flush() catch {};
+                err_exit("error: processing failed\n", .{});
+            },
+        };
         stdout_fw.flush() catch {};
+
+        if (record_count == 0) {
+            stdout_fw.flush() catch {};
+            err_exit("error: no valid sequences found in: {s}\n", .{path});
+        }
+        return;
+    }
+
+    var zfi_path_buf: [4096]u8 = undefined;
+    const zfi_path = std.fmt.bufPrint(&zfi_path_buf, "{s}.zfi", .{path}) catch {
+        err_exit("error: path too long\n", .{});
+    };
+
+    var zfi_tmp_buf: [4096]u8 = undefined;
+    const zfi_tmp_path = std.fmt.bufPrint(&zfi_tmp_buf, "{s}.zfi.tmp", .{path}) catch {
+        err_exit("error: path too long\n", .{});
+    };
+
+    const cwd = std.Io.Dir.cwd();
+    cwd.deleteFile(io, zfi_tmp_path) catch {};
+
+    var zfi_index = scanZfiIndexStreaming(&file_reader.interface, &read_buf, enable_dedup, allocator) catch |err| switch (err) {
+        error.HeaderTooLong => err_exit("error: sequence name exceeds {d} bytes: {s}\n", .{ max_index_name_len, path }),
+        error.MissingSideTable => err_exit("error: scan failed\n", .{}),
+        else => err_exit("error: scan failed\n", .{}),
+    };
+    defer zfi_index.deinit(allocator);
+
+    if (zfi_index.records.items.len == 0) {
         err_exit("error: no valid sequences found in: {s}\n", .{path});
     }
+
+    writeZfiIndexFile(io, zfi_tmp_path, &zfi_index, stat.size) catch {
+        cwd.deleteFile(io, zfi_tmp_path) catch {};
+        err_exit("error: write failed\n", .{});
+    };
+
+    cwd.rename(zfi_tmp_path, cwd, zfi_path, io) catch {
+        cwd.deleteFile(io, zfi_tmp_path) catch {};
+        err_exit("error: failed to finalize index: {s}\n", .{zfi_path});
+    };
+
+    std.debug.print("wrote {s} ({d} sequences)\n", .{ zfi_path, zfi_index.records.items.len });
 }
 
 /// Validates that the data is a FASTA file (starts with '>')

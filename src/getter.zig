@@ -436,6 +436,12 @@ fn ensureComplementAllowed(idx: *const LoadedIndex, requests: []const ParsedRequ
 // Sequence emission
 // ============================================================================
 
+/// Writes one region's FASTA output.
+pub fn extractRegion(idx: *const LoadedIndex, region_str: []const u8, writer: anytype) void {
+    const resolved = resolveRegion(idx, region_str, 0);
+    emitRegion(resolved, idx.fasta_data, writer);
+}
+
 /// Write FASTA output for one resolved region to `writer`.
 /// Output is wrapped at 60 bases per line (samtools default).
 fn emitRegion(resolved: ResolvedRegion, fasta: []const u8, writer: anytype) void {

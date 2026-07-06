@@ -38,7 +38,7 @@ bench/get/results/*
 bench/stats/results/*
 !bench/stats/results/figures/
 
-# Performance baselines (machine-local snapshots; use bench/save_baseline.py)
+# Performance baselines (machine-local snapshots; save_baseline.py pending rebuild)
 bench/baselines/
 
 # Temp dirs from verify scripts

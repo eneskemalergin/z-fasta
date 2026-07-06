@@ -45,7 +45,7 @@ const USAGE =
     \\  --emit-fai   Output FAI format to stdout (default: create .zfi file)
     \\  --no-dedup   Keep duplicate sequence names in the index (default: first wins
     \\               at index time). get resolves duplicate names to the last record.
-    \\  --low-mem    Stream FAI to stdout only (no .zfi file; 4 MB constant memory)
+    \\  --low-mem    Stream input with bounded RAM; same outputs as default index
     \\
     \\Get usage:
     \\  z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt]
@@ -235,7 +235,6 @@ fn runIndex(io: std.Io, args: *std.process.Args.Iterator) void {
             enable_dedup = true;
         } else if (std.mem.eql(u8, arg, "--low-mem")) {
             low_mem = true;
-            emit_fai = true;
         } else {
             fasta_path = arg;
         }
@@ -246,7 +245,7 @@ fn runIndex(io: std.Io, args: *std.process.Args.Iterator) void {
     };
 
     if (low_mem) {
-        indexer.runChunkedMode(io, path);
+        indexer.runIndexLowMem(io, path, emit_fai, enable_dedup);
         return;
     }
 
@@ -316,42 +315,19 @@ fn runIndex(io: std.Io, args: *std.process.Args.Iterator) void {
         const cwd = std.Io.Dir.cwd();
         cwd.deleteFile(io, zfi_tmp_path) catch {};
 
-        const out_file = cwd.createFile(io, zfi_tmp_path, .{}) catch {
-            printErrorAndExit("error: cannot create: {s}\n", .{zfi_tmp_path});
-        };
-        defer out_file.close(io);
-        errdefer cwd.deleteFile(io, zfi_tmp_path) catch {};
-
         var zfi_index = indexer.scanZfiIndex(data, enable_dedup, arena.allocator()) catch {
             printErrorAndExit("error: scan failed\n", .{});
         };
         defer zfi_index.deinit(arena.allocator());
 
         if (zfi_index.records.items.len == 0) {
-            cwd.deleteFile(io, zfi_tmp_path) catch {};
             printErrorAndExit("error: no valid sequences found in: {s}\n", .{path});
         }
 
-        var file_buf: [65536]u8 = undefined;
-        var file_fw = out_file.writer(io, &file_buf);
-        const writer = &file_fw.interface;
-
-        const header = index_format.ZfiHeader{
-            .magic = index_format.ZFI_MAGIC,
-            .record_count = @intCast(zfi_index.records.items.len),
-            .source_size = data.len,
-        };
-        writer.writeAll(std.mem.asBytes(&header)) catch {
+        indexer.writeZfiIndexFile(io, zfi_tmp_path, &zfi_index, data.len) catch {
+            cwd.deleteFile(io, zfi_tmp_path) catch {};
             printErrorAndExit("error: write failed\n", .{});
         };
-        writer.writeAll(std.mem.sliceAsBytes(zfi_index.records.items)) catch {
-            printErrorAndExit("error: write failed\n", .{});
-        };
-        writer.writeAll(zfi_index.side_tables.items) catch {
-            printErrorAndExit("error: write failed\n", .{});
-        };
-
-        file_fw.flush() catch {};
 
         cwd.rename(zfi_tmp_path, cwd, zfi_path, io) catch {
             cwd.deleteFile(io, zfi_tmp_path) catch {};
