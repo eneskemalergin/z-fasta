@@ -333,6 +333,7 @@ pub fn exitCodeForOptions(summary: *const Summary, options: Options) u8 {
 }
 
 fn isFixedByFormatRewrite(kind: Kind) bool {
+    // --fix rewrites only these kinds. Everything else is left unchanged or blocks fix.
     return switch (kind) {
         .utf8_bom,
         .inconsistent_line_widths,
@@ -342,6 +343,17 @@ fn isFixedByFormatRewrite(kind: Kind) bool {
         => true,
         else => false,
     };
+}
+
+pub fn fixRejection(summary: *const Summary, options: Options) ?Kind {
+    for (summary.events.items) |event| {
+        switch (event.kind) {
+            .invalid_character => if (!options.fix_format_only) return .invalid_character,
+            .no_sequences, .duplicate_name, .null_byte => return event.kind,
+            else => {},
+        }
+    }
+    return null;
 }
 
 fn appendEvent(allocator: std.mem.Allocator, summary: *Summary, event: ValidateEvent) !void {
@@ -660,22 +672,40 @@ fn matchesRefseq(header: []const u8) bool {
 }
 
 fn ensureFixAllowed(summary: *const Summary, options: Options) void {
-    for (summary.events.items) |event| {
-        switch (event.kind) {
-            .invalid_character => {
-                if (!options.fix_format_only) {
-                    printErrorAndExit("error: validate --fix refuses character-level errors; use --fix-format-only to keep them unchanged\n", .{});
-                }
-            },
-            .no_sequences, .duplicate_name, .null_byte => {
-                printErrorAndExit("error: validate --fix cannot repair {s}\n", .{event.kind.text()});
-            },
-            else => {},
-        }
+    const rejection = fixRejection(summary, options) orelse return;
+    switch (rejection) {
+        .invalid_character => {
+            printErrorAndExit("error: validate --fix refuses character-level errors; use --fix-format-only to keep them unchanged\n", .{});
+        },
+        else => printErrorAndExit("error: validate --fix cannot repair {s}\n", .{rejection.text()}),
     }
 }
 
+/// Rewrite format-level issues to normalized LF FASTA bytes. Caller must run validateData first.
+pub fn fixData(allocator: std.mem.Allocator, data: []const u8, record_widths: []const u32) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try writeFixedContent(&out, allocator, data, record_widths);
+    return out.toOwnedSlice(allocator);
+}
+
+const FixedContentWriter = struct {
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+
+    fn writeAll(self: FixedContentWriter, bytes: []const u8) !void {
+        try self.out.appendSlice(self.allocator, bytes);
+    }
+
+    fn writeByte(self: FixedContentWriter, byte: u8) !void {
+        try self.out.append(self.allocator, byte);
+    }
+};
+
 fn writeFixed(io: std.Io, data: []const u8, record_widths: []const u32, output_path: []const u8) !void {
+    const fixed = try fixData(std.heap.page_allocator, data, record_widths);
+    defer std.heap.page_allocator.free(fixed);
+
     const cwd = std.Io.Dir.cwd();
     const out_file = try cwd.createFile(io, output_path, .{ .truncate = true });
     errdefer cwd.deleteFile(io, output_path) catch {};
@@ -683,7 +713,12 @@ fn writeFixed(io: std.Io, data: []const u8, record_widths: []const u32, output_p
 
     var out_buf: [65536]u8 = undefined;
     var file_fw = out_file.writer(io, &out_buf);
-    const writer = &file_fw.interface;
+    try file_fw.interface.writeAll(fixed);
+    try file_fw.flush();
+}
+
+fn writeFixedContent(out: *std.ArrayList(u8), allocator: std.mem.Allocator, data: []const u8, record_widths: []const u32) !void {
+    const writer = FixedContentWriter{ .out = out, .allocator = allocator };
 
     var pos: usize = if (std.mem.startsWith(u8, data, UTF8_BOM)) UTF8_BOM.len else 0;
     var record_index: usize = 0;
@@ -734,8 +769,9 @@ fn writeFixed(io: std.Io, data: []const u8, record_widths: []const u32, output_p
 
     if (in_record and line_pos > 0) {
         try writer.writeByte('\n');
+    } else if (in_record and (data.len == 0 or data[data.len - 1] != '\n')) {
+        try writer.writeByte('\n');
     }
-    try file_fw.flush();
 }
 
 fn writeSummary(writer: anytype, summary: *const Summary, options: Options) !void {
@@ -874,79 +910,4 @@ fn firstKind(summary: *const Summary, kind: Kind) ?ValidateEvent {
         if (event.kind == kind) return event;
     }
     return null;
-}
-
-test "validateData reports duplicate and empty sequence" {
-    var summary = try validateData(std.testing.allocator, ">dup\nAAAA\n>dup\n", .{});
-    defer summary.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .duplicate_name));
-    try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .empty_sequence));
-    try std.testing.expectEqual(@as(usize, 0), countKind(&summary, .no_sequences));
-    try std.testing.expectEqual(@as(usize, 1), summary.sequence_count);
-    try std.testing.expectEqual(@as(usize, 2), summary.header_count);
-}
-
-test "validateData reports missing terminal newline and invalid nucleotide character" {
-    var summary = try validateData(std.testing.allocator, ">seq\nACGTZ", .{});
-    defer summary.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .missing_terminal_newline));
-    try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .invalid_character));
-}
-
-test "validateData custom alphabet overrides built-in alphabet" {
-    var summary = try validateData(std.testing.allocator, ">seq\nACGTZ\n", .{
-        .custom_alphabet = "ACGTZ",
-    });
-    defer summary.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(usize, 0), countKind(&summary, .invalid_character));
-}
-
-test "validateData tracks line-width and trailing whitespace warnings" {
-    var summary = try validateData(std.testing.allocator, ">seq\nAAAA\nCC \nGGGG\nTT\n", .{});
-    defer summary.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .trailing_whitespace));
-    try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .inconsistent_line_widths));
-}
-
-test "validateData checks schemas" {
-    var uniprot = try validateData(std.testing.allocator, ">sp|P12345|PROT_HUMAN\nMAV\n", .{
-        .schema = .uniprot,
-    });
-    defer uniprot.deinit(std.testing.allocator);
-
-    var refseq = try validateData(std.testing.allocator, ">bad\nACGT\n", .{
-        .schema = .refseq,
-    });
-    defer refseq.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(usize, 0), countKind(&uniprot, .schema_violation));
-    try std.testing.expectEqual(@as(usize, 1), countKind(&refseq, .schema_violation));
-}
-
-test "exitCode implements strict warning promotion" {
-    try std.testing.expectEqual(@as(u8, 0), exitCode(0, 0, false));
-    try std.testing.expectEqual(@as(u8, 2), exitCode(0, 1, false));
-    try std.testing.expectEqual(@as(u8, 1), exitCode(0, 1, true));
-    try std.testing.expectEqual(@as(u8, 1), exitCode(1, 0, false));
-}
-
-test "exitCodeForOptions ignores format warnings fixed by rewrite" {
-    var summary = Summary{
-        .events = .empty,
-        .record_widths = .empty,
-    };
-    defer summary.deinit(std.testing.allocator);
-
-    try appendEvent(std.testing.allocator, &summary, .{
-        .level = .warning,
-        .kind = .trailing_whitespace,
-        .line = 2,
-    });
-
-    try std.testing.expectEqual(@as(u8, 2), exitCodeForOptions(&summary, .{}));
-    try std.testing.expectEqual(@as(u8, 0), exitCodeForOptions(&summary, .{ .fix = true }));
 }

@@ -84,14 +84,17 @@ pub fn build(b: *std.Build) void {
     });
     const run_test_bed_parser = b.addRunArtifact(test_bed_parser);
 
-    const test_validator = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/validator.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+    const test_validate_module = b.createModule(.{
+        .root_source_file = b.path("tests/test_validate.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "main", .module = main_module }},
     });
-    const run_test_validator = b.addRunArtifact(test_validator);
+    test_validate_module.link_libc = true;
+    const test_validate = b.addTest(.{
+        .root_module = test_validate_module,
+    });
+    const run_test_validate = b.addRunArtifact(test_validate);
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_test_index.step);
@@ -99,5 +102,5 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_test_stats.step);
     test_step.dependOn(&run_test_complement.step);
     test_step.dependOn(&run_test_bed_parser.step);
-    test_step.dependOn(&run_test_validator.step);
+    test_step.dependOn(&run_test_validate.step);
 }
