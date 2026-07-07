@@ -42,6 +42,7 @@ bench/stats/results/*
 bench/baselines/
 
 # Temp dirs from verify scripts
+bench/get/.fixture*
 bench/get/.verify*
 bench/get/.bench*
 
