@@ -5,9 +5,8 @@ const posix = std.posix;
 // Types - shared by indexer, getter, stats
 // ============================================================================
 
-/// ZFI binary format magic + header.
-pub const ZFI_MAGIC_V1: [4]u8 = .{ 'Z', 'F', 'I', 0x01 };
-pub const ZFI_MAGIC: [4]u8 = .{ 'Z', 'F', 'I', 0x02 };
+/// ZFI binary format magic + header (`ZFI\x01` since first release; no users on a prior on-disk layout).
+pub const ZFI_MAGIC: [4]u8 = .{ 'Z', 'F', 'I', 0x01 };
 
 const NON_UNIFORM_WIDTH_FLAG: u8 = 1;
 const SIDE_TABLE_OFFSET_BYTES = 5;
@@ -337,9 +336,7 @@ fn tryLoadZfi(
 
     // Validate magic
     const header: *const ZfiHeader = @ptrCast(@alignCast(zfi_data.ptr));
-    const is_v1 = std.mem.eql(u8, &header.magic, &ZFI_MAGIC_V1);
-    const is_v2 = std.mem.eql(u8, &header.magic, &ZFI_MAGIC);
-    if (!is_v1 and !is_v2) {
+    if (!std.mem.eql(u8, &header.magic, &ZFI_MAGIC)) {
         return .corrupt;
     }
 
@@ -362,7 +359,7 @@ fn tryLoadZfi(
     )[0..header.record_count];
 
     for (records) |rec| {
-        if (!isValidZfiRecord(rec, fasta_data, zfi_data, is_v2)) {
+        if (!isValidZfiRecord(rec, fasta_data, zfi_data)) {
             return .corrupt;
         }
     }
@@ -491,7 +488,6 @@ fn isValidZfiRecord(
     rec: IndexRecord,
     fasta_data: []align(4096) const u8,
     zfi_data: []align(4096) const u8,
-    is_v2: bool,
 ) bool {
     const fasta_len = fasta_data.len;
 
@@ -506,7 +502,6 @@ fn isValidZfiRecord(
     if (rec.line_bytes < rec.line_bases) return false;
 
     if (!rec.isUniformWidth()) {
-        if (!is_v2) return false;
         return isValidSideTable(rec, fasta_len, zfi_data);
     }
 

@@ -1579,7 +1579,7 @@ def parse_fai_stats(fai_path: Path) -> tuple[int, int]:
 
 
 def parse_zfi_stats(zfi_path: Path) -> tuple[int, int]:
-    """Return (record_count, file_bytes) from a ZFI v2 header."""
+    """Return (record_count, file_bytes) from a ZFI header."""
     data = zfi_path.read_bytes()
     if len(data) < 16 or data[:3] != b"ZFI":
         return 0, len(data)

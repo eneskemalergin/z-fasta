@@ -609,7 +609,7 @@ pub fn writeZfiIndexFile(
     try file_fw.flush();
 }
 
-/// Serializes a `ZfiIndex` to the on-disk `.zfi` v2 byte layout.
+/// Serializes a `ZfiIndex` to the on-disk `.zfi` byte layout (header, records, side tables).
 pub fn zfiIndexToBytes(index: *const ZfiIndex, source_size: u64, allocator: std.mem.Allocator) ![]u8 {
     const header = ZfiHeader{
         .magic = ZFI_MAGIC,

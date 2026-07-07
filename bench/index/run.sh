@@ -535,7 +535,7 @@ from pathlib import Path
 import sys
 zfi = Path(sys.argv[1]).read_bytes()
 expected = sys.argv[2]
-if len(zfi) < 16 or zfi[:4] != b"ZFI\x02":
+if len(zfi) < 16 or zfi[:4] != b"ZFI\x01":
     raise SystemExit(1)
 count = int.from_bytes(zfi[4:8], "little")
 side = any(zfi[16 + i * 40 + 10] & 1 for i in range(count))
