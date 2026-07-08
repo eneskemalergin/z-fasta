@@ -5,7 +5,7 @@ All notable changes to z-fasta will be documented in this file.
 
 ## [0.3.0] - Unreleased
 
-Ongoing release: messy-FASTA side tables in `.zfi`, streaming `index --low-mem`, `validate`, and a rebuilt index benchmark suite. GET and stats perf reports and baseline snapshot scripts were removed in the July bench cleanup; `bench/get/verify.sh` remains (messy FASTA cases included). Stats verification is pending rebuild.
+Ongoing release: messy-FASTA `.zfi` side tables, streaming `index --low-mem`, `validate`, and a benchmark suite overhaul (hyperfine to zebrac). Stats perf runner and report pending rebuild.
 
 ### Added
 
@@ -13,29 +13,31 @@ Ongoing release: messy-FASTA side tables in `.zfi`, streaming `index --low-mem`,
 - **`get` side-table lookup**: binary search on side tables for non-uniform records (O(log L) per base; L is line count).
 - **`z-fasta validate`**: structure, alphabet, and header checks (duplicate names, invalid characters, null bytes, UTF-8 BOM, inconsistent line widths, trailing whitespace, empty sequences, missing terminal newlines, mixed line endings, long headers, schema violations). Output modes: human text; `--json` JSON Lines (`schema_version: "v1"` per event); `--json --summary` aggregate object. `--strict` promotes warnings to errors. `--fix -o <file>` rewrites format issues. Also `--fix-format-only`, `--schema uniprot`, `--schema refseq`, `--custom-alphabet`, and `--max-header-len N` (default 1024).
 - **`index --low-mem` streaming `.zfi`**: bounded-RAM build path. Output bytes match mmap `index` on simple and messy fixtures. `--emit-fai` writes FAI to stdout (same as mmap).
-- **`tests/test_index.zig`**: v0.2 to v0.3 side-table and index compatibility coverage.
+- **`tests/test_index.zig`**: v0.2 to v0.3 side-table and index compatibility coverage; `.fai` `records_only` vs `lookup_full_map` duplicate-name parity test.
 - **`build.zig`**: `test_validator` target for validator unit tests.
 
 ### Changed
 
 - **Default mmap `index`**: writes `.zfi` via `scanZfiIndex()` with in-memory record and side-table arrays (replaces dummy-header streaming write). `scanFastaRecords` passes sequence data and uniform-width flag to the emit callback.
 - **`index --low-mem`**: default output is `{file}.zfi` (was FAI-only in v0.2.x). Shares line-metrics semantics with mmap via `ChunkParseState` and `LineMetricsBuilder`. Removed duplicate `StreamingParseState` parser.
-- **`stats`**: composition and whitespace checks follow side tables on non-uniform records. Whitespace uses `byte > ' '` instead of explicit `\n`/`\r` tests.
-- **Index benchmark suite** (`bench/index/run.sh`, `bench/index/README.md`, `bench/index/generate_report.py`, `bench/index/REPORT.md`): single runner for correctness, zebrac perf, messy zebrac, and report generation. Shared `bench/shared/zebrac_runner.sh` and `bench/shared/tools.sh`. Mode comparison uses `--emit-fai` for FAI parity. `z-fasta-zfi` lane benchmarks production `.zfi` (mmap). `preserve_real_index_sidecars()` retains on-disk `.zfi` and `.fai` for size tables. Report section *z-fasta Production Index (.zfi)* covers wall time, RSS, and format overhead. Latest full run `20260706_134943` (Genome: default FAI 0.38s; `--low-mem` FAI 1.61s at 3.39 MB RSS; production `.zfi` 0.40s).
-- **GET verification**: `bench/get/verify.sh` unified harness (replaces `verify_get.sh`, `verify_bed.sh`, `verify_rc.sh`, and related scripts) with messy FASTA BED, region, and RC cases.
+- **`.fai` fallback loading** (`index_format.zig`): respects `LoadMode` like `.zfi` (name hash map only for `lookup_full_map`). Single-pass mmap parse; record names live in the mmap'd `.fai` via `name_offset` / `name_len`. `LoadedIndex.getRecordName` resolves names for both index sources.
+- **`.zfi` `records_only` loads**: skip the full per-record validation loop on single-region and small multi-region GET paths. Faster reads; weaker corrupt-index detection on those paths only.
+- **`get` multi-region scan** (2 to 15 regions, no BED/names): record scan path applies to `.fai` fallback as well as `.zfi`.
+- **`stats`**: composition and whitespace checks follow side tables on non-uniform records. Whitespace uses `byte > ' '` instead of explicit `\n`/`\r` tests. Record names use `LoadedIndex.getRecordName`.
+- **Benchmark suite overhaul** (from v0.2.9 hyperfine): zebrac runners `bench/index/run.sh` and `bench/get/run.sh` (verify to perf to report) via shared `bench/shared/zebrac_runner.sh`; rewritten `generate_report.py` / `REPORT.md` for index and GET; GET verify scripts merged into `bench/get/verify.sh` (409 checks). Stats runner/report not yet restored.
 - **`README.md`**: benchmark commands point at `bench/index/run.sh` and the updated verification workflow.
 
 ### Fixed
 
 - **`get` on messy FASTAs**: correct extraction via side tables. Previously returned garbage or failed silently on mixed-width files.
+- **`.fai` on single-region GET**: no longer always builds a full name hash map (fixed large slowdown vs `.zfi` on transcriptome-scale indexes).
 - **`index --low-mem`**: skip throwaway side-table work on uniform records (fixes RSS and instruction blow-up on large genomes).
+- **`bench/get/run.sh`**: positional perf uses only positional fixture labels (not multi-region lists); region span metadata parsing matches `parseRegion`.
 
 ### Removed
 
-- `bench/wrappers/`: obsolete Tier 2 hyperfine lane (Rust wrappers live in main index, get, and stats suites).
-- `bench/index/run_benchmarks.sh` and `bench/index/run_tests.sh` (replaced by `bench/index/run.sh`).
+- **Legacy benchmark tooling** (replaced by zebrac overhaul): `bench/wrappers/`, hyperfine `run_benchmarks.sh` runners, `bench/index/run_tests.sh`, split GET verify scripts, baseline snapshot scripts; stats runner/report (`bench/stats/verify_stats.py`). `bench/baselines/BASELINES.md` keeps the v2 schema for when snapshots return.
 - `bench/index/results/figures/scaling_seqs.png` and `speedup.png` (legacy figures).
-- **Bench cleanup (July 2026, pending rebuild)**: `bench/save_baseline.py`, `bench/compare_baseline.py`, `bench/run_all_and_baseline.sh`; GET/stats benchmark runners, reports, and `bench/stats/verify_stats.py`; split GET verify scripts (logic consolidated into `bench/get/verify.sh`). `bench/baselines/BASELINES.md` documents the intended `bench.baseline.v2` schema for when snapshot tooling returns.
 
 ## [0.2.9] - 2026-06-24
 

@@ -1,0 +1,28 @@
+{
+  "messy_dir": "bench/shared/messy_variants",
+  "variants": [
+    "mixed_widths",
+    "trailing_whitespace",
+    "crlf_endings",
+    "all_messy"
+  ],
+  "headline_span": "titin_mid",
+  "spans": {
+    "titin_1k": {
+      "region": "sp|Q8WZ42|TITIN_HUMAN:1-1000",
+      "purpose": "1 kbp N-terminal on TITIN"
+    },
+    "titin_10k": {
+      "region": "sp|Q8WZ42|TITIN_HUMAN:1-10000",
+      "purpose": "10 kbp N-terminal on TITIN"
+    },
+    "titin_mid": {
+      "region": "sp|Q8WZ42|TITIN_HUMAN:500-2500",
+      "purpose": "2 kbp interior slice (headline side-table stress)"
+    },
+    "titin_40k": {
+      "region": "sp|Q8WZ42|TITIN_HUMAN:10000-50000",
+      "purpose": "40 kbp mid-protein slice"
+    }
+  }
+}
