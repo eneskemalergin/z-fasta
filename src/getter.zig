@@ -756,7 +756,7 @@ fn appendBedRequests(requests: *std.ArrayList(ParsedRequest), bed_data: []const 
 }
 
 fn processBedData(
-    idx: *const LoadedIndex,
+    idx: *LoadedIndex,
     allocator: std.mem.Allocator,
     bed_data: []const u8,
     honor_strand: bool,
@@ -815,7 +815,7 @@ fn writeSummary(io: std.Io, region_count: usize, total_bases: u64, elapsed_ns: u
 }
 
 fn processParsedRequests(
-    idx: *const LoadedIndex,
+    idx: *index_format.LoadedIndex,
     allocator: std.mem.Allocator,
     requests: []const ParsedRequest,
     annotate_transform: bool,
@@ -945,7 +945,7 @@ fn processParsedRequests(
 }
 
 fn processBedReaderChunked(
-    idx: *const LoadedIndex,
+    idx: *LoadedIndex,
     reader: *std.Io.Reader,
     honor_strand: bool,
     global_orientation: Orientation,
@@ -1003,7 +1003,7 @@ fn processBedReaderChunked(
 
 fn processBedPathChunked(
     io: std.Io,
-    idx: *const LoadedIndex,
+    idx: *LoadedIndex,
     path: []const u8,
     honor_strand: bool,
     global_orientation: Orientation,
@@ -1031,7 +1031,7 @@ fn processBedPathChunked(
 
 fn processBedPathAllInMemory(
     io: std.Io,
-    idx: *const LoadedIndex,
+    idx: *LoadedIndex,
     allocator: std.mem.Allocator,
     path: []const u8,
     honor_strand: bool,

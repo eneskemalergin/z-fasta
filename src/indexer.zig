@@ -48,10 +48,12 @@ pub const FastaRecordEmit = struct {
 pub const ZfiIndex = struct {
     records: std.ArrayList(IndexRecord),
     side_tables: std.ArrayList(u8),
+    name_blob: std.ArrayList(u8),
 
     pub fn deinit(self: *ZfiIndex, allocator: std.mem.Allocator) void {
         self.records.deinit(allocator);
         self.side_tables.deinit(allocator);
+        self.name_blob.deinit(allocator);
     }
 };
 
@@ -504,10 +506,23 @@ pub fn streamingScan(
     return scanFastaRecords(data, 0, enable_dedup, null, null, allocator, &ctx, Ctx.emit);
 }
 
+fn embedZfiName(
+    rec: *IndexRecord,
+    name: []const u8,
+    name_blob: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+) !void {
+    rec.name_offset = name_blob.items.len;
+    rec.name_len = @intCast(name.len);
+    try name_blob.appendSlice(allocator, name);
+    rec._pad[0] |= index_format.name_in_zfi_flag;
+}
+
 pub fn scanZfiIndex(data: []const u8, enable_dedup: bool, allocator: std.mem.Allocator) !ZfiIndex {
     var index = ZfiIndex{
         .records = .empty,
         .side_tables = .empty,
+        .name_blob = .empty,
     };
     errdefer index.deinit(allocator);
 
@@ -531,6 +546,7 @@ pub fn scanZfiIndex(data: []const u8, enable_dedup: bool, allocator: std.mem.All
                 );
                 try rec.markNonUniform(local_offset);
             }
+            try embedZfiName(&rec, emit_info.name, &ctx.index.name_blob, ctx.allocator);
             try ctx.index.records.append(ctx.allocator, rec);
         }
     };
@@ -550,6 +566,7 @@ pub fn scanZfiIndexStreaming(
     var index = ZfiIndex{
         .records = .empty,
         .side_tables = .empty,
+        .name_blob = .empty,
     };
     errdefer index.deinit(allocator);
 
@@ -564,6 +581,7 @@ pub fn scanZfiIndexStreaming(
                 try ctx.index.side_tables.appendSlice(ctx.allocator, emit_info.streaming_side_table);
                 try rec.markNonUniform(local_offset);
             }
+            try embedZfiName(&rec, emit_info.name, &ctx.index.name_blob, ctx.allocator);
             try ctx.index.records.append(ctx.allocator, rec);
         }
     };
@@ -606,6 +624,12 @@ pub fn writeZfiIndexFile(
     try writer.writeAll(std.mem.asBytes(&header));
     try writer.writeAll(std.mem.sliceAsBytes(index.records.items));
     try writer.writeAll(index.side_tables.items);
+    try writer.writeAll(index.name_blob.items);
+    const footer = index_format.ZfiNameFooter{
+        .magic = index_format.ZFI_NAME_FOOTER_MAGIC,
+        .name_blob_len = index.name_blob.items.len,
+    };
+    try writer.writeAll(std.mem.asBytes(&footer));
     try file_fw.flush();
 }
 
@@ -617,10 +641,19 @@ pub fn zfiIndexToBytes(index: *const ZfiIndex, source_size: u64, allocator: std.
         .source_size = source_size,
     };
     const records_bytes = std.mem.sliceAsBytes(index.records.items);
-    const out = try allocator.alloc(u8, @sizeOf(ZfiHeader) + records_bytes.len + index.side_tables.items.len);
+    const footer = index_format.ZfiNameFooter{
+        .magic = index_format.ZFI_NAME_FOOTER_MAGIC,
+        .name_blob_len = index.name_blob.items.len,
+    };
+    const out = try allocator.alloc(u8, @sizeOf(ZfiHeader) + records_bytes.len + index.side_tables.items.len + index.name_blob.items.len + @sizeOf(index_format.ZfiNameFooter));
     @memcpy(out[0..@sizeOf(ZfiHeader)], std.mem.asBytes(&header));
     @memcpy(out[@sizeOf(ZfiHeader) .. @sizeOf(ZfiHeader) + records_bytes.len], records_bytes);
-    @memcpy(out[@sizeOf(ZfiHeader) + records_bytes.len ..], index.side_tables.items);
+    var pos = @sizeOf(ZfiHeader) + records_bytes.len;
+    @memcpy(out[pos .. pos + index.side_tables.items.len], index.side_tables.items);
+    pos += index.side_tables.items.len;
+    @memcpy(out[pos .. pos + index.name_blob.items.len], index.name_blob.items);
+    pos += index.name_blob.items.len;
+    @memcpy(out[pos..], std.mem.asBytes(&footer));
     return out;
 }
 
