@@ -100,14 +100,18 @@ pub const LoadedIndex = struct {
     pub const IndexSource = enum { zfi, fai };
 
     pub fn deinit(self: *LoadedIndex) void {
-        // munmap FASTA
         posix.munmap(@alignCast(@constCast(self.fasta_data)));
-        // munmap .zfi if loaded
         if (self.zfi_data) |zd| {
             posix.munmap(@alignCast(@constCast(zd)));
         }
-        self.name_map.deinit();
-        self.arena.deinit();
+        // `.fai` name_map keys and record storage live in `arena`. Hash-map deinit frees
+        // through the arena first and leaves the arena in a bad state for arena.deinit().
+        if (self.source == .fai) {
+            self.arena.deinit();
+        } else {
+            self.name_map.deinit();
+            self.arena.deinit();
+        }
     }
 
     pub fn lookupName(self: *const LoadedIndex, name: []const u8) ?usize {

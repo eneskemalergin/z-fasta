@@ -42,9 +42,14 @@ bench/stats/results/*
 bench/baselines/
 
 # Temp dirs from verify scripts
+# Get
 bench/get/.fixture*
 bench/get/.verify*
 bench/get/.bench*
+# Stats
+bench/stats/.fixture*
+bench/stats/.verify*
+bench/stats/.bench*
 
 # Python
 __pycache__/
