@@ -735,3 +735,41 @@ test "loadIndexChecked falls back to fai when zfi is stale" {
     try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.fai, idx.source);
     try std.testing.expectEqual(@as(?usize, 0), idx.lookupName("seq1"));
 }
+
+test "loadIndexCheckedWithMode preserves fai duplicate lookup semantics" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "duplicate-fai", "fa");
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    const fasta_data = ">dup\nAAAA\n>dup\nCCCC\n";
+    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+    defer fasta_file.close(io);
+    try std.Io.File.writeStreamingAll(fasta_file, io, fasta_data);
+
+    const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
+    defer fai_file.close(io);
+    try std.Io.File.writeStreamingAll(fai_file, io, "dup\t4\t5\t4\t5\ndup\t4\t15\t4\t5\n");
+
+    const zfi_file = try std.Io.Dir.cwd().createFile(io, zfi_path, .{ .truncate = true });
+    defer zfi_file.close(io);
+    try std.Io.File.writeStreamingAll(zfi_file, io, "stale");
+
+    var full_map_idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .lookup_full_map);
+    defer full_map_idx.deinit();
+    var records_only_idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .records_only);
+    defer records_only_idx.deinit();
+
+    try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.fai, records_only_idx.source);
+    try std.testing.expect(!records_only_idx.has_name_map);
+    try std.testing.expectEqual(@as(u16, 3), records_only_idx.records[0].name_len);
+    try std.testing.expectEqualStrings("dup", records_only_idx.getRecordName(0));
+    try std.testing.expectEqual(full_map_idx.lookupName("dup"), records_only_idx.lookupName("dup"));
+    try std.testing.expectEqual(@as(?usize, 1), records_only_idx.lookupName("dup"));
+}

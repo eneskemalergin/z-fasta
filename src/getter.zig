@@ -341,8 +341,8 @@ fn resolveParsedRequestsByRecordScan(
     };
     for (rec_indices.items) |*entry| entry.* = null;
 
-    for (idx.records, 0..) |rec, rec_idx| {
-        const rec_name = rec.getName(idx.fasta_data);
+    for (idx.records, 0..) |_, rec_idx| {
+        const rec_name = idx.getRecordName(rec_idx);
         for (requests, 0..) |request, request_idx| {
             if (std.mem.eql(u8, rec_name, request.region.name)) {
                 rec_indices.items[request_idx] = rec_idx;
@@ -360,11 +360,6 @@ fn resolveParsedRequestsByRecordScan(
 
 fn findRecordIndex(idx: *const LoadedIndex, name: []const u8) ?usize {
     if (idx.lookupName(name)) |rec_idx| return rec_idx;
-
-    for (idx.records, 0..) |rec, rec_idx| {
-        if (std.mem.eql(u8, rec.getName(idx.fasta_data), name)) return rec_idx;
-    }
-
     return null;
 }
 
@@ -838,7 +833,7 @@ fn processParsedRequests(
     var prev_start_byte: u64 = 0;
 
     // `.records_only` + 2..15 regions: by-record scan (see resolveParsedRequestsByRecordScan).
-    if (requests.len > 1 and requests.len < 16 and idx.source == .zfi and !idx.has_name_map) {
+    if (requests.len > 1 and requests.len < 16 and !idx.has_name_map) {
         resolveParsedRequestsByRecordScan(idx, requests, resolved, annotate_transform);
     } else {
         var last_name: ?[]const u8 = null;

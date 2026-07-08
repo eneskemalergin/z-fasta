@@ -374,21 +374,7 @@ pub fn runStats(io: std.Io, fasta_path: []const u8, index_only: bool) void {
 
 /// Get the name of a record, handling both .zfi and .fai sources.
 fn getRecordName(idx: *const LoadedIndex, rec_idx: usize) []const u8 {
-    const rec = idx.records[rec_idx];
-
-    // For .zfi, names are slices into the FASTA mmap
-    if (idx.source == .zfi and rec.name_len > 0) {
-        return idx.fasta_data[rec.name_offset..][0..rec.name_len];
-    }
-
-    // For .fai, look up in name_map (iterate to find by index)
-    var it = idx.name_map.iterator();
-    while (it.next()) |entry| {
-        if (entry.value_ptr.* == rec_idx) {
-            return entry.key_ptr.*;
-        }
-    }
-    return "?";
+    return idx.getRecordName(rec_idx);
 }
 
 /// Scan all sequence regions in the FASTA for composition.

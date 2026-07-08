@@ -32,9 +32,9 @@ pub const SideTableLine = extern struct {
 /// Index record for ZFI output (40 bytes padded).
 ///
 /// For `.zfi` indexes, `name_offset` / `name_len` point into the mmap'd FASTA (byte after `>`).
-/// For `.fai` fallback loads, both are zero: names live only in `LoadedIndex.name_map`
-/// (see `tryLoadFai`). Do not call `getName` on `.fai` records; use `lookupName` or
-/// `LoadedIndex.name_map` instead.
+/// For `.fai` fallback loads, `name_offset` / `name_len` point into the mmap'd `.fai`
+/// line (name field before the first tab). Do not call `getName` with `fasta_data` on
+/// `.fai` records; pass `LoadedIndex.fai_data` or use `getRecordName`.
 ///
 /// v0.3 stores non-uniform-width metadata in `_pad` so uniform records remain
 /// byte-identical to v0.2 records. `_pad[0] & 1 == 0` means the classic O(1)
@@ -50,7 +50,7 @@ pub const IndexRecord = extern struct {
     line_bytes: u32,
 
     pub fn getName(self: IndexRecord, data: []const u8) []const u8 {
-        // Valid for `.zfi` records only (`name_offset` > 0). `.fai` records store 0/0.
+        // `.zfi`: slice into FASTA (byte after `>`). `.fai`: slice into `.fai` mmap line.
         return data[self.name_offset..][0..self.name_len];
     }
 
@@ -84,13 +84,14 @@ pub const LoadMode = enum {
 
 /// Loaded FASTA + index state (from `.zfi` or samtools-compatible `.fai`).
 ///
-/// `source` tells which index format was loaded. `.fai` records keep `name_offset` /
-/// `name_len` at zero; sequence coordinates are valid, but names are resolved through
-/// `name_map` (always built for `.fai`). `.zfi` records embed name slices into `fasta_data`.
+/// `source` tells which index format was loaded. Names resolve through embedded
+/// `name_offset` / `name_len` (`.zfi` → FASTA mmap, `.fai` → `.fai` mmap) or
+/// `name_map` when loaded with `.lookup_full_map`.
 pub const LoadedIndex = struct {
     records: []const IndexRecord,
     name_map: std.StringHashMap(usize),
     has_name_map: bool,
+    fai_data: ?[]align(4096) const u8 = null,
     fasta_data: []align(4096) const u8,
     fasta_size: u64,
     zfi_data: ?[]align(4096) const u8,
@@ -99,10 +100,31 @@ pub const LoadedIndex = struct {
 
     pub const IndexSource = enum { zfi, fai };
 
+    fn nameBase(self: *const LoadedIndex) []const u8 {
+        return if (self.source == .zfi) self.fasta_data else self.fai_data.?;
+    }
+
+    pub fn getRecordName(self: *const LoadedIndex, rec_idx: usize) []const u8 {
+        const rec = self.records[rec_idx];
+        if (rec.name_len > 0) {
+            return rec.getName(self.nameBase());
+        }
+        var it = self.name_map.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.* == rec_idx) {
+                return entry.key_ptr.*;
+            }
+        }
+        return "?";
+    }
+
     pub fn deinit(self: *LoadedIndex) void {
         posix.munmap(@alignCast(@constCast(self.fasta_data)));
         if (self.zfi_data) |zd| {
             posix.munmap(@alignCast(@constCast(zd)));
+        }
+        if (self.fai_data) |fd| {
+            posix.munmap(@alignCast(@constCast(fd)));
         }
         // `.fai` name_map keys and record storage live in `arena`. Hash-map deinit frees
         // through the arena first and leaves the arena in a bad state for arena.deinit().
@@ -119,17 +141,15 @@ pub const LoadedIndex = struct {
             return self.name_map.get(name);
         }
 
-        if (self.source == .zfi) {
-            var found: ?usize = null;
-            for (self.records, 0..) |rec, i| {
-                if (std.mem.eql(u8, rec.getName(self.fasta_data), name)) {
-                    found = i;
-                }
+        const name_data = self.nameBase();
+        var found: ?usize = null;
+        for (self.records, 0..) |rec, i| {
+            if (rec.name_len == 0) continue;
+            if (std.mem.eql(u8, rec.getName(name_data), name)) {
+                found = i;
             }
-            return found;
         }
-
-        return null;
+        return found;
     }
 
     pub fn sideTableLines(self: *const LoadedIndex, rec: IndexRecord) []const SideTableLine {
@@ -276,7 +296,7 @@ pub fn loadIndexCheckedWithMode(io: std.Io, fasta_path: []const u8, mode: LoadMo
         return error.PathTooLong;
     };
 
-    switch (tryLoadFai(io, fai_path, fasta_data, fasta_stat) catch |err| {
+    switch (tryLoadFai(io, fai_path, fasta_data, fasta_stat, mode) catch |err| {
         posix.munmap(@alignCast(@constCast(fasta_data)));
         return err;
     }) {
@@ -363,7 +383,7 @@ fn tryLoadZfi(
     )[0..header.record_count];
 
     for (records) |rec| {
-        if (!isValidZfiRecord(rec, fasta_data, zfi_data)) {
+        if (mode == .lookup_full_map and !isValidZfiRecord(rec, fasta_data, zfi_data)) {
             return .corrupt;
         }
     }
@@ -397,6 +417,7 @@ fn tryLoadFai(
     fai_path: []const u8,
     fasta_data: []align(4096) const u8,
     fasta_stat: std.Io.File.Stat,
+    mode: LoadMode,
 ) LoadIndexError!LoadAttempt {
     const fai_file = std.Io.Dir.cwd().openFile(io, fai_path, .{}) catch |err| switch (err) {
         error.FileNotFound => return .not_found,
@@ -416,76 +437,122 @@ fn tryLoadFai(
         return .corrupt;
     }
 
-    // Read .fai into memory (they're small)
+    const fai_data = posix.mmap(
+        null,
+        fai_stat.size,
+        .{ .READ = true },
+        .{ .TYPE = .PRIVATE },
+        fai_file.handle,
+        0,
+    ) catch return error.MmapFailed;
+    errdefer posix.munmap(@alignCast(@constCast(fai_data)));
+
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     errdefer arena.deinit();
     const allocator = arena.allocator();
 
-    const fai_contents = allocator.alloc(u8, fai_stat.size) catch return error.OutOfMemory;
-    const bytes_read = std.Io.File.readPositionalAll(fai_file, io, fai_contents, 0) catch return error.Io;
-    const fai_data = fai_contents[0..bytes_read];
-
-    // Parse .fai lines: NAME\tLENGTH\tOFFSET\tLINE_BASES\tLINE_BYTES[\tQUAL_OFFSET]
-    var records_list: std.ArrayList(IndexRecord) = .empty;
+    const approx_records = std.mem.count(u8, fai_data, "\n");
+    const records = allocator.alloc(IndexRecord, approx_records) catch return error.OutOfMemory;
     var name_map = std.StringHashMap(usize).init(allocator);
+    var has_name_map = false;
+    if (mode == .lookup_full_map) {
+        name_map.ensureTotalCapacity(@intCast(approx_records)) catch return error.OutOfMemory;
+        has_name_map = true;
+    }
 
-    var line_iter = std.mem.splitScalar(u8, fai_data, '\n');
-    while (line_iter.next()) |line| {
-        if (line.len == 0) continue;
+    var record_count: usize = 0;
+    var pos: usize = 0;
+    while (pos < fai_data.len) {
+        const line_start = pos;
+        const rel_eol = std.mem.indexOfScalar(u8, fai_data[pos..], '\n') orelse fai_data.len - pos;
+        const line_len = rel_eol;
+        pos += rel_eol + 1;
+        if (line_len == 0) continue;
 
-        var fields = std.mem.splitScalar(u8, line, '\t');
-        const name = fields.next() orelse continue;
-        const len_str = fields.next() orelse {
-            return .corrupt;
-        };
-        const offset_str = fields.next() orelse {
-            return .corrupt;
-        };
-        const lb_str = fields.next() orelse {
-            return .corrupt;
-        };
-        const lbytes_str = fields.next() orelse {
-            return .corrupt;
-        };
-        // Ignore optional 6th field (qual_offset for FASTQ)
+        const line = fai_data[line_start..][0..line_len];
+        const name_end = std.mem.indexOfScalar(u8, line, '\t') orelse return .corrupt;
+        var field_start: usize = name_end + 1;
 
-        const seq_len = std.fmt.parseInt(u64, len_str, 10) catch return .corrupt;
-        const seq_offset = std.fmt.parseInt(u64, offset_str, 10) catch return .corrupt;
-        const line_bases = std.fmt.parseInt(u32, lb_str, 10) catch return .corrupt;
-        const line_bytes = std.fmt.parseInt(u32, lbytes_str, 10) catch return .corrupt;
+        const seq_len = parseFaiFieldU64(line, &field_start) catch return .corrupt;
+        const seq_offset = parseFaiFieldU64(line, &field_start) catch return .corrupt;
+        const line_bases = parseFaiFieldU32(line, &field_start) catch return .corrupt;
+        const line_bytes = parseFaiFieldU32(line, &field_start) catch return .corrupt;
 
-        // `.fai` rows do not carry FASTA name offsets; names are arena-owned in `name_map`.
         const rec = IndexRecord{
-            .name_offset = 0,
-            .name_len = 0,
+            .name_offset = line_start,
+            .name_len = @intCast(name_end),
             .seq_offset = seq_offset,
             .seq_len = seq_len,
             .line_bases = line_bases,
             .line_bytes = line_bytes,
         };
 
-        const idx = records_list.items.len;
-        records_list.append(allocator, rec) catch return error.OutOfMemory;
+        if (record_count >= records.len) return .corrupt;
+        records[record_count] = rec;
 
-        // Store arena-owned name slice in the map
-        const name_owned = allocator.dupe(u8, name) catch return error.OutOfMemory;
-        name_map.put(name_owned, idx) catch return error.OutOfMemory;
+        if (has_name_map) {
+            const name = rec.getName(fai_data);
+            name_map.putAssumeCapacity(name, record_count);
+        }
+
+        record_count += 1;
     }
 
-    if (records_list.items.len == 0) {
+    if (record_count == 0) {
         return .corrupt;
     }
 
     return .{ .loaded = LoadedIndex{
-        .records = records_list.items,
+        .records = records[0..record_count],
         .name_map = name_map,
-        .has_name_map = true,
+        .has_name_map = has_name_map,
+        .fai_data = fai_data,
         .fasta_data = fasta_data,
         .fasta_size = fasta_stat.size,
         .zfi_data = null,
         .source = .fai,
         .arena = arena,
     } };
+}
+
+fn parseFaiFieldU64(line: []const u8, field_start: *usize) LoadIndexError!u64 {
+    if (field_start.* < line.len and line[field_start.*] == '\t') {
+        field_start.* += 1;
+    }
+    if (field_start.* >= line.len) return error.CorruptIndex;
+
+    const field_end = std.mem.indexOfScalarPos(u8, line, field_start.*, '\t') orelse line.len;
+    const value = parseFaiAsciiU64(line[field_start.*..field_end]) orelse return error.CorruptIndex;
+    field_start.* = field_end;
+    return value;
+}
+
+fn parseFaiFieldU32(line: []const u8, field_start: *usize) LoadIndexError!u32 {
+    if (field_start.* < line.len and line[field_start.*] == '\t') {
+        field_start.* += 1;
+    }
+    if (field_start.* >= line.len) return error.CorruptIndex;
+
+    const field_end = std.mem.indexOfScalarPos(u8, line, field_start.*, '\t') orelse line.len;
+    const value = parseFaiAsciiU32(line[field_start.*..field_end]) orelse return error.CorruptIndex;
+    field_start.* = field_end;
+    return value;
+}
+
+fn parseFaiAsciiU64(text: []const u8) ?u64 {
+    if (text.len == 0) return null;
+    var value: u64 = 0;
+    for (text) |byte| {
+        if (byte < '0' or byte > '9') return null;
+        value = value * 10 + (byte - '0');
+    }
+    return value;
+}
+
+fn parseFaiAsciiU32(text: []const u8) ?u32 {
+    const wide = parseFaiAsciiU64(text) orelse return null;
+    if (wide > std.math.maxInt(u32)) return null;
+    return @intCast(wide);
 }
 
 fn isValidZfiRecord(
