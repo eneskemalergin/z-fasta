@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # verify.sh - z-fasta get verification (subject: z-fasta only; others are oracles)
 #
-# Bench layout: one runner (this file), like bench/index/run.sh. oracle.py is the
-# only helper script here; extend it in place or use awk/samtools, do not add more.
+# Single-file runner (like bench/index/run.sh). Messy/BED/RC expected output uses an
+# embedded Python oracle below; extend that or use awk/samtools, do not add sibling scripts.
 #
 # Tags: [parity:samtools] [parity:bedtools] [parity:seq] [extended:messy]
 #       [extended:header] [extended:summary] [extended:dedup] [index:zfi] [index:fai]
 #       [index:cross] [index:lowmem]
+#
+# Section 0 asserts .zfi == .fai byte-identical output for all uniform-index GET modes
+# (single, multi incl. 15-region scan / 16+ hash boundary, BED incl. large/stranded,
+# names, RC/complement/reverse). Messy non-uniform stays .zfi-only.
 #
 # Usage: ./verify.sh [--skip-index] [--skip-get] [--skip-multi] [--skip-bed] [--skip-rc] [--skip-edge]
 set -euo pipefail
@@ -16,7 +20,6 @@ SKIP_INDEX=false SKIP_GET=false SKIP_MULTI=false SKIP_BED=false SKIP_RC=false SK
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-ORACLE="$SCRIPT_DIR/oracle.py"
 MESSY_DIR="$PROJECT_DIR/bench/index/messy_variants"
 FIXTURE_CACHE="$SCRIPT_DIR/.fixture_cache"
 TMPDIR="$SCRIPT_DIR/.verify_tmp"
@@ -61,7 +64,90 @@ ensure_index() {
     [[ -f "${f}.zfi" ]] || "$ZFASTA" index "$f" 2>/dev/null
 }
 
-oracle() { python3 "$ORACLE" "$@"; }
+# Messy-FASTA oracles (region/rc/rev/comp/bed). argv: MODE FASTA ... OUT
+oracle() {
+    python3 - "$@" <<'PY'
+import sys
+from pathlib import Path
+
+RC = str.maketrans(
+    "ACGTURYSWKMBDHVNacgturyswkmbdhvn",
+    "TGCAAYRSWMKVHDBNtgcaayrswmkvhdbn",
+)
+
+
+def load_seqs(fasta: str) -> dict[str, str]:
+    seqs: dict[str, list[str]] = {}
+    cur: str | None = None
+    for line in Path(fasta).read_text().splitlines():
+        if line.startswith(">"):
+            cur = line[1:].split()[0]
+            seqs[cur] = []
+        elif cur is not None:
+            seqs[cur].append("".join(c for c in line if not c.isspace()))
+    return {name: "".join(parts) for name, parts in seqs.items()}
+
+
+def write_region(path: str, name: str, start: int, end: int, seq: str) -> None:
+    Path(path).write_text(f">{name}:{start}-{end}\n{seq}\n")
+
+
+def cmd_region(argv: list[str], transform) -> None:
+    fasta, name, start, end, out = argv[2], argv[3], int(argv[4]), int(argv[5]), argv[6]
+    seq = load_seqs(fasta)[name][start - 1 : end]
+    if transform is not None:
+        seq = transform(seq)
+    write_region(out, name, start, end, seq)
+
+
+def cmd_bed(argv: list[str], stranded_rc: bool = False) -> None:
+    fasta, bed, out = argv[2], argv[3], argv[4]
+    seqs = load_seqs(fasta)
+    parts: list[str] = []
+    for line in Path(bed).read_text().splitlines():
+        if not line or line.startswith("#") or line.startswith("track") or line.startswith("browser"):
+            continue
+        fields = line.split("\t")
+        chrom, s0, e0 = fields[0], int(fields[1]), int(fields[2])
+        seq = seqs[chrom][s0:e0]
+        if stranded_rc and (fields[5] if len(fields) >= 6 else ".") != "-":
+            seq = seq.translate(RC)[::-1]
+        parts.append(f">{chrom}:{s0 + 1}-{e0}\n{seq}\n")
+    Path(out).write_text("".join(parts))
+
+
+COMMANDS = {
+    "region": lambda a: cmd_region(a, None),
+    "rc": lambda a: cmd_region(a, lambda s: s.translate(RC)[::-1]),
+    "rev": lambda a: cmd_region(a, lambda s: s[::-1]),
+    "comp": lambda a: cmd_region(a, lambda s: s.translate(RC)),
+    "bed": lambda a: cmd_bed(a),
+    "bed-stranded-rc": lambda a: cmd_bed(a, stranded_rc=True),
+}
+
+if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
+    print("usage: oracle <region|rc|rev|comp|bed|bed-stranded-rc> ...", file=sys.stderr)
+    sys.exit(2)
+COMMANDS[sys.argv[1]](sys.argv)
+PY
+}
+
+_fixture_paths() {
+    local prefix="$1" src="$2" desc="$3"
+    local base="${src##*/}"; base="${base%.fasta}"
+    local safe="${desc// /_}"; safe="${safe//\//_}"; safe="${safe//|/_}"
+    FIXTURE_FASTA="$TMPDIR/${prefix}_${base}_${safe}.fasta"
+    FIXTURE_STASH="$TMPDIR/${prefix}_${base}_${safe}.zfi"
+}
+
+_zfasta_get() {
+    local fasta="$1" stdin_file="${2:-}"; shift 2
+    if [[ -n "$stdin_file" ]]; then
+        cat "$stdin_file" | "$ZFASTA" get "$fasta" "$@"
+    else
+        "$ZFASTA" get "$fasta" "$@"
+    fi
+}
 
 bed_to_regions() {
     awk -F'\t' '!/^[[:space:]]*$|^#|^track|^browser/{sub(/\r$/,""); printf "%s:%d-%d\n",$1,$2+1,$3}' "$1"
@@ -189,12 +275,41 @@ verify_open_ended_region() {
     fi
 }
 
-# --- index paths (.zfi vs .fai fallback) ---
+# verify_index_cross: byte-identical get with .zfi present vs .fai-only fallback.
+# Optional third arg: existing file → read GET input from stdin (e.g. BED via pipe).
+verify_index_cross() {
+    local desc="$1" src="$2"
+    shift 2
+    local stdin_file=""
+    [[ $# -gt 0 && -f "$1" ]] && { stdin_file="$1"; shift; }
+
+    _fixture_paths xidx "$src" "$desc"
+    local fasta="$FIXTURE_FASTA" stash="$FIXTURE_STASH"
+    local tag="[index:cross] $desc"
+
+    cp "$src" "$fasta"
+    ensure_index "$fasta"
+    [[ -f "${fasta}.zfi" && -f "${fasta}.fai" ]] || { fail "[index:cross] $desc sidecars missing"; return; }
+
+    if ! _zfasta_get "$fasta" "$stdin_file" "$@" > "$TMPDIR/zfi.out" 2>/dev/null; then
+        fail "[index:zfi] $desc get failed"
+        return
+    fi
+    mv "${fasta}.zfi" "$stash"
+    if ! _zfasta_get "$fasta" "$stdin_file" "$@" > "$TMPDIR/fai.out" 2>/dev/null; then
+        mv "$stash" "${fasta}.zfi"
+        fail "[index:fai] $desc get via .fai failed"
+        return
+    fi
+    diff_oracle "$TMPDIR/zfi.out" "$TMPDIR/fai.out" "$tag"
+    mv "$stash" "${fasta}.zfi"
+}
+
 verify_index() {
     local mode="$1" src="$2" target="$3" desc="$4"
     local base="${src##*/}"; base="${base%.fasta}"
-    local fasta="$TMPDIR/idx_${mode}_${base}_${desc// /_}.fasta"
-    local stash="$TMPDIR/idx_${mode}_${base}_${desc// /_}.zfi"
+    _fixture_paths "idx_${mode}" "$src" "$desc"
+    local fasta="$FIXTURE_FASTA" stash="$FIXTURE_STASH"
     local tag="idx $mode $base $desc"
     local zf_get=(get "$fasta") st_get=(faidx)
 
@@ -231,9 +346,9 @@ verify_index() {
 
 verify_low_mem() {
     local src="$1" target="$2" desc="$3" mode="${4:-positional}"
-    local base="${src##*/}"; base="${base%.fasta}"
-    local fasta="$TMPDIR/lowmem_${mode}_${base}_${desc// /_}.fasta"
-    local tag="low-mem $mode $base $desc"
+    _fixture_paths "lowmem_${mode}" "$src" "$desc"
+    local fasta="$FIXTURE_FASTA"
+    local tag="low-mem $mode ${src##*/} $desc"
     local get_cmd=(get "$fasta")
 
     [[ "$mode" == bed ]] && get_cmd+=(--bed "$target") || get_cmd+=("$target")
@@ -485,19 +600,92 @@ BED
 # --- sections ---
 section0_index() {
     section_hdr 0 "Index path coverage (.zfi vs .fai fallback)"
-    echo "  Indexable fixtures only; messy_variants are [extended:messy] (.zfi-only)"
-    verify_index positional tests/data/simple.fasta "seq1:1-10" "sub-region"
-    verify_index positional tests/data/simple.fasta "seq1" "full sequence"
+    echo "  Uniform fixtures only; messy_variants stay .zfi-only ([extended:messy])"
+    local simple="tests/data/simple.fasta" proteome="tests/data/proteome.fasta"
+    local edge="tests/data/edge_cases.fasta" mixed="tests/data/mixed_widths.fasta"
+    local bed_small="$TMPDIR/idx_bed_small.bed" bed_medium="$TMPDIR/idx_bed_medium.bed"
+    local bed_large="$TMPDIR/idx_bed_large.bed"
+    local mx_bed="$TMPDIR/idx_mx.bed" names="$TMPDIR/idx_names.txt"
+    local bed_rc="$TMPDIR/idx_bed_rc.bed"
+    local -a p16=() reg15=() reg1024=()
+    local prot1="sp|P12345|PROT_HUMAN" prot2="sp|Q98765|ANOT_MOUSE"
+
+    gen_bed_file "$bed_small" 10
+    gen_bed_file "$bed_medium" 100
+    gen_bed_file "$bed_large" 1000
+    gen_names_file "$names"
+    for i in {1..8}; do
+        p16+=("${prot1}:${i}-$((i + 2))" "${prot2}:${i}-$((i + 2))")
+    done
+    reg15=("${REG20[@]:0:15}")
+    for _ in {1..64}; do reg1024+=("seq1:1-1"); done
+
+    cat > "$mx_bed" <<'BED'
+mixed1	54	75	mixed1_span	0	+
+mixed2	74	95	mixed2_span	0	-
+mixed3	57	72	mixed3_span	0	+
+BED
+    cat > "$bed_rc" <<'BED'
+seq1	0	5	plus	0	+
+seq1	0	5	minus	0	-
+seq1	2	8	overlap_minus	0	-
+seq2	0	4	short_plus	0	+
+BED
+
+    # Spot checks with samtools oracle on both index paths.
+    verify_index positional "$simple" "seq1:1-10" "sub-region"
+    verify_index positional "$simple" "seq1" "full sequence"
     verify_index positional tests/data/single.fasta "single_sequence:1-4" "single record"
-    verify_index positional tests/data/proteome.fasta "sp|P12345|PROT_HUMAN:1-10" "pipe name"
-    verify_index positional tests/data/mixed_widths.fasta "mixed1:55-75" "mixed-width record"
-    local bed="$TMPDIR/idx_bed_small.bed"
-    gen_bed_file "$bed" 10
-    verify_index bed tests/data/simple.fasta "$bed" "small BED"
-    verify_low_mem tests/data/simple.fasta "seq1:1-10" "positional"
-    verify_low_mem tests/data/mixed_widths.fasta "mixed1:55-75" "mixed-width"
+    verify_index positional "$proteome" "sp|P12345|PROT_HUMAN:1-10" "pipe name"
+    verify_index positional "$mixed" "mixed1:55-75" "mixed-width record"
+    verify_index bed "$simple" "$bed_small" "small BED"
+
+    echo "  [index:cross] single-region"
+    verify_index_cross "sub-region" "$simple" "seq1:1-10"
+    verify_index_cross "full sequence" "$simple" "seq1"
+    verify_index_cross "open-ended region" "$simple" "seq1:10-"
+    verify_index_cross "pipe name sub-region" "$proteome" "sp|P12345|PROT_HUMAN:1-10"
+    verify_index_cross "mixed-width sub-region" "$mixed" "mixed1:55-75"
+    verify_index_cross "duplicate name (last wins)" "$edge" "dupname"
+    verify_index_cross "lowercase sub-region" "$edge" "lowercase:1-6"
+
+    echo "  [index:cross] multi-region"
+    verify_index_cross "two sub-regions" "$simple" "seq1:1-10" "seq1:13-24"
+    verify_index_cross "full + sub-region" "$simple" "seq1" "seq2:3-10"
+    verify_index_cross "15 regions (scan path max)" "$simple" "${reg15[@]}"
+    verify_index_cross "16 regions (hash map path)" "$proteome" "${p16[@]}"
+    verify_index_cross "20 regions (sort path)" "$simple" "${REG20[@]}"
+    verify_index_cross "64 regions (hash map path)" "$simple" "${reg1024[@]}"
+
+    echo "  [index:cross] BED and names"
+    verify_index_cross "small BED default chunk" "$simple" --bed "$bed_small" --chunk-size 3
+    verify_index_cross "medium BED chunk 97" "$simple" --bed "$bed_medium" --chunk-size 97
+    verify_index_cross "large BED chunk 257" "$simple" --bed "$bed_large" --chunk-size 257
+    verify_index_cross "BED chunk-size -1" "$simple" --bed "$bed_medium" --chunk-size -1
+    verify_index_cross "BED chunk-size 1" "$simple" --bed "$bed_small" --chunk-size 1
+    verify_index_cross "BED via stdin" "$simple" "$bed_small" --bed - --chunk-size 3
+    verify_index_cross "BED stranded" "$simple" --bed "$bed_small" --chunk-size 3 --strand-aware
+    verify_index_cross "BED --honor-strand alias" "$simple" --bed "$bed_small" --chunk-size 4096 --honor-strand
+    verify_index_cross "large BED stranded chunk 257" "$simple" --bed "$bed_large" --chunk-size 257 --strand-aware
+    verify_index_cross "mixed-width BED" "$mixed" --bed "$mx_bed"
+    verify_index_cross "names file" "$simple" --names "$names"
+
+    echo "  [index:cross] RC / complement / reverse"
+    verify_index_cross "--rc" "$simple" "seq1:1-5" --rc
+    verify_index_cross "--complement-only" "$simple" "seq1:1-5" --complement-only
+    verify_index_cross "--reverse-only" "$simple" "seq1:1-5" --reverse-only
+    verify_index_cross "multi --rc" "$simple" "seq1:1-5" "seq1:10-15" "seq1:20-24" --rc
+    verify_index_cross "names --rc" "$simple" --names "$names" --rc
+    verify_index_cross "BED --strand-aware --rc" "$simple" --bed "$bed_rc" --strand-aware --rc
+    verify_index_cross "--rc --annotate-rc" "$simple" "seq1:1-5" --rc --annotate-rc
+    verify_index_cross "--complement-only --annotate-rc" "$simple" "seq1:1-5" --complement-only --annotate-rc
+    verify_index_cross "IUPAC --rc" "$(gen_iupac_fixture)" "iupac_all:1-33" --rc
+    verify_index_cross "IUPAC --complement-only" "$(gen_iupac_fixture)" "iupac_all:1-33" --complement-only
+
+    verify_low_mem "$simple" "seq1:1-10" "positional"
+    verify_low_mem "$mixed" "mixed1:55-75" "mixed-width"
     verify_low_mem "$MESSY_DIR/mixed_line_widths.fasta" "mixed_line_widths:3-24" "messy positional"
-    verify_low_mem tests/data/simple.fasta "$bed" "small BED" bed
+    verify_low_mem "$simple" "$bed_small" "small BED" bed
     verify_messy_zfi_required mixed_line_widths 1 8
 }
 
@@ -581,6 +769,7 @@ section2() {
     parity_samtools_regions "$simple" "all reversed" "seq2" "seq1"
     parity_samtools_regions "$simple" "20 regions sort path" "${REG20[@]}"
     parity_samtools_regions "$simple" "20 regions reversed" "${REG20_REV[@]}"
+    parity_samtools_regions "$simple" "15 regions (scan path max)" "${REG20[@]:0:15}"
     wrapper_regions "multi same seq" "$simple" "seq1:1-10" "seq1:13-24"
     wrapper_regions "multi file order" "$simple" "seq1:1-12" "seq2:1-6"
     wrapper_regions "multi 20 regions" "$simple" "${REG20[@]}"
