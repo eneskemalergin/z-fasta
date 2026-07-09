@@ -117,10 +117,14 @@ def compute_expected(fasta: str, *, dedup: bool = True) -> dict:
     mean = total_bases // num_seqs if num_seqs else 0
     if num_seqs == 0:
         median = 0
+        median_half_up = 0
     elif num_seqs % 2 == 1:
         median = sorted_desc[num_seqs // 2]
+        median_half_up = median
     else:
-        median = (sorted_desc[num_seqs // 2 - 1] + sorted_desc[num_seqs // 2]) // 2
+        central_sum = sorted_desc[num_seqs // 2 - 1] + sorted_desc[num_seqs // 2]
+        median = central_sum // 2  # z-fasta integer floor
+        median_half_up = (central_sum + 1) // 2  # seqkit-style round half up
 
     threshold_50 = (total_bases + 1) // 2
     threshold_90 = (total_bases * 9 + 9) // 10
@@ -164,6 +168,7 @@ def compute_expected(fasta: str, *, dedup: bool = True) -> dict:
         "longest_name": records[longest_idx].id,
         "mean": mean,
         "median": median,
+        "median_half_up": median_half_up,
         "n50": n50,
         "l50": l50,
         "n90": n90,
@@ -279,12 +284,122 @@ def parse_zfasta(text: str) -> dict:
 
 
 def parse_wrapper(text: str) -> dict:
-    out: dict = {}
+    out: dict = {"top_aa": []}
     for line in text.splitlines():
         key, _, val = line.partition("\t")
-        if key in ("sequences", "total_bases"):
+        if not key:
+            continue
+        if key in (
+            "sequences",
+            "total_bases",
+            "shortest_len",
+            "longest_len",
+            "mean",
+            "median",
+            "n50",
+            "l50",
+            "n90",
+            "l90",
+            "au",
+            "n_content",
+        ):
             out[key] = int(val)
+        elif key in (
+            "a_pct",
+            "c_pct",
+            "g_pct",
+            "t_pct",
+            "n_pct",
+            "other_pct",
+            "gc_pct",
+            "gc_skew",
+            "soft_pct",
+        ):
+            out[key] = float(val)
+        elif key in ("shortest_name", "longest_name", "type"):
+            out[key] = val
+        elif key.startswith("top_aa_"):
+            # code:pct:name
+            parts = val.split(":", 2)
+            if len(parts) == 3:
+                out["top_aa"].append(
+                    {"code": parts[0], "pct": float(parts[1]), "name": parts[2]}
+                )
     return out
+
+
+def compare_wrapper_to_expected(tool: str, expected: dict, got: dict, errors: list[str]) -> None:
+    """Compare wrapper TSV stats to BioPython expected (z-fasta field formulas).
+
+    Wrappers are clean-FASTA comparison peers only. They re-parse the FASTA with
+    noodles/rust-bio; they do not strip messy whitespace or use side tables.
+    Require the expanded field set so a stale 2-line binary fails loudly.
+    """
+    required = (
+        "sequences",
+        "total_bases",
+        "shortest_len",
+        "longest_len",
+        "mean",
+        "median",
+        "n50",
+        "l50",
+        "n90",
+        "l90",
+        "au",
+        "type",
+        "soft_pct",
+    )
+    missing = [k for k in required if k not in got]
+    if missing:
+        errors.append(
+            f"{tool}: stale or incomplete stats output (missing {', '.join(missing)}); "
+            f"rebuild tools/{tool}_wrapper --target-dir ./target"
+        )
+        return
+
+    int_ok(errors, f"{tool}.sequences", expected["num_seqs"], got.get("sequences", -2))
+    int_ok(errors, f"{tool}.total_bases", expected["total_bases"], got.get("total_bases", -2))
+    for key in (
+        "shortest_len",
+        "longest_len",
+        "mean",
+        "median",
+        "n50",
+        "l50",
+        "n90",
+        "l90",
+        "au",
+    ):
+        int_ok(errors, f"{tool}.{key}", expected[key], got.get(key, -2))
+    str_ok(errors, f"{tool}.shortest_name", expected["shortest_name"], got.get("shortest_name", "?"))
+    str_ok(errors, f"{tool}.longest_name", expected["longest_name"], got.get("longest_name", "?"))
+    want_type = "nucleotide" if expected["seq_type"] == "nucleotide" else "protein"
+    str_ok(errors, f"{tool}.type", want_type, got.get("type", "?"))
+    float_ok(errors, f"{tool}.soft_pct", expected["soft_pct"], got.get("soft_pct", -1.0))
+
+    if expected["seq_type"] == "nucleotide":
+        for key in ("a_pct", "c_pct", "g_pct", "t_pct", "n_pct", "gc_pct"):
+            if key not in got:
+                errors.append(f"{tool}.{key}: missing from wrapper output")
+                continue
+            float_ok(errors, f"{tool}.{key}", expected[key], got.get(key, -1.0))
+        if expected.get("has_other"):
+            float_ok(errors, f"{tool}.other_pct", expected["other_pct"], got.get("other_pct", -1.0))
+        if expected.get("has_gc_skew"):
+            float_ok(errors, f"{tool}.gc_skew", expected["gc_skew"], got.get("gc_skew", 9.0), tol=0.002)
+        int_ok(errors, f"{tool}.n_content", expected["n_count"], got.get("n_content", -1))
+    else:
+        got_top = got.get("top_aa", [])
+        if len(got_top) < 3:
+            errors.append(f"{tool}.top_aa: expected 3 entries, got {len(got_top)}")
+        for i, want in enumerate(expected.get("top_aa", [])):
+            if i >= len(got_top):
+                errors.append(f"{tool}.top_aa[{i}]: missing")
+                continue
+            float_ok(errors, f"{tool}.top_aa[{i}].pct", want["pct"], got_top[i].get("pct", -1.0))
+            str_ok(errors, f"{tool}.top_aa[{i}].code", want["code"], got_top[i].get("code", "?"))
+            str_ok(errors, f"{tool}.top_aa[{i}].name", want["name"], got_top[i].get("name", "?"))
 
 
 def parse_int_field(s: str) -> int:
@@ -295,6 +410,24 @@ def parse_seqkit_assembly(text: str) -> dict:
     lines = [ln for ln in text.splitlines() if ln.strip() and not ln.startswith("file")]
     if not lines:
         return {}
+    # Prefer TSV (-T): header + data. Fall back to whitespace table.
+    raw_lines = [ln for ln in text.splitlines() if ln.strip()]
+    if len(raw_lines) >= 2 and "\t" in raw_lines[0]:
+        headers = raw_lines[0].split("\t")
+        cols = raw_lines[-1].split("\t")
+        if len(cols) < len(headers):
+            return {}
+        by = dict(zip(headers, cols))
+        out: dict = {
+            "num_seqs": parse_int_field(by.get("num_seqs", "-1")),
+            "total_bases": parse_int_field(by.get("sum_len", "-1")),
+            "n50": parse_int_field(by.get("N50", "-1")),
+            "gc_pct": float(by.get("GC(%)", "-2")),
+        }
+        if "Q2" in by:
+            out["q2"] = parse_int_field(by["Q2"])
+        return out
+
     cols = lines[-1].split()
     if len(cols) < 18:
         return {}
@@ -303,7 +436,32 @@ def parse_seqkit_assembly(text: str) -> dict:
         "total_bases": parse_int_field(cols[4]),
         "n50": parse_int_field(cols[12]),
         "gc_pct": float(cols[17]),
+        # Whitespace table: Q2 is column 10 (0-based index 9) when -a is used.
+        "q2": parse_int_field(cols[9]) if len(cols) > 9 else -1,
     }
+
+
+def seqkit_q2_vs_median(expected: dict, q2: int, errors: list[str]) -> None:
+    """Compare seqkit Q2 to z-fasta median.
+
+    Odd N: Q2 must equal median.
+    Even N: both average the two central lengths; z-fasta floors, seqkit rounds half up.
+    Example proteome lengths 20 and 51: midpoint 35.5 -> z-fasta 35, seqkit Q2 36.
+    """
+    median = expected["median"]
+    half_up = expected.get("median_half_up", median)
+    n = expected["num_seqs"]
+    if n <= 0:
+        errors.append("seqkit.q2: expected num_seqs > 0")
+        return
+    if n % 2 == 1:
+        int_ok(errors, "seqkit.q2_vs_median", median, q2)
+        return
+    int_ok(errors, "seqkit.q2_vs_median_half_up", half_up, q2)
+    if half_up != median and q2 == median:
+        errors.append(
+            f"seqkit.q2_vs_median: got floor {median} but seqkit should half-up to {half_up}"
+        )
 
 
 def parse_seqtk_comp(text: str, indexed_names: list[str]) -> dict:
@@ -516,10 +674,8 @@ def cmd_parity(argv: list[str]) -> None:
         tool, path = argv[pos], argv[pos + 1]
         pos += 2
         if tool in ("noodles", "rustbio"):
-            zf = parse_zfasta(Path(zfi_idx).read_text())
             got = parse_wrapper(Path(path).read_text())
-            int_ok(errors, f"{tool}.sequences", zf.get("num_seqs", -1), got.get("sequences", -2))
-            int_ok(errors, f"{tool}.total_bases", zf.get("total_bases", -1), got.get("total_bases", -2))
+            compare_wrapper_to_expected(tool, expected, got, errors)
             tools_validated += 1
         elif tool == "seqkit":
             zf = parse_zfasta(Path(zfi_full).read_text())
@@ -527,6 +683,12 @@ def cmd_parity(argv: list[str]) -> None:
             int_ok(errors, "seqkit.num_seqs", expected["num_seqs"], sk.get("num_seqs", -1))
             int_ok(errors, "seqkit.total_bases", expected["total_bases"], sk.get("total_bases", -1))
             int_ok(errors, "seqkit.n50", expected["n50"], sk.get("n50", -1))
+            if "q2" not in sk:
+                errors.append("seqkit.q2: missing (run seqkit stats -a)")
+            else:
+                seqkit_q2_vs_median(expected, sk["q2"], errors)
+            # Cross-check z-fasta printed median against BioPython expected.
+            int_ok(errors, "seqkit.zfasta_median", expected["median"], zf.get("median", -1))
             if expected["seq_type"] == "nucleotide" and "gc_pct" in zf:
                 float_ok(errors, "seqkit.gc_pct", zf["gc_pct"], sk.get("gc_pct", -2.0))
             tools_validated += 1

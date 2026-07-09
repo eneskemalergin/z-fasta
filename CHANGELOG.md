@@ -17,6 +17,9 @@ Ongoing release: messy-FASTA `.zfi` side tables, streaming `index --low-mem`, `v
 - **`tests/test_index.zig`**: v0.2 to v0.3 side-table and index compatibility coverage; `.fai` `records_only` vs `lookup_full_map` duplicate-name parity test.
 - **`build.zig`**: `test_validator` target for validator unit tests.
 - **`complement.complementInto`**: chunked IUPAC complement into a caller buffer (shared by forward and reverse GET emit).
+- **`bench/stats/verify.sh`**: L2 stats gate (BioPython oracle, `.zfi`/`.fai`/cross, layout twins messy==uniform, messy fixtures, low-mem, dedup + Duplicates policy, per-tool parity, CLI errors; 92 checks). See `plan/stats-bench.md`.
+- **`bench/stats/fixtures/layout_twins/`**: same-base FASTA layouts (uniform vs mixed widths / trailing ws / blank lines / mixed CRLF) for layout-invariant stats checks.
+- **`tools/noodles_wrapper` / `tools/rustbio_wrapper` `stats`**: clean-FASTA TSV comparison peers with assembly + composition fields (N50/N90/AU, GC skew, protein top-AA) so benches/verify can compare more than sequences/bases. Not messy/side-table capable.
 
 ### Changed
 
@@ -30,7 +33,7 @@ Ongoing release: messy-FASTA `.zfi` side tables, streaming `index --low-mem`, `v
 - **`get` uniform emit**: `emitRegionForwardUniform` / `emitRegionBackwardUniform` for fixed-width records; reverse and RC share the same chunked path.
 - **`get` protein-guard sample**: `detectRecordType` samples at most 256 bases per record (was up to 100k).
 - **`stats`**: composition and whitespace checks follow side tables on non-uniform records. Whitespace uses `byte > ' '` instead of explicit `\n`/`\r` tests. Record names use `LoadedIndex.getRecordName`.
-- **Benchmark suite overhaul** (from v0.2.9 hyperfine): zebrac runners `bench/index/run.sh` and `bench/get/run.sh` (verify to perf to report) via shared `bench/shared/zebrac_runner.sh`; rewritten `generate_report.py` / `REPORT.md` for index and GET; GET verify scripts merged into `bench/get/verify.sh` (409 checks). Stats runner/report not yet restored.
+- **Benchmark suite overhaul** (from v0.2.9 hyperfine): zebrac runners `bench/index/run.sh` and `bench/get/run.sh` (verify to perf to report) via shared `bench/shared/zebrac_runner.sh`; rewritten `generate_report.py` / `REPORT.md` for index and GET; GET verify scripts merged into `bench/get/verify.sh` (409 checks). Stats L2 verify restored (`bench/stats/verify.sh`, 78 checks); stats perf runner/report not yet restored.
 - **`bench/get` RC figure**: plain z-fasta hatched like seqtk (ref); `--rc` / `--complement-only` / `--reverse-only` use distinct shades of brand gold.
 - **`README.md`**: benchmark commands point at `bench/index/run.sh` and the updated verification workflow.
 
