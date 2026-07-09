@@ -9,7 +9,8 @@ Ongoing release: messy-FASTA `.zfi` side tables, streaming `index --low-mem`, `v
 
 ### Added
 
-- **Messy-FASTA `.zfi` side tables** (`ZFI\x01` magic unchanged): per-record non-uniform flag in `_pad` and per-line side tables for mixed-width FASTA. Uniform records stay the same 40-byte layout as before.
+- **`.zfi` embedded name table**: sequence names are stored in the index at build time (`ZFNM` footer + name blob). `lookup_full_map` builds a pointer hash over the blob without touching the FASTA header scan path. **Re-index required** for existing `.zfi` files to pick up the new layout.
+- **`.zfi` name footer**: tight 12-byte on-disk footer (4-byte magic + u64 length); legacy 16-byte footers remain readable.
 - **`get` side-table lookup**: binary search on side tables for non-uniform records (O(log L) per base; L is line count).
 - **`z-fasta validate`**: structure, alphabet, and header checks (duplicate names, invalid characters, null bytes, UTF-8 BOM, inconsistent line widths, trailing whitespace, empty sequences, missing terminal newlines, mixed line endings, long headers, schema violations). Output modes: human text; `--json` JSON Lines (`schema_version: "v1"` per event); `--json --summary` aggregate object. `--strict` promotes warnings to errors. `--fix -o <file>` rewrites format issues. Also `--fix-format-only`, `--schema uniprot`, `--schema refseq`, `--custom-alphabet`, and `--max-header-len N` (default 1024).
 - **`index --low-mem` streaming `.zfi`**: bounded-RAM build path. Output bytes match mmap `index` on simple and messy fixtures. `--emit-fai` writes FAI to stdout (same as mmap).
@@ -21,7 +22,7 @@ Ongoing release: messy-FASTA `.zfi` side tables, streaming `index --low-mem`, `v
 - **Default mmap `index`**: writes `.zfi` via `scanZfiIndex()` with in-memory record and side-table arrays (replaces dummy-header streaming write). `scanFastaRecords` passes sequence data and uniform-width flag to the emit callback.
 - **`index --low-mem`**: default output is `{file}.zfi` (was FAI-only in v0.2.x). Shares line-metrics semantics with mmap via `ChunkParseState` and `LineMetricsBuilder`. Removed duplicate `StreamingParseState` parser.
 - **`.fai` fallback loading** (`index_format.zig`): respects `LoadMode` like `.zfi` (name hash map only for `lookup_full_map`). Single-pass mmap parse; record names live in the mmap'd `.fai` via `name_offset` / `name_len`. `LoadedIndex.getRecordName` resolves names for both index sources.
-- **`.zfi` `records_only` loads**: skip the full per-record validation loop on single-region and small multi-region GET paths. Faster reads; weaker corrupt-index detection on those paths only.
+- **`get` large BED RSS**: sorted/sequential batch paths drop FASTA pages behind the scan cursor (`MADV_DONTNEED`) so multi-thousand-row BED runs stay near index size instead of retaining the whole mmap.
 - **`get` multi-region scan** (2 to 15 regions, no BED/names): record scan path applies to `.fai` fallback as well as `.zfi`.
 - **`stats`**: composition and whitespace checks follow side tables on non-uniform records. Whitespace uses `byte > ' '` instead of explicit `\n`/`\r` tests. Record names use `LoadedIndex.getRecordName`.
 - **Benchmark suite overhaul** (from v0.2.9 hyperfine): zebrac runners `bench/index/run.sh` and `bench/get/run.sh` (verify to perf to report) via shared `bench/shared/zebrac_runner.sh`; rewritten `generate_report.py` / `REPORT.md` for index and GET; GET verify scripts merged into `bench/get/verify.sh` (409 checks). Stats runner/report not yet restored.

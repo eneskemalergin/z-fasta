@@ -431,10 +431,41 @@ fn ensureComplementAllowed(idx: *const LoadedIndex, requests: []const ParsedRequ
 // Sequence emission
 // ============================================================================
 
-/// Writes one region's FASTA output.
+/// Writes one region's FASTA output and releases cached FASTA pages for the span read.
 pub fn extractRegion(idx: *const LoadedIndex, region_str: []const u8, writer: anytype) void {
     const resolved = resolveRegion(idx, region_str, 0);
-    emitRegion(resolved, idx.fasta_data, writer);
+    emitRegionAndRelease(resolved, idx.fasta_data, writer);
+}
+
+fn emitRegionAndRelease(resolved: ResolvedRegion, fasta: []const u8, writer: anytype) void {
+    emitRegion(resolved, fasta, writer);
+    const span = fastaSpanForRegion(resolved, fasta);
+    index_format.dropFastaSpan(fasta, span.start, span.end);
+}
+
+/// Like `emitRegionAndRelease`, but drops FASTA pages before `start_byte` when regions
+/// are emitted in ascending file order so earlier sequence data stays evicted.
+fn emitRegionAndReleaseSequential(resolved: ResolvedRegion, fasta: []const u8, writer: anytype) void {
+    index_format.dropFastaPrefix(fasta, @intCast(resolved.start_byte));
+    emitRegion(resolved, fasta, writer);
+    const span = fastaSpanForRegion(resolved, fasta);
+    index_format.dropFastaSpan(fasta, span.start, span.end);
+}
+
+fn fastaSpanForRegion(resolved: ResolvedRegion, fasta: []const u8) struct { start: usize, end: usize } {
+    const rec = IndexRecord{
+        .name_offset = 0,
+        .name_len = 0,
+        .seq_offset = resolved.seq_offset,
+        .seq_len = resolved.start - 1 + resolved.num_bases,
+        .line_bases = resolved.line_bases,
+        .line_bytes = resolved.line_bytes,
+    };
+    const start: usize = @intCast(resolved.start_byte);
+    const last_base_index = resolved.start - 1 + resolved.num_bases - 1;
+    const last_byte = byteOffsetForBase(fasta, rec, resolved.side_table, last_base_index);
+    const end: usize = @min(fasta.len, @as(usize, @intCast(last_byte)) + resolved.line_bytes);
+    return .{ .start = start, .end = @max(start + 1, end) };
 }
 
 /// Write FASTA output for one resolved region to `writer`.
@@ -632,7 +663,10 @@ fn shouldAdviseSequentialMmap(
 }
 
 fn adviseFastaMmap(fasta: []const u8, advice: u32) void {
-    posix.madvise(@alignCast(@constCast(fasta.ptr)), fasta.len, advice) catch {};
+    if (fasta.len == 0) return;
+    const len = std.mem.alignBackward(usize, fasta.len, std.heap.page_size_min);
+    if (len == 0) return;
+    posix.madvise(@alignCast(@constCast(fasta.ptr)), len, advice) catch {};
 }
 
 fn readAllInput(allocator: std.mem.Allocator, io: std.Io, path: []const u8) []u8 {
@@ -880,13 +914,13 @@ fn processParsedRequests(
     if (requests.len < 16) {
         for (resolved) |r| {
             total_bases += r.num_bases;
-            emitRegion(r, idx.fasta_data, writer);
+            emitRegionAndRelease(r, idx.fasta_data, writer);
         }
     } else {
         if (already_in_offset_order) {
             for (resolved) |r| {
                 total_bases += r.num_bases;
-                emitRegion(r, idx.fasta_data, writer);
+                emitRegionAndReleaseSequential(r, idx.fasta_data, writer);
             }
             return .{
                 .region_count = requests.len,
@@ -897,7 +931,7 @@ fn processParsedRequests(
         if (!use_sort_buffers) {
             for (resolved) |r| {
                 total_bases += r.num_bases;
-                emitRegion(r, idx.fasta_data, writer);
+                emitRegionAndRelease(r, idx.fasta_data, writer);
             }
             return .{
                 .region_count = requests.len,
@@ -927,7 +961,7 @@ fn processParsedRequests(
 
         for (sorted) |r| {
             total_bases += r.num_bases;
-            emitRegion(r, idx.fasta_data, &output_bufs[r.original_index].writer);
+            emitRegionAndReleaseSequential(r, idx.fasta_data, &output_bufs[r.original_index].writer);
         }
 
         for (output_bufs) |*buf| {

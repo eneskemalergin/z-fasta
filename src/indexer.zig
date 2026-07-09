@@ -625,11 +625,7 @@ pub fn writeZfiIndexFile(
     try writer.writeAll(std.mem.sliceAsBytes(index.records.items));
     try writer.writeAll(index.side_tables.items);
     try writer.writeAll(index.name_blob.items);
-    const footer = index_format.ZfiNameFooter{
-        .magic = index_format.ZFI_NAME_FOOTER_MAGIC,
-        .name_blob_len = index.name_blob.items.len,
-    };
-    try writer.writeAll(std.mem.asBytes(&footer));
+    try writer.writeAll(&index_format.encodeZfiNameFooter(index.name_blob.items.len));
     try file_fw.flush();
 }
 
@@ -641,11 +637,8 @@ pub fn zfiIndexToBytes(index: *const ZfiIndex, source_size: u64, allocator: std.
         .source_size = source_size,
     };
     const records_bytes = std.mem.sliceAsBytes(index.records.items);
-    const footer = index_format.ZfiNameFooter{
-        .magic = index_format.ZFI_NAME_FOOTER_MAGIC,
-        .name_blob_len = index.name_blob.items.len,
-    };
-    const out = try allocator.alloc(u8, @sizeOf(ZfiHeader) + records_bytes.len + index.side_tables.items.len + index.name_blob.items.len + @sizeOf(index_format.ZfiNameFooter));
+    const footer = index_format.encodeZfiNameFooter(index.name_blob.items.len);
+    const out = try allocator.alloc(u8, @sizeOf(ZfiHeader) + records_bytes.len + index.side_tables.items.len + index.name_blob.items.len + footer.len);
     @memcpy(out[0..@sizeOf(ZfiHeader)], std.mem.asBytes(&header));
     @memcpy(out[@sizeOf(ZfiHeader) .. @sizeOf(ZfiHeader) + records_bytes.len], records_bytes);
     var pos = @sizeOf(ZfiHeader) + records_bytes.len;
@@ -653,7 +646,7 @@ pub fn zfiIndexToBytes(index: *const ZfiIndex, source_size: u64, allocator: std.
     pos += index.side_tables.items.len;
     @memcpy(out[pos .. pos + index.name_blob.items.len], index.name_blob.items);
     pos += index.name_blob.items.len;
-    @memcpy(out[pos..], std.mem.asBytes(&footer));
+    @memcpy(out[pos..], &footer);
     return out;
 }
 

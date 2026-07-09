@@ -16,10 +16,24 @@ const MAX_SIDE_TABLE_OFFSET = (1 << (SIDE_TABLE_OFFSET_BYTES * 8)) - 1;
 
 pub const ZFI_NAME_FOOTER_MAGIC: [4]u8 = .{ 'Z', 'F', 'N', 'M' };
 
-pub const ZfiNameFooter = extern struct {
-    magic: [4]u8,
-    name_blob_len: u64,
-};
+/// On-disk name-table footer size (4-byte magic + little-endian u64 length).
+pub const zfi_name_footer_bytes: usize = 12;
+
+pub fn encodeZfiNameFooter(name_blob_len: u64) [zfi_name_footer_bytes]u8 {
+    var out: [zfi_name_footer_bytes]u8 = undefined;
+    @memcpy(out[0..4], &ZFI_NAME_FOOTER_MAGIC);
+    std.mem.writeInt(u64, out[4..12], name_blob_len, .little);
+    return out;
+}
+
+fn decodeZfiNameFooterBytes(footer_bytes: []const u8) ?u64 {
+    if (footer_bytes.len < zfi_name_footer_bytes) return null;
+    if (!std.mem.eql(u8, footer_bytes[0..4], &ZFI_NAME_FOOTER_MAGIC)) return null;
+    return std.mem.readInt(u64, footer_bytes[4..12], .little);
+}
+
+/// Legacy on-disk footer written before tight layout (16 bytes: magic + 4 pad + u64).
+const zfi_name_footer_legacy_bytes: usize = 16;
 
 pub const ZfiHeader = extern struct {
     magic: [4]u8,
@@ -357,14 +371,33 @@ pub fn loadIndexCheckedWithMode(io: std.Io, fasta_path: []const u8, mode: LoadMo
 
 fn parseZfiNameBlob(zfi_data: []const u8, records: []const IndexRecord) ?[]const u8 {
     if (records.len == 0 or !records[0].nameInZfi()) return null;
-    if (zfi_data.len < @sizeOf(ZfiNameFooter)) return null;
-    var footer: ZfiNameFooter = undefined;
-    @memcpy(std.mem.asBytes(&footer), zfi_data[zfi_data.len - @sizeOf(ZfiNameFooter) ..]);
-    if (!std.mem.eql(u8, &footer.magic, &ZFI_NAME_FOOTER_MAGIC)) return null;
-    const blob_len: usize = @intCast(footer.name_blob_len);
-    const footer_start = zfi_data.len - @sizeOf(ZfiNameFooter);
+
+    const parsed = parseZfiNameFooter(zfi_data) orelse return null;
+    const blob_len: usize = @intCast(parsed.name_blob_len);
+    const footer_start = zfi_data.len - parsed.footer_bytes;
     if (footer_start < blob_len) return null;
     return zfi_data[footer_start - blob_len .. footer_start];
+}
+
+fn parseZfiNameFooter(zfi_data: []const u8) ?struct {
+    name_blob_len: u64,
+    footer_bytes: usize,
+} {
+    if (zfi_data.len >= zfi_name_footer_bytes) {
+        if (decodeZfiNameFooterBytes(zfi_data[zfi_data.len - zfi_name_footer_bytes ..])) |name_blob_len| {
+            return .{ .name_blob_len = name_blob_len, .footer_bytes = zfi_name_footer_bytes };
+        }
+    }
+
+    if (zfi_data.len >= zfi_name_footer_legacy_bytes) {
+        const tail = zfi_data[zfi_data.len - zfi_name_footer_legacy_bytes ..];
+        if (std.mem.eql(u8, tail[0..4], &ZFI_NAME_FOOTER_MAGIC)) {
+            const name_blob_len: u64 = @bitCast(tail[8..16].*);
+            return .{ .name_blob_len = name_blob_len, .footer_bytes = zfi_name_footer_legacy_bytes };
+        }
+    }
+
+    return null;
 }
 
 fn buildNameMapFast(
@@ -421,11 +454,17 @@ fn buildNameTable(
     return .{ .name_map = name_map, .name_slices = name_slices };
 }
 
-fn dropFastaPrefix(fasta_data: []align(4096) const u8, end_exclusive: usize) void {
-    if (end_exclusive == 0) return;
-    const len = std.mem.alignBackward(usize, end_exclusive, std.heap.page_size_min);
-    if (len == 0) return;
-    posix.madvise(@alignCast(@constCast(fasta_data.ptr)), len, posix.MADV.DONTNEED) catch {};
+pub fn dropFastaPrefix(fasta_data: []const u8, end_exclusive: usize) void {
+    dropFastaSpan(fasta_data, 0, end_exclusive);
+}
+
+pub fn dropFastaSpan(fasta_data: []const u8, start: usize, end_exclusive: usize) void {
+    if (start >= end_exclusive or fasta_data.len == 0) return;
+    const page = std.heap.page_size_min;
+    const drop_start = std.mem.alignBackward(usize, start, page);
+    const drop_end = @min(fasta_data.len, std.mem.alignForward(usize, end_exclusive, page));
+    if (drop_end <= drop_start) return;
+    posix.madvise(@alignCast(@constCast(fasta_data.ptr + drop_start)), drop_end - drop_start, posix.MADV.DONTNEED) catch {};
 }
 
 fn dropFastaCache(fasta_data: []align(4096) const u8) void {
