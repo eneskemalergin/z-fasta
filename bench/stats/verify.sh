@@ -23,9 +23,11 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ORACLE="$SCRIPT_DIR/oracle.py"
 TEST_DATA="$PROJECT_DIR/tests/data"
 MESSY_DIR="$PROJECT_DIR/bench/index/messy_variants"
-LAYOUT_TWINS="$SCRIPT_DIR/fixtures/layout_twins"
-TMPDIR="$SCRIPT_DIR/.verify_tmp"
-mkdir -p "$TMPDIR"
+# Generated on demand under data/ (gitignored). Do not track FASTA here.
+VERIFY_DATA="$SCRIPT_DIR/data/verify"
+LAYOUT_TWINS="$VERIFY_DATA/layout_twins"
+TMPDIR="$VERIFY_DATA/work"
+mkdir -p "$LAYOUT_TWINS" "$TMPDIR"
 trap 'rm -rf "$TMPDIR"' EXIT
 
 ZFASTA="${ZFASTA:-$PROJECT_DIR/zig-out/bin/z-fasta}"
@@ -130,6 +132,52 @@ run_stats() {
         echo "z-fasta stats failed (see stderr)" >"$err"
         return 1
     fi
+}
+
+# Same bases, different wrapping. Written under data/verify/layout_twins/ (not tracked).
+generate_layout_twins() {
+    mkdir -p "$LAYOUT_TWINS"
+    "$PYTHON" - "$LAYOUT_TWINS" <<'PY'
+from pathlib import Path
+import sys
+
+out = Path(sys.argv[1])
+out.mkdir(parents=True, exist_ok=True)
+
+(out / "uniform.fasta").write_bytes(
+    b">layout_twin uniform wrap\n"
+    b"AAAACCCCGGGG\n"
+    b"ttttAAAANCCC\n"
+    b"G*GGGTTTT\n"
+)
+(out / "mixed_widths.fasta").write_bytes(
+    b">layout_twin mixed widths\n"
+    b"AAAACCCCGGGG\n"
+    b"ttttAA\n"
+    b"AANCCCG*GG\n"
+    b"GTTTT\n"
+)
+(out / "trailing_ws.fasta").write_bytes(
+    b">layout_twin trailing ws\n"
+    b"AAAACCCCGGGG    \n"
+    b"ttttAAAANCCC\t\n"
+    b"G*GGGTTTT  \n"
+)
+(out / "blank_lines.fasta").write_bytes(
+    b">layout_twin blank lines\n"
+    b"AAAACCCCGGGG\n"
+    b"\n"
+    b"ttttAAAANCCC\n"
+    b"\n"
+    b"G*GGGTTTT\n"
+)
+(out / "mixed_crlf.fasta").write_bytes(
+    b">layout_twin mixed crlf\r\n"
+    b"AAAACCCCGGGG\r\n"
+    b"ttttAA\n"
+    b"AANCCCG*GGGTTTT\r\n"
+)
+PY
 }
 
 prepare_fixtures() {
@@ -361,8 +409,9 @@ verify_layout_twins() {
     local uref_full="$TMPDIR/layout_uniform.full.txt"
     local uref_idx="$TMPDIR/layout_uniform.index-only.txt"
 
+    generate_layout_twins
     [[ -f "$LAYOUT_TWINS/uniform.fasta" ]] || {
-        fail "[extended:layout] missing fixtures under bench/stats/fixtures/layout_twins"
+        fail "[extended:layout] missing fixtures under bench/stats/data/verify/layout_twins"
         return
     }
 

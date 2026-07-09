@@ -5,7 +5,7 @@ All notable changes to z-fasta will be documented in this file.
 
 ## [0.3.0] - Unreleased
 
-Ongoing release: messy-FASTA `.zfi` side tables, streaming `index --low-mem`, `validate`, and a benchmark suite overhaul (hyperfine to zebrac). Stats perf runner and report pending rebuild.
+Ongoing release: messy-FASTA `.zfi` side tables, streaming `index --low-mem`, `validate`, and a benchmark suite overhaul (hyperfine to zebrac). Stats L3 harness (`run.sh` + `generate_report.py`) landed.
 
 ### Added
 
@@ -18,7 +18,8 @@ Ongoing release: messy-FASTA `.zfi` side tables, streaming `index --low-mem`, `v
 - **`build.zig`**: `test_validator` target for validator unit tests.
 - **`complement.complementInto`**: chunked IUPAC complement into a caller buffer (shared by forward and reverse GET emit).
 - **`bench/stats/verify.sh`**: L2 stats gate (BioPython oracle, `.zfi`/`.fai`/cross, layout twins messy==uniform, messy fixtures, low-mem, dedup + Duplicates policy, per-tool parity, CLI errors; 92 checks). See `plan/stats-bench.md`.
-- **`bench/stats/fixtures/layout_twins/`**: same-base FASTA layouts (uniform vs mixed widths / trailing ws / blank lines / mixed CRLF) for layout-invariant stats checks.
+- **`bench/stats/run.sh` + `generate_report.py`**: L3 stats perf (full peers, four-way mode, size + seq-count scaling) and `REPORT.md` / figures. Indexes preloaded; timed work is `stats` / peers only. Colors and labels follow `plan/stats-bench.md`.
+- **Layout twins** (generated under `bench/stats/data/verify/layout_twins/` by `verify.sh`): same-base FASTA layouts (uniform vs mixed widths / trailing ws / blank lines / mixed CRLF) for layout-invariant stats checks.
 - **`tools/noodles_wrapper` / `tools/rustbio_wrapper` `stats`**: clean-FASTA TSV comparison peers with assembly + composition fields (N50/N90/AU, GC skew, protein top-AA) so benches/verify can compare more than sequences/bases. Not messy/side-table capable.
 
 ### Changed
@@ -33,7 +34,7 @@ Ongoing release: messy-FASTA `.zfi` side tables, streaming `index --low-mem`, `v
 - **`get` uniform emit**: `emitRegionForwardUniform` / `emitRegionBackwardUniform` for fixed-width records; reverse and RC share the same chunked path.
 - **`get` protein-guard sample**: `detectRecordType` samples at most 256 bases per record (was up to 100k).
 - **`stats`**: composition and whitespace checks follow side tables on non-uniform records. Whitespace uses `byte > ' '` instead of explicit `\n`/`\r` tests. Record names use `LoadedIndex.getRecordName`.
-- **Benchmark suite overhaul** (from v0.2.9 hyperfine): zebrac runners `bench/index/run.sh` and `bench/get/run.sh` (verify to perf to report) via shared `bench/shared/zebrac_runner.sh`; rewritten `generate_report.py` / `REPORT.md` for index and GET; GET verify scripts merged into `bench/get/verify.sh` (409 checks). Stats L2 verify restored (`bench/stats/verify.sh`, 78 checks); stats perf runner/report not yet restored.
+- **Benchmark suite overhaul** (from v0.2.9 hyperfine): zebrac runners `bench/index/run.sh`, `bench/get/run.sh`, and `bench/stats/run.sh` (verify to perf to report) via shared `bench/shared/zebrac_runner.sh`; rewritten `generate_report.py` / `REPORT.md` for index, GET, and stats; GET verify scripts merged into `bench/get/verify.sh` (409 checks). Stats L2 verify (`bench/stats/verify.sh`, 92 checks) plus L3 full/mode/scale report.
 - **`bench/get` RC figure**: plain z-fasta hatched like seqtk (ref); `--rc` / `--complement-only` / `--reverse-only` use distinct shades of brand gold.
 - **`README.md`**: benchmark commands point at `bench/index/run.sh` and the updated verification workflow.
 

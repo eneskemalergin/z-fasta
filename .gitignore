@@ -1,55 +1,14 @@
-# Zig build artifacts
+# Zig
 zig-out/
 zig-cache/
 .zig-cache/
-
-# Local Zig installation (download separately)
 zig-*/
-
-# Downloaded tool binaries (prebuilt, not built from source)
-tools/fastahack-*/
-tools/seqkit
-tools/seqtk/
-tools/zebrac
-
-# Rust wrapper build artifacts (source is tracked)
-tools/*/target/
-
-# Local zig wrapper (uses project-local zig installation)
 /zig
 
 # Editor
 .vscode/
 *.swp
 *~
-
-# Real datasets (download with bench/shared/download_data.sh)
-bench/shared/data/
-
-# Generated bench data (created by bench scripts)
-bench/index/data/
-bench/index/edge_cases/
-
-# Benchmark results (raw data is regenerated; keep figures for REPORT.md)
-bench/index/results/*
-!bench/index/results/figures/
-bench/get/results/*
-!bench/get/results/figures/
-bench/stats/results/*
-!bench/stats/results/figures/
-
-# Performance baselines (machine-local snapshots; save_baseline.py pending rebuild)
-bench/baselines/
-
-# Temp dirs from verify scripts
-# Get
-bench/get/.fixture*
-bench/get/.verify*
-bench/get/.bench*
-# Stats
-bench/stats/.fixture*
-bench/stats/.verify*
-bench/stats/.bench*
 
 # Python
 __pycache__/
@@ -64,16 +23,31 @@ venv/
 .coverage
 htmlcov/
 
-# Ignored folders
-plan/
-assets/
+# Tool binaries / build outputs (source under tools/ stays tracked)
+tools/fastahack-*/
+tools/seqkit
+tools/seqtk/
+tools/zebrac
+tools/*/target/
 
-# Experiments (dev only; track harness scripts, not local data/results)
-experiments/*
-!experiments/25g_index_stress/
-experiments/25g_index_stress/data/
-experiments/25g_index_stress/results/
+# Bench: downloads, on-demand fixtures, raw results (keep figures for REPORT.md)
+bench/*/data/**
+bench/index/edge_cases/
+bench/*/results/**
+!bench/*/results/figures/
+bench/baselines/
+bench/*/.verify*/
+bench/*/.fixture*/
+bench/*/.bench*/
 
-# Index files (generated during testing)
+# Generated indexes (testing / local runs)
 *.fai
 *.zfi
+
+# Local-only dev folders
+tmp/
+ref/
+temp/
+plan/
+assets/
+experiments/
