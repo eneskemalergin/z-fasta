@@ -16,16 +16,22 @@ Ongoing release: messy-FASTA `.zfi` side tables, streaming `index --low-mem`, `v
 - **`index --low-mem` streaming `.zfi`**: bounded-RAM build path. Output bytes match mmap `index` on simple and messy fixtures. `--emit-fai` writes FAI to stdout (same as mmap).
 - **`tests/test_index.zig`**: v0.2 to v0.3 side-table and index compatibility coverage; `.fai` `records_only` vs `lookup_full_map` duplicate-name parity test.
 - **`build.zig`**: `test_validator` target for validator unit tests.
+- **`complement.complementInto`**: chunked IUPAC complement into a caller buffer (shared by forward and reverse GET emit).
 
 ### Changed
 
 - **Default mmap `index`**: writes `.zfi` via `scanZfiIndex()` with in-memory record and side-table arrays (replaces dummy-header streaming write). `scanFastaRecords` passes sequence data and uniform-width flag to the emit callback.
 - **`index --low-mem`**: default output is `{file}.zfi` (was FAI-only in v0.2.x). Shares line-metrics semantics with mmap via `ChunkParseState` and `LineMetricsBuilder`. Removed duplicate `StreamingParseState` parser.
 - **`.fai` fallback loading** (`index_format.zig`): respects `LoadMode` like `.zfi` (name hash map only for `lookup_full_map`). Single-pass mmap parse; record names live in the mmap'd `.fai` via `name_offset` / `name_len`. `LoadedIndex.getRecordName` resolves names for both index sources.
-- **`get` large BED RSS**: sorted/sequential batch paths drop FASTA pages behind the scan cursor (`MADV_DONTNEED`) so multi-thousand-row BED runs stay near index size instead of retaining the whole mmap.
-- **`get` multi-region scan** (2 to 15 regions, no BED/names): record scan path applies to `.fai` fallback as well as `.zfi`.
+- **`.fai` `lookup_full_map` loads**: build a pointer hash over mmap'd `.fai` name fields (same fast path as embedded `.zfi` names; no arena copy).
+- **`get` multi-region name lookup**: load `.lookup_full_map` for any N > 1 (and BED/names); N=1 stays `.records_only`. Removes the old 2..15 record-scan cliff on large catalogs.
+- **`get` dense BED RSS**: sorted/sequential mmap batches drop FASTA pages behind the scan cursor (`MADV_DONTNEED`, 8 MiB batching) so multi-thousand-row dense runs stay near index size.
+- **`get` sparse BED paths**: skip file-order sort on small catalogs, wide median byte gaps, or FASTA under 64 MiB; emit in request order. Large sparse FASTAs (Genome-scale) open a GET-only `std.Io.File` and read via `readPositionalAll` so scattered rows do not retain mmap pages. `MADV_SEQUENTIAL` only when a true sequential scan is active; end-of-batch cache drop only on the mmap path for FASTA over 256 MiB.
+- **`get` uniform emit**: `emitRegionForwardUniform` / `emitRegionBackwardUniform` for fixed-width records; reverse and RC share the same chunked path.
+- **`get` protein-guard sample**: `detectRecordType` samples at most 256 bases per record (was up to 100k).
 - **`stats`**: composition and whitespace checks follow side tables on non-uniform records. Whitespace uses `byte > ' '` instead of explicit `\n`/`\r` tests. Record names use `LoadedIndex.getRecordName`.
 - **Benchmark suite overhaul** (from v0.2.9 hyperfine): zebrac runners `bench/index/run.sh` and `bench/get/run.sh` (verify to perf to report) via shared `bench/shared/zebrac_runner.sh`; rewritten `generate_report.py` / `REPORT.md` for index and GET; GET verify scripts merged into `bench/get/verify.sh` (409 checks). Stats runner/report not yet restored.
+- **`bench/get` RC figure**: plain z-fasta hatched like seqtk (ref); `--rc` / `--complement-only` / `--reverse-only` use distinct shades of brand gold.
 - **`README.md`**: benchmark commands point at `bench/index/run.sh` and the updated verification workflow.
 
 ### Fixed
@@ -33,6 +39,7 @@ Ongoing release: messy-FASTA `.zfi` side tables, streaming `index --low-mem`, `v
 - **`get` on messy FASTAs**: correct extraction via side tables. Previously returned garbage or failed silently on mixed-width files.
 - **`.fai` on single-region GET**: no longer always builds a full name hash map (fixed large slowdown vs `.zfi` on transcriptome-scale indexes).
 - **`index --low-mem`**: skip throwaway side-table work on uniform records (fixes RSS and instruction blow-up on large genomes).
+- **`get` RC / complement wall**: `--rc` and `--complement-only` no longer pay a large protein-guard sample or per-byte complement on the hot path (Genome `--rc`/plain ~1.0x after fix).
 - **`bench/get/run.sh`**: positional perf uses only positional fixture labels (not multi-region lists); region span metadata parsing matches `parseRegion`.
 
 ### Removed

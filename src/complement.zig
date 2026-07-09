@@ -38,9 +38,23 @@ pub fn complement(byte: u8) u8 {
     return iupac_complement_table[byte];
 }
 
+/// Write the IUPAC complement of `src` into `dst` (same length).
+pub fn complementInto(dst: []u8, src: []const u8) void {
+    std.debug.assert(dst.len == src.len);
+    var i: usize = 0;
+    // Process 32-byte chunks with a table lookup per lane (no branch on base).
+    while (i + 32 <= src.len) : (i += 32) {
+        inline for (0..32) |j| {
+            dst[i + j] = iupac_complement_table[src[i + j]];
+        }
+    }
+    while (i < src.len) : (i += 1) {
+        dst[i] = iupac_complement_table[src[i]];
+    }
+}
+
 /// Write the reverse complement of `src` into `dst`.
 /// Caller must provide a same-length destination buffer.
-/// SIMD vectorization here is deferred; `get` applies complement per-byte during mmap walks.
 pub fn reverseComplementInto(dst: []u8, src: []const u8) void {
     std.debug.assert(dst.len == src.len);
 

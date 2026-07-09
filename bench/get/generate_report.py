@@ -63,6 +63,10 @@ REGION_LABELS = {
 
 REFERENCE_TOOLS = frozenset({"seqtk-reference", "fastahack-reference"})
 
+# RC chart only: plain z-fasta is a no-transform baseline — hatch like seqtk so it
+# does not blend with the three transform modes.
+RC_BASELINE_TOOLS = frozenset({"z-fasta-default"})
+
 POS_EXCLUDE = frozenset(
     {
         "z-fasta-fai",
@@ -226,9 +230,10 @@ GET_COLORS = {
     "z-fasta-fai": "#E65100",
     "z-fasta-chunk-all": "#FFF59D",
     "z-fasta-chunk-1": "#FBC02D",
-    "z-fasta-rc": "#F7A41D",
-    "z-fasta-complement-only": "#FFB74D",
-    "z-fasta-reverse-only": "#FF8F00",
+    # RC transform modes: darker / mid / pale shades of brand gold (#F7A41D).
+    "z-fasta-rc": "#C67A00",
+    "z-fasta-complement-only": "#F5B041",
+    "z-fasta-reverse-only": "#FFE082",
     "noodles": "#C45C26",
     "noodles-rc": "#C45C26",
     "rustbio-custom-get": "#8B3A2A",
@@ -540,7 +545,7 @@ def md_multi_intro_blurb(work: pd.DataFrame, table_tools: list[str]) -> str:
         f"0.1 Mb output). Timed on {', '.join(datasets)} with **{n_list}** (log-spaced). "
         "Three figure panels (Genome, Proteome, Transcriptome); panel width follows each "
         "dataset's N count. At **N≥16**, z-fasta uses `lookup_full_map` (N=100 and N=1,000 "
-        f"here; N=1 and N=10 use the lighter index path — see `getter.zig`).{genome_note}"
+        f"here; N=1 and N=10 use the lighter index path (see `getter.zig`)).{genome_note}"
         f"{ref_note} Chart/table tool order: z-fasta, noodles, rust-bio, samtools{tool_tail}"
     )
 
@@ -834,7 +839,7 @@ def _rc_annotate_facet(
 ) -> None:
     """Rotated ratio badges on every comparable RC bar (all metric facets)."""
     plain_color = ir.COLORS.get("z-fasta-default", "#F7A41D")
-    rc_color = ir.COLORS.get("z-fasta-rc", "#F7A41D")
+    rc_color = ir.COLORS.get("z-fasta-rc", "#C67A00")
 
     for ds in datasets:
         ds_work = work[work["dataset"] == ds]
@@ -881,7 +886,11 @@ def _rc_annotate_facet(
             if ratio is None:
                 continue
             xpos, y = bar_tops[key]
-            edge = rc_color if baseline == "z-fasta-default" and tool == "z-fasta-rc" else ir.COLORS.get(tool, "#666666")
+            edge = (
+                rc_color
+                if baseline == "z-fasta-default" and tool == "z-fasta-rc"
+                else ir.COLORS.get(tool, "#666666")
+            )
             ax.annotate(
                 ir._format_speedup(ratio),
                 (xpos, y),
@@ -2170,6 +2179,7 @@ def _rc_draw_facet(
 
     for ti, tool in enumerate(tools):
         color = ir.COLORS.get(tool, "#888888")
+        is_styled = tool in REFERENCE_TOOLS or tool in RC_BASELINE_TOOLS
         for di, ds in enumerate(datasets):
             row = work[(work["dataset"] == ds) & (work["tool"] == tool)]
             if row.empty:
@@ -2182,10 +2192,10 @@ def _rc_draw_facet(
             bar_kw: dict = {
                 "width": width,
                 "color": color,
-                "alpha": 0.75 if tool in REFERENCE_TOOLS else 0.88,
+                "alpha": 0.75 if is_styled else 0.88,
                 "zorder": 2,
             }
-            if tool in REFERENCE_TOOLS:
+            if is_styled:
                 bar_kw["hatch"] = "///"
                 bar_kw["edgecolor"] = color
                 bar_kw["linewidth"] = 0.6
@@ -2271,7 +2281,8 @@ def fig_rc_overhead(
         0.93,
         (
             f"Grouped bars per dataset (Genome, Transcriptome). "
-            f"Error bars = zebrac stddev (n={sample_n}). Hatched = seqtk (ref). "
+            f"Error bars = zebrac stddev (n={sample_n}). "
+            "Hatched = plain z-fasta (no transform) and seqtk (ref). "
             "Rotated bar labels: z-fasta `--rc` / `--complement-only` / `--reverse-only` "
             "vs plain; RC peers and seqtk (ref) vs z-fasta `--rc` (all facets)."
         ),
@@ -2284,13 +2295,14 @@ def fig_rc_overhead(
     patches = []
     for tool in legend_tools:
         color = ir.COLORS.get(tool, "#888888")
+        is_styled = tool in REFERENCE_TOOLS or tool in RC_BASELINE_TOOLS
         patch_kw: dict = {
             "facecolor": color,
-            "edgecolor": color if tool in REFERENCE_TOOLS else "none",
+            "edgecolor": color if is_styled else "none",
             "label": ir.display_tool(tool),
-            "alpha": 0.75 if tool in REFERENCE_TOOLS else 0.88,
+            "alpha": 0.75 if is_styled else 0.88,
         }
-        if tool in REFERENCE_TOOLS:
+        if is_styled:
             patch_kw["hatch"] = "///"
         patches.append(mpatches.Patch(**patch_kw))
     fig.legend(
@@ -4159,7 +4171,7 @@ def md_rc_section(
                 "`--complement-only`, `--reverse-only` vs plain; noodles/rust-bio `--rc` "
                 "and seqtk (ref) vs z-fasta `--rc`. Same ratio rules on wall time, peak RSS, "
                 "and page faults.\n"
-                "- **Hatched bars:** seqtk (ref) when that lane ran."
+                "- **Hatched bars:** plain z-fasta (no transform) and seqtk (ref)."
             ),
         ]
     )

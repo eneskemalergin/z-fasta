@@ -196,7 +196,15 @@ preload_real_indexes() {
     echo "  Preloading REAL_* indexes (.zfi + .fai)..."
     local fa
     for fa in "${REAL_DATASETS[@]}"; do
-        if [[ ! -f "${fa}.zfi" ]] || [[ "$fa" -nt "${fa}.zfi" ]]; then
+        # Rebuild when FASTA is newer, sidecar is missing, z-fasta binary is newer than .zfi,
+        # or .zfi predates the embedded name-table footer (ZFNM).
+        local need_zfi=false
+        if [[ ! -f "${fa}.zfi" ]] || [[ "$fa" -nt "${fa}.zfi" ]] || [[ "$ZFASTA" -nt "${fa}.zfi" ]]; then
+            need_zfi=true
+        elif ! tail -c 12 "${fa}.zfi" | grep -q 'ZFNM'; then
+            need_zfi=true
+        fi
+        if $need_zfi; then
             "$ZFASTA" index "$fa" > /dev/null
         fi
         if bench_has_tool samtools; then
