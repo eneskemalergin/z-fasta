@@ -17,7 +17,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 RESULTS_DIR = SCRIPT_DIR / "results"
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
 
-DATASET_ORDER = ["Genome", "Proteome", "Transcriptome"]
+DATASET_ORDER = ["Genome", "Transcriptome", "Proteome"]
 
 # Chart/table order: z-fasta first, then Rust peers, then samtools/bedtools, then reference lanes.
 TOOL_ORDER = [
@@ -141,7 +141,7 @@ LABEL_PEER_WALL_RATIO = "peer wall time ÷ z-fasta wall time"
 LABEL_PEER_RSS_RATIO = "peer peak RSS ÷ z-fasta peak RSS"
 LABEL_PEER_FAULTS_RATIO = "peer minor faults ÷ z-fasta minor faults"
 
-# Horizontal gap between Genome / Proteome / Transcriptome facet panels.
+# Horizontal gap between Genome / Transcriptome / Proteome facet panels.
 GROUPED_BAR_WSPACE = 0.10
 # Gap between RC / messy multi-facet columns.
 FACET_WSPACE = 0.28
@@ -543,7 +543,7 @@ def md_multi_intro_blurb(work: pd.DataFrame, table_tools: list[str]) -> str:
     return (
         "One `get` invocation fetches **N regions × 1 kbp each** (e.g. N=100 → 100 kbp ≈ "
         f"0.1 Mb output). Timed on {', '.join(datasets)} with **{n_list}** (log-spaced). "
-        "Three figure panels (Genome, Proteome, Transcriptome); panel width follows each "
+        "Three figure panels (Genome, Transcriptome, Proteome); panel width follows each "
         "dataset's N count. At **N≥16**, z-fasta uses `lookup_full_map` (N=100 and N=1,000 "
         f"here; N=1 and N=10 use the lighter index path (see `getter.zig`)).{genome_note}"
         f"{ref_note} Chart/table tool order: z-fasta, noodles, rust-bio, samtools{tool_tail}"
@@ -569,7 +569,7 @@ def md_multi_figure_reading_base(
         ref_lines = "- **Legend order:** z-fasta, noodles, rust-bio, samtools.\n"
     return (
         f"**Reading Figure {f_num}**\n"
-        "- Three panels: Genome, Proteome, Transcriptome (N on x-axis).\n"
+        "- Three panels: Genome, Transcriptome, Proteome (N on x-axis).\n"
         f"- {y_note}\n"
         f"{ref_lines}"
         f"- **Bar labels:** `1×` on z-fasta; other labels = {ratio_label}. "
@@ -705,7 +705,7 @@ def md_bed_intro_blurb(work: pd.DataFrame, *, t_mode: int | None = None) -> str:
         )
     return (
         f"`z-fasta get --bed` on {', '.join(datasets)}. Each BED row fetches **1 kbp** "
-        f"(sweep: {row_list}). Three figure panels (Genome, Proteome, Transcriptome); "
+        f"(sweep: {row_list}). Three figure panels (Genome, Transcriptome, Proteome); "
         f"grouped bars per row count. Headline z-fasta is plain `get --bed` with CLI default "
         f"**`--chunk-size {BED_DEFAULT_CHUNK}`** (internal batching; not `--chunk-size -1` "
         f"read-whole-file or `--chunk-size 1`).{mode_blurb} Chart/table tool order: z-fasta, "
@@ -728,7 +728,7 @@ def md_bed_figure_reading_base(
         )
     return (
         f"**Reading Figure {f_num}**\n"
-        "- Three panels: Genome, Proteome, Transcriptome (BED row count on x-axis).\n"
+        "- Three panels: Genome, Transcriptome, Proteome (BED row count on x-axis).\n"
         f"- {y_note}\n"
         "- **Legend order:** z-fasta, noodles, rust-bio, samtools, bedtools.\n"
         f"{chunk_line}"
@@ -1747,7 +1747,7 @@ def fig_pos_grouped_bars(
     value_floor: float = 1e-6,
     annotate_comparisons: bool = False,
 ) -> Path:
-    """Three side-by-side panels (Genome / Proteome / Transcriptome); grouped bars per region."""
+    """Three side-by-side panels (Genome / Transcriptome / Proteome); grouped bars per region."""
     filtered = ir.filter_tools(work, tools)
     tools = [t for t in tools if t in filtered["tool"].unique()]
     datasets = [d for d in DATASET_ORDER if d in filtered["dataset"].unique()]
@@ -1884,7 +1884,7 @@ def fig_multi_grouped_bars(
     value_floor: float = 1e-6,
     annotate_comparisons: bool = False,
 ) -> Path:
-    """Three side-by-side panels (Genome / Proteome / Transcriptome); grouped bars per N."""
+    """Three side-by-side panels (Genome / Transcriptome / Proteome); grouped bars per N."""
     filtered = ir.filter_tools(work, tools)
     tools = [t for t in tools if t in filtered["tool"].unique()]
     datasets = [d for d in DATASET_ORDER if d in filtered["dataset"].unique()]
@@ -2029,7 +2029,7 @@ def fig_bed_grouped_bars(
     value_floor: float = 1e-6,
     annotate_comparisons: bool = False,
 ) -> Path:
-    """Three side-by-side panels (Genome / Proteome / Transcriptome); grouped bars per BED row count."""
+    """Three side-by-side panels (Genome / Transcriptome / Proteome); grouped bars per BED row count."""
     filtered = ir.filter_tools(work, tools)
     tools = [t for t in tools if t in filtered["tool"].unique()]
     datasets = [d for d in DATASET_ORDER if d in filtered["dataset"].unique()]
@@ -2995,8 +2995,8 @@ def md_pos_section(
 
     return "\n\n".join(
         [
-            "Positional GET on preloaded indexes. Three panels (Genome, Proteome, "
-            "Transcriptome) with grouped bars per region size. **`full seq`** is a "
+            "Positional GET on preloaded indexes. Three panels (Genome, Transcriptome, "
+            "Proteome) with grouped bars per region size. **`full seq`** is a "
             "whole-entry fetch on a bounded sequence (Genome ≤1 kbp; Transcriptome/Proteome "
             "medium entries, not titin). Tool order: z-fasta, noodles, rust-bio, samtools, "
             "fastahack (when present), seqtk (ref).",
@@ -3032,7 +3032,7 @@ def md_pos_section(
             "![positional wall time](results/figures/perf_pos_wall.png)",
             (
                 f"**Reading Figure {f_wall}**\n"
-                "- Three panels: Genome, Proteome, Transcriptome.\n"
+                "- Three panels: Genome, Transcriptome, Proteome.\n"
                 "- **Bars:** zebrac mean wall time. Error bars are one standard deviation.\n"
                 "- **Legend order:** z-fasta, noodles, rust-bio, samtools, fastahack, seqtk (ref).\n"
                 "- **Hatched bars:** seqtk (ref) has no index and rescans the FASTA each call.\n"
@@ -3251,7 +3251,7 @@ def md_mode_comparison(df: pd.DataFrame, nums, ir, figures_dir: Path) -> str:
             "index with no line parsing. Genome (**194** seqs) and Proteome (**~21k**) pay "
             "far less parse overhead. Single-region GET uses `records_only` (no hash map); "
             "lookup is O(n) on both paths, so startup parse cost dominates on large catalogs.",
-            f"**Table {t_wall}:** Wall time per dataset (Genome, Proteome, Transcriptome).",
+            f"**Table {t_wall}:** Wall time per dataset (Genome, Transcriptome, Proteome).",
             md_wall_table(sub, MODE_POS_TOOLS, "dataset", ir),
             "<details>",
             f"<summary><strong>Table {t_cmp}:</strong> default vs `.fai` lane.</summary>",
