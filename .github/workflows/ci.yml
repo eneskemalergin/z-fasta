@@ -5,25 +5,77 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Build and test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+            binary: ./zig-out/bin/z-fasta
+          - name: Windows
+            os: windows-latest
+            binary: ./zig-out/bin/z-fasta.exe
+          - name: macOS
+            os: macos-latest
+            binary: ./zig-out/bin/z-fasta
+
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
 
+      - name: Runner diagnostics
+        shell: bash
+        run: |
+          echo "runner_os=${RUNNER_OS}"
+          echo "runner_arch=${RUNNER_ARCH}"
+          zig version
+
       - name: Build
+        shell: bash
         run: zig build
 
       - name: Build (ReleaseFast)
+        shell: bash
         run: zig build -Doptimize=ReleaseFast
 
+      - name: Smoke test
+        shell: bash
+        run: |
+          if [[ ! -f "${{ matrix.binary }}" ]]; then
+            echo "expected executable was not produced: ${{ matrix.binary }}" >&2
+            ls -la zig-out/bin
+            exit 1
+          fi
+          mkdir -p .ci-smoke
+          printf '>seq1\nACGT\n>seq2\nGGGG\n' > .ci-smoke/test.fasta
+          "${{ matrix.binary }}" --version
+          "${{ matrix.binary }}" validate .ci-smoke/test.fasta > /dev/null
+          "${{ matrix.binary }}" index --emit-fai .ci-smoke/test.fasta > .ci-smoke/test.fai
+          test -s .ci-smoke/test.fai
+
       - name: Generate test indexes
+        shell: bash
         run: |
           for f in \
             tests/data/simple.fasta \
@@ -31,14 +83,9 @@ jobs:
             tests/data/single.fasta \
             tests/data/edge_cases.fasta \
             tests/data/mixed_widths.fasta; do
-            ./zig-out/bin/z-fasta index "$f"
+            "${{ matrix.binary }}" index "$f"
           done
 
       - name: Run tests
-        run: zig build test
-
-      - name: Smoke test
-        run: |
-          printf '>seq1\nACGT\n>seq2\nGGGG\n' > /tmp/test.fasta
-          ./zig-out/bin/z-fasta --version
-          ./zig-out/bin/z-fasta index --emit-fai /tmp/test.fasta
+        shell: bash
+        run: zig build test --summary all

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const main = @import("main");
 const formatComma = main.stats.formatComma;
 const formatSize = main.stats.formatSize;
@@ -174,7 +175,7 @@ test "detectType - lowercase nucleotides" {
 // Integration: stats via process spawn
 // ============================================================================
 
-const ZFASTA_BIN = "zig-out/bin/z-fasta";
+const ZFASTA_BIN = if (builtin.os.tag == .windows) "zig-out/bin/z-fasta.exe" else "zig-out/bin/z-fasta";
 
 fn runStatsAndCapture(allocator: std.mem.Allocator, fasta_path: []const u8, index_only: bool) ![]u8 {
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -192,11 +193,15 @@ fn runStatsAndCapture(allocator: std.mem.Allocator, fasta_path: []const u8, inde
         .argv = argv.items,
         .stdout = .pipe,
     });
+    defer proc.kill(io);
 
     var read_buf: [4096]u8 = undefined;
     var stdout_reader = proc.stdout.?.reader(io, &read_buf);
     const result = try stdout_reader.interface.allocRemaining(allocator, .limited(10 * 1024 * 1024));
-    _ = try proc.wait(io);
+    switch (try proc.wait(io)) {
+        .exited => |code| if (code != 0) return error.ChildProcessFailed,
+        else => return error.ChildProcessFailed,
+    }
     return result;
 }
 
