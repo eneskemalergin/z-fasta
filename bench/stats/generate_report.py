@@ -139,6 +139,30 @@ def load_manifest(results_dir: Path) -> dict | None:
     return None
 
 
+def resolve_verify_status(manifest: dict, results_dir: Path) -> tuple[bool, str | None]:
+    """Return (skipped, pass_count). Prefer verify_<ts>.log when present.
+
+    Resume with `--skip-verify` can rewrite the manifest and clear `verify_pass`
+    even when `verify_<timestamp>.log` already recorded a green L2 run.
+    """
+    ts = str(manifest.get("timestamp") or "")
+    log = results_dir / f"verify_{ts}.log" if ts else None
+    if log is not None and log.is_file():
+        text = log.read_text(encoding="utf-8", errors="replace")
+        if "ALL PASSED" in text:
+            for line in text.splitlines():
+                if line.startswith("Results:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return False, parts[1]
+            return False, str(manifest.get("verify_pass") or "unknown")
+    skipped = bool(manifest.get("verify_skipped", False))
+    raw = manifest.get("verify_pass")
+    if raw is None:
+        return skipped, None
+    return skipped, str(raw)
+
+
 def is_incomplete(manifest: dict | None) -> bool:
     if not manifest:
         return True
@@ -943,9 +967,8 @@ def md_combined_metric_figure(
     )
 
 
-def md_overview(manifest: dict) -> str:
-    verify = manifest.get("verify_pass")
-    verify_skipped = manifest.get("verify_skipped", False)
+def md_overview(manifest: dict, results_dir: Path) -> str:
+    verify_skipped, verify = resolve_verify_status(manifest, results_dir)
     if verify_skipped:
         verify_line = "Verify was skipped for this run (`--skip-verify`)."
     elif verify is not None:
@@ -1340,7 +1363,7 @@ def main() -> None:
     report_lines.extend(
         [
             "## Overview",
-            md_overview(manifest),
+            md_overview(manifest, results_dir),
             "## What each tool reports",
             md_field_matrix(),
             "## Run Provenance",

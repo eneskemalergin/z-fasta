@@ -378,6 +378,33 @@ out = {
     "tools": tools,
     "sections": sections,
 }
+
+# Resume with --skip-verify must not erase a prior green verify for this timestamp.
+manifest_path = Path(manifest)
+if not do_verify:
+    prior_pass = None
+    if manifest_path.is_file():
+        try:
+            prior = json.loads(manifest_path.read_text())
+            if prior.get("verify_pass") is not None and not prior.get("verify_skipped", True):
+                prior_pass = str(prior["verify_pass"])
+        except Exception:
+            prior_pass = None
+    if prior_pass is None:
+        log = manifest_path.parent / f"verify_{ts}.log"
+        if log.is_file():
+            text = log.read_text(encoding="utf-8", errors="replace")
+            if "ALL PASSED" in text:
+                for line in text.splitlines():
+                    if line.startswith("Results:"):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            prior_pass = parts[1]
+                        break
+    if prior_pass is not None:
+        out["verify_skipped"] = False
+        out["verify_pass"] = prior_pass
+
 Path(manifest).write_text(json.dumps(out, indent=2) + "\n")
 PY
 }
