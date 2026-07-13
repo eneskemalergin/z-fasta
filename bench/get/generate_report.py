@@ -63,8 +63,8 @@ REGION_LABELS = {
 
 REFERENCE_TOOLS = frozenset({"seqtk-reference", "fastahack-reference"})
 
-# RC chart only: plain z-fasta is a no-transform baseline — hatch like seqtk so it
-# does not blend with the three transform modes.
+# RC chart only: plain z-fasta is a no-transform baseline (hatch like seqtk)
+# so it does not blend with the three transform modes.
 RC_BASELINE_TOOLS = frozenset({"z-fasta-default"})
 
 POS_EXCLUDE = frozenset(

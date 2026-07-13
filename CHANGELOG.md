@@ -5,7 +5,7 @@ All notable changes to z-fasta will be documented in this file.
 
 ## [0.3.0] - Unreleased
 
-Ongoing release: messy-FASTA `.zfi` side tables, streaming `index --low-mem`, `validate`, and a benchmark suite overhaul (hyperfine to zebrac). Stats L3 harness (`run.sh` + `generate_report.py`) landed.
+Feature-parity release: `validate` subcommand, messy-FASTA side tables, streaming `index --low-mem`, RSS caps on `get` and `stats` composition scans, embedded `.zfi` name table, and a complete benchmark suite rebuild (hyperfine to zebrac).
 
 ### Added
 
@@ -33,7 +33,10 @@ Ongoing release: messy-FASTA `.zfi` side tables, streaming `index --low-mem`, `v
 - **`get` sparse BED paths**: skip file-order sort on small catalogs, wide median byte gaps, or FASTA under 64 MiB; emit in request order. Large sparse FASTAs (Genome-scale) open a GET-only `std.Io.File` and read via `readPositionalAll` so scattered rows do not retain mmap pages. `MADV_SEQUENTIAL` only when a true sequential scan is active; end-of-batch cache drop only on the mmap path for FASTA over 256 MiB.
 - **`get` uniform emit**: `emitRegionForwardUniform` / `emitRegionBackwardUniform` for fixed-width records; reverse and RC share the same chunked path.
 - **`get` protein-guard sample**: `detectRecordType` samples at most 256 bases per record (was up to 100k).
-- **`stats`**: composition and whitespace checks follow side tables on non-uniform records. Whitespace uses `byte > ' '` instead of explicit `\n`/`\r` tests. Record names use `LoadedIndex.getRecordName`.
+- **`stats` composition scan**: walks records in file-offset order and releases FASTA pages behind the cursor with batched `MADV_DONTNEED` (8 MiB stride). Peak RSS drops from ~1:1 file-size residency to near index size (Genome 3006 MB to 242 MB; Transcriptome 474 MB to 24 MB). `.fai` records are sorted by `seq_offset` before release so both index formats share the same scan path. Fixed-width records use SIMD `countCompositionSlice` on base-only slices; side-table records use separate per-line counting. Wall time stays within +10% of the pre-release baseline.
+- **`stats` nucleotide/protein detection**: `detectType` now checks the full composition counts instead of a 100K-byte sample.
+- **`stats` `.fai` loading**: uses `.stats_scan` mode which streams record data without retaining the full `.fai` mapping or all name strings. Shortest and longest names are fetched on demand via recorded line offsets (two seeks per stats invocation), not by rescanning the sidecar from line zero.
+- **`stats` assembly metrics output**: `formatSize` renders on-disk file size in human-readable units (bytes/KB/MB/GB).
 - **Benchmark suite overhaul** (from v0.2.9 hyperfine): zebrac runners `bench/index/run.sh`, `bench/get/run.sh`, and `bench/stats/run.sh` (verify to perf to report) via shared `bench/shared/zebrac_runner.sh`; rewritten `generate_report.py` / `REPORT.md` for index, GET, and stats; GET verify scripts merged into `bench/get/verify.sh` (409 checks). Stats L2 verify (`bench/stats/verify.sh`, 92 checks) plus L3 full/mode/scale report.
 - **`bench/get` RC figure**: plain z-fasta hatched like seqtk (ref); `--rc` / `--complement-only` / `--reverse-only` use distinct shades of brand gold.
 - **`README.md`**: benchmark commands point at `bench/index/run.sh` and the updated verification workflow.

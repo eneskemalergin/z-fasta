@@ -16,3 +16,8 @@
 *.fasta text
 *.fa text
 *.fai text
+
+# Exclude benchmark infrastructure and wrapper crates from language stats
+bench/** linguist-vendored
+tools/noodles_wrapper/** linguist-vendored
+tools/rustbio_wrapper/** linguist-vendored
