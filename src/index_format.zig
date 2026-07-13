@@ -109,6 +109,8 @@ pub const IndexRecord = extern struct {
 pub const LoadMode = enum {
     records_only,
     lookup_full_map,
+    /// Stats composition: `.fai` rows streamed without retaining every name in RAM.
+    stats_scan,
 };
 
 /// When a catalog exceeds this record count, multi-region GET (2..15) uses a by-record scan
@@ -134,6 +136,10 @@ pub const LoadedIndex = struct {
     fasta_size: u64,
     zfi_data: ?[]align(4096) const u8,
     source: IndexSource,
+    /// Optional `.fai` path for on-demand name reads (`stats_scan` without name table).
+    sidecar_path: ?[]const u8 = null,
+    /// Byte offsets into `sidecar_path` for each record line (`stats_scan` only).
+    fai_line_offsets: []const u64 = &.{},
     arena: std.heap.ArenaAllocator,
 
     pub const IndexSource = enum { zfi, fai };
@@ -162,6 +168,16 @@ pub const LoadedIndex = struct {
             }
         }
         return "?";
+    }
+
+    pub fn getRecordNameWithIo(self: *LoadedIndex, io: std.Io, rec_idx: usize) []const u8 {
+        if (self.sidecar_path) |path| {
+            if (self.fai_line_offsets.len > rec_idx) {
+                return readFaiNameAtOffset(io, self.arena.allocator(), path, self.fai_line_offsets[rec_idx]) catch "?";
+            }
+            return readFaiNameLine(io, self.arena.allocator(), path, rec_idx) catch "?";
+        }
+        return self.getRecordName(rec_idx);
     }
 
     pub fn deinit(self: *LoadedIndex) void {
@@ -609,6 +625,13 @@ fn tryLoadFai(
         return .corrupt;
     }
 
+    if (mode == .records_only) {
+        return loadFaiRecordsOnly(io, fai_file, fasta_data, fasta_stat, true, null);
+    }
+    if (mode == .stats_scan) {
+        return loadFaiStatsScan(io, fai_file, fai_path, fasta_data, fasta_stat);
+    }
+
     const fai_data = posix.mmap(
         null,
         fai_stat.size,
@@ -663,22 +686,13 @@ fn tryLoadFai(
     }
 
     const loaded_records = records[0..record_count];
-    const build_name_map = mode == .lookup_full_map;
-    var name_map = std.StringHashMap(usize).init(allocator);
-    var name_slices: []const []const u8 = &.{};
-    var has_name_map = false;
-    if (build_name_map) {
-        const built = buildNameTable(allocator, loaded_records, fai_data, null) catch return error.OutOfMemory;
-        name_map = built.name_map;
-        name_slices = built.name_slices;
-        has_name_map = true;
-    }
+    const built = buildNameTable(allocator, loaded_records, fai_data, null) catch return error.OutOfMemory;
 
     return .{ .loaded = LoadedIndex{
         .records = loaded_records,
-        .name_map = name_map,
-        .has_name_map = has_name_map,
-        .name_slices = name_slices,
+        .name_map = built.name_map,
+        .has_name_map = true,
+        .name_slices = built.name_slices,
         .fai_data = fai_data,
         .fasta_data = fasta_data,
         .fasta_size = fasta_stat.size,
@@ -686,6 +700,128 @@ fn tryLoadFai(
         .source = .fai,
         .arena = arena,
     } };
+}
+
+fn loadFaiRecordsOnly(
+    io: std.Io,
+    fai_file: std.Io.File,
+    fasta_data: []align(4096) const u8,
+    fasta_stat: std.Io.File.Stat,
+    store_names: bool,
+    sidecar_path: ?[]const u8,
+) LoadIndexError!LoadAttempt {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    errdefer arena.deinit();
+    const allocator = arena.allocator();
+
+    var records_list: std.ArrayListUnmanaged(IndexRecord) = .empty;
+    errdefer records_list.deinit(allocator);
+    var slices_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer slices_list.deinit(allocator);
+    var offsets_list: std.ArrayListUnmanaged(u64) = .empty;
+    errdefer offsets_list.deinit(allocator);
+    const track_line_offsets = sidecar_path != null and !store_names;
+
+    var io_buf: [65536]u8 = undefined;
+    var file_reader = fai_file.reader(io, &io_buf);
+    var file_offset: u64 = 0;
+
+    while (true) {
+        const maybe_line = file_reader.interface.takeDelimiter('\n') catch return error.Io;
+        const line = maybe_line orelse break;
+        const line_start_offset = file_offset;
+        file_offset += @as(u64, @intCast(line.len)) + 1;
+        if (line.len == 0) continue;
+
+        const name_end = std.mem.indexOfScalar(u8, line, '\t') orelse return .corrupt;
+        var field_start: usize = name_end + 1;
+
+        const seq_len = parseFaiFieldU64(line, &field_start) catch return .corrupt;
+        const seq_offset = parseFaiFieldU64(line, &field_start) catch return .corrupt;
+        const line_bases = parseFaiFieldU32(line, &field_start) catch return .corrupt;
+        const line_bytes = parseFaiFieldU32(line, &field_start) catch return .corrupt;
+
+        const name = if (store_names)
+            allocator.dupe(u8, line[0..name_end]) catch return error.OutOfMemory
+        else
+            @as([]const u8, &.{});
+        if (store_names) try slices_list.append(allocator, name);
+        if (track_line_offsets) try offsets_list.append(allocator, line_start_offset);
+        try records_list.append(allocator, .{
+            .name_offset = 0,
+            .name_len = if (store_names) @intCast(name_end) else 0,
+            .seq_offset = seq_offset,
+            .seq_len = seq_len,
+            .line_bases = line_bases,
+            .line_bytes = line_bytes,
+        });
+    }
+
+    if (records_list.items.len == 0) return .corrupt;
+
+    const path_copy = if (sidecar_path) |path|
+        allocator.dupe(u8, path) catch return error.OutOfMemory
+    else
+        null;
+
+    return .{ .loaded = LoadedIndex{
+        .records = records_list.toOwnedSlice(allocator) catch return error.OutOfMemory,
+        .name_map = std.StringHashMap(usize).init(allocator),
+        .has_name_map = false,
+        .name_slices = if (store_names) slices_list.toOwnedSlice(allocator) catch return error.OutOfMemory else &.{},
+        .fai_data = null,
+        .fasta_data = fasta_data,
+        .fasta_size = fasta_stat.size,
+        .zfi_data = null,
+        .source = .fai,
+        .sidecar_path = path_copy,
+        .fai_line_offsets = if (track_line_offsets) offsets_list.toOwnedSlice(allocator) catch return error.OutOfMemory else &.{},
+        .arena = arena,
+    } };
+}
+
+fn readFaiNameAtOffset(io: std.Io, allocator: std.mem.Allocator, fai_path: []const u8, offset: u64) LoadIndexError![]const u8 {
+    const fai_file = std.Io.Dir.cwd().openFile(io, fai_path, .{}) catch return error.Io;
+    defer fai_file.close(io);
+
+    var io_buf: [65536]u8 = undefined;
+    var file_reader = fai_file.reader(io, &io_buf);
+    file_reader.seekTo(offset) catch return error.Io;
+    const maybe_line = file_reader.interface.takeDelimiter('\n') catch return error.Io;
+    const line = maybe_line orelse return error.CorruptIndex;
+    if (line.len == 0) return error.CorruptIndex;
+    const name_end = std.mem.indexOfScalar(u8, line, '\t') orelse return error.CorruptIndex;
+    return allocator.dupe(u8, line[0..name_end]);
+}
+
+fn loadFaiStatsScan(
+    io: std.Io,
+    fai_file: std.Io.File,
+    fai_path: []const u8,
+    fasta_data: []align(4096) const u8,
+    fasta_stat: std.Io.File.Stat,
+) LoadIndexError!LoadAttempt {
+    return loadFaiRecordsOnly(io, fai_file, fasta_data, fasta_stat, false, fai_path);
+}
+
+fn readFaiNameLine(io: std.Io, allocator: std.mem.Allocator, fai_path: []const u8, rec_idx: usize) LoadIndexError![]const u8 {
+    const fai_file = std.Io.Dir.cwd().openFile(io, fai_path, .{}) catch return error.Io;
+    defer fai_file.close(io);
+
+    var io_buf: [65536]u8 = undefined;
+    var file_reader = fai_file.reader(io, &io_buf);
+
+    var line_no: usize = 0;
+    while (true) {
+        const maybe_line = file_reader.interface.takeDelimiter('\n') catch return error.Io;
+        const line = maybe_line orelse return error.CorruptIndex;
+        if (line.len == 0) continue;
+        if (line_no == rec_idx) {
+            const name_end = std.mem.indexOfScalar(u8, line, '\t') orelse return error.CorruptIndex;
+            return allocator.dupe(u8, line[0..name_end]);
+        }
+        line_no += 1;
+    }
 }
 
 fn parseFaiFieldU64(line: []const u8, field_start: *usize) LoadIndexError!u64 {

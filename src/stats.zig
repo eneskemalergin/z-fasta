@@ -109,7 +109,7 @@ fn getAminoAcidName(code: u8) []const u8 {
 
 /// Run the stats command.
 pub fn runStats(io: std.Io, fasta_path: []const u8, index_only: bool) void {
-    var idx = index_format.loadIndexWithMode(io, fasta_path, .records_only);
+    var idx = index_format.loadIndexWithMode(io, fasta_path, .stats_scan);
     defer idx.deinit();
 
     const records = idx.records;
@@ -193,13 +193,10 @@ pub fn runStats(io: std.Io, fasta_path: []const u8, index_only: bool) void {
         if (rec.seq_len > records[longest_idx].seq_len) longest_idx = i;
     }
 
-    // Get names - handle both .zfi and .fai sources
-    const shortest_name = getRecordName(&idx, shortest_idx);
-    const longest_name = getRecordName(&idx, longest_idx);
+    // Get names - handle both .zfi and .fai sources.
+    const shortest_name = getRecordName(&idx, io, shortest_idx);
+    const longest_name = getRecordName(&idx, io, longest_idx);
 
-    // Count duplicates (check name_map size vs record count)
-    // In a deduplicated index, the name_map size == record count
-    // For .fai, duplicates were already filtered by samtools
     const duplicates: usize = 0; // Deduplicated during indexing
 
     // Run composition scan early (if not --index-only) so we can include Type in the header
@@ -373,8 +370,119 @@ pub fn runStats(io: std.Io, fasta_path: []const u8, index_only: bool) void {
 }
 
 /// Get the name of a record, handling both .zfi and .fai sources.
-fn getRecordName(idx: *const LoadedIndex, rec_idx: usize) []const u8 {
-    return idx.getRecordName(rec_idx);
+fn getRecordName(idx: *LoadedIndex, io: std.Io, rec_idx: usize) []const u8 {
+    return idx.getRecordNameWithIo(io, rec_idx);
+}
+
+const fasta_release_batch_bytes: usize = 8 * 1024 * 1024;
+
+/// Release FASTA mmap pages during sequential composition scan; batches `madvise` to limit syscall overhead.
+const CompositionReleaseCursor = struct {
+    released_end: usize = 0,
+    scan_end: usize = 0,
+
+    fn beforeRegion(self: *CompositionReleaseCursor, fasta: []const u8, start_byte: usize) void {
+        if (start_byte <= self.released_end) return;
+        const pending = start_byte - self.released_end;
+        if (pending >= fasta_release_batch_bytes) {
+            index_format.dropFastaSpan(fasta, self.released_end, start_byte);
+            self.released_end = start_byte;
+        }
+    }
+
+    fn afterRegion(self: *CompositionReleaseCursor, span_end: usize) void {
+        if (span_end > self.scan_end) self.scan_end = span_end;
+    }
+
+    fn flush(self: *CompositionReleaseCursor, fasta: []const u8) void {
+        const drop_end = @max(self.scan_end, self.released_end);
+        if (drop_end > self.released_end) {
+            index_format.dropFastaSpan(fasta, self.released_end, drop_end);
+            self.released_end = drop_end;
+        }
+    }
+};
+
+fn scanCompositionBytes(
+    fasta: []const u8,
+    start: usize,
+    end: usize,
+    counts: *[256]u64,
+    total_bases: *u64,
+    lowercase_count: *u64,
+) void {
+    for (fasta[start..end]) |byte| {
+        if (byte > ' ') {
+            counts[byte] += 1;
+            total_bases.* += 1;
+            if (byte >= 'a' and byte <= 'z') {
+                lowercase_count.* += 1;
+            }
+        }
+    }
+}
+
+fn uniformRecordByteSpan(rec: IndexRecord) usize {
+    const full_lines = rec.seq_len / rec.line_bases;
+    const remainder = rec.seq_len % rec.line_bases;
+    return @intCast(full_lines * rec.line_bytes + remainder);
+}
+
+fn compositionRegionEnd(fasta: []const u8, rec: IndexRecord, start: usize) usize {
+    const full_lines = rec.seq_len / rec.line_bases;
+    const remainder = rec.seq_len % rec.line_bases;
+    var end: usize = start;
+    if (remainder > 0) {
+        end = start + (full_lines * rec.line_bytes) + remainder;
+        if (end < fasta.len and (fasta[end] == '\n' or fasta[end] == '\r')) {
+            end += 1;
+            if (end < fasta.len and fasta[end - 1] == '\r' and fasta[end] == '\n') {
+                end += 1;
+            }
+        }
+    } else {
+        end = start + (full_lines * rec.line_bytes);
+    }
+    return @min(end, fasta.len);
+}
+
+/// Inline composition scan for one record (hot path; kept in scanComposition for inlining).
+fn scanCompositionRecordInline(
+    idx: *const LoadedIndex,
+    rec: IndexRecord,
+    counts: *[256]u64,
+    total_bases: *u64,
+    lowercase_count: *u64,
+    release: *CompositionReleaseCursor,
+) void {
+    const fasta = idx.fasta_data;
+    if (rec.seq_len == 0) return;
+
+    if (!rec.isUniformWidth()) {
+        const side_table = idx.sideTableLines(rec);
+        var record_end: usize = 0;
+        for (side_table) |line| {
+            const start: usize = @intCast(line.byte_offset);
+            const end = @min(fasta.len, start + @as(usize, @intCast(line.line_bytes)));
+            release.beforeRegion(fasta, start);
+            scanCompositionBytes(fasta, start, end, counts, total_bases, lowercase_count);
+            if (end > record_end) record_end = end;
+        }
+        release.afterRegion(record_end);
+        return;
+    }
+
+    const start: usize = @intCast(rec.seq_offset);
+    release.beforeRegion(fasta, start);
+
+    if (tryScanFixedWidthRecord(fasta, rec, start, counts, total_bases, lowercase_count)) {
+        release.afterRegion(compositionRegionEnd(fasta, rec, start));
+        return;
+    }
+
+    const end = compositionRegionEnd(fasta, rec, start);
+    scanCompositionBytes(fasta, start, end, counts, total_bases, lowercase_count);
+    release.afterRegion(end);
 }
 
 /// Scan all sequence regions in the FASTA for composition.
@@ -392,67 +500,71 @@ fn scanComposition(idx: *const LoadedIndex) CompositionStats {
     var lowercase_count: u64 = 0;
     var total_bases: u64 = 0;
 
-    // Scan each sequence region
-    for (idx.records) |rec| {
-        if (rec.seq_len == 0) continue;
+    const records = idx.records;
+    const record_count = records.len;
+    if (record_count == 0) {
+        return CompositionStats{
+            .counts = counts,
+            .total_bases = total_bases,
+            .seq_type = .nucleotide,
+            .lowercase_count = lowercase_count,
+        };
+    }
 
-        if (!rec.isUniformWidth()) {
-            const side_table = idx.sideTableLines(rec);
-            for (side_table) |line| {
-                const start: usize = @intCast(line.byte_offset);
-                const end = @min(fasta.len, start + @as(usize, @intCast(line.line_bytes)));
-                for (fasta[start..end]) |byte| {
-                    if (byte > ' ') {
-                        counts[byte] += 1;
-                        total_bases += 1;
-                        if (byte >= 'a' and byte <= 'z') {
-                            lowercase_count += 1;
-                        }
-                    }
-                }
+    var release = CompositionReleaseCursor{};
+
+    if (recordsInSeqOffsetOrder(records)) {
+        var scan_end: usize = 0;
+        for (records) |rec| {
+            if (rec.seq_len == 0) continue;
+
+            if (!rec.isUniformWidth()) {
+                scanCompositionRecordInline(idx, rec, &counts, &total_bases, &lowercase_count, &release);
+                if (release.scan_end > scan_end) scan_end = release.scan_end;
+                continue;
             }
-            continue;
-        }
 
-        const start: usize = @intCast(rec.seq_offset);
-
-        if (tryScanFixedWidthRecord(fasta, rec, start, &counts, &total_bases, &lowercase_count)) {
-            continue;
-        }
-
-        // Compute end of sequence region
-        // end = seq_offset + (full_lines * line_bytes) + last_line_bytes
-        const full_lines = rec.seq_len / rec.line_bases;
-        const remainder = rec.seq_len % rec.line_bases;
-        var end: usize = start;
-        if (remainder > 0) {
-            end = start + (full_lines * rec.line_bytes) + remainder;
-            // Account for possible trailing newline
-            if (end < fasta.len and (fasta[end] == '\n' or fasta[end] == '\r')) {
-                end += 1;
-                if (end < fasta.len and fasta[end - 1] == '\r' and fasta[end] == '\n') {
-                    end += 1;
-                }
+            const start: usize = @intCast(rec.seq_offset);
+            if (start >= release.released_end + fasta_release_batch_bytes) {
+                release.beforeRegion(fasta, start);
             }
-        } else {
-            // seq_len is exact multiple of line_bases
-            end = start + (full_lines * rec.line_bytes);
-        }
 
-        if (end > fasta.len) end = fasta.len;
-
-        // Branchless byte counting
-        const region = fasta[start..end];
-        for (region) |byte| {
-            if (byte > ' ') {
-                counts[byte] += 1;
-                total_bases += 1;
-                if (byte >= 'a' and byte <= 'z') {
-                    lowercase_count += 1;
-                }
+            if (tryScanFixedWidthRecord(fasta, rec, start, &counts, &total_bases, &lowercase_count)) {
+                const end = start + uniformRecordByteSpan(rec);
+                if (end > scan_end) scan_end = end;
+                continue;
             }
+
+            const end = compositionRegionEnd(fasta, rec, start);
+            scanCompositionBytes(fasta, start, end, &counts, &total_bases, &lowercase_count);
+            if (end > scan_end) scan_end = end;
+        }
+        release.scan_end = scan_end;
+    } else {
+        // `.fai` rows are usually name-sorted, not file order; must sort before page release.
+        const sorted_indices = std.heap.page_allocator.alloc(usize, record_count) catch {
+            printErrorAndExit("error: out of memory\n", .{});
+        };
+        defer std.heap.page_allocator.free(sorted_indices);
+        for (sorted_indices, 0..) |*slot, i| slot.* = i;
+        std.mem.sort(usize, sorted_indices, records, struct {
+            fn lessThan(ctx: []const IndexRecord, a: usize, b: usize) bool {
+                return ctx[a].seq_offset < ctx[b].seq_offset;
+            }
+        }.lessThan);
+
+        for (sorted_indices) |rec_idx| {
+            scanCompositionRecordInline(
+                idx,
+                records[rec_idx],
+                &counts,
+                &total_bases,
+                &lowercase_count,
+                &release,
+            );
         }
     }
+    release.flush(fasta);
 
     // Detect nucleotide vs protein
     const seq_type = detectType(&counts, total_bases);
@@ -463,6 +575,31 @@ fn scanComposition(idx: *const LoadedIndex) CompositionStats {
         .seq_type = seq_type,
         .lowercase_count = lowercase_count,
     };
+}
+
+fn recordsInSeqOffsetOrder(records: []const IndexRecord) bool {
+    if (records.len < 2) return true;
+    var prev = records[0].seq_offset;
+    for (records[1..]) |rec| {
+        if (rec.seq_offset < prev) return false;
+        prev = rec.seq_offset;
+    }
+    return true;
+}
+
+test "recordsInSeqOffsetOrder detects sorted and unsorted offsets" {
+    const sorted = [_]IndexRecord{
+        .{ .seq_offset = 10, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
+        .{ .seq_offset = 20, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
+        .{ .seq_offset = 30, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
+    };
+    try std.testing.expect(recordsInSeqOffsetOrder(&sorted));
+
+    const unsorted = [_]IndexRecord{
+        .{ .seq_offset = 30, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
+        .{ .seq_offset = 10, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
+    };
+    try std.testing.expect(!recordsInSeqOffsetOrder(&unsorted));
 }
 
 fn tryScanFixedWidthRecord(
@@ -537,7 +674,7 @@ test "countCompositionSlice tallies composition and lowercase" {
     try std.testing.expectEqual(@as(u64, 2), counts['N']);
 }
 
-/// Detect if sequences are nucleotide or protein based on first 100K bases.
+/// Detect if sequences are nucleotide or protein from the full composition counts.
 pub fn detectType(counts: *const [256]u64, total: u64) SequenceType {
     if (total == 0) return .nucleotide;
 
