@@ -1587,7 +1587,7 @@ pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions
 }
 
 test "processBedReaderChunked matches non-chunked extraction" {
-    const test_io = std.Io.Threaded.global_single_threaded.io();
+    const test_io = std.testing.io;
     var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
     defer idx.deinit();
 
@@ -1616,7 +1616,7 @@ test "processBedReaderChunked matches non-chunked extraction" {
 }
 
 test "processBedReaderChunked preserves strand handling across chunk boundaries" {
-    const test_io = std.Io.Threaded.global_single_threaded.io();
+    const test_io = std.testing.io;
     var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
     defer idx.deinit();
 
@@ -1639,7 +1639,7 @@ test "processBedReaderChunked preserves strand handling across chunk boundaries"
 }
 
 test "processBedReaderChunked preserves duplicate chrom cache across chunk boundaries" {
-    const test_io = std.Io.Threaded.global_single_threaded.io();
+    const test_io = std.testing.io;
     var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
     defer idx.deinit();
 
@@ -1680,7 +1680,7 @@ test "orientation compose behaves like transform composition" {
 }
 
 test "processParsedRequests applies complement-only and reverse-only transforms" {
-    const test_io = std.Io.Threaded.global_single_threaded.io();
+    const test_io = std.testing.io;
     var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
     defer idx.deinit();
 
@@ -1705,7 +1705,7 @@ test "processParsedRequests applies complement-only and reverse-only transforms"
 }
 
 test "processParsedRequests annotates transforms on by-record-scan path" {
-    const test_io = std.Io.Threaded.global_single_threaded.io();
+    const test_io = std.testing.io;
     var idx = index_format.loadIndexWithMode(test_io, "tests/data/simple.fasta", .records_only);
     defer idx.deinit();
     try std.testing.expect(!idx.has_name_map);
@@ -1732,7 +1732,7 @@ test "processParsedRequests annotates transforms on by-record-scan path" {
 }
 
 test "detectRecordType classifies nucleotide and protein records" {
-    const test_io = std.Io.Threaded.global_single_threaded.io();
+    const test_io = std.testing.io;
 
     var nucleotide_idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
     defer nucleotide_idx.deinit();
@@ -1750,7 +1750,7 @@ test "detectRecordType classifies nucleotide and protein records" {
 }
 
 test "shouldSortByFileOffset rejects small catalogs and wide gaps" {
-    const test_io = std.Io.Threaded.global_single_threaded.io();
+    const test_io = std.testing.io;
     var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
     defer idx.deinit();
 

@@ -2,7 +2,7 @@ const std = @import("std");
 const main = @import("main");
 const parseRegion = main.getter.parseRegion;
 const resolveRegion = main.getter.resolveRegion;
-const io = std.Io.Threaded.global_single_threaded.io();
+const io = std.testing.io;
 
 // ============================================================================
 // Region parsing tests

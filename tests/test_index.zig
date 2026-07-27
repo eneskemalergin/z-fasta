@@ -10,7 +10,7 @@ const IndexRecord = main.IndexRecord;
 const ZfiHeader = main.ZfiHeader;
 const ZFI_MAGIC = main.ZFI_MAGIC;
 const c = std.c;
-const io = std.Io.Threaded.global_single_threaded.io();
+const io = std.testing.io;
 
 fn writeZfiFromRecords(path: []const u8, records: []const IndexRecord, source_size: u64, source_mtime_ns: u64, allocator: std.mem.Allocator) !void {
     var index = try main.indexer.zfiIndexFromRecords(records, allocator);

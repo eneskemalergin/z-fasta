@@ -1,7 +1,7 @@
 const std = @import("std");
 const main = @import("main");
 
-const io = std.Io.Threaded.global_single_threaded.io();
+const io = std.testing.io;
 const validator = main.validator;
 
 fn countKind(summary: *const validator.Summary, kind: validator.Kind) usize {

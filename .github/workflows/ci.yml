@@ -71,8 +71,13 @@ jobs:
           printf '>seq1\nACGT\n>seq2\nGGGG\n' > .ci-smoke/test.fasta
           "${{ matrix.binary }}" --version
           "${{ matrix.binary }}" validate .ci-smoke/test.fasta > /dev/null
+          "${{ matrix.binary }}" index .ci-smoke/test.fasta
           "${{ matrix.binary }}" index --emit-fai .ci-smoke/test.fasta > .ci-smoke/test.fai
           test -s .ci-smoke/test.fai
+          "${{ matrix.binary }}" get .ci-smoke/test.fasta seq1:1-4 > .ci-smoke/get.out
+          test -s .ci-smoke/get.out
+          "${{ matrix.binary }}" stats .ci-smoke/test.fasta > .ci-smoke/stats.out
+          test -s .ci-smoke/stats.out
 
       - name: Generate test indexes
         shell: bash
@@ -88,4 +93,11 @@ jobs:
 
       - name: Run tests
         shell: bash
-        run: zig build test --summary all
+        run: |
+          # Windows file mapping is less forgiving of parallel test binaries
+          # racing on the same fixture files; serialize there only.
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            zig build test --summary all -j1
+          else
+            zig build test --summary all
+          fi

@@ -175,7 +175,7 @@ test "detectType - lowercase nucleotides" {
 // Integration: stats via process spawn
 // ============================================================================
 
-const ZFASTA_BIN = if (builtin.os.tag == .windows) "zig-out/bin/z-fasta.exe" else "zig-out/bin/z-fasta";
+const ZFASTA_BIN = if (builtin.os.tag == .windows) "zig-out\\bin\\z-fasta.exe" else "zig-out/bin/z-fasta";
 
 fn runStatsAndCapture(allocator: std.mem.Allocator, fasta_path: []const u8, index_only: bool) ![]u8 {
     var threaded = std.Io.Threaded.init(allocator, .{});
