@@ -1,6 +1,6 @@
 const std = @import("std");
-const posix = std.posix;
 const index_format = @import("index_format.zig");
+const platform = @import("platform.zig");
 
 const IndexRecord = index_format.IndexRecord;
 const LoadedIndex = index_format.LoadedIndex;
@@ -489,12 +489,8 @@ fn scanCompositionRecordInline(
 fn scanComposition(idx: *const LoadedIndex) CompositionStats {
     const fasta = idx.fasta_data;
 
-    // Set madvise to sequential for full scan
-    posix.madvise(
-        @alignCast(@constCast(fasta.ptr)),
-        fasta.len,
-        posix.MADV.SEQUENTIAL,
-    ) catch {};
+    // Sequential access hint for full scan (no-op on Windows).
+    platform.advise(fasta, .sequential);
 
     var counts: [256]u64 = .{0} ** 256;
     var lowercase_count: u64 = 0;

@@ -1,8 +1,8 @@
 const std = @import("std");
-const posix = std.posix;
 const complement = @import("complement.zig");
 const bed_parser = @import("bed_parser.zig");
 const index_format = @import("index_format.zig");
+const platform = @import("platform.zig");
 const stats = @import("stats.zig");
 
 const IndexRecord = index_format.IndexRecord;
@@ -1047,11 +1047,8 @@ fn shouldAdviseSequentialMmap(
     return sequential_scan;
 }
 
-fn adviseFastaMmap(fasta: []const u8, advice: u32) void {
-    if (fasta.len == 0) return;
-    const len = std.mem.alignBackward(usize, fasta.len, std.heap.page_size_min);
-    if (len == 0) return;
-    posix.madvise(@alignCast(@constCast(fasta.ptr)), len, advice) catch {};
+fn adviseFastaMmap(fasta: []const u8, advice: platform.Advice) void {
+    platform.advise(fasta, advice);
 }
 
 fn readAllInput(allocator: std.mem.Allocator, io: std.Io, path: []const u8) []u8 {
@@ -1308,7 +1305,7 @@ fn processParsedRequests(
     const use_positional = !release_sorted and requests.len >= 16 and
         idx.fasta_size >= sort_by_offset_min_fasta_bytes and sparse != null;
     if (!use_positional) {
-        const mmap_advice: u32 = if (sequential_mmap) posix.MADV.SEQUENTIAL else posix.MADV.RANDOM;
+        const mmap_advice: platform.Advice = if (sequential_mmap) .sequential else .random;
         adviseFastaMmap(idx.fasta_data, mmap_advice);
     }
 

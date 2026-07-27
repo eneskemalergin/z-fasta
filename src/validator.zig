@@ -1,7 +1,6 @@
 const std = @import("std");
-const posix = std.posix;
-
 const index_format = @import("index_format.zig");
+const platform = @import("platform.zig");
 const stats = @import("stats.zig");
 
 const printErrorAndExit = index_format.printErrorAndExit;
@@ -157,23 +156,20 @@ pub fn runValidate(io: std.Io, fasta_path: []const u8, options: Options) void {
         printErrorAndExit("error: failed to stat file: {s}\n", .{fasta_path});
     };
 
-    const data = if (stat.size == 0)
+    var fasta_view: ?platform.FileView = null;
+    defer if (fasta_view) |*view| view.destroy(io);
+
+    const data: []const u8 = if (stat.size == 0)
         &[_]u8{}
-    else
-        posix.mmap(
-            null,
-            stat.size,
-            .{ .READ = true },
-            .{ .TYPE = .PRIVATE },
-            file.handle,
-            0,
-        ) catch {
+    else blk: {
+        fasta_view = platform.FileView.mapFile(io, file, @intCast(stat.size)) catch {
             printErrorAndExit("error: failed to mmap file: {s}\n", .{fasta_path});
         };
-    defer if (stat.size > 0) posix.munmap(data);
+        break :blk fasta_view.?.bytes();
+    };
 
     if (data.len > 0) {
-        posix.madvise(@alignCast(@constCast(data.ptr)), data.len, posix.MADV.SEQUENTIAL) catch {};
+        platform.advise(data, .sequential);
     }
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);

@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const posix = std.posix;
+const platform = @import("platform.zig");
 
 // Module imports
 pub const index_format = @import("index_format.zig");
@@ -181,7 +181,11 @@ fn printVersionFastAndExit() noreturn {
 }
 
 pub fn main(init: std.process.Init.Minimal) void {
-    var args = std.process.Args.Iterator.init(init.args);
+    var args = std.process.Args.Iterator.initAllocator(init.args, std.heap.page_allocator) catch {
+        std.debug.print("error: out of memory\n", .{});
+        std.process.exit(1);
+    };
+    defer args.deinit();
     _ = args.skip();
 
     const cmd = args.next() orelse {
@@ -267,19 +271,13 @@ fn runIndex(io: std.Io, args: *std.process.Args.Iterator) void {
         printErrorAndExit("error: file is empty: {s}\n", .{path});
     }
 
-    const data = posix.mmap(
-        null,
-        stat.size,
-        .{ .READ = true },
-        .{ .TYPE = .PRIVATE },
-        file.handle,
-        0,
-    ) catch {
+    var fasta_view = platform.FileView.mapFile(io, file, @intCast(stat.size)) catch {
         printErrorAndExit("error: failed to mmap file: {s}\n", .{path});
     };
-    defer posix.munmap(data);
+    defer fasta_view.destroy(io);
+    const data = fasta_view.bytes();
 
-    posix.madvise(data.ptr, data.len, posix.MADV.SEQUENTIAL) catch {};
+    platform.advise(data, .sequential);
 
     if (data.len == 0 or data[0] != '>') {
         printErrorAndExit("error: not a FASTA file: {s}\n", .{path});
