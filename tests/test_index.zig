@@ -773,3 +773,333 @@ test "loadIndexCheckedWithMode preserves fai duplicate lookup semantics" {
     try std.testing.expectEqual(full_map_idx.lookupName("dup"), records_only_idx.lookupName("dup"));
     try std.testing.expectEqual(@as(?usize, 1), records_only_idx.lookupName("dup"));
 }
+
+test "loadIndexChecked rejects fai with zero line_bases" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "bad-fai-zero-bases", "fa");
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+    defer fasta_file.close(io);
+    try std.Io.File.writeStreamingAll(fasta_file, io, ">seq1\nACGT\n");
+
+    const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
+    defer fai_file.close(io);
+    try std.Io.File.writeStreamingAll(fai_file, io, "seq1\t4\t6\t0\t5\n");
+
+    try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, fasta_path));
+}
+
+test "loadIndexChecked rejects fai with line_bytes less than line_bases" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "bad-fai-line-bytes", "fa");
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+    defer fasta_file.close(io);
+    try std.Io.File.writeStreamingAll(fasta_file, io, ">seq1\nACGT\n");
+
+    const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
+    defer fai_file.close(io);
+    try std.Io.File.writeStreamingAll(fai_file, io, "seq1\t4\t6\t5\t4\n");
+
+    try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, fasta_path));
+}
+
+test "loadIndexChecked rejects fai with seq_offset past EOF" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "bad-fai-offset", "fa");
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+    defer fasta_file.close(io);
+    try std.Io.File.writeStreamingAll(fasta_file, io, ">seq1\nACGT\n");
+
+    const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
+    defer fai_file.close(io);
+    try std.Io.File.writeStreamingAll(fai_file, io, "seq1\t4\t99\t4\t5\n");
+
+    try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, fasta_path));
+}
+
+test "loadIndexChecked rejects fai whose sequence span exceeds FASTA" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "bad-fai-span", "fa");
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+    defer fasta_file.close(io);
+    try std.Io.File.writeStreamingAll(fasta_file, io, ">seq1\nACGT\n");
+
+    // seq_len 100 from offset 6 cannot fit in an 11-byte FASTA.
+    const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
+    defer fai_file.close(io);
+    try std.Io.File.writeStreamingAll(fai_file, io, "seq1\t100\t6\t4\t5\n");
+
+    try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, fasta_path));
+}
+
+test "loadIndexCheckedWithMode records_only rejects impossible fai geometry" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "bad-fai-records-only", "fa");
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+    defer fasta_file.close(io);
+    try std.Io.File.writeStreamingAll(fasta_file, io, ">seq1\nACGT\n");
+
+    const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
+    defer fai_file.close(io);
+    try std.Io.File.writeStreamingAll(fai_file, io, "seq1\t4\t6\t0\t5\n");
+
+    try std.testing.expectError(
+        error.CorruptIndex,
+        main.index_format.loadIndexCheckedWithMode(io, fasta_path, .records_only),
+    );
+}
+
+test "loadIndexCheckedWithMode stats_scan rejects impossible fai geometry" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "bad-fai-stats-scan", "fa");
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+    defer fasta_file.close(io);
+    try std.Io.File.writeStreamingAll(fasta_file, io, ">seq1\nACGT\n");
+
+    const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
+    defer fai_file.close(io);
+    try std.Io.File.writeStreamingAll(fai_file, io, "seq1\t4\t6\t4\t3\n");
+
+    try std.testing.expectError(
+        error.CorruptIndex,
+        main.index_format.loadIndexCheckedWithMode(io, fasta_path, .stats_scan),
+    );
+}
+
+test "loadIndexChecked rejects fai decimal overflow in seq_len" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "bad-fai-u64-overflow", "fa");
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+    defer fasta_file.close(io);
+    try std.Io.File.writeStreamingAll(fasta_file, io, ">seq1\nACGT\n");
+
+    // 20 nines overflows u64 during decimal accumulation (max u64 is 20 digits starting with 1).
+    const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
+    defer fai_file.close(io);
+    try std.Io.File.writeStreamingAll(fai_file, io, "seq1\t99999999999999999999\t6\t4\t5\n");
+
+    try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, fasta_path));
+}
+
+test "loadIndexChecked rejects fai line_bases above u32" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "bad-fai-u32-overflow", "fa");
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+    defer fasta_file.close(io);
+    try std.Io.File.writeStreamingAll(fasta_file, io, ">seq1\nACGT\n");
+
+    const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
+    defer fai_file.close(io);
+    try std.Io.File.writeStreamingAll(fai_file, io, "seq1\t4\t6\t4294967296\t5\n");
+
+    try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, fasta_path));
+}
+
+test "loadIndexChecked rejects fai name longer than u16" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "bad-fai-long-name", "fa");
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+    defer fasta_file.close(io);
+    try std.Io.File.writeStreamingAll(fasta_file, io, ">seq1\nACGT\n");
+
+    var fai_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer fai_buf.deinit(allocator);
+    try fai_buf.appendNTimes(allocator, 'N', 65536);
+    try fai_buf.appendSlice(allocator, "\t4\t6\t4\t5\n");
+
+    const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
+    defer fai_file.close(io);
+    try std.Io.File.writeStreamingAll(fai_file, io, fai_buf.items);
+
+    try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, fasta_path));
+}
+
+fn expectFaiLoaderModesAgree(fasta_path: []const u8) !void {
+    var full = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .lookup_full_map);
+    defer full.deinit();
+    var records_only = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .records_only);
+    defer records_only.deinit();
+    var stats_scan = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .stats_scan);
+    defer stats_scan.deinit();
+
+    try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.fai, full.source);
+    try std.testing.expectEqual(full.source, records_only.source);
+    try std.testing.expectEqual(full.source, stats_scan.source);
+    try std.testing.expectEqual(full.records.len, records_only.records.len);
+    try std.testing.expectEqual(full.records.len, stats_scan.records.len);
+    try std.testing.expectEqual(full.records.len, stats_scan.fai_line_offsets.len);
+
+    for (full.records, 0..) |rec, i| {
+        const streamed = records_only.records[i];
+        const scanned = stats_scan.records[i];
+
+        // Geometry and length fields must match across mmap and streaming paths.
+        try std.testing.expectEqual(rec.seq_offset, streamed.seq_offset);
+        try std.testing.expectEqual(rec.seq_len, streamed.seq_len);
+        try std.testing.expectEqual(rec.line_bases, streamed.line_bases);
+        try std.testing.expectEqual(rec.line_bytes, streamed.line_bytes);
+
+        try std.testing.expectEqual(rec.seq_offset, scanned.seq_offset);
+        try std.testing.expectEqual(rec.seq_len, scanned.seq_len);
+        try std.testing.expectEqual(rec.line_bases, scanned.line_bases);
+        try std.testing.expectEqual(rec.line_bytes, scanned.line_bytes);
+
+        // stats_scan sidecar offsets are the same byte positions mmap stores in name_offset.
+        try std.testing.expectEqual(rec.name_offset, stats_scan.fai_line_offsets[i]);
+
+        try std.testing.expectEqualStrings(full.getRecordName(i), records_only.getRecordName(i));
+        try std.testing.expectEqualStrings(full.getRecordName(i), stats_scan.getRecordNameWithIo(io, i));
+    }
+}
+
+test "fai loaders agree when index omits terminal newline" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "fai-no-term-nl", "fa");
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+    defer fasta_file.close(io);
+    try std.Io.File.writeStreamingAll(fasta_file, io, ">s1\nACGT\n>s2\nGGGG\n");
+
+    // Two records; final `.fai` line has no trailing `\n`.
+    const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
+    defer fai_file.close(io);
+    try std.Io.File.writeStreamingAll(fai_file, io, "s1\t4\t4\t4\t5\ns2\t4\t13\t4\t5");
+
+    try expectFaiLoaderModesAgree(fasta_path);
+}
+
+test "fai loaders agree when FASTA omits terminal newline" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "fasta-no-term-nl", "fa");
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    // Samtools-style line_bytes still counts the separator even when the final line has none.
+    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+    defer fasta_file.close(io);
+    try std.Io.File.writeStreamingAll(fasta_file, io, ">seq1\nACGT");
+
+    const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
+    defer fai_file.close(io);
+    try std.Io.File.writeStreamingAll(fai_file, io, "seq1\t4\t6\t4\t5\n");
+
+    try expectFaiLoaderModesAgree(fasta_path);
+}
+
+test "fai loaders agree when FASTA and index both omit terminal newline" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "both-no-term-nl", "fa");
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+    defer fasta_file.close(io);
+    try std.Io.File.writeStreamingAll(fasta_file, io, ">seq1\nAAAA\nBBBB");
+
+    const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
+    defer fai_file.close(io);
+    try std.Io.File.writeStreamingAll(fai_file, io, "seq1\t8\t6\t4\t5");
+
+    try expectFaiLoaderModesAgree(fasta_path);
+}
+
+test "loadIndexChecked accepts zfi when FASTA omits terminal newline" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "zfi-fasta-no-term-nl", "fa");
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+
+    const fasta_data = ">seq1\nACGT";
+    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+    defer fasta_file.close(io);
+    try std.Io.File.writeStreamingAll(fasta_file, io, fasta_data);
+
+    var records = try scanHeaders(fasta_data, allocator);
+    defer records.deinit(allocator);
+    try writeZfi(io, zfi_path, records.items, fasta_data.len);
+
+    var idx = try loadIndexChecked(io, fasta_path);
+    defer idx.deinit();
+    try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.zfi, idx.source);
+    try std.testing.expectEqual(@as(u64, 4), idx.records[0].seq_len);
+}
