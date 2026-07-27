@@ -13,7 +13,6 @@ const index_format = @import("index_format.zig");
 pub const IndexRecord = index_format.IndexRecord;
 pub const ZfiHeader = index_format.ZfiHeader;
 pub const ZFI_MAGIC = index_format.ZFI_MAGIC;
-pub const writeZfi = index_format.writeZfi;
 
 const SIMD_CHUNK_SIZE = 32;
 const SimdVec = @Vector(SIMD_CHUNK_SIZE, u8);
@@ -602,7 +601,37 @@ pub fn scanZfiIndexStreamingData(
     return scanZfiIndexStreaming(&r, &read_buf, enable_dedup, allocator);
 }
 
-/// Writes a `ZfiIndex` to a `.zfi` file (header, records, side tables).
+/// Wrap prebuilt records as a production `ZfiIndex` with empty side tables and
+/// an empty name blob. Prefer `scanZfiIndex` for real FASTA fixtures so embedded
+/// names and side tables match the CLI. Use this for deliberately crafted records
+/// (including corrupt fixtures) that still must go through `writeZfiIndex`.
+pub fn zfiIndexFromRecords(records: []const IndexRecord, allocator: std.mem.Allocator) !ZfiIndex {
+    var index = ZfiIndex{
+        .records = .empty,
+        .side_tables = .empty,
+        .name_blob = .empty,
+    };
+    errdefer index.deinit(allocator);
+    try index.records.appendSlice(allocator, records);
+    return index;
+}
+
+/// Single on-disk `.zfi` serialization path (`plan/zfi-format.md`):
+/// header, records, side tables, name blob, `ZFNM` footer.
+pub fn writeZfiIndex(writer: *std.Io.Writer, index: *const ZfiIndex, source_size: u64) !void {
+    const header = ZfiHeader{
+        .magic = ZFI_MAGIC,
+        .record_count = @intCast(index.records.items.len),
+        .source_size = source_size,
+    };
+    try writer.writeAll(std.mem.asBytes(&header));
+    try writer.writeAll(std.mem.sliceAsBytes(index.records.items));
+    try writer.writeAll(index.side_tables.items);
+    try writer.writeAll(index.name_blob.items);
+    try writer.writeAll(&index_format.encodeZfiNameFooter(index.name_blob.items.len));
+}
+
+/// Writes a `ZfiIndex` to a `.zfi` file via `writeZfiIndex`.
 pub fn writeZfiIndexFile(
     io: std.Io,
     path: []const u8,
@@ -614,40 +643,16 @@ pub fn writeZfiIndexFile(
 
     var file_buf: [65536]u8 = undefined;
     var file_fw = file.writer(io, &file_buf);
-    const writer = &file_fw.interface;
-
-    const header = ZfiHeader{
-        .magic = ZFI_MAGIC,
-        .record_count = @intCast(index.records.items.len),
-        .source_size = source_size,
-    };
-    try writer.writeAll(std.mem.asBytes(&header));
-    try writer.writeAll(std.mem.sliceAsBytes(index.records.items));
-    try writer.writeAll(index.side_tables.items);
-    try writer.writeAll(index.name_blob.items);
-    try writer.writeAll(&index_format.encodeZfiNameFooter(index.name_blob.items.len));
+    try writeZfiIndex(&file_fw.interface, index, source_size);
     try file_fw.flush();
 }
 
-/// Serializes a `ZfiIndex` to the on-disk `.zfi` byte layout (header, records, side tables).
+/// Serializes a `ZfiIndex` with the same bytes as `writeZfiIndexFile`.
 pub fn zfiIndexToBytes(index: *const ZfiIndex, source_size: u64, allocator: std.mem.Allocator) ![]u8 {
-    const header = ZfiHeader{
-        .magic = ZFI_MAGIC,
-        .record_count = @intCast(index.records.items.len),
-        .source_size = source_size,
-    };
-    const records_bytes = std.mem.sliceAsBytes(index.records.items);
-    const footer = index_format.encodeZfiNameFooter(index.name_blob.items.len);
-    const out = try allocator.alloc(u8, @sizeOf(ZfiHeader) + records_bytes.len + index.side_tables.items.len + index.name_blob.items.len + footer.len);
-    @memcpy(out[0..@sizeOf(ZfiHeader)], std.mem.asBytes(&header));
-    @memcpy(out[@sizeOf(ZfiHeader) .. @sizeOf(ZfiHeader) + records_bytes.len], records_bytes);
-    var pos = @sizeOf(ZfiHeader) + records_bytes.len;
-    @memcpy(out[pos .. pos + index.side_tables.items.len], index.side_tables.items);
-    pos += index.side_tables.items.len;
-    @memcpy(out[pos .. pos + index.name_blob.items.len], index.name_blob.items);
-    pos += index.name_blob.items.len;
-    @memcpy(out[pos..], &footer);
-    return out;
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    try writeZfiIndex(&aw.writer, index, source_size);
+    return try aw.toOwnedSlice();
 }
 
 /// Scans FASTA data and returns index records as ArrayList (for testing).

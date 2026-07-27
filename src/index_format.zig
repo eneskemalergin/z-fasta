@@ -1,4 +1,11 @@
+//! `.zfi` binary and `.fai` text index load/write helpers (`LoadedIndex`, staleness, geometry).
+//!
+//! On-disk `.zfi` bytes follow the frozen little-endian contract in `plan/zfi-format.md`.
+//! Host `extern struct` views are allowed only when comptime checks prove native layout
+//! matches that contract (little-endian + fixed sizes/offsets).
+
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 
 // ============================================================================
@@ -14,7 +21,15 @@ pub const name_in_zfi_flag = NAME_IN_ZFI_FLAG;
 const SIDE_TABLE_OFFSET_BYTES = 5;
 const MAX_SIDE_TABLE_OFFSET = (1 << (SIDE_TABLE_OFFSET_BYTES * 8)) - 1;
 
+/// Maximum absolute side-table byte offset (`plan/zfi-format.md`).
+pub const max_side_table_offset: u64 = MAX_SIDE_TABLE_OFFSET;
+
 pub const ZFI_NAME_FOOTER_MAGIC: [4]u8 = .{ 'Z', 'F', 'N', 'M' };
+
+/// On-disk sizes from the wire contract (must match `@sizeOf` under the frozen layout).
+pub const zfi_header_bytes: usize = 16;
+pub const zfi_index_record_bytes: usize = 40;
+pub const zfi_side_table_line_bytes: usize = 32;
 
 /// On-disk name-table footer size (4-byte magic + little-endian u64 length).
 pub const zfi_name_footer_bytes: usize = 12;
@@ -104,6 +119,63 @@ pub const IndexRecord = extern struct {
         }
     }
 };
+
+// Frozen wire layout (`plan/zfi-format.md`). `asBytes` / mmap views are valid only when
+// native endianness and struct layout match the little-endian contract.
+comptime {
+    if (builtin.cpu.arch.endian() != .little) {
+        @compileError(".zfi wire format requires little-endian (see plan/zfi-format.md); big-endian codec not implemented");
+    }
+    if (@sizeOf(ZfiHeader) != zfi_header_bytes) @compileError("ZfiHeader size drifted from wire contract");
+    if (@sizeOf(IndexRecord) != zfi_index_record_bytes) @compileError("IndexRecord size drifted from wire contract");
+    if (@sizeOf(SideTableLine) != zfi_side_table_line_bytes) @compileError("SideTableLine size drifted from wire contract");
+    if (@offsetOf(ZfiHeader, "magic") != 0) @compileError("ZfiHeader.magic offset");
+    if (@offsetOf(ZfiHeader, "record_count") != 4) @compileError("ZfiHeader.record_count offset");
+    if (@offsetOf(ZfiHeader, "source_size") != 8) @compileError("ZfiHeader.source_size offset");
+    if (@offsetOf(IndexRecord, "name_offset") != 0) @compileError("IndexRecord.name_offset offset");
+    if (@offsetOf(IndexRecord, "name_len") != 8) @compileError("IndexRecord.name_len offset");
+    if (@offsetOf(IndexRecord, "_pad") != 10) @compileError("IndexRecord._pad offset");
+    if (@offsetOf(IndexRecord, "seq_offset") != 16) @compileError("IndexRecord.seq_offset offset");
+    if (@offsetOf(IndexRecord, "seq_len") != 24) @compileError("IndexRecord.seq_len offset");
+    if (@offsetOf(IndexRecord, "line_bases") != 32) @compileError("IndexRecord.line_bases offset");
+    if (@offsetOf(IndexRecord, "line_bytes") != 36) @compileError("IndexRecord.line_bytes offset");
+    if (@offsetOf(SideTableLine, "base_start") != 0) @compileError("SideTableLine.base_start offset");
+    if (@offsetOf(SideTableLine, "byte_offset") != 8) @compileError("SideTableLine.byte_offset offset");
+    if (@offsetOf(SideTableLine, "line_bytes") != 16) @compileError("SideTableLine.line_bytes offset");
+    if (@offsetOf(SideTableLine, "line_bases") != 24) @compileError("SideTableLine.line_bases offset");
+}
+
+/// Explicit little-endian header bytes (must match `asBytes` on little-endian hosts).
+pub fn encodeZfiHeader(header: ZfiHeader) [zfi_header_bytes]u8 {
+    var out: [zfi_header_bytes]u8 = undefined;
+    @memcpy(out[0..4], &header.magic);
+    std.mem.writeInt(u32, out[4..8], header.record_count, .little);
+    std.mem.writeInt(u64, out[8..16], header.source_size, .little);
+    return out;
+}
+
+/// Explicit little-endian record bytes (must match `asBytes` on little-endian hosts).
+pub fn encodeIndexRecord(rec: IndexRecord) [zfi_index_record_bytes]u8 {
+    var out: [zfi_index_record_bytes]u8 = undefined;
+    std.mem.writeInt(u64, out[0..8], rec.name_offset, .little);
+    std.mem.writeInt(u16, out[8..10], rec.name_len, .little);
+    @memcpy(out[10..16], &rec._pad);
+    std.mem.writeInt(u64, out[16..24], rec.seq_offset, .little);
+    std.mem.writeInt(u64, out[24..32], rec.seq_len, .little);
+    std.mem.writeInt(u32, out[32..36], rec.line_bases, .little);
+    std.mem.writeInt(u32, out[36..40], rec.line_bytes, .little);
+    return out;
+}
+
+/// Explicit little-endian side-table line bytes (must match `asBytes` on little-endian hosts).
+pub fn encodeSideTableLine(line: SideTableLine) [zfi_side_table_line_bytes]u8 {
+    var out: [zfi_side_table_line_bytes]u8 = undefined;
+    std.mem.writeInt(u64, out[0..8], line.base_start, .little);
+    std.mem.writeInt(u64, out[8..16], line.byte_offset, .little);
+    std.mem.writeInt(u64, out[16..24], line.line_bytes, .little);
+    std.mem.writeInt(u64, out[24..32], line.line_bases, .little);
+    return out;
+}
 
 /// Result of loading an index (from .zfi or .fai)
 pub const LoadMode = enum {
@@ -223,15 +295,11 @@ pub const LoadedIndex = struct {
 
     pub fn sideTableLines(self: *const LoadedIndex, rec: IndexRecord) []const SideTableLine {
         if (rec.isUniformWidth()) return &.{};
-
-        const zfi = self.zfi_data.?;
-        const offset: usize = @intCast(rec.sideTableOffset());
-        const count: *const u64 = @ptrCast(@alignCast(zfi[offset..].ptr));
-        const line_bytes = zfi[offset + @sizeOf(u64) ..];
-        return @as(
-            [*]const SideTableLine,
-            @ptrCast(@alignCast(line_bytes.ptr)),
-        )[0..count.*];
+        const zfi = self.zfi_data orelse return &.{};
+        // Load-time validation must have accepted this table; re-check bounds so a
+        // corrupt in-memory record cannot create an out-of-range pointer.
+        const parsed = parseSideTable(zfi, rec, 0, zfi.len, std.math.maxInt(usize)) orelse return &.{};
+        return parsed.lines;
     }
 };
 
@@ -268,30 +336,6 @@ const LoadAttempt = union(enum) {
 pub fn printErrorAndExit(comptime fmt: []const u8, args: anytype) noreturn {
     std.debug.print(fmt, args);
     std.process.exit(1);
-}
-
-// ============================================================================
-// .zfi writer (used by indexer)
-// ============================================================================
-
-/// Writes the .zfi binary index file.
-pub fn writeZfi(
-    io: std.Io,
-    path: []const u8,
-    records: []const IndexRecord,
-    source_size: u64,
-) !void {
-    const file = try std.Io.Dir.cwd().createFile(io, path, .{});
-    errdefer std.Io.Dir.cwd().deleteFile(io, path) catch {};
-    defer file.close(io);
-
-    const header = ZfiHeader{
-        .magic = ZFI_MAGIC,
-        .record_count = @intCast(records.len),
-        .source_size = source_size,
-    };
-    try std.Io.File.writeStreamingAll(file, io, std.mem.asBytes(&header));
-    try std.Io.File.writeStreamingAll(file, io, std.mem.sliceAsBytes(records));
 }
 
 // ============================================================================
@@ -391,16 +435,6 @@ pub fn loadIndexCheckedWithMode(io: std.Io, fasta_path: []const u8, mode: LoadMo
     }
 }
 
-fn parseZfiNameBlob(zfi_data: []const u8, records: []const IndexRecord) ?[]const u8 {
-    if (records.len == 0 or !records[0].nameInZfi()) return null;
-
-    const parsed = parseZfiNameFooter(zfi_data) orelse return null;
-    const blob_len: usize = @intCast(parsed.name_blob_len);
-    const footer_start = zfi_data.len - parsed.footer_bytes;
-    if (footer_start < blob_len) return null;
-    return zfi_data[footer_start - blob_len .. footer_start];
-}
-
 fn parseZfiNameFooter(zfi_data: []const u8) ?struct {
     name_blob_len: u64,
     footer_bytes: usize,
@@ -411,15 +445,59 @@ fn parseZfiNameFooter(zfi_data: []const u8) ?struct {
         }
     }
 
+    // Legacy 16-byte footer: magic + 4 pad bytes + little-endian u64 length.
     if (zfi_data.len >= zfi_name_footer_legacy_bytes) {
         const tail = zfi_data[zfi_data.len - zfi_name_footer_legacy_bytes ..];
         if (std.mem.eql(u8, tail[0..4], &ZFI_NAME_FOOTER_MAGIC)) {
-            const name_blob_len: u64 = @bitCast(tail[8..16].*);
+            const name_blob_len = std.mem.readInt(u64, tail[8..16], .little);
             return .{ .name_blob_len = name_blob_len, .footer_bytes = zfi_name_footer_legacy_bytes };
         }
     }
 
     return null;
+}
+
+// Partition name-blob / footer relative to the records region.
+//
+// Production indexes embed names for every record and end with a `ZFNM` footer.
+// Indexes with FASTA-backed names (no name-in-`.zfi` flag) may still carry an
+// empty name blob + footer from `writeZfiIndex`; loaders ignore the trailing
+// region when no record requests embedded names.
+// Mixed `nameInZfi` flags, a missing footer when names are embedded, or a blob
+// that overlaps the record array are corrupt.
+const ZfiNameLayout = union(enum) {
+    none,
+    blob: struct {
+        bytes: []const u8,
+        start: usize,
+    },
+    corrupt,
+};
+
+fn resolveZfiNameLayout(zfi_data: []const u8, records_end: usize, records: []const IndexRecord) ZfiNameLayout {
+    if (records.len == 0) return .corrupt;
+
+    const names_in_zfi = records[0].nameInZfi();
+    for (records[1..]) |rec| {
+        if (rec.nameInZfi() != names_in_zfi) return .corrupt;
+    }
+    if (!names_in_zfi) return .none;
+
+    const footer = parseZfiNameFooter(zfi_data) orelse return .corrupt;
+    const blob_len = std.math.cast(usize, footer.name_blob_len) orelse return .corrupt;
+    if (zfi_data.len < footer.footer_bytes) return .corrupt;
+    const footer_start = zfi_data.len - footer.footer_bytes;
+    const blob_start = std.math.sub(usize, footer_start, blob_len) catch return .corrupt;
+    if (blob_start < records_end) return .corrupt;
+    return .{ .blob = .{
+        .bytes = zfi_data[blob_start..footer_start],
+        .start = blob_start,
+    } };
+}
+
+fn zfiRecordsEnd(record_count: u32) ?usize {
+    const records_bytes = std.math.mul(usize, @as(usize, record_count), @sizeOf(IndexRecord)) catch return null;
+    return std.math.add(usize, @sizeOf(ZfiHeader), records_bytes) catch null;
 }
 
 fn buildNameMapFast(
@@ -551,25 +629,37 @@ fn tryLoadZfi(
         return .stale;
     }
 
-    // Validate that the file has enough bytes for all records
-    const expected_size = @sizeOf(ZfiHeader) + @as(usize, header.record_count) * @sizeOf(IndexRecord);
-    if (zfi_data.len < expected_size) {
-        return .corrupt;
-    }
+    // Empty catalogs are not useful and match the `.fai` reject-empty policy.
+    if (header.record_count == 0) return .corrupt;
 
-    // Cast record array from mmap bytes
-    const record_bytes = zfi_data[@sizeOf(ZfiHeader)..];
+    // Checked records extent before forming the typed record slice.
+    const records_end = zfiRecordsEnd(header.record_count) orelse return .corrupt;
+    if (zfi_data.len < records_end) return .corrupt;
+
+    const record_bytes = zfi_data[@sizeOf(ZfiHeader)..records_end];
     const records: []const IndexRecord = @as(
         [*]const IndexRecord,
         @ptrCast(@alignCast(record_bytes.ptr)),
     )[0..header.record_count];
 
-    const name_blob = parseZfiNameBlob(zfi_data, records);
+    const name_layout = resolveZfiNameLayout(zfi_data, records_end, records);
+    const name_blob: ?[]const u8 = switch (name_layout) {
+        .none => null,
+        .blob => |b| b.bytes,
+        .corrupt => return .corrupt,
+    };
 
-    for (records) |rec| {
-        if (!isValidZfiRecordMetadata(rec, fasta_data.len, zfi_data, name_blob)) {
-            return .corrupt;
-        }
+    // Side tables live after records and before the name blob (or EOF when names
+    // stay in the FASTA, as with legacy header+records files).
+    const side_region_start = records_end;
+    const side_region_end: usize = switch (name_layout) {
+        .blob => |b| b.start,
+        .none => zfi_data.len,
+        .corrupt => unreachable,
+    };
+
+    if (!validateZfiRecords(records, fasta_data, zfi_data, name_blob, side_region_start, side_region_end)) {
+        return .corrupt;
     }
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -975,54 +1065,99 @@ fn isValidUniformSequenceGeometry(rec: IndexRecord, fasta_len: usize) bool {
     return last_byte < fasta_len;
 }
 
+fn rangeFitsUsize(offset: u64, len: u64, limit: usize) bool {
+    const off = std.math.cast(usize, offset) orelse return false;
+    const len_usz = std.math.cast(usize, len) orelse return false;
+    const end = std.math.add(usize, off, len_usz) catch return false;
+    return end <= limit;
+}
+
 fn isValidZfiRecordMetadata(
     rec: IndexRecord,
-    fasta_len: usize,
+    fasta_data: []const u8,
     zfi_data: []align(4096) const u8,
     name_blob: ?[]const u8,
+    side_region_start: usize,
+    side_region_end: usize,
+    prev_side_end: *usize,
 ) bool {
     if (rec.name_len == 0) return false;
     if (rec.nameInZfi()) {
         const blob = name_blob orelse return false;
-        if (rec.name_offset + rec.name_len > blob.len) return false;
+        if (!rangeFitsUsize(rec.name_offset, rec.name_len, blob.len)) return false;
     } else {
-        if (rec.name_offset == 0 or rec.name_offset > fasta_len) return false;
-        if (rec.name_offset + rec.name_len > fasta_len) return false;
+        if (rec.name_offset == 0) return false;
+        if (!rangeFitsUsize(rec.name_offset, rec.name_len, fasta_data.len)) return false;
+        // Name points at the byte after `>` in the FASTA.
+        if (fasta_data[rec.name_offset - 1] != '>') return false;
     }
 
     if (!rec.isUniformWidth()) {
         if (rec.seq_len == 0) return false;
-        if (rec.seq_offset >= fasta_len) return false;
-        return isValidSideTable(rec, fasta_len, zfi_data);
+        if (rec.seq_offset >= fasta_data.len) return false;
+        const parsed = parseSideTable(zfi_data, rec, side_region_start, side_region_end, fasta_data.len) orelse return false;
+        if (parsed.start < prev_side_end.*) return false;
+        prev_side_end.* = parsed.end;
+        return true;
     }
 
-    return isValidUniformSequenceGeometry(rec, fasta_len);
+    return isValidUniformSequenceGeometry(rec, fasta_data.len);
 }
 
-fn isValidZfiRecord(
-    rec: IndexRecord,
-    fasta_data: []align(4096) const u8,
+fn validateZfiRecords(
+    records: []const IndexRecord,
+    fasta_data: []const u8,
     zfi_data: []align(4096) const u8,
+    name_blob: ?[]const u8,
+    side_region_start: usize,
+    side_region_end: usize,
 ) bool {
-    if (!isValidZfiRecordMetadata(rec, fasta_data.len, zfi_data, null)) return false;
-    if (rec.nameInZfi()) return true;
-    if (fasta_data[rec.name_offset - 1] != '>') return false;
+    if (side_region_end < side_region_start) return false;
+    var prev_side_end: usize = side_region_start;
+    for (records) |rec| {
+        if (!isValidZfiRecordMetadata(rec, fasta_data, zfi_data, name_blob, side_region_start, side_region_end, &prev_side_end)) {
+            return false;
+        }
+    }
     return true;
 }
 
-fn isValidSideTable(rec: IndexRecord, fasta_len: usize, zfi_data: []align(4096) const u8) bool {
-    const offset: usize = @intCast(rec.sideTableOffset());
-    if (offset < @sizeOf(ZfiHeader)) return false;
-    if (offset + @sizeOf(u64) > zfi_data.len) return false;
+// Parsed side-table location inside the side-table region.
+const ParsedSideTable = struct {
+    start: usize,
+    end: usize,
+    lines: []const SideTableLine,
+};
+
+// Validate one non-uniform record's side table before creating typed line pointers.
+//
+// The table must sit in `[side_region_start, side_region_end)`, be 8-byte aligned,
+// and describe `rec.seq_len` bases starting at `rec.seq_offset`. Line byte offsets
+// must strictly increase; checked arithmetic rejects wraps before any slice.
+fn parseSideTable(
+    zfi_data: []align(4096) const u8,
+    rec: IndexRecord,
+    side_region_start: usize,
+    side_region_end: usize,
+    fasta_len: usize,
+) ?ParsedSideTable {
+    const offset = std.math.cast(usize, rec.sideTableOffset()) orelse return null;
+    if (offset < side_region_start or offset >= side_region_end) return null;
+    if (offset % @alignOf(u64) != 0) return null;
+
+    const count_end = std.math.add(usize, offset, @sizeOf(u64)) catch return null;
+    if (count_end > side_region_end) return null;
 
     const count_ptr: *const u64 = @ptrCast(@alignCast(zfi_data[offset..].ptr));
     const line_count = count_ptr.*;
-    if (line_count == 0) return false;
-    if (line_count > std.math.maxInt(usize) / @sizeOf(SideTableLine)) return false;
+    if (line_count == 0) return null;
+    if (line_count > std.math.maxInt(usize) / @sizeOf(SideTableLine)) return null;
 
-    const table_bytes = @as(usize, @intCast(line_count)) * @sizeOf(SideTableLine);
-    const lines_offset = offset + @sizeOf(u64);
-    if (lines_offset + table_bytes > zfi_data.len) return false;
+    const table_bytes = std.math.mul(usize, @as(usize, @intCast(line_count)), @sizeOf(SideTableLine)) catch return null;
+    const lines_offset = count_end;
+    const table_end = std.math.add(usize, lines_offset, table_bytes) catch return null;
+    if (table_end > side_region_end) return null;
+    if (lines_offset % @alignOf(SideTableLine) != 0) return null;
 
     const lines = @as(
         [*]const SideTableLine,
@@ -1032,16 +1167,21 @@ fn isValidSideTable(rec: IndexRecord, fasta_len: usize, zfi_data: []align(4096) 
     var expected_base_start: u64 = 0;
     var previous_byte_offset: u64 = 0;
     for (lines, 0..) |line, i| {
-        if (line.base_start != expected_base_start) return false;
-        if (line.line_bases == 0 or line.line_bytes == 0) return false;
-        if (line.line_bytes < line.line_bases) return false;
-        if (line.byte_offset >= fasta_len) return false;
-        if (line.byte_offset + line.line_bytes > fasta_len) return false;
-        if (i > 0 and line.byte_offset <= previous_byte_offset) return false;
+        if (line.base_start != expected_base_start) return null;
+        if (line.line_bases == 0 or line.line_bytes == 0) return null;
+        if (line.line_bytes < line.line_bases) return null;
+        if (!rangeFitsUsize(line.byte_offset, line.line_bytes, fasta_len)) return null;
+        if (i == 0) {
+            // Writer invariant: first base-bearing line begins at seq_offset.
+            if (line.byte_offset != rec.seq_offset) return null;
+        } else if (line.byte_offset <= previous_byte_offset) {
+            return null;
+        }
 
-        expected_base_start += line.line_bases;
+        expected_base_start = std.math.add(u64, expected_base_start, line.line_bases) catch return null;
         previous_byte_offset = line.byte_offset;
     }
 
-    return expected_base_start == rec.seq_len;
+    if (expected_base_start != rec.seq_len) return null;
+    return .{ .start = offset, .end = table_end, .lines = lines };
 }

@@ -7,11 +7,16 @@ const scanChunkedData = main.indexer.scanChunkedData;
 const low_mem_chunk_size = main.indexer.low_mem_chunk_size;
 const loadIndexChecked = main.index_format.loadIndexChecked;
 const IndexRecord = main.IndexRecord;
-const writeZfi = main.writeZfi;
 const ZfiHeader = main.ZfiHeader;
 const ZFI_MAGIC = main.ZFI_MAGIC;
 const c = std.c;
 const io = std.Io.Threaded.global_single_threaded.io();
+
+fn writeZfiFromRecords(path: []const u8, records: []const IndexRecord, source_size: u64, allocator: std.mem.Allocator) !void {
+    var index = try main.indexer.zfiIndexFromRecords(records, allocator);
+    defer index.deinit(allocator);
+    try main.indexer.writeZfiIndexFile(io, path, &index, source_size);
+}
 
 fn supportsPosixFutimens() bool {
     return switch (builtin.os.tag) {
@@ -342,12 +347,13 @@ test "scanHeaders on real proteome.fasta file" {
 }
 
 // ============================================================================
-// writeZfi tests
+// writeZfiIndex tests
 // ============================================================================
 
-test "writeZfi creates valid file" {
+test "writeZfiIndexFile creates valid production layout" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
+    const allocator = arena.allocator();
 
     const records = [_]IndexRecord{
         .{ .name_offset = 1, .name_len = 4, .seq_offset = 10, .seq_len = 100, .line_bases = 80, .line_bytes = 81 },
@@ -356,11 +362,11 @@ test "writeZfi creates valid file" {
     const path = "tests/data/test_write.zfi";
     defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
 
-    try writeZfi(io, path, &records, 1000);
+    try writeZfiFromRecords(path, &records, 1000, allocator);
 
-    // Read and verify
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
+    const stat = try file.stat(io);
 
     var header_bytes: [@sizeOf(ZfiHeader)]u8 = undefined;
     _ = try std.Io.File.readPositionalAll(file, io, &header_bytes, 0);
@@ -369,6 +375,8 @@ test "writeZfi creates valid file" {
     try std.testing.expectEqualSlices(u8, &ZFI_MAGIC, &header.magic);
     try std.testing.expectEqual(@as(u32, 1), header.record_count);
     try std.testing.expectEqual(@as(u64, 1000), header.source_size);
+    // header + one record + empty side/name regions + 12-byte footer
+    try std.testing.expectEqual(@as(u64, 16 + 40 + main.index_format.zfi_name_footer_bytes), stat.size);
 }
 
 test "ZfiHeader has correct size" {
@@ -382,6 +390,72 @@ test "IndexRecord has consistent size" {
 
 test "SideTableLine has explicit v0.3 size" {
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(main.index_format.SideTableLine));
+}
+
+test "zfi wire encoders match asBytes for frozen little-endian layout" {
+    const header = ZfiHeader{
+        .magic = ZFI_MAGIC,
+        .record_count = 0x01020304,
+        .source_size = 0x0807060504030201,
+    };
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&header), &main.index_format.encodeZfiHeader(header));
+
+    var rec = IndexRecord{
+        .name_offset = 0x1112131415161718,
+        .name_len = 0x2122,
+        .seq_offset = 0x3132333435363738,
+        .seq_len = 0x4142434445464748,
+        .line_bases = 0x51525354,
+        .line_bytes = 0x61626364,
+    };
+    try rec.markNonUniform(0x000000AABBCCDDEE);
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&rec), &main.index_format.encodeIndexRecord(rec));
+    try std.testing.expectEqual(@as(u8, 0xEE), std.mem.asBytes(&rec)[11]);
+    try std.testing.expectEqual(@as(u64, 0x000000AABBCCDDEE), rec.sideTableOffset());
+
+    const line = main.index_format.SideTableLine{
+        .base_start = 1,
+        .byte_offset = 0x90A0B0C0D0E0F000,
+        .line_bytes = 10,
+        .line_bases = 8,
+    };
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&line), &main.index_format.encodeSideTableLine(line));
+
+    const footer = main.index_format.encodeZfiNameFooter(0x0102030405060708);
+    try std.testing.expectEqualSlices(u8, &main.index_format.ZFI_NAME_FOOTER_MAGIC, footer[0..4]);
+    try std.testing.expectEqual(@as(u64, 0x0102030405060708), std.mem.readInt(u64, footer[4..12], .little));
+}
+
+test "zfiIndexToBytes matches encodeZfiHeader prefix and LE side-table count" {
+    const data = ">seq\nAAA\nCCCC\nGG\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var zfi_index = try main.indexer.scanZfiIndex(data, true, allocator);
+    defer zfi_index.deinit(allocator);
+    const bytes = try main.indexer.zfiIndexToBytes(&zfi_index, data.len, allocator);
+    defer allocator.free(bytes);
+
+    const expected_header = main.index_format.encodeZfiHeader(.{
+        .magic = ZFI_MAGIC,
+        .record_count = 1,
+        .source_size = data.len,
+    });
+    try std.testing.expectEqualSlices(u8, &expected_header, bytes[0..16]);
+
+    const rec = zfi_index.records.items[0];
+    try std.testing.expectEqualSlices(
+        u8,
+        &main.index_format.encodeIndexRecord(rec),
+        bytes[16 .. 16 + 40],
+    );
+
+    const side_off: usize = @intCast(rec.sideTableOffset());
+    try std.testing.expectEqual(
+        @as(u64, 3),
+        std.mem.readInt(u64, bytes[side_off ..][0..8], .little),
+    );
 }
 
 test "scanZfiIndex marks non-uniform records and appends side table" {
@@ -638,7 +712,7 @@ test "loadIndexChecked rejects corrupt zfi records" {
     const bad_records = [_]IndexRecord{
         .{ .name_offset = 999_999, .name_len = 4, .seq_offset = 6, .seq_len = 4, .line_bases = 4, .line_bytes = 5 },
     };
-    try writeZfi(io, zfi_path, &bad_records, 11);
+    try writeZfiFromRecords(zfi_path, &bad_records, 11, allocator);
 
     try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, fasta_path));
 }
@@ -661,9 +735,212 @@ test "loadIndexChecked rejects seq_offset at end of file" {
     const bad_records = [_]IndexRecord{
         .{ .name_offset = 1, .name_len = 4, .seq_offset = fasta_data.len, .seq_len = 4, .line_bases = 4, .line_bytes = 5 },
     };
-    try writeZfi(io, zfi_path, &bad_records, fasta_data.len);
+    try writeZfiFromRecords(zfi_path, &bad_records, fasta_data.len, allocator);
 
     try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, fasta_path));
+}
+
+fn writeFastaAndRawZfi(allocator: std.mem.Allocator, stem: []const u8, fasta: []const u8, zfi_bytes: []const u8) !struct { fasta_path: []u8, zfi_path: []u8 } {
+    const fasta_path = try uniqueArtifactPath(allocator, stem, "fa");
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+
+    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+    defer fasta_file.close(io);
+    try std.Io.File.writeStreamingAll(fasta_file, io, fasta);
+
+    const zfi_file = try std.Io.Dir.cwd().createFile(io, zfi_path, .{ .truncate = true });
+    defer zfi_file.close(io);
+    try std.Io.File.writeStreamingAll(zfi_file, io, zfi_bytes);
+    return .{ .fasta_path = fasta_path, .zfi_path = zfi_path };
+}
+
+fn appendZfiHeader(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, record_count: u32, source_size: u64) !void {
+    const header = ZfiHeader{
+        .magic = ZFI_MAGIC,
+        .record_count = record_count,
+        .source_size = source_size,
+    };
+    try buf.appendSlice(allocator, std.mem.asBytes(&header));
+}
+
+test "loadIndexChecked rejects zfi with zero record_count" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var zfi_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer zfi_buf.deinit(allocator);
+    try appendZfiHeader(&zfi_buf, allocator, 0, 11);
+
+    const paths = try writeFastaAndRawZfi(allocator, "zfi-zero-count", ">seq1\nACGT\n", zfi_buf.items);
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, paths.zfi_path) catch {};
+
+    try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, paths.fasta_path));
+}
+
+test "loadIndexChecked rejects truncated zfi header" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const paths = try writeFastaAndRawZfi(allocator, "zfi-trunc-header", ">seq1\nACGT\n", ZFI_MAGIC[0..3]);
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, paths.zfi_path) catch {};
+
+    try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, paths.fasta_path));
+}
+
+test "loadIndexChecked rejects zfi record_count larger than file" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var zfi_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer zfi_buf.deinit(allocator);
+    try appendZfiHeader(&zfi_buf, allocator, 2, 11);
+    // Only one record body follows the header.
+    const rec = IndexRecord{ .name_offset = 1, .name_len = 4, .seq_offset = 6, .seq_len = 4, .line_bases = 4, .line_bytes = 5 };
+    try zfi_buf.appendSlice(allocator, std.mem.asBytes(&rec));
+
+    const paths = try writeFastaAndRawZfi(allocator, "zfi-count-overflow", ">seq1\nACGT\n", zfi_buf.items);
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, paths.zfi_path) catch {};
+
+    try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, paths.fasta_path));
+}
+
+test "loadIndexChecked rejects zfi with bad magic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var zfi_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer zfi_buf.deinit(allocator);
+    var header = ZfiHeader{ .magic = .{ 'X', 'F', 'I', 0x01 }, .record_count = 1, .source_size = 11 };
+    try zfi_buf.appendSlice(allocator, std.mem.asBytes(&header));
+    const rec = IndexRecord{ .name_offset = 1, .name_len = 4, .seq_offset = 6, .seq_len = 4, .line_bases = 4, .line_bytes = 5 };
+    try zfi_buf.appendSlice(allocator, std.mem.asBytes(&rec));
+
+    const paths = try writeFastaAndRawZfi(allocator, "zfi-bad-magic", ">seq1\nACGT\n", zfi_buf.items);
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, paths.zfi_path) catch {};
+
+    try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, paths.fasta_path));
+}
+
+test "loadIndexChecked rejects zfi name blob overlapping records" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_data = ">seq1\nACGT\n";
+    var index = try main.indexer.scanZfiIndex(fasta_data, true, allocator);
+    defer index.deinit(allocator);
+    var zfi_bytes = try main.indexer.zfiIndexToBytes(&index, fasta_data.len, allocator);
+    defer allocator.free(zfi_bytes);
+
+    // Inflate footer blob length so blob_start falls inside the record array.
+    const footer = main.index_format.encodeZfiNameFooter(zfi_bytes.len);
+    @memcpy(zfi_bytes[zfi_bytes.len - footer.len ..], &footer);
+
+    const paths = try writeFastaAndRawZfi(allocator, "zfi-blob-overlap", fasta_data, zfi_bytes);
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, paths.zfi_path) catch {};
+
+    try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, paths.fasta_path));
+}
+
+test "loadIndexChecked rejects zfi side table offset into records" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_data = ">seq\nAAA\nCCCC\nGG\n";
+    var index = try main.indexer.scanZfiIndex(fasta_data, true, allocator);
+    defer index.deinit(allocator);
+    try std.testing.expect(!index.records.items[0].isUniformWidth());
+
+    // Point the side table into the header/records region.
+    try index.records.items[0].markNonUniform(@sizeOf(ZfiHeader));
+
+    const zfi_bytes = try main.indexer.zfiIndexToBytes(&index, fasta_data.len, allocator);
+    defer allocator.free(zfi_bytes);
+
+    const paths = try writeFastaAndRawZfi(allocator, "zfi-side-in-records", fasta_data, zfi_bytes);
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, paths.zfi_path) catch {};
+
+    try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, paths.fasta_path));
+}
+
+test "loadIndexChecked rejects zfi side table with empty line_count" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_data = ">seq\nAAA\nCCCC\nGG\n";
+    var index = try main.indexer.scanZfiIndex(fasta_data, true, allocator);
+    defer index.deinit(allocator);
+
+    const offset: usize = @intCast(index.records.items[0].sideTableOffset());
+    const zfi_bytes = try main.indexer.zfiIndexToBytes(&index, fasta_data.len, allocator);
+    defer allocator.free(zfi_bytes);
+    // Zero the line_count header at the side-table offset.
+    @memset(zfi_bytes[offset .. offset + @sizeOf(u64)], 0);
+
+    const paths = try writeFastaAndRawZfi(allocator, "zfi-side-zero-lines", fasta_data, zfi_bytes);
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, paths.zfi_path) catch {};
+
+    try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, paths.fasta_path));
+}
+
+test "loadIndexChecked rejects mixed nameInZfi flags" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_data = ">a\nAAAA\n>b\nBBBB\n";
+    var index = try main.indexer.scanZfiIndex(fasta_data, true, allocator);
+    defer index.deinit(allocator);
+    try std.testing.expect(index.records.items.len >= 2);
+    try std.testing.expect(index.records.items[0].nameInZfi());
+
+    // Clear NAME_IN_ZFI on the second record only.
+    index.records.items[1]._pad[0] &= ~@as(u8, 2);
+
+    const zfi_bytes = try main.indexer.zfiIndexToBytes(&index, fasta_data.len, allocator);
+    defer allocator.free(zfi_bytes);
+
+    const paths = try writeFastaAndRawZfi(allocator, "zfi-mixed-name-flags", fasta_data, zfi_bytes);
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, paths.zfi_path) catch {};
+
+    try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, paths.fasta_path));
+}
+
+test "loadIndexChecked accepts production zfi with side tables and name blob" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_data = ">seq\nAAA\nCCCC\nGG\n";
+    var index = try main.indexer.scanZfiIndex(fasta_data, true, allocator);
+    defer index.deinit(allocator);
+    const zfi_bytes = try main.indexer.zfiIndexToBytes(&index, fasta_data.len, allocator);
+    defer allocator.free(zfi_bytes);
+
+    const paths = try writeFastaAndRawZfi(allocator, "zfi-production-ok", fasta_data, zfi_bytes);
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, paths.zfi_path) catch {};
+
+    var idx = try loadIndexChecked(io, paths.fasta_path);
+    defer idx.deinit();
+    try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.zfi, idx.source);
+    try std.testing.expect(idx.name_blob != null);
+    try std.testing.expectEqual(@as(usize, 1), idx.records.len);
+    try std.testing.expectEqualStrings("seq", idx.getRecordName(0));
 }
 
 test "loadIndexCheckedWithMode preserves duplicate lookup semantics" {
@@ -685,7 +962,7 @@ test "loadIndexCheckedWithMode preserves duplicate lookup semantics" {
         .{ .name_offset = 1, .name_len = 3, .seq_offset = 5, .seq_len = 4, .line_bases = 4, .line_bytes = 5 },
         .{ .name_offset = 11, .name_len = 3, .seq_offset = 15, .seq_len = 4, .line_bases = 4, .line_bytes = 5 },
     };
-    try writeZfi(io, zfi_path, &records, fasta_data.len);
+    try writeZfiFromRecords(zfi_path, &records, fasta_data.len, allocator);
 
     var full_map_idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .lookup_full_map);
     defer full_map_idx.deinit();
@@ -716,7 +993,7 @@ test "loadIndexChecked falls back to fai when zfi is stale" {
 
     var records = try scanHeaders(fasta_data, allocator);
     defer records.deinit(allocator);
-    try writeZfi(io, zfi_path, records.items, fasta_data.len);
+    try writeZfiFromRecords(zfi_path, records.items, fasta_data.len, allocator);
 
     const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
     defer fai_file.close(io);
@@ -1096,7 +1373,7 @@ test "loadIndexChecked accepts zfi when FASTA omits terminal newline" {
 
     var records = try scanHeaders(fasta_data, allocator);
     defer records.deinit(allocator);
-    try writeZfi(io, zfi_path, records.items, fasta_data.len);
+    try writeZfiFromRecords(zfi_path, records.items, fasta_data.len, allocator);
 
     var idx = try loadIndexChecked(io, fasta_path);
     defer idx.deinit();

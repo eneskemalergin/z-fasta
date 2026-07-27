@@ -13,7 +13,6 @@ pub const validator = @import("validator.zig");
 pub const IndexRecord = index_format.IndexRecord;
 pub const ZfiHeader = index_format.ZfiHeader;
 pub const ZFI_MAGIC = index_format.ZFI_MAGIC;
-pub const writeZfi = index_format.writeZfi;
 pub const validateFasta = indexer.validateFasta;
 pub const scanHeaders = indexer.scanHeaders;
 
