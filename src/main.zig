@@ -41,7 +41,8 @@ const USAGE =
     \\  --version    Print version
     \\
     \\Index options:
-    \\  --emit-fai   Output FAI format to stdout (default: create .zfi file)
+    \\  --emit-fai   Output FAI to stdout when every record has fixed line geometry;
+    \\               otherwise fails and directs you to default .zfi indexing
     \\  --no-dedup   Keep duplicate sequence names in the index (default: first wins
     \\               at index time). get resolves duplicate names to the last record.
     \\  --low-mem    Stream input with bounded RAM; same outputs as default index
@@ -290,16 +291,26 @@ fn runIndex(io: std.Io, args: *std.process.Args.Iterator) void {
     if (emit_fai) {
         var out_buf: [65536]u8 = undefined;
         var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
-        const record_count = indexer.streamingScan(data, &stdout_fw.interface, .fai, enable_dedup, arena.allocator()) catch {
-            stdout_fw.flush() catch {};
-            printErrorAndExit("error: failed to scan/write\n", .{});
+        // Buffer first so a mid-file NonUniformFai does not leave a partial `.fai` on stdout.
+        var fai_aw: std.Io.Writer.Allocating = .init(arena.allocator());
+        defer fai_aw.deinit();
+
+        const record_count = indexer.streamingScan(data, &fai_aw.writer, .fai, enable_dedup, arena.allocator()) catch |err| switch (err) {
+            error.HeaderTooLong => printErrorAndExit("error: sequence name exceeds {d} bytes: {s}\n", .{ indexer.max_index_name_len, path }),
+            error.NonUniformFai => printErrorAndExit(
+                "error: cannot emit .fai for non-uniform sequence layout; run 'z-fasta index' (default) to write .zfi\n",
+                .{},
+            ),
+            else => printErrorAndExit("error: failed to scan/write\n", .{}),
         };
-        stdout_fw.flush() catch {};
 
         if (record_count == 0) {
-            stdout_fw.flush() catch {};
             printErrorAndExit("error: no valid sequences found in: {s}\n", .{path});
         }
+        stdout_fw.interface.writeAll(fai_aw.written()) catch {
+            printErrorAndExit("error: write failed\n", .{});
+        };
+        stdout_fw.flush() catch {};
     } else {
         var zfi_path_buf: [4096]u8 = undefined;
         const zfi_path = std.fmt.bufPrint(&zfi_path_buf, "{s}.zfi", .{path}) catch {
@@ -314,8 +325,9 @@ fn runIndex(io: std.Io, args: *std.process.Args.Iterator) void {
         const cwd = std.Io.Dir.cwd();
         cwd.deleteFile(io, zfi_tmp_path) catch {};
 
-        var zfi_index = indexer.scanZfiIndex(data, enable_dedup, arena.allocator()) catch {
-            printErrorAndExit("error: scan failed\n", .{});
+        var zfi_index = indexer.scanZfiIndex(data, enable_dedup, arena.allocator()) catch |err| switch (err) {
+            error.HeaderTooLong => printErrorAndExit("error: sequence name exceeds {d} bytes: {s}\n", .{ indexer.max_index_name_len, path }),
+            else => printErrorAndExit("error: scan failed\n", .{}),
         };
         defer zfi_index.deinit(arena.allocator());
 
@@ -323,7 +335,7 @@ fn runIndex(io: std.Io, args: *std.process.Args.Iterator) void {
             printErrorAndExit("error: no valid sequences found in: {s}\n", .{path});
         }
 
-        indexer.writeZfiIndexFile(io, zfi_tmp_path, &zfi_index, data.len) catch {
+        indexer.writeZfiIndexFile(io, zfi_tmp_path, &zfi_index, data.len, index_format.timestampToNs(stat.mtime)) catch {
             cwd.deleteFile(io, zfi_tmp_path) catch {};
             printErrorAndExit("error: write failed\n", .{});
         };

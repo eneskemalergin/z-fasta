@@ -9,12 +9,14 @@ Feature-parity release: `validate` subcommand, messy-FASTA side tables, streamin
 
 ### Added
 
+- **`.zfi` source identity (`ZFID`)**: production indexes store the FASTA mtime immediately before the `ZFNM` footer. Load rejects size or embedded-mtime mismatch; legacy files without `ZFID` keep the weaker index-mtime check. `.fai` remains mtime-only.
 - **`.zfi` embedded name table**: sequence names are stored in the index at build time (`ZFNM` footer + name blob). `lookup_full_map` builds a pointer hash over the blob without touching the FASTA header scan path. **Re-index required** for existing `.zfi` files to pick up the new layout.
 - **`.zfi` name footer**: tight 12-byte on-disk footer (4-byte magic + u64 length); legacy 16-byte footers remain readable.
 - **`get` side-table lookup**: binary search on side tables for non-uniform records (O(log L) per base; L is line count).
 - **`z-fasta validate`**: structure, alphabet, and header checks (duplicate names, invalid characters, null bytes, UTF-8 BOM, inconsistent line widths, trailing whitespace, empty sequences, missing terminal newlines, mixed line endings, long headers, schema violations). Output modes: human text; `--json` JSON Lines (`schema_version: "v1"` per event); `--json --summary` aggregate object. `--strict` promotes warnings to errors. `--fix -o <file>` rewrites format issues. Also `--fix-format-only`, `--schema uniprot`, `--schema refseq`, `--custom-alphabet`, and `--max-header-len N` (default 1024).
-- **`index --low-mem` streaming `.zfi`**: bounded-RAM build path. Output bytes match mmap `index` on simple and messy fixtures. `--emit-fai` writes FAI to stdout (same as mmap).
-- **`tests/test_index.zig`**: v0.2 to v0.3 side-table and index compatibility coverage; `.fai` `records_only` vs `lookup_full_map` duplicate-name parity test.
+- **`index --low-mem` streaming `.zfi`**: bounded-RAM build path. Output bytes match mmap `index` on simple and messy fixtures.
+- **Index dedup identity**: mmap and streaming share collision-safe name comparison (`NameDedup`); hash may accelerate lookup but never decides alone.
+- **`tests/test_index.zig`**: v0.2 to v0.3 side-table and index compatibility coverage; `.fai` `records_only` vs `lookup_full_map` duplicate-name parity test; malformed-index and stale-identity coverage.
 - **`build.zig`**: `test_validator` target for validator unit tests.
 - **`complement.complementInto`**: chunked IUPAC complement into a caller buffer (shared by forward and reverse GET emit).
 - **`bench/stats/verify.sh`**: L2 stats gate (BioPython oracle, `.zfi`/`.fai`/cross, layout twins messy==uniform, messy fixtures, low-mem, dedup + Duplicates policy, per-tool parity, CLI errors; 92 checks). See `plan/stats-bench.md`.
@@ -43,6 +45,8 @@ Feature-parity release: `validate` subcommand, messy-FASTA side tables, streamin
 
 ### Fixed
 
+- **`.fai` emit contract**: `--emit-fai` refuses non-uniform layouts instead of writing a misleading text index.
+- **`--low-mem` blank-line parity**: trailing blanks (before EOF or the next header) stay uniform like mmap body trim; interior blanks still force side tables. Fixes `MissingSideTable` scan failures on end-of-record blanks.
 - **`get` on messy FASTAs**: correct extraction via side tables. Previously returned garbage or failed silently on mixed-width files.
 - **`.fai` on single-region GET**: no longer always builds a full name hash map (fixed large slowdown vs `.zfi` on transcriptome-scale indexes).
 - **`index --low-mem`**: skip throwaway side-table work on uniform records (fixes RSS and instruction blow-up on large genomes).

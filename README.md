@@ -27,7 +27,7 @@ Quick links: [Supported Today](#supported-today) · [Installation](#installation
 
 Modern bioinformatics workflows are often bottlenecked by legacy text parsers. `z-fasta` keeps the hot paths close to the data: memory-mapped FASTA input for the default indexer, explicit SIMD header scanning, compact binary indexes, and startup-conscious CLI dispatch for tiny commands.
 
-- **samtools-compatible output:** Both `z-fasta index --emit-fai` and `z-fasta get` produce output byte-identical to `samtools faidx` for the verified cases. Lookup falls back from `.zfi` to `.fai` with mtime + file-size staleness validation.
+- **samtools-compatible output:** Both `z-fasta index --emit-fai` (uniform FASTA only) and `z-fasta get` produce output byte-identical to `samtools faidx` for the verified cases. `--emit-fai` rejects non-uniform layouts and directs you to default `.zfi` indexing. Lookup prefers `.zfi` (size + embedded source mtime) and falls back to `.fai` (mtime-only identity).
 - **Single binary:** No dependencies, no `conda` environments, no `glibc` version errors.
 - **Arena-scoped allocations:** Uses Zig's `ArenaAllocator` for short-lived command state, keeping heap overhead low and cleanup simple.
 
@@ -52,7 +52,8 @@ curl -L https://ziglang.org/download/0.16.0/zig-linux-x86_64-0.16.0.tar.xz | tar
 z-fasta index [options] <file.fasta>
 
 Options:
-  --emit-fai    Output FAI format to stdout (default: create .zfi binary file)
+  --emit-fai    Output FAI to stdout when every record has fixed line geometry;
+                otherwise fails and directs you to default .zfi indexing
   --no-dedup    Keep duplicate sequence names in the index (default: first wins at
                 index time). get resolves duplicate names to the last record.
   --low-mem     Stream input with bounded RAM; same outputs as default index
@@ -244,7 +245,7 @@ See [bench/index/README.md](bench/index/README.md) for index runner flags. GET/s
 ## Output Formats
 
 - **`.zfi`** (default): compact binary index for fast programmatic read/write.
-- **`.fai`** (`--emit-fai`): tab-separated text, byte-identical to `samtools faidx` output.
+- **`.fai`** (`--emit-fai`): tab-separated text for uniform, FAI-representable records only; byte-identical to `samtools faidx` for those cases. Non-uniform layouts require default `.zfi` indexing.
 
 ## Development
 

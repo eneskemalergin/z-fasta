@@ -34,10 +34,23 @@ pub const zfi_side_table_line_bytes: usize = 32;
 /// On-disk name-table footer size (4-byte magic + little-endian u64 length).
 pub const zfi_name_footer_bytes: usize = 12;
 
+/// Trailing source-identity block (`ZFID` + FASTA mtime ns) written immediately
+/// before the name footer. Production writers always include it. Legacy files
+/// without it use the weaker mtime policy.
+pub const ZFI_SOURCE_ID_MAGIC: [4]u8 = .{ 'Z', 'F', 'I', 'D' };
+pub const zfi_source_id_bytes: usize = 12;
+
 pub fn encodeZfiNameFooter(name_blob_len: u64) [zfi_name_footer_bytes]u8 {
     var out: [zfi_name_footer_bytes]u8 = undefined;
     @memcpy(out[0..4], &ZFI_NAME_FOOTER_MAGIC);
     std.mem.writeInt(u64, out[4..12], name_blob_len, .little);
+    return out;
+}
+
+pub fn encodeZfiSourceId(source_mtime_ns: u64) [zfi_source_id_bytes]u8 {
+    var out: [zfi_source_id_bytes]u8 = undefined;
+    @memcpy(out[0..4], &ZFI_SOURCE_ID_MAGIC);
+    std.mem.writeInt(u64, out[4..12], source_mtime_ns, .little);
     return out;
 }
 
@@ -47,8 +60,74 @@ fn decodeZfiNameFooterBytes(footer_bytes: []const u8) ?u64 {
     return std.mem.readInt(u64, footer_bytes[4..12], .little);
 }
 
+fn decodeZfiSourceIdBytes(id_bytes: []const u8) ?u64 {
+    if (id_bytes.len < zfi_source_id_bytes) return null;
+    if (!std.mem.eql(u8, id_bytes[0..4], &ZFI_SOURCE_ID_MAGIC)) return null;
+    return std.mem.readInt(u64, id_bytes[4..12], .little);
+}
+
 /// Legacy on-disk footer written before tight layout (16 bytes: magic + 4 pad + u64).
 const zfi_name_footer_legacy_bytes: usize = 16;
+
+/// Nanoseconds since epoch as stored in `.zfi` source-identity trailers.
+pub fn timestampToNs(ts: std.Io.Timestamp) u64 {
+    return @intCast(ts.nanoseconds);
+}
+
+/// Trailing layout after records/side tables:
+/// `[name blob][optional ZFID][ZFNM footer]`.
+/// `ZFID` sits *before* the footer so legacy loaders that seek `ZFNM` at EOF still work.
+pub const ZfiTrailingMeta = struct {
+    /// End of name blob (and of the side-table region when the blob is empty).
+    payload_end: usize,
+    name_blob_len: u64,
+    footer_bytes: usize,
+    source_mtime_ns: ?u64,
+};
+
+pub fn parseZfiTrailingMeta(zfi_data: []const u8) ?ZfiTrailingMeta {
+    const footer = parseZfiNameFooterAtEnd(zfi_data) orelse return null;
+    if (zfi_data.len < footer.footer_bytes) return null;
+    const footer_start = zfi_data.len - footer.footer_bytes;
+
+    var source_mtime_ns: ?u64 = null;
+    var payload_end = footer_start;
+    if (footer_start >= zfi_source_id_bytes) {
+        if (decodeZfiSourceIdBytes(zfi_data[footer_start - zfi_source_id_bytes .. footer_start])) |mtime_ns| {
+            source_mtime_ns = mtime_ns;
+            payload_end = footer_start - zfi_source_id_bytes;
+        }
+    }
+
+    return .{
+        .payload_end = payload_end,
+        .name_blob_len = footer.name_blob_len,
+        .footer_bytes = footer.footer_bytes,
+        .source_mtime_ns = source_mtime_ns,
+    };
+}
+
+fn parseZfiNameFooterAtEnd(zfi_data: []const u8) ?struct {
+    name_blob_len: u64,
+    footer_bytes: usize,
+} {
+    if (zfi_data.len >= zfi_name_footer_bytes) {
+        if (decodeZfiNameFooterBytes(zfi_data[zfi_data.len - zfi_name_footer_bytes ..])) |name_blob_len| {
+            return .{ .name_blob_len = name_blob_len, .footer_bytes = zfi_name_footer_bytes };
+        }
+    }
+
+    // Legacy 16-byte footer: magic + 4 pad bytes + little-endian u64 length.
+    if (zfi_data.len >= zfi_name_footer_legacy_bytes) {
+        const tail = zfi_data[zfi_data.len - zfi_name_footer_legacy_bytes ..];
+        if (std.mem.eql(u8, tail[0..4], &ZFI_NAME_FOOTER_MAGIC)) {
+            const name_blob_len = std.mem.readInt(u64, tail[8..16], .little);
+            return .{ .name_blob_len = name_blob_len, .footer_bytes = zfi_name_footer_legacy_bytes };
+        }
+    }
+
+    return null;
+}
 
 pub const ZfiHeader = extern struct {
     magic: [4]u8,
@@ -356,7 +435,10 @@ pub fn loadIndexWithMode(io: std.Io, fasta_path: []const u8, mode: LoadMode) Loa
         error.PathTooLong => printErrorAndExit("error: path too long\n", .{}),
         error.MmapFailed => printErrorAndExit("error: failed to mmap file: {s}\n", .{fasta_path}),
         error.CorruptIndex => printErrorAndExit("error: corrupt index file for: {s}\n", .{fasta_path}),
-        error.StaleIndex => printErrorAndExit("error: index is stale (FASTA is newer than index). Re-run 'z-fasta index <path>'.\n", .{}),
+        error.StaleIndex => printErrorAndExit(
+            "error: index is stale (FASTA size or mtime does not match the index). Re-run 'z-fasta index <path>'.\n",
+            .{},
+        ),
         error.NoIndexFound => printErrorAndExit("error: no index found for {s}. Run 'z-fasta index {s}' first.\n", .{ fasta_path, fasta_path }),
         error.OutOfMemory => printErrorAndExit("error: out of memory loading index\n", .{}),
         error.Io => printErrorAndExit("error: failed to load index for: {s}\n", .{fasta_path}),
@@ -439,37 +521,28 @@ fn parseZfiNameFooter(zfi_data: []const u8) ?struct {
     name_blob_len: u64,
     footer_bytes: usize,
 } {
-    if (zfi_data.len >= zfi_name_footer_bytes) {
-        if (decodeZfiNameFooterBytes(zfi_data[zfi_data.len - zfi_name_footer_bytes ..])) |name_blob_len| {
-            return .{ .name_blob_len = name_blob_len, .footer_bytes = zfi_name_footer_bytes };
-        }
-    }
-
-    // Legacy 16-byte footer: magic + 4 pad bytes + little-endian u64 length.
-    if (zfi_data.len >= zfi_name_footer_legacy_bytes) {
-        const tail = zfi_data[zfi_data.len - zfi_name_footer_legacy_bytes ..];
-        if (std.mem.eql(u8, tail[0..4], &ZFI_NAME_FOOTER_MAGIC)) {
-            const name_blob_len = std.mem.readInt(u64, tail[8..16], .little);
-            return .{ .name_blob_len = name_blob_len, .footer_bytes = zfi_name_footer_legacy_bytes };
-        }
-    }
-
-    return null;
+    return parseZfiNameFooterAtEnd(zfi_data);
 }
 
 // Partition name-blob / footer relative to the records region.
 //
-// Production indexes embed names for every record and end with a `ZFNM` footer.
+// Production indexes embed names for every record and end with
+// `[name blob][ZFID][ZFNM footer]`. Legacy files may omit `ZFID`.
 // Indexes with FASTA-backed names (no name-in-`.zfi` flag) may still carry an
-// empty name blob + footer from `writeZfiIndex`; loaders ignore the trailing
-// region when no record requests embedded names.
+// empty name blob + trailer from `writeZfiIndex`; loaders ignore the trailing
+// region when no record requests embedded names, but still bound the side region
+// before the trailer.
 // Mixed `nameInZfi` flags, a missing footer when names are embedded, or a blob
 // that overlaps the record array are corrupt.
 const ZfiNameLayout = union(enum) {
-    none,
+    none: struct {
+        /// End of side-table bytes (excludes name blob + identity + footer when present).
+        side_end: usize,
+    },
     blob: struct {
         bytes: []const u8,
         start: usize,
+        source_mtime_ns: ?u64,
     },
     corrupt,
 };
@@ -481,17 +554,28 @@ fn resolveZfiNameLayout(zfi_data: []const u8, records_end: usize, records: []con
     for (records[1..]) |rec| {
         if (rec.nameInZfi() != names_in_zfi) return .corrupt;
     }
-    if (!names_in_zfi) return .none;
 
-    const footer = parseZfiNameFooter(zfi_data) orelse return .corrupt;
-    const blob_len = std.math.cast(usize, footer.name_blob_len) orelse return .corrupt;
-    if (zfi_data.len < footer.footer_bytes) return .corrupt;
-    const footer_start = zfi_data.len - footer.footer_bytes;
-    const blob_start = std.math.sub(usize, footer_start, blob_len) catch return .corrupt;
+    const trailer = parseZfiTrailingMeta(zfi_data);
+    if (!names_in_zfi) {
+        // No embedded names: side tables run up to the name blob (usually empty)
+        // that precedes the optional identity + footer.
+        if (trailer) |t| {
+            const blob_len = std.math.cast(usize, t.name_blob_len) orelse return .corrupt;
+            const side_end = std.math.sub(usize, t.payload_end, blob_len) catch return .corrupt;
+            if (side_end < records_end) return .corrupt;
+            return .{ .none = .{ .side_end = side_end } };
+        }
+        return .{ .none = .{ .side_end = zfi_data.len } };
+    }
+
+    const t = trailer orelse return .corrupt;
+    const blob_len = std.math.cast(usize, t.name_blob_len) orelse return .corrupt;
+    const blob_start = std.math.sub(usize, t.payload_end, blob_len) catch return .corrupt;
     if (blob_start < records_end) return .corrupt;
     return .{ .blob = .{
-        .bytes = zfi_data[blob_start..footer_start],
+        .bytes = zfi_data[blob_start..t.payload_end],
         .start = blob_start,
+        .source_mtime_ns = t.source_mtime_ns,
     } };
 }
 
@@ -595,7 +679,8 @@ fn tryLoadZfi(
         return .corrupt;
     }
 
-    // Staleness check: mtime
+    // Staleness: index file older than FASTA (both formats). `.fai` has no embedded
+    // source size/mtime, so this plus "index not older" is its entire identity check.
     if (zfi_stat.mtime.nanoseconds < fasta_stat.mtime.nanoseconds) {
         return .stale;
     }
@@ -624,7 +709,7 @@ fn tryLoadZfi(
         return .corrupt;
     }
 
-    // Validate source file size
+    // Validate source file size (embedded identity).
     if (header.source_size != fasta_stat.size) {
         return .stale;
     }
@@ -648,13 +733,28 @@ fn tryLoadZfi(
         .blob => |b| b.bytes,
         .corrupt => return .corrupt,
     };
+    const source_mtime_ns: ?u64 = switch (name_layout) {
+        .none => if (parseZfiTrailingMeta(zfi_data)) |t| t.source_mtime_ns else null,
+        .blob => |b| b.source_mtime_ns,
+        .corrupt => unreachable,
+    };
 
-    // Side tables live after records and before the name blob (or EOF when names
-    // stay in the FASTA, as with legacy header+records files).
+    // Strong identity: production trailers store the FASTA mtime at index time.
+    // Exact match catches same-size content replacement even when the `.zfi` file
+    // mtime was touched forward. Legacy files without a trailer keep the weaker
+    // index-mtime check above only.
+    if (source_mtime_ns) |stored_mtime| {
+        if (stored_mtime != timestampToNs(fasta_stat.mtime)) {
+            return .stale;
+        }
+    }
+
+    // Side tables live after records and before the name blob (or before the
+    // trailing identity/footer when names stay in the FASTA).
     const side_region_start = records_end;
     const side_region_end: usize = switch (name_layout) {
         .blob => |b| b.start,
-        .none => zfi_data.len,
+        .none => |n| n.side_end,
         .corrupt => unreachable,
     };
 
@@ -716,7 +816,8 @@ fn tryLoadFai(
 
     const fai_stat = fai_file.stat(io) catch return error.Io;
 
-    // Staleness check: mtime
+    // `.fai` identity is mtime-only: the text format has no source size or mtime field.
+    // Same-size FASTA replacement is detected only when the FASTA mtime moves forward.
     if (fai_stat.mtime.nanoseconds < fasta_stat.mtime.nanoseconds) {
         return .stale;
     }

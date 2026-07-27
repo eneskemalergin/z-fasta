@@ -3,9 +3,18 @@
 //! `scanFastaRecords` walks a byte slice and invokes a per-record callback. Offsets in
 //! `IndexRecord` and side-table lines are absolute positions in the FASTA file.
 //!
-//! Shared line-metrics rules: `countBasesInLineSlice`, `LineMetricsBuilder`, and
-//! `scanLineMetrics`. Mmap record length uses `measureSequenceLength` on the full
-//! sequence slice; streaming FAI sums per-line metrics from `ChunkParseState`.
+//! Mmap and streaming share line-metrics rules (`countBasesInLineSlice`,
+//! `LineMetricsBuilder`): skip empty lines for geometry, set `seq_offset` to the first
+//! base-bearing line, invent a phantom separator when the final line has no newline,
+//! and reject names longer than `max_index_name_len`.
+//!
+//! Mmap length uses the fast `measureSequenceLength` / `countFixedWidthBases` stride on
+//! the region from the first base-bearing line. Streaming and side-table builds still
+//! walk lines via `LineMetricsBuilder` (interior blank-after-bases → non-uniform;
+//! trailing blanks match mmap body trim and stay uniform).
+//!
+//! Duplicate-name filtering is first-wins and collision-safe on both paths: lookup may
+//! use a hash, but identity is always full-string equality (`NameDedup`).
 
 const std = @import("std");
 const index_format = @import("index_format.zig");
@@ -20,16 +29,48 @@ pub const low_mem_chunk_size = 1 * 1024 * 1024;
 const FILE_IO_BUF_SIZE = 8 * 1024;
 pub const max_index_name_len = std.math.maxInt(u16);
 
-const DedupSeen = std.HashMap(
-    u64,
-    void,
-    std.hash_map.AutoContext(u64),
-    std.hash_map.default_max_load_percentage,
-);
+/// First-wins name set for indexing. A hash accelerates the map; discarding a record
+/// requires `std.mem.eql` identity, never hash equality alone.
+pub const NameDedup = struct {
+    map: std.StringHashMap(void),
+    /// When true, keys were `dupe`d with `map.allocator` and are freed in `deinit`.
+    /// Mmap scans set this false and borrow name slices from the source buffer.
+    owns_keys: bool,
 
-fn hashSequenceName(name: []const u8) u64 {
-    return std.hash.Wyhash.hash(0, name);
-}
+    pub fn init(allocator: std.mem.Allocator, owns_keys: bool) NameDedup {
+        return .{
+            .map = std.StringHashMap(void).init(allocator),
+            .owns_keys = owns_keys,
+        };
+    }
+
+    pub fn deinit(self: *NameDedup) void {
+        if (self.owns_keys) {
+            var it = self.map.keyIterator();
+            while (it.next()) |key| {
+                self.map.allocator.free(key.*);
+            }
+        }
+        self.map.deinit();
+    }
+
+    /// Returns true when `name` was already observed (caller should skip the record).
+    pub fn observe(self: *NameDedup, name: []const u8) !bool {
+        if (!self.owns_keys) {
+            const gop = try self.map.getOrPut(name);
+            return gop.found_existing;
+        }
+        // Own before insert so a failed alloc cannot leave a borrowed key in the map.
+        const owned = try self.map.allocator.dupe(u8, name);
+        errdefer self.map.allocator.free(owned);
+        const gop = try self.map.getOrPut(owned);
+        if (gop.found_existing) {
+            self.map.allocator.free(owned);
+            return true;
+        }
+        return false;
+    }
+};
 
 pub const OutputMode = enum { fai, zfi };
 
@@ -37,8 +78,11 @@ pub const OutputMode = enum { fai, zfi };
 pub const FastaRecordEmit = struct {
     record: IndexRecord,
     name: []const u8,
-    /// Sequence region in the scan buffer (header newline through next header or EOF).
+    /// Sequence region in the scan buffer (byte after header newline through next header or EOF).
+    /// May include leading blank lines before `record.seq_offset`.
     seq_data: []const u8,
+    /// Buffer index where `seq_data` begins (byte after header newline).
+    seq_region_start: usize = 0,
     uses_uniform_formula: bool,
     /// Incremental side-table bytes for streaming `.zfi` (line count + `SideTableLine` rows).
     streaming_side_table: []const u8 = &.{},
@@ -248,9 +292,23 @@ const LineMetricsBuilder = struct {
     pending_bases: u32 = 0,
     pending_actual_bytes: u32 = 0,
     have_pending: bool = false,
+    /// Blank seen after at least one base line; applied when another base line follows
+    /// (trailing blanks before EOF/next header match mmap `trimTrailingRecordNewlines`).
+    blank_after_bases: bool = false,
 
     fn ingestLine(self: *LineMetricsBuilder, bases: u32, actual_bytes: u32, has_lf: bool) void {
-        if (bases == 0) return;
+        if (bases == 0) {
+            // Leading blanks ignored. Trailing blanks ignored until a later base line proves
+            // an interior blank (mmap trims trailing newlines from the sequence body).
+            if (self.metrics.line_count > 0) {
+                self.blank_after_bases = true;
+            }
+            return;
+        }
+        if (self.blank_after_bases) {
+            self.metrics.is_uniform_width = false;
+            self.blank_after_bases = false;
+        }
         self.metrics.seq_len += bases;
         self.metrics.line_count += 1;
 
@@ -272,6 +330,8 @@ const LineMetricsBuilder = struct {
     }
 
     fn finish(self: *LineMetricsBuilder) LineMetrics {
+        // Trailing blanks do not break uniformity (same as mmap body trim).
+        self.blank_after_bases = false;
         if (self.metrics.line_count > 1 and self.have_pending) {
             if (self.pending_bases > self.metrics.line_bases or
                 self.pending_actual_bytes > self.first_actual_bytes)
@@ -294,10 +354,18 @@ fn sequenceLengthInfoFromMetrics(metrics: LineMetrics) SequenceLengthInfo {
     };
 }
 
-fn scanLineMetrics(data: []const u8, seq_offset: usize, seq_end: usize) LineMetrics {
-    var builder = LineMetricsBuilder{};
-    var pos = seq_offset;
+const SequenceRegionScan = struct {
+    metrics: LineMetrics,
+    /// Buffer index of the first base-bearing line start, if any.
+    first_base_line_start: ?usize,
+};
 
+// Walk a sequence region with the same rules as streaming `LineMetricsBuilder`:
+// blank lines do not set geometry; `first_base_line_start` is the index `seq_offset` uses.
+fn scanSequenceRegion(data: []const u8, seq_region_start: usize, seq_end: usize) SequenceRegionScan {
+    var builder = LineMetricsBuilder{};
+    var first_base_line_start: ?usize = null;
+    var pos = seq_region_start;
     while (pos < seq_end) {
         const line_start = pos;
         const line_end = findNextNewline(data, pos, seq_end);
@@ -310,12 +378,51 @@ fn scanLineMetrics(data: []const u8, seq_offset: usize, seq_end: usize) LineMetr
         const bases = countBasesInLineSlice(data, line_start, content_end);
         const actual_bytes: u32 = @intCast((if (has_lf) line_end + 1 else line_end) - line_start);
         builder.ingestLine(bases, actual_bytes, has_lf);
+        if (bases > 0 and first_base_line_start == null) {
+            first_base_line_start = line_start;
+        }
 
         if (!has_lf) break;
         pos = line_end + 1;
     }
+    return .{ .metrics = builder.finish(), .first_base_line_start = first_base_line_start };
+}
 
-    return builder.finish();
+fn scanLineMetrics(data: []const u8, seq_offset: usize, seq_end: usize) LineMetrics {
+    return scanSequenceRegion(data, seq_offset, seq_end).metrics;
+}
+
+/// Skip leading blank lines; return geometry of the first base-bearing line.
+fn peekFirstBaseLineGeometry(data: []const u8, seq_region_start: usize, seq_end: usize) ?struct {
+    first_base_line: usize,
+    line_bases: u32,
+    line_bytes: u32,
+} {
+    var pos = seq_region_start;
+    while (pos < seq_end) {
+        const line_start = pos;
+        const line_end = findNextNewline(data, pos, seq_end);
+        const has_lf = line_end < seq_end;
+        var content_end = line_end;
+        if (content_end > line_start and data[content_end - 1] == '\r') {
+            content_end -= 1;
+        }
+        const bases = countBasesInLineSlice(data, line_start, content_end);
+        if (bases > 0) {
+            const line_bytes: u32 = if (has_lf)
+                @intCast((line_end + 1) - line_start)
+            else
+                @intCast((line_end - line_start) + 1);
+            return .{
+                .first_base_line = line_start,
+                .line_bases = bases,
+                .line_bytes = line_bytes,
+            };
+        }
+        if (!has_lf) break;
+        pos = line_end + 1;
+    }
+    return null;
 }
 
 fn appendSideTable(
@@ -380,19 +487,20 @@ pub fn scanFastaRecords(
     data: []const u8,
     file_base_offset: u64,
     enable_dedup: bool,
-    dedup_names: ?*std.StringHashMap(void),
+    dedup_names: ?*NameDedup,
     max_name_len: ?usize,
     allocator: std.mem.Allocator,
     ctx: anytype,
     comptime emitRecord: fn (@TypeOf(ctx), FastaRecordEmit) anyerror!void,
 ) !u32 {
-    var local_dedup: ?std.StringHashMap(void) = null;
+    // Mmap keys borrow `data`; do not own copies.
+    var local_dedup: ?NameDedup = null;
     if (enable_dedup and dedup_names == null) {
-        local_dedup = std.StringHashMap(void).init(allocator);
+        local_dedup = NameDedup.init(allocator, false);
     }
     defer if (local_dedup) |*s| s.deinit();
 
-    const seen_names: ?*std.StringHashMap(void) = if (enable_dedup)
+    const seen_names: ?*NameDedup = if (enable_dedup)
         dedup_names orelse &local_dedup.?
     else
         null;
@@ -414,60 +522,54 @@ pub fn scanFastaRecords(
         {
             name_end += 1;
         }
+        const name_len_usize = name_end - name_local;
+        if (name_len_usize > max_index_name_len) return error.HeaderTooLong;
         if (max_name_len) |limit| {
-            if (name_end - name_local > limit) return error.HeaderTooLong;
+            if (name_len_usize > limit) return error.HeaderTooLong;
         }
-        const name_len: u16 = @intCast(name_end - name_local);
+        const name_len: u16 = @intCast(name_len_usize);
 
         var header_end = name_end;
         while (header_end < data.len and data[header_end] != '\n') {
             header_end += 1;
         }
 
-        const seq_local: usize = if (header_end < data.len) header_end + 1 else header_end;
-        const seq_end = findNextHeaderStart(data, seq_local);
-
-        var line_bases: u32 = 0;
-        var line_bytes: u32 = 0;
-        if (seq_local < seq_end) {
-            const first_line_end = findNextNewline(data, seq_local, seq_end);
-            const has_lf = first_line_end < seq_end;
-            var content_end = first_line_end;
-            if (content_end > seq_local and data[content_end - 1] == '\r') {
-                content_end -= 1;
-            }
-            line_bases = countBasesInLineSlice(data, seq_local, content_end);
-            line_bytes = if (has_lf)
-                @intCast((first_line_end + 1) - seq_local)
-            else
-                @intCast((first_line_end - seq_local) + 1);
-        }
-
-        const seq_data = data[seq_local..seq_end];
-        const seq_info = measureSequenceLength(seq_data, line_bases, line_bytes);
-        const seq_len = seq_info.seq_len;
+        const seq_region_start: usize = if (header_end < data.len) header_end + 1 else header_end;
+        const seq_end = findNextHeaderStart(data, seq_region_start);
+        // Fast path: only walk leading blanks, then stride-count with measureSequenceLength.
+        // Irregular / blank-after-bases regions fall back via uses_uniform_formula=false → side table.
+        const first = peekFirstBaseLineGeometry(data, seq_region_start, seq_end) orelse {
+            pos = seq_end;
+            continue;
+        };
+        const seq_info = measureSequenceLength(
+            data[first.first_base_line..seq_end],
+            first.line_bases,
+            first.line_bytes,
+        );
 
         pos = seq_end;
-        if (seq_len == 0) continue;
+        if (seq_info.seq_len == 0) continue;
 
         const name = data[name_local..][0..name_len];
         if (seen_names) |seen| {
-            const gop = try seen.getOrPut(name);
-            if (gop.found_existing) continue;
+            if (try seen.observe(name)) continue;
         }
 
+        const seq_data = data[seq_region_start..seq_end];
         const rec = IndexRecord{
             .name_offset = file_base_offset + @as(u64, @intCast(name_local)),
             .name_len = name_len,
-            .seq_offset = file_base_offset + @as(u64, @intCast(seq_local)),
-            .seq_len = seq_len,
-            .line_bases = line_bases,
-            .line_bytes = line_bytes,
+            .seq_offset = file_base_offset + @as(u64, @intCast(first.first_base_line)),
+            .seq_len = seq_info.seq_len,
+            .line_bases = first.line_bases,
+            .line_bytes = first.line_bytes,
         };
         try emitRecord(ctx, .{
             .record = rec,
             .name = name,
             .seq_data = seq_data,
+            .seq_region_start = seq_region_start,
             .uses_uniform_formula = seq_info.uses_uniform_formula,
         });
         record_count += 1;
@@ -490,6 +592,8 @@ pub fn streamingScan(
             const rec = emit_info.record;
             switch (ctx.mode) {
                 .fai => {
+                    // `.fai` can only represent one fixed line geometry per record.
+                    if (!emit_info.uses_uniform_formula) return error.NonUniformFai;
                     try ctx.writer.print("{s}\t{d}\t{d}\t{d}\t{d}\n", .{
                         emit_info.name, rec.seq_len, rec.seq_offset, rec.line_bases, rec.line_bytes,
                     });
@@ -534,11 +638,10 @@ pub fn scanZfiIndex(data: []const u8, enable_dedup: bool, allocator: std.mem.All
         fn emit(ctx: *@This(), emit_info: FastaRecordEmit) !void {
             var rec = emit_info.record;
             if (!emit_info.uses_uniform_formula) {
-                const seq_local: usize = @intCast(rec.seq_offset - ctx.file_base_offset);
                 const local_offset = try appendSideTable(
                     ctx.data,
-                    seq_local,
-                    seq_local + emit_info.seq_data.len,
+                    emit_info.seq_region_start,
+                    emit_info.seq_region_start + emit_info.seq_data.len,
                     ctx.file_base_offset,
                     &ctx.index.side_tables,
                     ctx.allocator,
@@ -617,8 +720,13 @@ pub fn zfiIndexFromRecords(records: []const IndexRecord, allocator: std.mem.Allo
 }
 
 /// Single on-disk `.zfi` serialization path (`plan/zfi-format.md`):
-/// header, records, side tables, name blob, `ZFNM` footer.
-pub fn writeZfiIndex(writer: *std.Io.Writer, index: *const ZfiIndex, source_size: u64) !void {
+/// header, records, side tables, name blob, `ZFID` source identity, `ZFNM` footer.
+pub fn writeZfiIndex(
+    writer: *std.Io.Writer,
+    index: *const ZfiIndex,
+    source_size: u64,
+    source_mtime_ns: u64,
+) !void {
     const header = ZfiHeader{
         .magic = ZFI_MAGIC,
         .record_count = @intCast(index.records.items.len),
@@ -628,6 +736,9 @@ pub fn writeZfiIndex(writer: *std.Io.Writer, index: *const ZfiIndex, source_size
     try writer.writeAll(std.mem.sliceAsBytes(index.records.items));
     try writer.writeAll(index.side_tables.items);
     try writer.writeAll(index.name_blob.items);
+    // Identity before the name footer so legacy loaders that seek `ZFNM` at EOF still
+    // find the footer; they ignore the orphan `ZFID` gap between blob and footer.
+    try writer.writeAll(&index_format.encodeZfiSourceId(source_mtime_ns));
     try writer.writeAll(&index_format.encodeZfiNameFooter(index.name_blob.items.len));
 }
 
@@ -637,21 +748,27 @@ pub fn writeZfiIndexFile(
     path: []const u8,
     index: *const ZfiIndex,
     source_size: u64,
+    source_mtime_ns: u64,
 ) !void {
     const file = try std.Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
 
     var file_buf: [65536]u8 = undefined;
     var file_fw = file.writer(io, &file_buf);
-    try writeZfiIndex(&file_fw.interface, index, source_size);
+    try writeZfiIndex(&file_fw.interface, index, source_size, source_mtime_ns);
     try file_fw.flush();
 }
 
 /// Serializes a `ZfiIndex` with the same bytes as `writeZfiIndexFile`.
-pub fn zfiIndexToBytes(index: *const ZfiIndex, source_size: u64, allocator: std.mem.Allocator) ![]u8 {
+pub fn zfiIndexToBytes(
+    index: *const ZfiIndex,
+    source_size: u64,
+    source_mtime_ns: u64,
+    allocator: std.mem.Allocator,
+) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
-    try writeZfiIndex(&aw.writer, index, source_size);
+    try writeZfiIndex(&aw.writer, index, source_size, source_mtime_ns);
     return try aw.toOwnedSlice();
 }
 
@@ -771,7 +888,11 @@ const ChunkParseState = struct {
     ) !void {
         self.line_builder.ingestLine(bases, actual_bytes, has_lf);
 
-        if (!self.zfi_mode or bases == 0) return;
+        if (!self.zfi_mode) return;
+
+        // Blank lines never become side-table rows (matches mmap `appendSideTable`).
+        // Interior blanks flip uniformity when the next base line arrives.
+        if (bases == 0) return;
 
         const metrics = self.line_builder.metrics;
         const matches_stride = metrics.line_bases > 0 and
@@ -797,14 +918,11 @@ const ChunkParseState = struct {
         try self.appendSideTableLine(bases, actual_bytes, line_file_offset);
     }
 
-    fn noteSeqOffset(self: *ChunkParseState, data: []const u8, line_file_offset: u64) void {
+    fn noteSeqOffset(self: *ChunkParseState, line_file_offset: u64) void {
         if (self.seq_offset_set) return;
-        var pos: usize = 0;
-        while (pos < data.len and data[pos] <= ' ') pos += 1;
-        if (pos < data.len) {
-            self.seq_offset = line_file_offset + @as(u64, @intCast(pos));
-            self.seq_offset_set = true;
-        }
+        // Match mmap: `seq_offset` is the first base-bearing line start (side-table invariant).
+        self.seq_offset = line_file_offset;
+        self.seq_offset_set = true;
     }
 
     fn ingestSequenceLine(
@@ -822,9 +940,7 @@ const ChunkParseState = struct {
 
         const actual_bytes: u32 = @intCast((if (has_lf) line_end + 1 else line_end) - line_start);
         const bases = countBasesInLineSlice(data, line_start, content_end);
-        if (bases > 0 and !self.seq_offset_set) {
-            self.noteSeqOffset(data[line_start..content_end], line_file_offset);
-        }
+        if (bases > 0) self.noteSeqOffset(line_file_offset);
 
         try self.recordSequenceLine(bases, actual_bytes, has_lf, line_file_offset);
         self.at_line_start = has_lf;
@@ -840,13 +956,13 @@ const ChunkParseState = struct {
             self.pending_line_bytes = 0;
             self.pending_line_file_offset = fragment_file_offset;
         }
-        self.noteSeqOffset(fragment, fragment_file_offset);
         self.pending_line_bases += countBasesInLineSlice(fragment, 0, fragment.len);
         self.pending_line_bytes += @intCast(fragment.len);
     }
 
     fn commitPendingLine(self: *ChunkParseState, has_lf: bool) !void {
         if (!self.in_pending_line and self.pending_line_bytes == 0) return;
+        if (self.pending_line_bases > 0) self.noteSeqOffset(self.pending_line_file_offset);
         try self.recordSequenceLine(
             self.pending_line_bases,
             self.pending_line_bytes,
@@ -859,13 +975,11 @@ const ChunkParseState = struct {
         self.pending_line_bytes = 0;
     }
 
-    fn finalizeHeader(self: *ChunkParseState, seen_names: ?*DedupSeen) !void {
+    fn finalizeHeader(self: *ChunkParseState, seen_names: ?*NameDedup) !void {
         self.in_header = false;
         const name = self.name.items;
         if (seen_names) |seen| {
-            const key = hashSequenceName(name);
-            const gop = try seen.getOrPut(key);
-            if (gop.found_existing) self.is_duplicate = true;
+            if (try seen.observe(name)) self.is_duplicate = true;
         }
         self.at_line_start = true;
     }
@@ -884,6 +998,8 @@ const ChunkParseState = struct {
         const name_len: u16 = @intCast(self.name.items.len);
         var side_table_slice: []const u8 = &.{};
         if (!seq_info.uses_uniform_formula and self.zfi_mode) {
+            // Safety net: trailing blank may have set non-uniform without a later base line.
+            try self.activateSideTable();
             if (!self.side_table_active) {
                 return error.MissingSideTable;
             }
@@ -913,7 +1029,7 @@ fn processChunkBytes(
     data: []const u8,
     file_offset: u64,
     max_name_len: ?usize,
-    seen_names: ?*DedupSeen,
+    seen_names: ?*NameDedup,
     ctx: anytype,
     comptime emitRecord: fn (@TypeOf(ctx), FastaRecordEmit) anyerror!void,
     record_count: *u32,
@@ -956,11 +1072,11 @@ fn processChunkBytes(
                 if (byte == ' ' or byte == '\t' or byte == '\r') {
                     state.parsing_name = false;
                 } else {
-                    if (max_name_len) |limit| {
-                        if (state.name.items.len >= limit) return error.HeaderTooLong;
-                    }
                     try state.name.append(state.allocator, byte);
                     if (state.name.items.len > max_index_name_len) return error.HeaderTooLong;
+                    if (max_name_len) |limit| {
+                        if (state.name.items.len > limit) return error.HeaderTooLong;
+                    }
                 }
             }
             i += 1;
@@ -1004,9 +1120,10 @@ pub fn scanFastaReader(
     ctx: anytype,
     comptime emitRecord: fn (@TypeOf(ctx), FastaRecordEmit) anyerror!void,
 ) !u32 {
-    var dedup_names: ?DedupSeen = null;
+    // Streaming reuses one name buffer; NameDedup must own key copies.
+    var dedup_names: ?NameDedup = null;
     if (enable_dedup) {
-        dedup_names = DedupSeen.init(allocator);
+        dedup_names = NameDedup.init(allocator, true);
     }
     defer if (dedup_names) |*seen| seen.deinit();
 
@@ -1015,7 +1132,7 @@ pub fn scanFastaReader(
     defer if (zfi_mode) state.side_table.deinit(allocator);
     var record_count: u32 = 0;
     var file_offset: u64 = 0;
-    const dedup_ptr: ?*DedupSeen = if (dedup_names) |*s| s else null;
+    const dedup_ptr: ?*NameDedup = if (dedup_names) |*s| s else null;
 
     while (true) {
         const n = reader.readSliceShort(read_buf) catch |err| return err;
@@ -1052,6 +1169,7 @@ const FaiEmitBuffer = struct {
     }
 
     fn emitRecord(self: *FaiEmitBuffer, emit_info: FastaRecordEmit) !void {
+        if (!emit_info.uses_uniform_formula) return error.NonUniformFai;
         const rec = emit_info.record;
         var suffix_buf: [128]u8 = undefined;
         const suffix = try std.fmt.bufPrint(
@@ -1154,23 +1272,26 @@ pub fn runIndexLowMem(
     if (emit_fai) {
         var out_buf: [65536]u8 = undefined;
         var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
+        // Buffer first so a mid-file NonUniformFai does not leave a partial `.fai` on stdout.
+        var fai_aw: std.Io.Writer.Allocating = .init(allocator);
+        defer fai_aw.deinit();
 
-        const record_count = scanChunkedReader(&file_reader.interface, &read_buf, &stdout_fw.interface, enable_dedup, allocator) catch |err| switch (err) {
-            error.HeaderTooLong => {
-                stdout_fw.flush() catch {};
-                err_exit("error: sequence name exceeds {d} bytes: {s}\n", .{ max_index_name_len, path });
-            },
-            else => {
-                stdout_fw.flush() catch {};
-                err_exit("error: processing failed\n", .{});
-            },
+        const record_count = scanChunkedReader(&file_reader.interface, &read_buf, &fai_aw.writer, enable_dedup, allocator) catch |err| switch (err) {
+            error.HeaderTooLong => err_exit("error: sequence name exceeds {d} bytes: {s}\n", .{ max_index_name_len, path }),
+            error.NonUniformFai => err_exit(
+                "error: cannot emit .fai for non-uniform sequence layout; run 'z-fasta index' (default) to write .zfi\n",
+                .{},
+            ),
+            else => err_exit("error: processing failed\n", .{}),
         };
-        stdout_fw.flush() catch {};
 
         if (record_count == 0) {
-            stdout_fw.flush() catch {};
             err_exit("error: no valid sequences found in: {s}\n", .{path});
         }
+        stdout_fw.interface.writeAll(fai_aw.written()) catch {
+            err_exit("error: write failed\n", .{});
+        };
+        stdout_fw.flush() catch {};
         return;
     }
 
@@ -1198,7 +1319,7 @@ pub fn runIndexLowMem(
         err_exit("error: no valid sequences found in: {s}\n", .{path});
     }
 
-    writeZfiIndexFile(io, zfi_tmp_path, &zfi_index, stat.size) catch {
+    writeZfiIndexFile(io, zfi_tmp_path, &zfi_index, stat.size, index_format.timestampToNs(stat.mtime)) catch {
         cwd.deleteFile(io, zfi_tmp_path) catch {};
         err_exit("error: write failed\n", .{});
     };

@@ -351,9 +351,13 @@ fn writeMmapZfi(allocator: std.mem.Allocator, fasta_path: []const u8, data: []co
     var index = try main.indexer.scanZfiIndex(data, true, arena.allocator());
     defer index.deinit(arena.allocator());
 
+    const fasta_file = try std.Io.Dir.cwd().openFile(io, fasta_path, .{});
+    defer fasta_file.close(io);
+    const mtime_ns = main.index_format.timestampToNs((try fasta_file.stat(io)).mtime);
+
     var zfi_path_buf: [4096]u8 = undefined;
     const zfi_path = try std.fmt.bufPrint(&zfi_path_buf, "{s}.zfi", .{fasta_path});
-    try main.indexer.writeZfiIndexFile(io, zfi_path, &index, data.len);
+    try main.indexer.writeZfiIndexFile(io, zfi_path, &index, data.len, mtime_ns);
 }
 
 fn writeStreamingZfi(allocator: std.mem.Allocator, fasta_path: []const u8, data: []const u8) !void {
@@ -363,9 +367,13 @@ fn writeStreamingZfi(allocator: std.mem.Allocator, fasta_path: []const u8, data:
     var index = try main.indexer.scanZfiIndexStreamingData(data, true, arena.allocator());
     defer index.deinit(arena.allocator());
 
+    const fasta_file = try std.Io.Dir.cwd().openFile(io, fasta_path, .{});
+    defer fasta_file.close(io);
+    const mtime_ns = main.index_format.timestampToNs((try fasta_file.stat(io)).mtime);
+
     var zfi_path_buf: [4096]u8 = undefined;
     const zfi_path = try std.fmt.bufPrint(&zfi_path_buf, "{s}.zfi", .{fasta_path});
-    try main.indexer.writeZfiIndexFile(io, zfi_path, &index, data.len);
+    try main.indexer.writeZfiIndexFile(io, zfi_path, &index, data.len, mtime_ns);
 }
 
 fn captureExtractRegion(allocator: std.mem.Allocator, fasta_path: []const u8, region: []const u8) ![]u8 {

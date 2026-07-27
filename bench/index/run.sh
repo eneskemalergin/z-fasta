@@ -498,6 +498,15 @@ run_tests() {
         $SAMTOOLS faidx "$file" 2>/dev/null || true
         if [[ $zf_exit -ne 0 && $sam_exit -ne 0 ]]; then
             match="MATCH"
+        elif [[ $zf_exit -ne 0 && $sam_exit -eq 0 ]]; then
+            # `--emit-fai` refuses non-representable layouts; default `.zfi` may still succeed.
+            rm -f "${file}.zfi" 2>/dev/null || true
+            if "$ZFASTA" index "$file" >/dev/null 2>&1; then
+                match="MATCH"
+            else
+                match="DIFF"
+                echo "--- FAILURE: $name (emit-fai rejected and .zfi index failed; sam=$sam_exit) ---" >> "$fail_log"
+            fi
         elif [[ $zf_exit -ne 0 || $sam_exit -ne 0 ]]; then
             match="DIFF"
             echo "--- FAILURE: $name (exit codes differ: zf=$zf_exit sam=$sam_exit) ---" >> "$fail_log"
@@ -549,20 +558,22 @@ PY
         total=$((total + 1))
         run_index_tools "$file"
         match="DIFF"
+        zfi_status="ok"
+        # Production `.zfi` is the contract for messy layouts; `--emit-fai` must refuse them.
+        rm -f "${file}.fai" "${file}.zfi" 2>/dev/null || true
+        "$ZFASTA" index "$file" > /dev/null 2>&1 || zfi_status="index-failed"
+        [[ "$zfi_status" == "ok" ]] && check_zfi_side_table "${file}.zfi" "$zfi_expect" || zfi_status="bad-zfi"
+
         if [[ "$behavior" == "match-samtools" ]]; then
             rm -f "${file}.fai" "${file}.zfi" 2>/dev/null || true
             $SAMTOOLS faidx "$file" 2>/dev/null || true
             [[ $zf_exit -eq 0 && $sam_exit -eq 0 && -f "${file}.fai" ]] \
-                && diff -q /tmp/zf_edge_test.fai "${file}.fai" &>/dev/null && match="MATCH"
-        elif [[ "$behavior" == "zfasta-only" && $zf_exit -eq 0 && $sam_exit -ne 0 ]]; then
-            match="MATCH"
+                && diff -q /tmp/zf_edge_test.fai "${file}.fai" &>/dev/null \
+                && [[ "$zfi_status" == "ok" ]] && match="MATCH"
+        elif [[ "$behavior" == "zfasta-only" ]]; then
+            # emit-fai nonzero (non-uniform), samtools fails, `.zfi` + side-table ok
+            [[ $zf_exit -ne 0 && $sam_exit -ne 0 && "$zfi_status" == "ok" ]] && match="MATCH"
         fi
-        zfi_status="ok"
-        if [[ $zf_exit -eq 0 ]]; then
-            "$ZFASTA" index "$file" > /dev/null 2>&1 || zfi_status="index-failed"
-            [[ "$zfi_status" == "ok" ]] && check_zfi_side_table "${file}.zfi" "$zfi_expect" || zfi_status="bad-zfi"
-        fi
-        [[ "$zfi_status" != "ok" ]] && match="DIFF"
         echo "$name,$zf_exit,$sam_exit,$seq_exit,$fh_exit,$noodles_exit,$rustbio_exit,$match" >> "$csv"
         [[ "$match" == "MATCH" ]] && pass=$((pass + 1)) || fail=$((fail + 1))
         echo "  $([[ "$match" == MATCH ]] && echo ✓ || echo ✗)  $name  (zfi=$zfi_expect) $match"
