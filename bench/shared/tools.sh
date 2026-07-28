@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Shared benchmark tool discovery helpers.
 #
-# Source this file from bench/*/run_benchmarks.sh scripts. It defines paths,
-# availability checks, and lightweight version helpers for first-party,
-# Tier 1, Tier 2, and runner tools.
+# Source this file from bench/*/run.sh, verify.sh, install_tools.sh, or
+# zebrac_runner.sh / download_data.sh. It defines tool paths, availability
+# checks, version helpers, and small path utilities.
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     echo "tools.sh is a library; source it from a benchmark script." >&2
@@ -65,43 +65,6 @@ bench_require_tool() {
     fi
 }
 
-bench_tool_tier() {
-    case "$1" in
-        z-fasta) echo "first-party" ;;
-        zebrac) echo "runner" ;;
-        noodles|rustbio) echo "tier2" ;;
-        samtools|bedtools|seqkit|seqtk|fastahack|pyfaidx) echo "tier1" ;;
-        *) echo "unknown" ;;
-    esac
-}
-
-bench_tool_label() {
-    case "$1" in
-        z-fasta) echo "z-fasta" ;;
-        zebrac) echo "zebrac" ;;
-        noodles) echo "noodles-fasta 0.61" ;;
-        rustbio) echo "rust-bio 2.3 (custom indexer)" ;;
-        *) echo "$1" ;;
-    esac
-}
-
-bench_tool_supports_suite() {
-    local name="$1"
-    local suite="$2"
-    case "$name:$suite" in
-        z-fasta:index|z-fasta:get|z-fasta:stats) return 0 ;;
-        samtools:index|samtools:get) return 0 ;;
-        bedtools:get) return 0 ;;
-        seqkit:index|seqkit:get|seqkit:stats) return 0 ;;
-        seqtk:get|seqtk:stats) return 0 ;;
-        fastahack:index|fastahack:get) return 0 ;;
-        pyfaidx:index|pyfaidx:get) return 0 ;;
-        noodles:index|noodles:get|noodles:stats) return 0 ;;
-        rustbio:index|rustbio:get|rustbio:stats) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
 bench_tool_version() {
     local name="$1"
     local path
@@ -117,7 +80,9 @@ bench_tool_version() {
             [[ -x "$path" ]] && "$path" version 2>&1 | awk 'NR==1{print; exit}'
             ;;
         seqtk)
-            [[ -x "$path" ]] && "$path" 2>&1 | awk '/^Version:/{print "seqtk " $2; exit}'
+            # seqtk prints Version on stderr/stdout and exits nonzero with no args.
+            [[ -x "$path" ]] || return 1
+            { "$path" 2>&1 || true; } | awk '/^Version:/{print "seqtk " $2; exit}'
             ;;
         fastahack)
             echo "fastahack 1.0.0 (directory pin)"
@@ -126,10 +91,16 @@ bench_tool_version() {
             echo "noodles-fasta 0.61 (wrapper)"
             ;;
         rustbio)
-            echo "rust-bio 2.3 (custom indexer wrapper)"
+            echo "rust-bio 2.2 (custom indexer wrapper)"
             ;;
         *)
             return 1
             ;;
     esac
+}
+
+# Portable file size in bytes (GNU and BSD stat).
+file_size_bytes() {
+    local path="$1"
+    stat --printf='%s' "$path" 2>/dev/null || stat -f '%z' "$path" 2>/dev/null || echo 0
 }

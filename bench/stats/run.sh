@@ -549,7 +549,7 @@ run_perf_mode() {
     echo "--------------------------------------------------"
     echo " z-fasta modes (full zfi/fai + indexed zfi/fai)"
     echo "--------------------------------------------------"
-    echo "  Policy: .fai is a first-class index for users who skip .zfi."
+    echo "  Policy: .zfi preferred; .fai is compatibility for uniform records."
     echo "  Same stats surface for both (messy side tables need .zfi)."
 
     local ds fa qf qz nbytes json

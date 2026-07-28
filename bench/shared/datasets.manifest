@@ -1,0 +1,11 @@
+# REAL_* dataset manifest for bench/shared/download_data.sh
+#
+# Columns (tab-separated): id  filename  bytes  sha256  url
+# Bytes and sha256 are for the uncompressed file under bench/shared/data/.
+# Genome (Ensembl release-113) and Transcriptome (GENCODE v46) URLs are release-pinned.
+# Proteome uses UniProt current_release (floating); refresh bytes/sha256 when that file moves.
+#
+# id	filename	bytes	sha256	url
+Genome	REAL_Genome.fa	3151425851	1e74081a49ceb9739cc14c812fbb8b3db978eb80ba8e5350beb80d8ad8dfef3b	https://ftp.ensembl.org/pub/release-113/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz
+Transcriptome	REAL_Transcriptome.fa	480983019	8a8649181347d5ff093414f22b93f5e8c8d6320f664c0b1d9d11497d63cc009a	https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_46/gencode.v46.transcripts.fa.gz
+Proteome	REAL_Proteome.fasta	13731881	2329a517bec9bd7269f9ce3b9252d8b959ae98bc41405a945c2d6134b284d5a0	https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/reference_proteomes/Eukaryota/UP000005640/UP000005640_9606.fasta.gz

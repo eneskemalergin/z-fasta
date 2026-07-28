@@ -54,6 +54,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_test_get = b.addRunArtifact(test_get);
+    // CLI subprocess tests spawn zig-out/bin/z-fasta; keep it current with this suite.
+    run_test_get.step.dependOn(b.getInstallStep());
 
     // Stats tests
     const test_stats = b.addTest(.{
@@ -65,6 +67,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_test_stats = b.addRunArtifact(test_stats);
+    run_test_stats.step.dependOn(b.getInstallStep());
 
     const test_complement = b.addTest(.{
         .root_module = b.createModule(.{

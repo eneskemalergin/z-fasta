@@ -1,3 +1,7 @@
+//! IUPAC complement and reverse-complement lookup tables (comptime 256-byte maps).
+//!
+//! Used by GET transforms (`--rc`, `--complement-only`, `--reverse-only`).
+
 const std = @import("std");
 
 fn setPair(table: *[256]u8, left: u8, right: u8) void {

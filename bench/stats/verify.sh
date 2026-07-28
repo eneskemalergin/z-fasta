@@ -18,11 +18,13 @@ SKIP_DEDUP=false
 SKIP_EDGE=false
 SKIP_LAYOUT=false
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../shared/tools.sh
+source "$SCRIPT_DIR/../shared/tools.sh"
+PROJECT_DIR="$PROJECT_ROOT"
 ORACLE="$SCRIPT_DIR/oracle.py"
 TEST_DATA="$PROJECT_DIR/tests/data"
-MESSY_DIR="$PROJECT_DIR/bench/index/messy_variants"
+MESSY_DIR="$PROJECT_DIR/bench/index/messy_fixtures"
 # Generated on demand under data/ (gitignored). Do not track FASTA here.
 VERIFY_DATA="$SCRIPT_DIR/data/verify"
 LAYOUT_TWINS="$VERIFY_DATA/layout_twins"
@@ -30,12 +32,6 @@ TMPDIR="$VERIFY_DATA/work"
 mkdir -p "$LAYOUT_TWINS" "$TMPDIR"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-ZFASTA="${ZFASTA:-$PROJECT_DIR/zig-out/bin/z-fasta}"
-SAMTOOLS="${SAMTOOLS:-samtools}"
-SEQKIT="${SEQKIT:-$PROJECT_DIR/tools/seqkit}"
-SEQTK="${SEQTK:-$PROJECT_DIR/tools/seqtk/seqtk}"
-NOODLES="${NOODLES:-$PROJECT_DIR/tools/noodles_wrapper/target/release/noodles_wrapper}"
-RUSTBIO="${RUSTBIO:-$PROJECT_DIR/tools/rustbio_wrapper/target/release/rustbio_wrapper}"
 PYTHON="${PYTHON:-$PROJECT_DIR/.venv/bin/python}"
 [[ -x "$PYTHON" ]] || PYTHON="$(command -v python3)"
 
@@ -460,26 +456,70 @@ verify_layout_twins() {
     done
 }
 
-# Product note: Duplicates line is always 0 (indexed set only). Gate that so it cannot drift silently.
+# Product policy: full stats report source-level extras; index-only never fabricates 0
+# on a deduplicated index (n/a). --no-dedup index-only can report retained repeats.
 verify_duplicates_policy() {
     section_hdr "extended:dedup" "Duplicates line policy"
     local fasta="$TMPDIR/dup_policy.fasta"
-    local out="$TMPDIR/dup_policy.index-only.txt"
-    local err="$TMPDIR/dup_policy.err"
-    local dups
+    local out err dups
+    err="$TMPDIR/dup_policy.err"
 
     cp "$TEST_DATA/edge_cases.fasta" "$fasta"
     rm -f "${fasta}.zfi" "${fasta}.fai"
+    "$ZFASTA" index "$fasta" >/dev/null 2>&1 \
+        || { fail "[extended:dedup] default index for Duplicates policy"; return; }
+
+    out="$TMPDIR/dup_policy.full.txt"
+    run_stats "$fasta" full "$out" "$err" \
+        || { fail "[extended:dedup] full stats on default index" "$err"; return; }
+    dups="$(awk '/^Duplicates:/{print $2; exit}' "$out")"
+    if [[ "$dups" == "1" ]]; then
+        pass "[extended:dedup] full Duplicates=1 for edge_cases (source extras)"
+    else
+        echo "expected Duplicates: 1, got ${dups:-missing}" >"$err"
+        fail "[extended:dedup] full Duplicates=1 for edge_cases" "$err"
+    fi
+
+    out="$TMPDIR/dup_policy.index-only.txt"
+    run_stats "$fasta" index-only "$out" "$err" \
+        || { fail "[extended:dedup] index-only on default index" "$err"; return; }
+    if grep -q '^Duplicates:[[:space:]]*n/a' "$out"; then
+        pass "[extended:dedup] index-only Duplicates=n/a on deduped index"
+    else
+        echo "expected Duplicates: n/a ..., got:" >"$err"
+        grep '^Duplicates:' "$out" >>"$err" || true
+        fail "[extended:dedup] index-only Duplicates=n/a on deduped index" "$err"
+    fi
+
+    rm -f "${fasta}.zfi" "${fasta}.fai"
     "$ZFASTA" index --no-dedup "$fasta" >/dev/null 2>&1 \
         || { fail "[extended:dedup] index --no-dedup for Duplicates policy"; return; }
+    out="$TMPDIR/dup_policy.nodedup.index-only.txt"
     run_stats "$fasta" index-only "$out" "$err" \
-        || { fail "[extended:dedup] stats on --no-dedup index" "$err"; return; }
+        || { fail "[extended:dedup] index-only on --no-dedup index" "$err"; return; }
     dups="$(awk '/^Duplicates:/{print $2; exit}' "$out")"
-    if [[ "$dups" == "0" ]]; then
-        pass "[extended:dedup] Duplicates prints 0 on --no-dedup index (indexed set only)"
+    if [[ "$dups" == "1" ]]; then
+        pass "[extended:dedup] index-only Duplicates=1 on --no-dedup index"
     else
-        echo "expected Duplicates: 0, got ${dups:-missing}" >"$err"
-        fail "[extended:dedup] Duplicates prints 0 on --no-dedup index" "$err"
+        echo "expected Duplicates: 1, got ${dups:-missing}" >"$err"
+        fail "[extended:dedup] index-only Duplicates=1 on --no-dedup index" "$err"
+    fi
+
+    # --no-dedup with unique names still cannot invent 0 under index-only.
+    local uniq="$TMPDIR/dup_policy_uniq.fasta"
+    cp "$TEST_DATA/simple.fasta" "$uniq"
+    rm -f "${uniq}.zfi" "${uniq}.fai"
+    "$ZFASTA" index --no-dedup "$uniq" >/dev/null 2>&1 \
+        || { fail "[extended:dedup] index --no-dedup unique names"; return; }
+    out="$TMPDIR/dup_policy_uniq.index-only.txt"
+    run_stats "$uniq" index-only "$out" "$err" \
+        || { fail "[extended:dedup] index-only on --no-dedup unique" "$err"; return; }
+    if grep -q '^Duplicates:[[:space:]]*n/a' "$out"; then
+        pass "[extended:dedup] index-only Duplicates=n/a on --no-dedup unique names"
+    else
+        echo "expected Duplicates: n/a ..., got:" >"$err"
+        grep '^Duplicates:' "$out" >>"$err" || true
+        fail "[extended:dedup] index-only Duplicates=n/a on --no-dedup unique names" "$err"
     fi
 }
 

@@ -113,7 +113,7 @@ Options:
 
 Compute assembly/proteome statistics. Type comes from the full composition scan (not a prefix sample).
 
-**Tier 1 (index-only):** sequence count, total bases, min/max/mean/median lengths, N50, L50, N90, L90, AU, duplicate count.
+**Tier 1 (index-only):** sequence count, total bases, min/max/mean/median lengths, N50, L50, N90, L90, AU, and duplicate reporting. Duplicate count is source-level (`k-1` extras per repeated name) on a full scan. `--index-only` prints `n/a` when the index is deduplicated (cannot prove source extras); with `--no-dedup` it reports repeats kept in the index.
 
 **Tier 2 (default):** full composition scan: nucleotide frequencies, GC content (N excluded), GC skew, soft-masked fraction. For proteins: top 3 amino acids with full names.
 
@@ -226,7 +226,7 @@ Orientation note: **`--rc`** uses the same mmap-backed extraction path and appli
 
 ### Correctness
 
-- **Index:** edge-case and messy-variant correctness via `bench/index/run.sh` (`edge_cases/` generated on the fly; `messy_variants/` checked in).
+- **Index:** edge-case and messy-fixture correctness via `bench/index/run.sh` (`edge_cases/` generated on the fly; `messy_fixtures/` checked in).
 - **Get:** verification in `bench/get/verify.sh` (single/multi-region, BED, names, RC, messy FASTA) against samtools, bedtools, and seqtk where applicable.
 - **Stats:** verification harness pending rebuild (removed in v0.3.0 bench cleanup).
 - **Unit tests:** `./zig build test` (index, get, stats, complement, BED parser, validator).

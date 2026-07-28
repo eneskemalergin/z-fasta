@@ -2,8 +2,8 @@
 """Generate stats benchmark REPORT.md and figures from zebrac JSON.
 
 Mirrors bench/get and bench/index report grammar (Overview, field matrix,
-Provenance, wall/RSS/faults, mode 2x2, scaling). Colors and labels follow
-plan/stats-bench.md. Prose follows plan/WRITING.md (ASCII; no emojis).
+Provenance, wall/RSS/faults, mode 2x2, scaling). Color map is STATS_COLORS
+below. Prose follows plan/WRITING.md (ASCII; no emojis).
 """
 
 from __future__ import annotations
@@ -1527,9 +1527,10 @@ def main() -> None:
         report_lines.append(
             "Four lanes: **full** and **indexed** (`--index-only`), each with `.zfi` and with "
             "`.fai` (`.zfi` stashed outside the timed window). Indexed skips the composition "
-            "mmap scan. `.fai` is first-class for users who skip `.zfi` (messy side tables still "
-            "need `.zfi`). **Figure facets** are wall time, peak RSS, and minor page faults; "
-            "**x-axis** is dataset; **bar color** is mode lane (same layout as Full stats)."
+            "mmap scan. `.zfi` is preferred; `.fai` is the compatibility lane for uniform, "
+            "FAI-representable records (messy side tables still need `.zfi`). **Figure facets** "
+            "are wall time, peak RSS, and minor page faults; **x-axis** is dataset; **bar color** "
+            "is mode lane (same layout as Full stats)."
         )
         tax = md_composition_tax(mode_df, nums)
         if tax:

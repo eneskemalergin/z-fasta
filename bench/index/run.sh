@@ -33,9 +33,9 @@
 #   bash bench/index/run.sh --allow-incomplete         # report from partial runs
 #
 # ── Sections (in run order) ─────────────────────────────────────────
-#   1. Correctness   edge_cases/ + messy_variants/ → results/tests_<ts>.csv
+#   1. Correctness   edge_cases/ + messy_fixtures/ → results/tests_<ts>.csv
 #   2. Benchmarks    REAL_* + scaling → perf_*, scale_*, metadata_*, run_*.json
-#   3. Messy zebrac  shared/messy_variants/ → results/messy_<ts>/
+#   3. Messy zebrac  shared/messy_perf/ → results/messy_<ts>/
 #   4. Report        generate_report.py → REPORT.md + results/figures/
 #
 # ── Scaling fixtures (bench/index/data/) ────────────────────────────
@@ -68,8 +68,8 @@ RESULTS_DIR="$SCRIPT_DIR/results"
 SCALING_DIR="$SCRIPT_DIR/data"
 DATA_DIR="$BENCH_ROOT/shared/data"
 EDGE_DIR="$SCRIPT_DIR/edge_cases"
-MESSY_TEST_DIR="$SCRIPT_DIR/messy_variants"
-MESSY_ZEBRAC_DIR="$BENCH_ROOT/shared/messy_variants"
+MESSY_TEST_DIR="$SCRIPT_DIR/messy_fixtures"
+MESSY_ZEBRAC_DIR="$BENCH_ROOT/shared/messy_perf"
 
 source "$BENCH_ROOT/shared/zebrac_runner.sh"
 
@@ -742,6 +742,8 @@ run_messy_zebrac() {
         bench_file "$fasta" "$out_dir/$(basename "$fasta" .fasta).json" "$metadata" \
             messy "$(basename "$fasta" .fasta)" messy
     done
+    # Peers may leave empty/failed .fai beside proteome fixtures; drop sidecars only.
+    rm -f "$MESSY_ZEBRAC_DIR"/*.fai "$MESSY_ZEBRAC_DIR"/*.zfi
 }
 
 # ══════════════════════════════════════════════════════════════════════

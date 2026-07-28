@@ -1,218 +1,167 @@
 #!/usr/bin/env bash
-# bench/shared/install_tools.sh
+# Verify benchmark tools used by bench/*/run.sh and verify.sh.
 #
-# Installs / verifies all v0.2.5 benchmark tools at pinned versions and prints
-# a canonical VERSION_PINS block for inclusion in REPORT.md.
-#
-# Pinned versions (last verified 2026-03-30):
-#   pyfaidx   0.9.0.3    (PyPI)
-#   seqtk     1.5-r133   (pre-built in tools/seqtk/)
-#   fastahack 1.0.0      (pre-built in tools/fastahack-1.0.0/)
-#   seqkit    2.13.0     (pre-built in tools/seqkit)
-#   samtools  1.13       (system)
-#   hyperfine 1.12.0     (system)
-#
-# TODO(v0.3-bench): Rework this around shared/tools.sh. Add zebrac,
-# bedtools, noodles_wrapper, and rustbio_wrapper checks; make hyperfine
-# legacy/optional; stop treating .venv as a general benchmark dependency
-# installer except for plotting/report packages.
-#
-# Usage:
-#   bash bench/shared/install_tools.sh
-#
-# After running, all tools are callable via the helper functions in this script:
-#   seqtk_bin, fastahack_bin, seqkit_bin, faidx_bin
+# Paths and version helpers come from tools.sh (single source of truth).
+# Optional: install the pinned pyfaidx into .venv when missing.
+# Does not check hyperfine (legacy; suites use zebrac).
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-TOOLS_DIR="$REPO_ROOT/tools"
-VENV="$REPO_ROOT/.venv"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=tools.sh
+source "$SCRIPT_DIR/tools.sh"
 
-# ── Pinned versions ────────────────────────────────────────────────────────────
+VENV="$PROJECT_ROOT/.venv"
 PYFAIDX_PIN="0.9.0.3"
 SEQTK_PIN="1.5-r133"
-FASTAHACK_PIN="1.0.0"
 SEQKIT_PIN="2.13.0"
+FASTAHACK_PIN="1.0.0"
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
-ok()   { echo -e "${GREEN}  ✓${NC} $*"; }
-warn() { echo -e "${YELLOW}  ⚠${NC} $*"; }
-fail() { echo -e "${RED}  ✗${NC} $*"; }
+ok() { printf '  [ok] %s\n' "$*"; }
+warn() { printf '  [warn] %s\n' "$*"; }
+fail() { printf '  [fail] %s\n' "$*"; }
 
-# ── Helper: resolve tool paths ─────────────────────────────────────────────────
-seqtk_bin()     { echo "$TOOLS_DIR/seqtk/seqtk"; }
-fastahack_bin() { echo "$TOOLS_DIR/fastahack-1.0.0/fastahack"; }
-seqkit_bin()    { echo "$TOOLS_DIR/seqkit"; }
-faidx_bin()     {
-    # pyfaidx ships a 'faidx' CLI entry-point; prefer venv, then system python
-    if "$VENV/bin/faidx" --version &>/dev/null 2>&1; then
-        echo "$VENV/bin/faidx"
-    else
-        echo "faidx"
+# Tools every L3 suite path expects. Missing any exits nonzero.
+REQUIRED_TOOLS=(
+    z-fasta
+    zebrac
+    samtools
+    bedtools
+    seqkit
+    seqtk
+    fastahack
+    pyfaidx
+    noodles
+    rustbio
+)
+
+ensure_pyfaidx() {
+    local ver=""
+
+    # Prefer an already-resolved faidx CLI at the pin (venv or PATH).
+    if bench_has_tool pyfaidx; then
+        ver="$(bench_tool_version pyfaidx 2>/dev/null || true)"
+        if [[ "$ver" == *"$PYFAIDX_PIN"* ]]; then
+            return 0
+        fi
     fi
-}
 
-# ── Check / install pyfaidx ────────────────────────────────────────────────────
-check_pyfaidx() {
-    echo "── pyfaidx ──────────────────────────────────────────────────────────────"
-    # Check base-env python first (that's where it's currently installed)
-    local ver
-    ver=$(python -c "import pyfaidx; print(pyfaidx.__version__)" 2>/dev/null || true)
-    if [[ "$ver" == "$PYFAIDX_PIN" ]]; then
-        ok "pyfaidx $ver (base env python)"
+    if [[ -x "$VENV/bin/python" ]]; then
+        ver="$("$VENV/bin/python" -c "import pyfaidx; print(pyfaidx.__version__)" 2>/dev/null || true)"
+        if [[ "$ver" == "$PYFAIDX_PIN" && -x "$VENV/bin/faidx" ]]; then
+            PYFAIDX="$VENV/bin/faidx"
+            return 0
+        fi
+        if [[ "$ver" != "$PYFAIDX_PIN" ]]; then
+            warn "pyfaidx not at pin $PYFAIDX_PIN in .venv; installing"
+            if "$VENV/bin/pip" install --quiet "pyfaidx==$PYFAIDX_PIN"; then
+                ver="$("$VENV/bin/python" -c "import pyfaidx; print(pyfaidx.__version__)" 2>/dev/null || true)"
+                if [[ "$ver" == "$PYFAIDX_PIN" && -x "$VENV/bin/faidx" ]]; then
+                    PYFAIDX="$VENV/bin/faidx"
+                    return 0
+                fi
+            fi
+        fi
+    fi
+    ver="$(python3 -c "import pyfaidx; print(pyfaidx.__version__)" 2>/dev/null || true)"
+    if [[ "$ver" == "$PYFAIDX_PIN" ]] && command -v faidx >/dev/null 2>&1; then
+        PYFAIDX="$(command -v faidx)"
         return 0
     fi
 
-    # Check venv
-    ver=$("$VENV/bin/python" -c "import pyfaidx; print(pyfaidx.__version__)" 2>/dev/null || true)
-    if [[ "$ver" == "$PYFAIDX_PIN" ]]; then
-        ok "pyfaidx $ver (venv)"
-        return 0
+    fail "pyfaidx $PYFAIDX_PIN not found (pip install pyfaidx==$PYFAIDX_PIN into .venv or PATH)"
+    return 1
+}
+
+check_tool() {
+    local name="$1"
+    local path ver
+
+    echo "-- $name --"
+    if [[ "$name" == "pyfaidx" ]]; then
+        ensure_pyfaidx || return 1
     fi
 
-    warn "pyfaidx not found at pin $PYFAIDX_PIN; installing into venv"
-    "$VENV/bin/pip" install --quiet "pyfaidx==$PYFAIDX_PIN"
-    ver=$("$VENV/bin/python" -c "import pyfaidx; print(pyfaidx.__version__)" 2>/dev/null || true)
-    if [[ "$ver" == "$PYFAIDX_PIN" ]]; then
-        ok "pyfaidx $ver installed"
+    if ! bench_has_tool "$name"; then
+        path="$(bench_tool_path "$name" 2>/dev/null || echo '<unknown>')"
+        fail "not found or not executable (resolved: $path)"
+        case "$name" in
+            z-fasta) echo "     Build: ./zig build -Doptimize=ReleaseFast" ;;
+            zebrac) echo "     Expected at: $TOOLS_DIR/zebrac" ;;
+            noodles) echo "     Build: (cd tools/noodles_wrapper && cargo build --release)" ;;
+            rustbio) echo "     Build: (cd tools/rustbio_wrapper && cargo build --release)" ;;
+            seqtk) echo "     Build: make -C tools/seqtk" ;;
+            fastahack) echo "     Build: make -C tools/fastahack-1.0.0" ;;
+            seqkit) echo "     Place binary at tools/seqkit" ;;
+            samtools|bedtools) echo "     Install via apt/conda and ensure on PATH" ;;
+        esac
+        return 1
+    fi
+
+    path="$(bench_tool_path "$name")"
+    ver="$(bench_tool_version "$name" 2>/dev/null || true)"
+    if [[ -n "$ver" ]]; then
+        ok "$ver ($path)"
     else
-        fail "pyfaidx install failed (got: '${ver:-none}')"
-        return 1
+        ok "$path"
     fi
+
+    case "$name" in
+        seqtk)
+            local got
+            got="$(bench_tool_version seqtk 2>/dev/null | awk '{print $2}' || true)"
+            if [[ -n "$got" && "$got" != "$SEQTK_PIN" ]]; then
+                warn "seqtk pin is $SEQTK_PIN; got $got"
+            fi
+            ;;
+        seqkit)
+            local got
+            got="$(bench_tool_version seqkit 2>/dev/null || true)"
+            if [[ -n "$got" && "$got" != *"v$SEQKIT_PIN"* ]]; then
+                warn "seqkit pin is v$SEQKIT_PIN; got $got"
+            fi
+            ;;
+        fastahack)
+            if [[ "$path" != *"/fastahack-${FASTAHACK_PIN}/"* ]]; then
+                warn "fastahack path does not include fastahack-$FASTAHACK_PIN"
+            fi
+            ;;
+    esac
+    return 0
 }
 
-# ── Check seqtk (pre-built) ────────────────────────────────────────────────────
-check_seqtk() {
-    echo "── seqtk ────────────────────────────────────────────────────────────────"
-    local bin
-    bin="$(seqtk_bin)"
-    if [[ ! -x "$bin" ]]; then
-        fail "seqtk binary not found at $bin"
-        echo "     Build it: cd tools/seqtk && make"
-        return 1
-    fi
-    local ver
-    ver=$("$bin" 2>&1 | awk '/^Version:/{print $2}')
-    if [[ "$ver" == "$SEQTK_PIN" ]]; then
-        ok "seqtk $ver ($bin)"
-    else
-        warn "seqtk version mismatch: got '$ver', expected '$SEQTK_PIN'"
-        warn "Pin may need updating; tool still usable"
-    fi
-}
-
-# ── Check fastahack (pre-built) ────────────────────────────────────────────────
-check_fastahack() {
-    echo "── fastahack ────────────────────────────────────────────────────────────"
-    local bin
-    bin="$(fastahack_bin)"
-    if [[ ! -x "$bin" ]]; then
-        fail "fastahack binary not found at $bin"
-        echo "     Build it: cd tools/fastahack-1.0.0 && make"
-        return 1
-    fi
-    # fastahack has no --version flag; version is embedded in the directory name
-    ok "fastahack $FASTAHACK_PIN ($bin)"
-    ok "  Note: no standalone version flag; version derived from directory name"
-}
-
-# ── Check seqkit (pre-built) ───────────────────────────────────────────────────
-check_seqkit() {
-    echo "── seqkit ───────────────────────────────────────────────────────────────"
-    local bin
-    bin="$(seqkit_bin)"
-    if [[ ! -x "$bin" ]]; then
-        fail "seqkit binary not found at $bin"
-        echo "     Download from https://github.com/shenwei356/seqkit/releases"
-        return 1
-    fi
-    local ver
-    ver=$("$bin" version 2>&1 | sed 's/seqkit //')
-    if [[ "$ver" == "v$SEQKIT_PIN" ]]; then
-        ok "seqkit $ver ($bin)"
-    else
-        warn "seqkit version mismatch: got '$ver', expected 'v$SEQKIT_PIN'"
-        warn "Pin may need updating; tool still usable"
-    fi
-}
-
-# ── Check system tools ─────────────────────────────────────────────────────────
-check_samtools() {
-    echo "── samtools ─────────────────────────────────────────────────────────────"
-    if ! command -v samtools &>/dev/null; then
-        fail "samtools not found in PATH"
-        echo "     Install: apt install samtools  OR  conda install -c bioconda samtools"
-        return 1
-    fi
-    local ver
-    ver=$(samtools --version 2>&1 | awk 'NR==1{print $2}')
-    ok "samtools $ver ($(command -v samtools))"
-}
-
-check_hyperfine() {
-    echo "── hyperfine ────────────────────────────────────────────────────────────"
-    if ! command -v hyperfine &>/dev/null; then
-        fail "hyperfine not found in PATH"
-        echo "     Install: cargo install hyperfine  OR  apt install hyperfine"
-        return 1
-    fi
-    local ver
-    ver=$(hyperfine --version 2>&1 | awk '{print $2}')
-    ok "hyperfine $ver ($(command -v hyperfine))"
-}
-
-# ── Print version-pins block (for copy-paste into REPORT.md) ──────────────────
-print_pins() {
-    echo ""
-    echo "## VERSION_PINS (copy into REPORT.md)"
-    echo "| Tool       | Version         | Source                              |"
-    echo "|------------|-----------------|-------------------------------------|"
-
-    local seqtk_ver fastahack_ver seqkit_ver samtools_ver hyperfine_ver pyfaidx_ver
-    seqtk_ver=$( { "$(seqtk_bin)" 2>&1; true; } | awk '/^Version:/{print $2}' )
-    fastahack_ver="$FASTAHACK_PIN (dir)"
-    seqkit_ver=$("$(seqkit_bin)" version 2>&1 | sed 's/seqkit //') || seqkit_ver="unknown"
-    samtools_ver=$(samtools --version 2>&1 | awk 'NR==1{print $2}') || samtools_ver="unknown"
-    hyperfine_ver=$(hyperfine --version 2>&1 | awk '{print $2}') || hyperfine_ver="unknown"
-    pyfaidx_ver=$(python -c "import pyfaidx; print(pyfaidx.__version__)" 2>/dev/null \
-                  || "$VENV/bin/python" -c "import pyfaidx; print(pyfaidx.__version__)" 2>/dev/null \
-                  || echo "not found")
-
-    printf "| %-10s | %-15s | %-35s |\n" "pyfaidx"   "$pyfaidx_ver"    "PyPI / base-env python"
-    printf "| %-10s | %-15s | %-35s |\n" "seqtk"     "$seqtk_ver"      "tools/seqtk/ (make)"
-    printf "| %-10s | %-15s | %-35s |\n" "fastahack" "$fastahack_ver"  "tools/fastahack-1.0.0/ (make)"
-    printf "| %-10s | %-15s | %-35s |\n" "seqkit"    "$seqkit_ver"     "tools/seqkit (binary)"
-    printf "| %-10s | %-15s | %-35s |\n" "samtools"  "$samtools_ver"   "system"
-    printf "| %-10s | %-15s | %-35s |\n" "hyperfine" "$hyperfine_ver"  "system"
-}
-
-# ── Main ───────────────────────────────────────────────────────────────────────
 main() {
     echo ""
-    echo "z-fasta v0.2.5 - benchmark tool verification"
-    echo "=============================================="
+    echo "z-fasta benchmark tool verification"
+    echo "==================================="
+    echo "Paths from: $SCRIPT_DIR/tools.sh"
+    echo ""
+
     local fail_count=0
+    local name
+    for name in "${REQUIRED_TOOLS[@]}"; do
+        if ! check_tool "$name"; then
+            fail_count=$((fail_count + 1))
+        fi
+        echo ""
+    done
 
-    check_pyfaidx  || (( fail_count++ )) || true
+    echo "Summary"
+    echo "-------"
+    for name in "${REQUIRED_TOOLS[@]}"; do
+        if bench_has_tool "$name"; then
+            ver="$(bench_tool_version "$name" 2>/dev/null || true)"
+            printf '  %-10s %s\n' "$name" "${ver:-present}"
+        else
+            printf '  %-10s missing\n' "$name"
+        fi
+    done
     echo ""
-    check_seqtk    || (( fail_count++ )) || true
-    echo ""
-    check_fastahack || (( fail_count++ )) || true
-    echo ""
-    check_seqkit   || (( fail_count++ )) || true
-    echo ""
-    check_samtools || (( fail_count++ )) || true
-    echo ""
-    check_hyperfine || (( fail_count++ )) || true
 
-    print_pins
-
-    echo ""
     if [[ "$fail_count" -eq 0 ]]; then
-        echo -e "${GREEN}All tools verified; ready to run benchmarks.${NC}"
+        echo "All required tools verified."
     else
-        echo -e "${RED}${fail_count} tool(s) missing or misconfigured; fix above before running benchmarks.${NC}"
+        echo "$fail_count tool(s) missing or misconfigured; fix above before running benchmarks."
         exit 1
     fi
 }

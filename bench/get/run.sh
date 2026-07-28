@@ -35,7 +35,7 @@ BENCH_ROOT="$(dirname "$SCRIPT_DIR")"
 PROJECT_ROOT="$(dirname "$BENCH_ROOT")"
 RESULTS_DIR="$SCRIPT_DIR/results"
 DATA_DIR="$BENCH_ROOT/shared/data"
-MESSY_DIR="$BENCH_ROOT/shared/messy_variants"
+MESSY_DIR="$BENCH_ROOT/shared/messy_perf"
 MESSY_PERF_JSON="$SCRIPT_DIR/messy_perf.json"
 FIXTURE_DIR="$SCRIPT_DIR/data"
 REGIONS_DIR="$FIXTURE_DIR/regions"
@@ -360,6 +360,7 @@ generate_get_fixtures() {
         "${REAL_DATASETS[Proteome]:-}" \
         "${BED_COUNTS[*]}" \
         "${MULTI_COUNTS[*]}" <<'PY'
+import hashlib
 import random
 import sys
 from pathlib import Path
@@ -381,6 +382,11 @@ MULTI_SEED = 42
 FULL_SEQ_GENOME_MAX = 1000
 FULL_SEQ_PROTEOME_MAX = 5000
 FULL_SEQ_TRANSCRIPTOME_MAX = 20000
+
+
+def stable_u32(text: str) -> int:
+    """Process/platform-stable u32 from text. Do not use Python hash() (salted per process)."""
+    return int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:4], "little")
 
 
 def full_seq_region(dataset: str, rows: list[tuple[str, int]]) -> str | None:
@@ -469,7 +475,7 @@ def multi_regions(dataset: str, fasta: str) -> None:
     if not rows:
         raise SystemExit(f"{dataset}: no sequences with length >= {SPAN}")
     eligible = len(rows)
-    rng = random.Random(MULTI_SEED + hash(dataset) % 10000)
+    rng = random.Random(MULTI_SEED + stable_u32(dataset) % 10000)
     for n in MULTI_COUNTS:
         if n > eligible:
             continue
@@ -519,7 +525,7 @@ if mode in ("all", "bed"):
         if not fasta:
             continue
         for n in bed_counts:
-            bed_file(dataset, fasta, bed_dir / f"{dataset}_{n}.bed", n, n + hash(dataset) % 1000)
+            bed_file(dataset, fasta, bed_dir / f"{dataset}_{n}.bed", n, n + stable_u32(dataset) % 1000)
 PY
     if [[ "$mode" == "all" || "$mode" == "bed" ]]; then
         local ds n bed regions

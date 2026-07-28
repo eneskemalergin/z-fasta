@@ -18,9 +18,11 @@ set -euo pipefail
 # --- config ---
 SKIP_INDEX=false SKIP_GET=false SKIP_MULTI=false SKIP_BED=false SKIP_RC=false SKIP_EDGE=false
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-MESSY_DIR="$PROJECT_DIR/bench/index/messy_variants"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../shared/tools.sh
+source "$SCRIPT_DIR/../shared/tools.sh"
+PROJECT_DIR="$PROJECT_ROOT"
+MESSY_DIR="$PROJECT_DIR/bench/index/messy_fixtures"
 FIXTURE_CACHE="$SCRIPT_DIR/.fixture_cache"
 TMPDIR="$SCRIPT_DIR/.verify_tmp"
 mkdir -p "$TMPDIR" "$FIXTURE_CACHE"
@@ -32,13 +34,6 @@ MESSY_POS_CASES=(
     "blank_lines:1-4,9-12,17-20"
     "mixed_crlf_lf:1-8,3-18,7-14"
 )
-
-ZFASTA="${ZFASTA:-$PROJECT_DIR/zig-out/bin/z-fasta}"
-SAMTOOLS="${SAMTOOLS:-samtools}"
-BEDTOOLS="${BEDTOOLS:-bedtools}"
-SEQTK="${SEQTK:-$PROJECT_DIR/tools/seqtk/seqtk}"
-NOODLES="${NOODLES:-$PROJECT_DIR/tools/noodles_wrapper/target/release/noodles_wrapper}"
-RUSTBIO="${RUSTBIO:-$PROJECT_DIR/tools/rustbio_wrapper/target/release/rustbio_wrapper}"
 
 PASS=0 FAIL=0
 
@@ -600,7 +595,7 @@ BED
 # --- sections ---
 section0_index() {
     section_hdr 0 "Index path coverage (.zfi vs .fai fallback)"
-    echo "  Uniform fixtures only; messy_variants stay .zfi-only ([extended:messy])"
+    echo "  Uniform fixtures only; messy_fixtures stay .zfi-only ([extended:messy])"
     local simple="tests/data/simple.fasta" proteome="tests/data/proteome.fasta"
     local edge="tests/data/edge_cases.fasta" mixed="tests/data/mixed_widths.fasta"
     local bed_small="$TMPDIR/idx_bed_small.bed" bed_medium="$TMPDIR/idx_bed_medium.bed"
@@ -736,7 +731,7 @@ section1() {
 
     verify_open_ended_region tests/data/simple.fasta seq1 10 24 "simple open-ended region"
 
-    echo "  messy_variants [extended:messy]"
+    echo "  messy_fixtures [extended:messy]"
     for case in "${MESSY_POS_CASES[@]}"; do
         IFS=: read -r name regions <<< "$case"
         local tgt="$TMPDIR/messy_${name}.fasta"

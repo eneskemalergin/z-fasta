@@ -1,5 +1,5 @@
 {
-  "messy_dir": "bench/shared/messy_variants",
+  "messy_dir": "bench/shared/messy_perf",
   "variants": [
     "mixed_widths",
     "trailing_whitespace",

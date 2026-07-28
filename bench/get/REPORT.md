@@ -45,11 +45,11 @@ Run **`20260709_094913`** used **zebrac** in **warm** mode: 5 measured samples, 
 - **Transcriptome** (`REAL_Transcriptome.fa`): Homo sapiens GENCODE v46 transcript sequences. 254,070 transcripts, 444 Mbp total, 458.7 MiB on disk.
 - **Proteome** (`REAL_Proteome.fasta`): Homo sapiens UniProt reference proteome UP000005640. 20,659 proteins, 11.5 M residues total, 13.1 MiB on disk.
 
-**Peers in this run** (same GET task; versions captured at benchmark time; vendored pins in `bench/shared/install_tools.sh`):
+**Peers in this run** (same GET task; versions captured at benchmark time; vendored pins in `bench/shared/tools.sh` / `tools/`):
 - **samtools** (C): samtools 1.13 via `samtools faidx region` (from `samtools --version`)
 - **bedtools** (C++): bedtools v2.30.0 via `bedtools getfasta` (from `bedtools --version`)
 - **noodles** (Rust): noodles-fasta 0.61 (wrapper) via `tools/noodles_wrapper get` (from noodles-fasta crate in `tools/noodles_wrapper/Cargo.toml`; pin 0.61)
-- **rust-bio** (Rust): rust-bio 2.3 (custom indexer wrapper) via `tools/rustbio_wrapper get` (from bio crate in `tools/rustbio_wrapper/Cargo.toml`; pin 2.3)
+- **rust-bio** (Rust): rust-bio 2.2 (custom indexer wrapper) via `tools/rustbio_wrapper get` (from bio crate in `tools/rustbio_wrapper/Cargo.toml`; pin 2.2)
 - **fastahack** (C++): fastahack 1.0.0 (directory pin) via `fastahack region` (from directory pin `tools/fastahack-1.0.0/`; pin 1.0.0)
 - **seqtk** (C): seqtk 1.5-r133 via `seqtk subseq (reference loop)` (from `seqtk 2>&1`)
 
@@ -1101,7 +1101,7 @@ z-fasta default (`.zfi`) vs `.fai` lane on **1kbp_mid**. The `.fai` lane stashes
 
 ## Messy FASTA GET (z-fasta only)
 
-Paired `get` on proteome-derived messy fixtures in `bench/shared/messy_variants/` (4 layout variants, ~20k sequences each). Each workload extracts the same TITIN sub-regions from a **uniform** (`validate --fix`) and **messy** (side-table `.zfi`) copy of each file. Spans are defined in `bench/get/messy_perf.json`. Index build stays outside zebrac. Zebrac used **50** samples, **10** warmup, **30000 ms** minimum per lane. Peers are omitted.
+Paired `get` on proteome-derived messy fixtures in `bench/shared/messy_perf/` (4 layout variants, ~20k sequences each). Each workload extracts the same TITIN sub-regions from a **uniform** (`validate --fix`) and **messy** (side-table `.zfi`) copy of each file. Spans are defined in `bench/get/messy_perf.json`. Index build stays outside zebrac. Zebrac used **50** samples, **10** warmup, **30000 ms** minimum per lane. Peers are omitted.
 
 **Why ratio charts:** Figures plot **messy / uniform**; dashed line = parity (1.0×). Figure 12 quotes the headline span `titin_mid`. Figure 13 summarizes all spans (median bar, min-max whiskers, `titin_mid` diamond) to show overhead tracks layout type, not extraction length. Collapsible Table below has per-span microseconds and ratios.
 

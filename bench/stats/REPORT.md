@@ -68,7 +68,7 @@ Oracle: [`bench/stats/oracle.py`](oracle.py). Verify: [`bench/stats/verify.sh`](
 - **seqkit:** seqkit v2.13.0
 - **seqtk:** seqtk 1.5-r133
 - **noodles:** noodles-fasta 0.61 (wrapper)
-- **rustbio:** rust-bio 2.3 (custom indexer wrapper)
+- **rustbio:** rust-bio 2.2 (custom indexer wrapper)
 - **samtools:** samtools 1.13
 
 **Data used** (human reference files in `bench/shared/data/`; fetch with `bench/shared/download_data.sh`):
@@ -567,7 +567,7 @@ Synthetic FASTAs under `bench/stats/data/` (generated on demand). Indexes preloa
 
 ## z-fasta Mode Comparison
 
-Four lanes: **full** and **indexed** (`--index-only`), each with `.zfi` and with `.fai` (`.zfi` stashed outside the timed window). Indexed skips the composition mmap scan. `.fai` is first-class for users who skip `.zfi` (messy side tables still need `.zfi`). **Figure facets** are wall time, peak RSS, and minor page faults; **x-axis** is dataset; **bar color** is mode lane (same layout as Full stats).
+Four lanes: **full** and **indexed** (`--index-only`), each with `.zfi` and with `.fai` (`.zfi` stashed outside the timed window). Indexed skips the composition mmap scan. `.zfi` is preferred; `.fai` is the compatibility lane for uniform, FAI-representable records (messy side tables still need `.zfi`). **Figure facets** are wall time, peak RSS, and minor page faults; **x-axis** is dataset; **bar color** is mode lane (same layout as Full stats).
 
 **Table 19:** Composition tax. Fraction of full wall explained by the mmap scan: `(full - indexed(zfi)) / full`.
 

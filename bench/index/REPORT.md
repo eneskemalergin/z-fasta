@@ -29,13 +29,13 @@ Run **`20260706_134943`** used **zebrac** in **warm** mode: 10 measured samples,
 - **Transcriptome** (`REAL_Transcriptome.fa`): Homo sapiens GENCODE v46 transcript sequences. 254,070 transcripts, 444 Mbp total, 458.7 MiB on disk.
 - **Proteome** (`REAL_Proteome.fasta`): Homo sapiens UniProt reference proteome UP000005640. 20,659 proteins, 11.5 M residues total, 13.1 MiB on disk.
 
-**Competitors in this run** (versions captured at benchmark time; vendored pins in `bench/shared/install_tools.sh`):
+**Competitors in this run** (versions captured at benchmark time; vendored pins in `bench/shared/tools.sh` / `tools/`):
 - **samtools** (C): samtools 1.13 via `samtools faidx` (from `samtools --version`)
 - **seqkit** (Go): seqkit v2.13.0 via `seqkit faidx` (from `seqkit version`; pin 2.13.0)
 - **fastahack** (C++): fastahack 1.0.0 (directory pin) via `fastahack -i` (from directory pin `tools/fastahack-1.0.0/`; pin 1.0.0)
 - **pyfaidx** (Python): 0.9.0.3 via `faidx --no-output` (from `faidx --version` / `pyfaidx.__version__`; pin 0.9.0.3)
 - **noodles** (Rust): noodles-fasta 0.61 (wrapper) via `tools/noodles_wrapper index` (from noodles-fasta crate in `tools/noodles_wrapper/Cargo.toml`; pin 0.61)
-- **rust-bio** (Rust): rust-bio 2.3 (custom indexer wrapper) via `tools/rustbio_wrapper index` (from bio crate in `tools/rustbio_wrapper/Cargo.toml`; pin 2.3)
+- **rust-bio** (Rust): rust-bio 2.2 (custom indexer wrapper) via `tools/rustbio_wrapper index` (from bio crate in `tools/rustbio_wrapper/Cargo.toml`; pin 2.2)
 
 Index-file cleanup runs inside each measured command because zebrac has no separate prepare hook. Every tool pays the same small reset overhead.
 
@@ -588,7 +588,7 @@ Mean wall time (seconds, zebrac) at each record count. **Lower is better.** Byte
 
 ## z-fasta Mode Comparison
 
-Compares the three z-fasta index modes on the same human reference files as **Performance: Real Datasets**, with **noodles** (headline competitor) and **samtools** (industry reference) on the same fixtures. All samples use the same zebrac warm-cache setup.
+Compares the three z-fasta index modes on the same human reference files as **Performance: Real Datasets**, with **noodles** (headline competitor) and **samtools** (industry reference) on the same fixtures. All samples use the same zebrac warm-cache setup. The `--low-mem` column times `index --low-mem --emit-fai` (FAI stdout, fair vs competitors); default `index --low-mem` writes `.zfi`.
 
 ### Wall time and throughput
 
@@ -726,15 +726,15 @@ Each uniform entry is a fixed 40-byte `IndexRecord` (`src/index_format.zig`). FA
 
 ### Load path
 
-`loadIndex` opens `.zfi` first, then falls back to `.fai`. For `.zfi`, the record array is a zero-copy view of mmap'd index bytes. For `.fai`, the loader reads the file, parses tab-separated lines, builds a record array, and copies every sequence name into an arena hash map (`tryLoadFai` in `index_format.zig`). `.zfi` entries also store `name_offset` / `name_len` into the mmap'd FASTA; FAI rows leave those fields zero and keep names only in the hash map. `stats --index-only` and small `get` batches can load `.zfi` in `.records_only` mode and skip the name hash entirely.
+`loadIndex` opens `.zfi` first, then falls back to `.fai`. For `.zfi`, the record array is a zero-copy view of mmap'd index bytes, and `lookup_full_map` builds a pointer hash over the embedded name blob. For `.fai`, the loader mmaps the text index, parses lines into a record array, and points `name_offset` / `name_len` into the mmap'd `.fai` (`tryLoadFai` in `index_format.zig`). `.zfi` entries store `name_offset` / `name_len` into the mmap'd FASTA as well. `stats --index-only` and small `get` batches can load either format in `.records_only` mode and skip the name hash; `.fai` stats scans use `.stats_scan` (on-demand name reads).
 
 ### Messy FASTA
 
-FAI assumes one `line_bases` / `line_bytes` pair per record. z-fasta indexes irregular wrap, trailing whitespace, blank lines, and mixed CRLF/LF using per-record side tables (see **Messy FASTA Compatibility**). Use `index --emit-fai` or rely on `.fai` fallback when you need samtools-compatible text on disk.
+FAI assumes one `line_bases` / `line_bytes` pair per record. z-fasta indexes irregular wrap, trailing whitespace, blank lines, and mixed CRLF/LF using per-record side tables (see **Messy FASTA Compatibility**). Emit `.fai` only with `index --emit-fai` when every record is FAI-representable; otherwise use default `.zfi`. Load still falls back to an existing `.fai` for samtools-compatible text indexes.
 
 ### Integrity
 
-The `.zfi` header stores `source_size`. Load rejects the index when that value does not match the FASTA file size, in addition to mtime staleness checks.
+`.zfi` stores `source_size` and, on current writers, a `ZFID` embedded FASTA mtime. Load rejects size or embedded-mtime mismatch. Legacy `.zfi` without `ZFID` keeps the weaker index-file mtime check. `.fai` identity remains mtime-only (no embedded source fields).
 
 ### Index build time
 
@@ -748,7 +748,7 @@ The `.zfi` header stores `source_size`. Load rejects the index when that value d
 
 ### Peak RSS
 
-Production `.zfi` uses mmap like the bench default (`--emit-fai`). `--low-mem` is the low-RSS path (streaming FAI). Do not read `.zfi` as a low-memory index format.
+Production `.zfi` uses mmap like default `index`. The bench `--low-mem` column times `index --low-mem --emit-fai` (streaming read; FAI to stdout for fair competitor compare). Default `index --low-mem` writes `.zfi`. Do not confuse the low-RSS build path with a smaller on-disk index format.
 
 **Table 26:** Peak RSS for bench FAI default, `--low-mem --emit-fai`, and production `.zfi` (zebrac mean).
 
@@ -774,7 +774,7 @@ Production `index` (mmap plus `.zfi` write) tracks `index --emit-fai` within a f
 
 ## Edge Case Correctness
 
-Structural edge-case fixtures from `run_tests.sh`. Each row in the heatmap is one test file; tool columns show process exit codes. The **Expected** column marks whether z-fasta met that test's rules.
+Structural edge-case fixtures from `bench/index/run.sh` (edge_cases/). Each row in the heatmap is one test file; tool columns show process exit codes. The **Expected** column marks whether z-fasta met that test's rules.
 
 **Scoring rules:**
 
@@ -801,7 +801,7 @@ Structural edge-case fixtures from `run_tests.sh`. Each row in the heatmap is on
 ![Figure 11: edge-case exit codes](results/figures/edge_cases.png)
 
 **Reading Figure 11**
-- Rows: test case names from `run_tests.sh`.
+- Rows: test case names from `bench/index/run.sh` edge_cases/.
 - Tool columns: `ok` = exit 0, `fail` = non-zero exit.
 - **Expected:** `Y` = MATCH, `N` = mismatch vs test rules.
 - Green / red / orange cells match the legend on the chart.
@@ -809,7 +809,7 @@ Structural edge-case fixtures from `run_tests.sh`. Each row in the heatmap is on
 
 ## Messy FASTA Compatibility
 
-Proteome-derived fixtures in `bench/shared/messy_variants/`. Each cell is zebrac with `--allow-failures` (repeated samples, not a single exit check).
+Proteome-derived fixtures in `bench/shared/messy_perf/`. Each cell is zebrac with `--allow-failures` (repeated samples, not a single exit check).
 
 **What z-fasta handles:** irregular line wrapping, trailing whitespace on sequence lines, blank lines between records, and mixed CRLF/LF. Those are common export glitches, not arbitrary byte corruption. z-fasta records true sequence boundaries in a side-table `.zfi` instead of assuming every line in a record has the same width.
 
@@ -827,17 +827,17 @@ Proteome-derived fixtures in `bench/shared/messy_variants/`. Each cell is zebrac
 **Reading Table 29**
 - Rows: messy variant names (`all_messy`, `crlf_endings`, `mixed_widths`, `trailing_whitespace`).
 - Columns: tools in fixed order (z-fasta, samtools, noodles, rust-bio, fastahack, pyfaidx when present).
-- Refresh with `bash bench/index/run_messy_benchmarks.sh`.
+- Refresh with `bash bench/index/run.sh` (messy zebrac section).
 
 ## Tools Tested
 
 - **z-fasta (bench FAI) (z-fasta 0.2.9):** `index --emit-fai`, mmap + dedup; stdout FAI for cross-tool tables.
 - **z-fasta (production `.zfi`):** `index`, mmap + dedup; writes `.zfi` on disk.
 - **z-fasta (`--no-dedup`):** `index --emit-fai --no-dedup`.
-- **z-fasta (`--low-mem`):** `index --low-mem --emit-fai`, streaming IO, low peak RSS.
+- **z-fasta (`--low-mem`):** bench lane is `index --low-mem --emit-fai` (streaming IO, low peak RSS); default `index --low-mem` writes `.zfi`.
 - **samtools (samtools 1.13):** `samtools faidx`, industry reference.
 - **seqkit (seqkit v2.13.0):** `seqkit faidx`, Go toolkit.
 - **fastahack (fastahack 1.0.0 (directory pin)):** `fastahack -i`, indexes on first access.
 - **pyfaidx (0.9.0.3):** `faidx --no-output`, Python wrapper.
 - **noodles (noodles-fasta 0.61 (wrapper)):** `tools/noodles_wrapper index`, Tier 2 noodles-fasta wrapper.
-- **rust-bio (rust-bio 2.3 (custom indexer wrapper)):** `tools/rustbio_wrapper index`. Custom CLI because rust-bio has no standalone index command. Strict FAI rules aligned with noodles and samtools.
+- **rust-bio (rust-bio 2.2 (custom indexer wrapper)):** `tools/rustbio_wrapper index`. Custom CLI because rust-bio has no standalone index command. Strict FAI rules aligned with noodles and samtools.

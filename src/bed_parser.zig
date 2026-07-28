@@ -1,3 +1,7 @@
+//! BED line parser: 0-based half-open intervals to 1-based inclusive regions plus strand.
+//!
+//! Used by GET `--bed` batching (`BedRegion`, strand-aware extract).
+
 const std = @import("std");
 
 pub const BedStrand = enum {

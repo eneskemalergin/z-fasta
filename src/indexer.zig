@@ -30,47 +30,55 @@ const FILE_IO_BUF_SIZE = 8 * 1024;
 pub const max_index_name_len = std.math.maxInt(u16);
 
 /// First-wins name set for indexing. A hash accelerates the map; discarding a record
-/// requires `std.mem.eql` identity, never hash equality alone.
-pub const NameDedup = struct {
-    map: std.StringHashMap(void),
-    /// When true, keys were `dupe`d with `map.allocator` and are freed in `deinit`.
-    /// Mmap scans set this false and borrow name slices from the source buffer.
-    owns_keys: bool,
+/// requires full-string equality (`Context.eql`), never hash equality alone.
+/// Production uses `NameDedup` (`StringContext`). Tests may inject a colliding hasher via
+/// `NameDedupWith` to prove identity stays byte equality under forced collisions.
+pub fn NameDedupWith(comptime Context: type) type {
+    return struct {
+        map: std.HashMap([]const u8, void, Context, std.hash_map.default_max_load_percentage),
+        /// When true, keys were `dupe`d with `map.allocator` and are freed in `deinit`.
+        /// Mmap scans set this false and borrow name slices from the source buffer.
+        owns_keys: bool,
 
-    pub fn init(allocator: std.mem.Allocator, owns_keys: bool) NameDedup {
-        return .{
-            .map = std.StringHashMap(void).init(allocator),
-            .owns_keys = owns_keys,
-        };
-    }
+        const Self = @This();
 
-    pub fn deinit(self: *NameDedup) void {
-        if (self.owns_keys) {
-            var it = self.map.keyIterator();
-            while (it.next()) |key| {
-                self.map.allocator.free(key.*);
+        pub fn init(allocator: std.mem.Allocator, owns_keys: bool) Self {
+            return .{
+                .map = std.HashMap([]const u8, void, Context, std.hash_map.default_max_load_percentage).init(allocator),
+                .owns_keys = owns_keys,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            if (self.owns_keys) {
+                var it = self.map.keyIterator();
+                while (it.next()) |key| {
+                    self.map.allocator.free(key.*);
+                }
             }
+            self.map.deinit();
         }
-        self.map.deinit();
-    }
 
-    /// Returns true when `name` was already observed (caller should skip the record).
-    pub fn observe(self: *NameDedup, name: []const u8) !bool {
-        if (!self.owns_keys) {
-            const gop = try self.map.getOrPut(name);
-            return gop.found_existing;
+        /// Returns true when `name` was already observed (caller should skip the record).
+        pub fn observe(self: *Self, name: []const u8) !bool {
+            if (!self.owns_keys) {
+                const gop = try self.map.getOrPut(name);
+                return gop.found_existing;
+            }
+            // Own before insert so a failed alloc cannot leave a borrowed key in the map.
+            const owned = try self.map.allocator.dupe(u8, name);
+            errdefer self.map.allocator.free(owned);
+            const gop = try self.map.getOrPut(owned);
+            if (gop.found_existing) {
+                self.map.allocator.free(owned);
+                return true;
+            }
+            return false;
         }
-        // Own before insert so a failed alloc cannot leave a borrowed key in the map.
-        const owned = try self.map.allocator.dupe(u8, name);
-        errdefer self.map.allocator.free(owned);
-        const gop = try self.map.getOrPut(owned);
-        if (gop.found_existing) {
-            self.map.allocator.free(owned);
-            return true;
-        }
-        return false;
-    }
-};
+    };
+}
+
+pub const NameDedup = NameDedupWith(std.hash_map.StringContext);
 
 pub const OutputMode = enum { fai, zfi };
 
@@ -832,14 +840,24 @@ const ChunkParseState = struct {
         try self.side_table.appendSlice(self.allocator, std.mem.asBytes(&line_count));
     }
 
-    fn activateSideTable(self: *ChunkParseState) !void {
+    /// Materialize `lines_to_materialize` uniform stride rows from the deferred first line.
+    /// Call with `line_count - 1` before appending the line that broke uniformity, or with
+    /// full `line_count` when `finish()` flips non-uniform after all lines looked formula-ready.
+    fn activateSideTable(self: *ChunkParseState, lines_to_materialize: u64) !void {
         if (self.side_table_active) return;
         self.side_table_active = true;
         try self.ensureSideTableHeader();
-        if (self.deferred_side_line) |deferred| {
-            try self.appendSideTableLine(deferred.bases, deferred.actual_bytes, deferred.line_file_offset);
+        if (lines_to_materialize == 0) {
             self.deferred_side_line = null;
+            return;
         }
+        const first = self.deferred_side_line orelse return error.MissingSideTable;
+        var i: u64 = 0;
+        while (i < lines_to_materialize) : (i += 1) {
+            const off = first.line_file_offset + i * @as(u64, first.actual_bytes);
+            try self.appendSideTableLine(first.bases, first.actual_bytes, off);
+        }
+        self.deferred_side_line = null;
     }
 
     fn startHeader(self: *ChunkParseState, header_start_offset: u64) !void {
@@ -902,19 +920,20 @@ const ChunkParseState = struct {
             firstLineIsDense(metrics.line_bases, metrics.line_bytes);
 
         if (can_use_formula) {
+            // Keep the first line deferred for the whole uniform prefix. Clearing it on
+            // line 2+ dropped prior rows when a later line forced a side table.
             if (metrics.line_count == 1) {
                 self.deferred_side_line = .{
                     .bases = bases,
                     .actual_bytes = actual_bytes,
                     .line_file_offset = line_file_offset,
                 };
-            } else {
-                self.deferred_side_line = null;
             }
             return;
         }
 
-        try self.activateSideTable();
+        // Reconstruct the uniform prefix, then append the line that broke it.
+        try self.activateSideTable(metrics.line_count - 1);
         try self.appendSideTableLine(bases, actual_bytes, line_file_offset);
     }
 
@@ -998,8 +1017,11 @@ const ChunkParseState = struct {
         const name_len: u16 = @intCast(self.name.items.len);
         var side_table_slice: []const u8 = &.{};
         if (!seq_info.uses_uniform_formula and self.zfi_mode) {
-            // Safety net: trailing blank may have set non-uniform without a later base line.
-            try self.activateSideTable();
+            // finish() can mark non-uniform after every line looked formula-ready (e.g. last
+            // line longer than the stride). Materialize the full uniform-looking prefix then.
+            if (!self.side_table_active) {
+                try self.activateSideTable(metrics.line_count);
+            }
             if (!self.side_table_active) {
                 return error.MissingSideTable;
             }

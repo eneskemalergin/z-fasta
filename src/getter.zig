@@ -1,3 +1,8 @@
+//! Sequence extraction: positional regions, BED/names batching, strand, and RC transforms.
+//!
+//! Uniform records use O(1) byte-offset math; non-uniform records use side-table lookup.
+//! Prefers `.zfi` via `index_format.loadIndex`, with `.fai` fallback.
+
 const std = @import("std");
 const complement = @import("complement.zig");
 const bed_parser = @import("bed_parser.zig");

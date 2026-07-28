@@ -9,7 +9,7 @@ This suite measures `z-fasta index` against FASTA indexers that produce or use F
 - Two sequence-count sweeps: bounded ~50 MiB total (1k–250k records) and fixed 1024 bp per record (100k–1M).
 - `zebrac` wall time, peak RSS, page faults, and hardware counters (single measurement source).
 - Edge-case correctness against `samtools` (fixtures in `edge_cases/`).
-- Messy FASTA: quick correctness checks (`messy_variants/`) and zebrac indexing on proteome-derived fixtures in [bench/shared/messy_variants](../shared/messy_variants/).
+- Messy FASTA: quick correctness checks (`messy_fixtures/`) and zebrac indexing on proteome-derived fixtures in [bench/shared/messy_perf](../shared/messy_perf/).
 
 ## Run
 
@@ -53,7 +53,7 @@ bash bench/index/run.sh --allow-incomplete # local report drafts from partial da
 
 The zebrac runner uses warm-cache mode. It does not currently have a per-sample prepare hook, so index-file cleanup is included inside each measured command. That overhead is small and applies to every tool in the suite.
 
-`z-fasta-default` uses mmap and duplicate-name detection. `z-fasta-nodedup` disables duplicate checking. `z-fasta-lowmem` uses streaming IO to trade speed for low peak RSS.
+`z-fasta-default` uses mmap and duplicate-name detection. `z-fasta-nodedup` disables duplicate checking. `z-fasta-lowmem` times `index --low-mem --emit-fai` (streaming IO, low peak RSS); default `index --low-mem` writes `.zfi`.
 
 Peak RSS and page faults in the report come from zebrac on the same samples as wall time. There is no separate `/usr/bin/time` pass.
 

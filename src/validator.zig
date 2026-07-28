@@ -1,3 +1,8 @@
+//! FASTA structure, alphabet, and header validation with optional fix streaming.
+//!
+//! Events are capped (`max_validate_events`). JSON output escapes arbitrary header bytes.
+//! Shared sequence-type sampling uses `stats.detectType`.
+
 const std = @import("std");
 const index_format = @import("index_format.zig");
 const platform = @import("platform.zig");

@@ -153,8 +153,3 @@ shell_command() {
     local script="$1"
     printf 'bash -c %q' "$script"
 }
-
-file_size_bytes() {
-    local path="$1"
-    stat --printf='%s' "$path" 2>/dev/null || stat -f '%z' "$path" 2>/dev/null || echo 0
-}

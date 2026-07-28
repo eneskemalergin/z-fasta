@@ -107,7 +107,13 @@ def top_amino_acids(counts: Counter, total: int) -> list[dict]:
     return out
 
 
+def name_duplicate_extras(names: list[str]) -> int:
+    """Source-level extras: sum(k - 1) for each name occurring k times."""
+    return sum(count - 1 for count in Counter(names).values() if count > 1)
+
+
 def compute_expected(fasta: str, *, dedup: bool = True) -> dict:
+    all_records = list(SeqIO.parse(fasta, "fasta"))
     records = indexed_records(fasta, dedup=dedup)
     lengths = [len(r.seq) for r in records]
     num_seqs = len(lengths)
@@ -155,8 +161,13 @@ def compute_expected(fasta: str, *, dedup: bool = True) -> dict:
 
     seq_type = detect_type(counts, comp_total)
     fasta_bytes = Path(fasta).stat().st_size
+    source_duplicates = name_duplicate_extras([r.id for r in all_records])
+    # Index-visible extras (--no-dedup path); empty sequences are omitted from indexes.
+    index_duplicates = name_duplicate_extras([r.id for r in records])
     out: dict = {
         "dedup_index": dedup,
+        "source_duplicates": source_duplicates,
+        "index_duplicates": index_duplicates,
         "fasta_bytes": fasta_bytes,
         "fasta_size": format_size(fasta_bytes),
         "fasta_name": Path(fasta).name,
@@ -252,7 +263,8 @@ def parse_zfasta(text: str) -> dict:
             (r"L90:\s+(.+)", "l90", strip_commas),
             (r"AU:\s+(.+)", "au", strip_commas),
             (r"Type:\s+(.+)", "type", str.strip),
-            (r"Duplicates:\s+(\d+)", "duplicates", int),
+            (r"Duplicates:\s+(\d+)\s*$", "duplicates", int),
+            (r"Duplicates:\s+(n/a(?:\s.*)?)\s*$", "duplicates_na", str.strip),
             (r"^\s*A:\s+([\d.]+)%", "a_pct", float),
             (r"^\s*C:\s+([\d.]+)%", "c_pct", float),
             (r"^\s*G:\s+([\d.]+)%", "g_pct", float),
@@ -532,17 +544,34 @@ def check_header(expected: dict, got: dict, errors: list[str], index_tag: str) -
     str_ok(errors, "header.file_size", expected["fasta_size"], got.get("file_size", "?"))
 
 
-def compare_index(expected: dict, got: dict, errors: list[str]) -> None:
+def compare_duplicates(expected: dict, got: dict, errors: list[str], *, index_only: bool) -> None:
+    """Product policy: full stats report source extras; index-only never fabricates 0."""
+    if "source_duplicates" not in expected:
+        return
+    if index_only:
+        # A number is knowable only when the index retains repeated names.
+        # Unique index names → n/a (dedup may have dropped repeats, or source
+        # may only duplicate empty records the indexer omits).
+        if expected.get("index_duplicates", 0) > 0:
+            int_ok(errors, "duplicates", expected["index_duplicates"], got.get("duplicates", -1))
+        elif "duplicates_na" not in got:
+            errors.append(
+                f"duplicates: expected n/a under index-only with no retained repeats, got {got.get('duplicates', '?')!r}"
+            )
+        return
+    int_ok(errors, "duplicates", expected["source_duplicates"], got.get("duplicates", -1))
+
+
+def compare_index(expected: dict, got: dict, errors: list[str], *, index_only: bool = False) -> None:
     for key in ("num_seqs", "total_bases", "shortest_len", "longest_len", "mean", "median", "n50", "l50", "n90", "l90", "au"):
         int_ok(errors, key, expected[key], got.get(key, -1))
     str_ok(errors, "shortest_name", expected["shortest_name"], got.get("shortest_name", "?"))
     str_ok(errors, "longest_name", expected["longest_name"], got.get("longest_name", "?"))
-    if expected.get("dedup_index", True):
-        int_ok(errors, "duplicates", 0, got.get("duplicates", -1))
+    compare_duplicates(expected, got, errors, index_only=index_only)
 
 
 def compare_full(expected: dict, got: dict, errors: list[str]) -> None:
-    compare_index(expected, got, errors)
+    compare_index(expected, got, errors, index_only=False)
     want_type = "Nucleotide" if expected["seq_type"] == "nucleotide" else "Protein"
     str_ok(errors, "type", want_type, got.get("type", "?"))
 
@@ -575,6 +604,16 @@ def compare_full(expected: dict, got: dict, errors: list[str]) -> None:
             str_ok(errors, f"top_aa[{i}].name", want["name"], got_top[i].get("name", "?"))
 
 
+def cross_duplicates_ok(a: dict, b: dict, errors: list[str]) -> None:
+    if "duplicates_na" in a or "duplicates_na" in b:
+        if "duplicates_na" not in a or "duplicates_na" not in b:
+            errors.append(
+                f"cross.duplicates: n/a mismatch ({a.get('duplicates_na', a.get('duplicates'))!r} vs {b.get('duplicates_na', b.get('duplicates'))!r})"
+            )
+        return
+    int_ok(errors, "cross.duplicates", a.get("duplicates", -1), b.get("duplicates", -2))
+
+
 def compare_parsed_full(a: dict, b: dict, errors: list[str]) -> None:
     compare_index(
         {k: a.get(k, -1) for k in ("num_seqs", "total_bases", "shortest_len", "longest_len", "mean", "median", "n50", "l50", "n90", "l90", "au")}
@@ -582,7 +621,7 @@ def compare_parsed_full(a: dict, b: dict, errors: list[str]) -> None:
         b,
         errors,
     )
-    int_ok(errors, "cross.duplicates", a.get("duplicates", -1), b.get("duplicates", -2))
+    cross_duplicates_ok(a, b, errors)
     str_ok(errors, "cross.type", a.get("type", "?"), b.get("type", "!"))
     if a.get("type") == "Nucleotide":
         for key in ("a_pct", "c_pct", "g_pct", "t_pct", "n_pct", "gc_pct", "soft_pct", "other_pct"):
@@ -617,7 +656,7 @@ def cmd_check(argv: list[str]) -> None:
             errors.append("index-only: composition section present")
         if "run without --index-only" not in got.get("type", ""):
             errors.append(f"index-only: bad type placeholder ({got.get('type', '?')!r})")
-        compare_index(expected, got, errors)
+        compare_index(expected, got, errors, index_only=True)
     else:
         if "Composition:" not in text:
             errors.append("full: composition section missing")
@@ -631,17 +670,18 @@ def cmd_verify_mode(argv: list[str]) -> None:
     mode, fasta_path, exp_path, zfi_path, fai_path = argv[2], argv[3], argv[4], argv[5], argv[6]
     expected = json.loads(Path(exp_path).read_text())
     errors: list[str] = []
+    index_only = mode == "index-only"
 
     for tag, path in (("zfi", zfi_path), ("fai", fai_path)):
         text = Path(path).read_text()
         got = parse_zfasta(text)
         check_header(expected, got, errors, tag)
-        if mode == "index-only":
+        if index_only:
             if "Composition:" in text:
                 errors.append(f"{tag}: composition section present")
             if "run without --index-only" not in got.get("type", ""):
                 errors.append(f"{tag}: bad index-only type placeholder")
-            compare_index(expected, got, errors)
+            compare_index(expected, got, errors, index_only=True)
         else:
             if "Composition:" not in text:
                 errors.append(f"{tag}: composition section missing")
@@ -649,14 +689,14 @@ def cmd_verify_mode(argv: list[str]) -> None:
 
     zfi = parse_zfasta(Path(zfi_path).read_text())
     fai = parse_zfasta(Path(fai_path).read_text())
-    if mode == "index-only":
+    if index_only:
         compare_index(
             {k: zfi.get(k, -1) for k in ("num_seqs", "total_bases", "shortest_len", "longest_len", "mean", "median", "n50", "l50", "n90", "l90", "au")}
             | {"shortest_name": zfi.get("shortest_name", "?"), "longest_name": zfi.get("longest_name", "?")},
             fai,
             errors,
         )
-        int_ok(errors, "cross.duplicates", zfi.get("duplicates", -1), fai.get("duplicates", -2))
+        cross_duplicates_ok(zfi, fai, errors)
     else:
         compare_parsed_full(zfi, fai, errors)
 
@@ -723,7 +763,7 @@ def cmd_same(argv: list[str]) -> None:
             b,
             errors,
         )
-        int_ok(errors, "cross.duplicates", a.get("duplicates", -1), b.get("duplicates", -2))
+        cross_duplicates_ok(a, b, errors)
     else:
         compare_parsed_full(a, b, errors)
 

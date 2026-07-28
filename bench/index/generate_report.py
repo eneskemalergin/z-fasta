@@ -83,13 +83,14 @@ TOOL_ORDER = [
 ]
 DATASET_ORDER = ["Genome", "Transcriptome", "Proteome"]
 
-# Pinned versions for vendored or wrapper tools (see bench/shared/install_tools.sh).
+# Pinned versions for vendored or wrapper tools (keep in sync with tools.sh /
+# tools/*/Cargo.toml / tools/fastahack-*). install_tools.sh verifies these.
 VERSION_PINS = {
     "pyfaidx": "0.9.0.3",
     "seqkit": "2.13.0",
     "fastahack": "1.0.0",
     "noodles": "0.61",
-    "rustbio": "2.3",
+    "rustbio": "2.2",
 }
 
 # Competitor metadata for provenance text (command + version source).
@@ -1764,13 +1765,13 @@ def md_run_provenance(manifest: dict | None, project_root: Path) -> str:
     if measured:
         blocks.append(
             "**Competitors in this run** (versions captured at benchmark time; "
-            "vendored pins in `bench/shared/install_tools.sh`):\n"
+            "vendored pins in `bench/shared/tools.sh` / `tools/`):\n"
             + "\n".join(measured)
         )
     else:
         blocks.append(
             "_Competitor binaries were not resolved on this machine. "
-            "Re-run `bench/index/run_benchmarks.sh` to capture versions in the manifest._"
+            "Re-run `bash bench/index/run.sh` to capture versions in the manifest._"
         )
 
     blocks.append(
@@ -2122,7 +2123,9 @@ def md_mode_comparison_section(
             "Compares the three z-fasta index modes on the same human reference files as "
             "**Performance: Real Datasets**, with **noodles** (headline competitor) and "
             "**samtools** (industry reference) on the same fixtures. All samples use the "
-            "same zebrac warm-cache setup."
+            "same zebrac warm-cache setup. The `--low-mem` column times "
+            "`index --low-mem --emit-fai` (FAI stdout, fair vs competitors); default "
+            "`index --low-mem` writes `.zfi`."
         ),
         (
             "### Wall time and throughput\n\n"
@@ -2371,7 +2374,7 @@ def md_zfi_production_wall_table(df: pd.DataFrame) -> str:
 
 
 def md_zfi_production_rss_table(df: pd.DataFrame) -> str:
-    """Peak RSS for mmap `.zfi` vs streaming `--low-mem` vs bench FAI default."""
+    """Peak RSS for production `.zfi`, bench `--low-mem --emit-fai`, and FAI default."""
     return md_tool_pivot_table(
         df,
         ["z-fasta-default", "z-fasta-lowmem", "z-fasta-zfi"],
@@ -2447,26 +2450,30 @@ def md_zfi_production_section(
         (
             "### Load path\n\n"
             "`loadIndex` opens `.zfi` first, then falls back to `.fai`. For `.zfi`, the "
-            "record array is a zero-copy view of mmap'd index bytes. For `.fai`, the loader "
-            "reads the file, parses tab-separated lines, builds a record array, and copies "
-            "every sequence name into an arena hash map (`tryLoadFai` in `index_format.zig`). "
-            "`.zfi` entries also store `name_offset` / `name_len` into the mmap'd FASTA; "
-            "FAI rows leave those fields zero and keep names only in the hash map. "
-            "`stats --index-only` and small `get` batches can load `.zfi` in "
-            "`.records_only` mode and skip the name hash entirely."
+            "record array is a zero-copy view of mmap'd index bytes, and `lookup_full_map` "
+            "builds a pointer hash over the embedded name blob. For `.fai`, the loader mmaps "
+            "the text index, parses lines into a record array, and points "
+            "`name_offset` / `name_len` into the mmap'd `.fai` (`tryLoadFai` in "
+            "`index_format.zig`). `.zfi` entries store `name_offset` / `name_len` into the "
+            "mmap'd FASTA as well. `stats --index-only` and small `get` batches can load "
+            "either format in `.records_only` mode and skip the name hash; `.fai` stats scans "
+            "use `.stats_scan` (on-demand name reads)."
         ),
         (
             "### Messy FASTA\n\n"
             "FAI assumes one `line_bases` / `line_bytes` pair per record. z-fasta indexes "
             "irregular wrap, trailing whitespace, blank lines, and mixed CRLF/LF using "
-            "per-record side tables (see **Messy FASTA Compatibility**). Use "
-            "`index --emit-fai` or rely on `.fai` fallback when you need samtools-compatible "
-            "text on disk."
+            "per-record side tables (see **Messy FASTA Compatibility**). Emit `.fai` only "
+            "with `index --emit-fai` when every record is FAI-representable; otherwise use "
+            "default `.zfi`. Load still falls back to an existing `.fai` for samtools-"
+            "compatible text indexes."
         ),
         (
             "### Integrity\n\n"
-            "The `.zfi` header stores `source_size`. Load rejects the index when that value "
-            "does not match the FASTA file size, in addition to mtime staleness checks."
+            "`.zfi` stores `source_size` and, on current writers, a `ZFID` embedded FASTA "
+            "mtime. Load rejects size or embedded-mtime mismatch. Legacy `.zfi` without "
+            "`ZFID` keeps the weaker index-file mtime check. `.fai` identity remains "
+            "mtime-only (no embedded source fields)."
         ),
     ]
 
@@ -2483,9 +2490,11 @@ def md_zfi_production_section(
                 md_zfi_production_wall_table(perf_df),
                 (
                     f"### Peak RSS\n\n"
-                    "Production `.zfi` uses mmap like the bench default (`--emit-fai`). "
-                    "`--low-mem` is the low-RSS path (streaming FAI). Do not read `.zfi` as "
-                    "a low-memory index format."
+                    "Production `.zfi` uses mmap like default `index`. The bench "
+                    "`--low-mem` column times `index --low-mem --emit-fai` (streaming read; "
+                    "FAI to stdout for fair competitor compare). Default `index --low-mem` "
+                    "writes `.zfi`. Do not confuse the low-RSS build path with a smaller "
+                    "on-disk index format."
                 ),
                 (
                     f"**Table {t_rss}:** Peak RSS for bench FAI default, `--low-mem --emit-fai`, "
@@ -2913,9 +2922,9 @@ def md_edge_case_section(df: pd.DataFrame, nums: ReportCounters) -> str:
     f_edge = nums.next_figure()
     blocks = [
         (
-            "Structural edge-case fixtures from `run_tests.sh`. Each row in the heatmap is "
-            "one test file; tool columns show process exit codes. The **Expected** column "
-            "marks whether z-fasta met that test's rules."
+            "Structural edge-case fixtures from `bench/index/run.sh` (edge_cases/). Each "
+            "row in the heatmap is one test file; tool columns show process exit codes. "
+            "The **Expected** column marks whether z-fasta met that test's rules."
         ),
         "**Scoring rules:**",
         (
@@ -2941,7 +2950,7 @@ def md_edge_case_section(df: pd.DataFrame, nums: ReportCounters) -> str:
         ),
         (
             f"**Reading Figure {f_edge}**\n"
-            "- Rows: test case names from `run_tests.sh`.\n"
+            "- Rows: test case names from `bench/index/run.sh` edge_cases/.\n"
             "- Tool columns: `ok` = exit 0, `fail` = non-zero exit.\n"
             "- **Expected:** `Y` = MATCH, `N` = mismatch vs test rules.\n"
             "- Green / red / orange cells match the legend on the chart.\n"
@@ -2956,7 +2965,7 @@ def md_messy_section(df: pd.DataFrame, nums: ReportCounters) -> str:
     t_matrix = nums.next_table()
     blocks = [
         (
-            "Proteome-derived fixtures in `bench/shared/messy_variants/`. Each cell is zebrac "
+            "Proteome-derived fixtures in `bench/shared/messy_perf/`. Each cell is zebrac "
             "with `--allow-failures` (repeated samples, not a single exit check)."
         ),
         (
@@ -2982,7 +2991,7 @@ def md_messy_section(df: pd.DataFrame, nums: ReportCounters) -> str:
             "`trailing_whitespace`).\n"
             "- Columns: tools in fixed order (z-fasta, samtools, noodles, rust-bio, fastahack, "
             "pyfaidx when present).\n"
-            "- Refresh with `bash bench/index/run_messy_benchmarks.sh`."
+            "- Refresh with `bash bench/index/run.sh` (messy zebrac section)."
         ),
     ]
     return "\n\n".join(blocks)
@@ -3006,7 +3015,8 @@ def md_tools_tested(tools: dict[str, str] | None = None, z_fasta: str | None = N
         "cross-tool tables.\n"
         "- **z-fasta (production `.zfi`):** `index`, mmap + dedup; writes `.zfi` on disk.\n"
         "- **z-fasta (`--no-dedup`):** `index --emit-fai --no-dedup`.\n"
-        "- **z-fasta (`--low-mem`):** `index --low-mem --emit-fai`, streaming IO, low peak RSS.\n"
+        "- **z-fasta (`--low-mem`):** bench lane is `index --low-mem --emit-fai` "
+        "(streaming IO, low peak RSS); default `index --low-mem` writes `.zfi`.\n"
         f"- **samtools{version_note('samtools')}:** `samtools faidx`, industry reference.\n"
         f"- **seqkit{version_note('seqkit')}:** `seqkit faidx`, Go toolkit.\n"
         f"- **fastahack{version_note('fastahack')}:** `fastahack -i`, indexes on first access.\n"

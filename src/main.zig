@@ -1,15 +1,20 @@
+//! CLI entry and subcommand dispatcher for `index`, `get`, `stats`, and `validate`.
+//!
+//! Re-exports core modules for tests. Argument parsing, usage text, and routing live here;
+//! indexing, extraction, stats, and validation logic live in the sibling modules.
+
 const std = @import("std");
 const builtin = @import("builtin");
 const platform = @import("platform.zig");
 
-// Module imports
+// --- Module imports ---
 pub const index_format = @import("index_format.zig");
 pub const indexer = @import("indexer.zig");
 pub const getter = @import("getter.zig");
 pub const stats = @import("stats.zig");
 pub const validator = @import("validator.zig");
 
-// Re-exports for backward compatibility (tests import these)
+// --- Re-exports for tests ---
 pub const IndexRecord = index_format.IndexRecord;
 pub const ZfiHeader = index_format.ZfiHeader;
 pub const ZFI_MAGIC = index_format.ZFI_MAGIC;
@@ -146,6 +151,13 @@ fn printUsageAndExit() noreturn {
     std.process.exit(1);
 }
 
+/// Positional argv tokens must not start with `-`. Known flags are matched earlier.
+fn rejectUnknownOption(arg: []const u8) void {
+    if (arg.len > 0 and arg[0] == '-') {
+        printErrorAndExit("error: unknown option: {s}\n", .{arg});
+    }
+}
+
 fn printHelpAndExit(io: std.Io) noreturn {
     std.Io.File.writeStreamingAll(.stdout(), io, USAGE) catch {};
     std.process.exit(0);
@@ -242,6 +254,7 @@ fn runIndex(io: std.Io, args: *std.process.Args.Iterator) void {
         } else if (std.mem.eql(u8, arg, "--low-mem")) {
             low_mem = true;
         } else {
+            rejectUnknownOption(arg);
             fasta_path = arg;
         }
     }
@@ -403,8 +416,10 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
                 printErrorAndExit("error: --chunk-size requires a positive integer or -1\n", .{});
             };
         } else if (fasta_path == null) {
+            rejectUnknownOption(arg);
             fasta_path = arg;
         } else {
+            rejectUnknownOption(arg);
             if (region_count >= region_buf.len) {
                 printErrorAndExit("error: too many regions (max 1024)\n", .{});
             }
@@ -489,6 +504,7 @@ fn runStatsCmd(io: std.Io, args: *std.process.Args.Iterator) void {
         } else if (std.mem.eql(u8, arg, "--index-only")) {
             index_only = true;
         } else {
+            rejectUnknownOption(arg);
             fasta_path = arg;
         }
     }
@@ -544,8 +560,10 @@ fn runValidateCmd(io: std.Io, args: *std.process.Args.Iterator) void {
             };
             options.max_header_len = parsePositiveUsize(raw, "--max-header-len");
         } else if (fasta_path == null) {
+            rejectUnknownOption(arg);
             fasta_path = arg;
         } else {
+            rejectUnknownOption(arg);
             printErrorAndExit("error: validate accepts exactly one FASTA path\n", .{});
         }
     }

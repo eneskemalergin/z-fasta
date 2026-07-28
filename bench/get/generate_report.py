@@ -297,7 +297,7 @@ GET_PEERS = [
         "language": "Rust",
         "command": "tools/rustbio_wrapper get",
         "version_from": "bio crate in `tools/rustbio_wrapper/Cargo.toml`",
-        "pin": "2.3",
+        "pin": "2.2",
     },
     {
         "key": "fastahack",
@@ -2824,7 +2824,7 @@ def md_run_provenance(manifest: dict | None, project_root: Path, ir) -> str:
     if measured:
         lines.append(
             "**Peers in this run** (same GET task; versions captured at benchmark time; "
-            "vendored pins in `bench/shared/install_tools.sh`):\n" + "\n".join(measured)
+            "vendored pins in `bench/shared/tools.sh` / `tools/`):\n" + "\n".join(measured)
         )
 
     lines.append(
@@ -4240,7 +4240,7 @@ def md_messy_section(df: pd.DataFrame, nums, ir, figures_dir: Path, manifest: di
     n_variants = len(cfg["variants"])
     return "\n\n".join(
         [
-            "Paired `get` on proteome-derived messy fixtures in `bench/shared/messy_variants/` "
+            "Paired `get` on proteome-derived messy fixtures in `bench/shared/messy_perf/` "
             f"({n_variants} layout variants, ~20k sequences each). Each workload extracts the same "
             "TITIN sub-regions from a **uniform** (`validate --fix`) and **messy** (side-table "
             f"`.zfi`) copy of each file. Spans are defined in `bench/get/messy_perf.json`. Index "
