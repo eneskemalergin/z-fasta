@@ -27,21 +27,31 @@ jobs:
           - name: Linux x86_64
             os: ubuntu-latest
             binary: ./zig-out/bin/z-fasta
+            target_flag: ""
           - name: Linux aarch64
             os: ubuntu-24.04-arm
             binary: ./zig-out/bin/z-fasta
+            target_flag: ""
           - name: Windows x86_64
             os: windows-latest
             binary: ./zig-out/bin/z-fasta.exe
+            target_flag: ""
+          # Zig 0.16.0 aarch64-windows host binary segfaults (bootstrap poison).
+          # Use x86_64 Zig under WoA emulation and cross-build aarch64-windows so
+          # smoke/tests still run native ARM binaries on the runner.
+          # https://codeberg.org/ziglang/zig/issues/31865
           - name: Windows aarch64
             os: windows-11-arm
             binary: ./zig-out/bin/z-fasta.exe
+            target_flag: "-Dtarget=aarch64-windows"
           - name: macOS aarch64
             os: macos-latest
             binary: ./zig-out/bin/z-fasta
+            target_flag: ""
           - name: macOS x86_64
             os: macos-15-intel
             binary: ./zig-out/bin/z-fasta
+            target_flag: ""
 
     steps:
       - uses: actions/checkout@v7
@@ -49,24 +59,36 @@ jobs:
           persist-credentials: false
 
       - name: Setup Zig
+        if: matrix.os != 'windows-11-arm'
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+          cache-key: ${{ matrix.name }}
+
+      - name: Setup Zig (Windows aarch64 host workaround)
+        if: matrix.os == 'windows-11-arm'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o zig.zip "https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip"
+          unzip -q zig.zip -d zig-sdk
+          echo "$GITHUB_WORKSPACE/zig-sdk/zig-x86_64-windows-0.16.0" >> "$GITHUB_PATH"
 
       - name: Runner diagnostics
         shell: bash
         run: |
           echo "runner_os=${RUNNER_OS}"
           echo "runner_arch=${RUNNER_ARCH}"
+          echo "target_flag=${{ matrix.target_flag }}"
           zig version
 
       - name: Build
         shell: bash
-        run: zig build
+        run: zig build ${{ matrix.target_flag }}
 
       - name: Build (ReleaseFast)
         shell: bash
-        run: zig build -Doptimize=ReleaseFast
+        run: zig build -Doptimize=ReleaseFast ${{ matrix.target_flag }}
 
       - name: Smoke test
         shell: bash
@@ -102,4 +124,4 @@ jobs:
 
       - name: Run tests
         shell: bash
-        run: zig build test --summary all
+        run: zig build test --summary all ${{ matrix.target_flag }}
