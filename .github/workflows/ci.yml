@@ -21,17 +21,26 @@ jobs:
     timeout-minutes: 20
     strategy:
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 6
       matrix:
         include:
-          - name: Linux
+          - name: Linux x86_64
             os: ubuntu-latest
             binary: ./zig-out/bin/z-fasta
-          - name: Windows
+          - name: Linux aarch64
+            os: ubuntu-24.04-arm
+            binary: ./zig-out/bin/z-fasta
+          - name: Windows x86_64
             os: windows-latest
             binary: ./zig-out/bin/z-fasta.exe
-          - name: macOS
+          - name: Windows aarch64
+            os: windows-11-arm
+            binary: ./zig-out/bin/z-fasta.exe
+          - name: macOS aarch64
             os: macos-latest
+            binary: ./zig-out/bin/z-fasta
+          - name: macOS x86_64
+            os: macos-15-intel
             binary: ./zig-out/bin/z-fasta
 
     steps:
@@ -93,11 +102,4 @@ jobs:
 
       - name: Run tests
         shell: bash
-        run: |
-          # Windows file mapping is less forgiving of parallel test binaries
-          # racing on the same fixture files; serialize there only.
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            zig build test --summary all -j1
-          else
-            zig build test --summary all
-          fi
+        run: zig build test --summary all
