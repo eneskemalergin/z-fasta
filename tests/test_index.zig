@@ -1908,6 +1908,8 @@ test "gates fixture: long header indexes; over-u16 name rejects on both paths" {
     const reject_data = try readTestFile(allocator, "tests/data/gates/long_header_reject.fasta");
     defer allocator.free(reject_data);
     try std.testing.expect(reject_data[0] == '>');
+    // Fixture must stay LF-only; a Windows CRLF checkout makes indexOf('\\n')-1 count the '\\r'.
+    try std.testing.expect(std.mem.indexOfScalar(u8, reject_data, '\r') == null);
     try std.testing.expectEqual(main.indexer.max_index_name_len + 1, std.mem.indexOfScalar(u8, reject_data, '\n').? - 1);
     try std.testing.expectError(error.HeaderTooLong, main.indexer.scanZfiIndex(reject_data, true, allocator));
     try std.testing.expectError(error.HeaderTooLong, main.indexer.scanZfiIndexStreamingData(reject_data, true, allocator));

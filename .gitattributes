@@ -12,16 +12,16 @@
 *.yml text
 *.json text
 
-# FASTA test fixtures (LF-normalized by default)
-*.fasta text
-*.fa text
-*.fai text
+# FASTA fixtures: LF on every checkout (Windows must not inject \r)
+*.fasta text eol=lf
+*.fa text eol=lf
+*.fai text eol=lf
 
-# Exact-byte fixtures: intentional CRLF / corrupt .fai (do not normalize)
-tests/data/validator_indexer_agreement.fasta -text
-tests/data/gates/*.fai -text
-bench/index/messy_fixtures/mixed_crlf_lf.fasta -text
-bench/shared/messy_perf/crlf_endings.fasta -text
+# Exact-byte exceptions: intentional CRLF / corrupt .fai (must clear text AND eol)
+tests/data/validator_indexer_agreement.fasta -text -eol
+tests/data/gates/*.fai -text -eol
+bench/index/messy_fixtures/mixed_crlf_lf.fasta -text -eol
+bench/shared/messy_perf/crlf_endings.fasta -text -eol
 
 # Exclude benchmark infrastructure and wrapper crates from language stats
 bench/** linguist-vendored
