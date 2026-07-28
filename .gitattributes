@@ -12,10 +12,16 @@
 *.yml text
 *.json text
 
-# FASTA test fixtures
+# FASTA test fixtures (LF-normalized by default)
 *.fasta text
 *.fa text
 *.fai text
+
+# Exact-byte fixtures: intentional CRLF / corrupt .fai (do not normalize)
+tests/data/validator_indexer_agreement.fasta -text
+tests/data/gates/*.fai -text
+bench/index/messy_fixtures/mixed_crlf_lf.fasta -text
+bench/shared/messy_perf/crlf_endings.fasta -text
 
 # Exclude benchmark infrastructure and wrapper crates from language stats
 bench/** linguist-vendored

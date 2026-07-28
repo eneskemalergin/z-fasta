@@ -42,6 +42,7 @@ bench/*/.bench*/
 
 # Generated indexes (testing / local runs)
 *.fai
+!tests/data/gates/*.fai
 *.zfi
 
 # Local-only dev folders
