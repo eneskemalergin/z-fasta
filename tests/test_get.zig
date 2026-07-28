@@ -1,3 +1,7 @@
+//! GET unit and CLI tests: region parsing, extraction, and failure-path subprocess checks.
+//!
+//! Includes low-mem vs mmap extract parity and exact-exit CLI failure contracts.
+
 const std = @import("std");
 const builtin = @import("builtin");
 const main = @import("main");
@@ -471,6 +475,79 @@ test "get on messy mixed_line_widths after low-mem index" {
     try std.testing.expectEqualStrings(expected, low_out);
 }
 
+/// Hard CLI failures: exact exit code, exact stderr, empty stdout (no partial success).
+fn expectCliFailure(
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    exit_code: u8,
+    expected_stderr: []const u8,
+) !void {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const spawn_io = threaded.io();
+
+    const result = try std.process.run(allocator, spawn_io, .{
+        .argv = argv,
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| try std.testing.expectEqual(exit_code, code),
+        else => return error.ChildProcessFailed,
+    }
+    try std.testing.expectEqual(@as(usize, 0), result.stdout.len);
+    try std.testing.expectEqualStrings(expected_stderr, result.stderr);
+}
+
+/// Usage dumps: exit 1, empty stdout, stderr matches `z-fasta --help` stdout exactly.
+fn expectCliUsageFailure(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const spawn_io = threaded.io();
+
+    const help = try std.process.run(allocator, spawn_io, .{
+        .argv = &.{ ZFASTA_BIN, "--help" },
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    });
+    defer allocator.free(help.stdout);
+    defer allocator.free(help.stderr);
+    switch (help.term) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        else => return error.ChildProcessFailed,
+    }
+    try std.testing.expectEqual(@as(usize, 0), help.stderr.len);
+    try std.testing.expect(help.stdout.len > 0);
+
+    const result = try std.process.run(allocator, spawn_io, .{
+        .argv = argv,
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 1), code),
+        else => return error.ChildProcessFailed,
+    }
+    try std.testing.expectEqual(@as(usize, 0), result.stdout.len);
+    try std.testing.expectEqualStrings(help.stdout, result.stderr);
+}
+
+fn expectUnknownOptionRejected(allocator: std.mem.Allocator, argv: []const []const u8, unknown: []const u8) !void {
+    const expected = try std.fmt.allocPrint(allocator, "error: unknown option: {s}\n", .{unknown});
+    try expectCliFailure(allocator, argv, 1, expected);
+}
+
+const get_usage_stderr =
+    \\error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--strand-aware] [--summary] [--rc|--complement-only|--reverse-only] [--annotate-rc] [--chunk-size N|-1] <region> [region ...]
+    \\
+;
+
 test "--names rejects file over max_input_file_bytes with clear error" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -483,12 +560,172 @@ test "--names rejects file over max_input_file_bytes with clear error" {
     try names_file.setLength(io, main.getter.max_input_file_bytes + 1);
     names_file.close(io);
 
+    const expected = try std.fmt.allocPrint(
+        allocator,
+        "error: names file exceeds {d} MiB limit: {s} (--chunk-size does not stream --names)\n",
+        .{ main.getter.max_input_file_mib, names_path },
+    );
+    try expectCliFailure(
+        allocator,
+        &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", names_path },
+        1,
+        expected,
+    );
+}
+
+test "index rejects unknown options before and after FASTA path" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const fasta = "tests/data/simple.fasta";
+    const unknown = "--not-a-flag";
+
+    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "index", unknown, fasta }, unknown);
+    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "index", fasta, unknown }, unknown);
+    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "index", "-z", fasta }, "-z");
+}
+
+test "get rejects unknown options before, between, and after positionals" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const fasta = "tests/data/simple.fasta";
+    const unknown = "--not-a-flag";
+
+    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "get", unknown, fasta, "seq1" }, unknown);
+    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "get", fasta, unknown, "seq1" }, unknown);
+    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "get", fasta, "seq1", unknown }, unknown);
+}
+
+test "stats rejects unknown options before and after FASTA path" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const fasta = "tests/data/simple.fasta";
+    const unknown = "--not-a-flag";
+
+    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "stats", unknown, fasta }, unknown);
+    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "stats", fasta, unknown }, unknown);
+}
+
+test "validate rejects unknown options before and after FASTA path" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const fasta = "tests/data/simple.fasta";
+    const unknown = "--not-a-flag";
+
+    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "validate", unknown, fasta }, unknown);
+    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "validate", fasta, unknown }, unknown);
+}
+
+test "CLI failures: missing command and missing subcommand args print usage on stderr" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try expectCliUsageFailure(allocator, &.{ZFASTA_BIN});
+    try expectCliUsageFailure(allocator, &.{ ZFASTA_BIN, "index" });
+    try expectCliUsageFailure(allocator, &.{ ZFASTA_BIN, "not-a-command" });
+}
+
+test "CLI failures: missing FASTA path is exit 1 with exact stderr" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const missing = "tests/data/definitely-missing-cli-failure.fasta";
+    const expected = "error: file not found: tests/data/definitely-missing-cli-failure.fasta\n";
+
+    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "index", missing }, 1, expected);
+    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "stats", missing }, 1, expected);
+    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "validate", missing }, 1, expected);
+    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", missing, "seq1" }, 1, expected);
+}
+
+test "CLI failures: get usage, conflicts, and missing sequence" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const fasta = "tests/data/simple.fasta";
+
+    // Ensure index exists so "sequence not found" is not a missing-index failure.
+    {
+        var threaded = std.Io.Threaded.init(allocator, .{});
+        defer threaded.deinit();
+        const spawn_io = threaded.io();
+        const indexed = try std.process.run(allocator, spawn_io, .{
+            .argv = &.{ ZFASTA_BIN, "index", fasta },
+            .stdout_limit = .limited(64 * 1024),
+            .stderr_limit = .limited(64 * 1024),
+        });
+        defer allocator.free(indexed.stdout);
+        defer allocator.free(indexed.stderr);
+        switch (indexed.term) {
+            .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+            else => return error.ChildProcessFailed,
+        }
+    }
+
+    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", fasta }, 1, get_usage_stderr);
+    try expectCliFailure(
+        allocator,
+        &.{ ZFASTA_BIN, "get", fasta, "missing" },
+        1,
+        "error: sequence not found: missing\n",
+    );
+    try expectCliFailure(
+        allocator,
+        &.{ ZFASTA_BIN, "get", fasta, "seq1", "--annotate-rc" },
+        1,
+        "error: --annotate-rc requires --rc, --complement-only, or --reverse-only\n",
+    );
+    try expectCliFailure(
+        allocator,
+        &.{ ZFASTA_BIN, "get", fasta, "--rc", "--complement-only", "seq1" },
+        1,
+        "error: --rc, --complement-only, and --reverse-only are mutually exclusive\n",
+    );
+}
+
+test "CLI failures: stats and validate usage errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try expectCliFailure(
+        allocator,
+        &.{ ZFASTA_BIN, "stats" },
+        1,
+        "error: usage: z-fasta stats [--index-only] <file.fasta>\n",
+    );
+    try expectCliFailure(
+        allocator,
+        &.{ ZFASTA_BIN, "validate", "--summary", "tests/data/simple.fasta" },
+        1,
+        "error: validate --summary requires --json\n",
+    );
+    try expectCliFailure(
+        allocator,
+        &.{ ZFASTA_BIN, "validate" },
+        1,
+        "error: usage: z-fasta validate [options] <file.fasta>\n",
+    );
+}
+
+test "CLI validate warnings: exit 2, empty stderr, exact WARNING stdout" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const path = try writeFastaArtifact(allocator, "cli-validate-warn", ">empty_rec\n");
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const spawn_io = threaded.io();
 
     const result = try std.process.run(allocator, spawn_io, .{
-        .argv = &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", names_path },
+        .argv = &.{ ZFASTA_BIN, "validate", path },
         .stdout_limit = .limited(64 * 1024),
         .stderr_limit = .limited(64 * 1024),
     });
@@ -496,12 +733,9 @@ test "--names rejects file over max_input_file_bytes with clear error" {
     defer allocator.free(result.stderr);
 
     switch (result.term) {
-        .exited => |code| try std.testing.expect(code != 0),
+        .exited => |code| try std.testing.expectEqual(@as(u8, 2), code),
         else => return error.ChildProcessFailed,
     }
-    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "names file exceeds") != null);
-    var limit_phrase_buf: [32]u8 = undefined;
-    const limit_phrase = try std.fmt.bufPrint(&limit_phrase_buf, "{d} MiB limit", .{main.getter.max_input_file_mib});
-    try std.testing.expect(std.mem.indexOf(u8, result.stderr, limit_phrase) != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "--chunk-size does not stream --names") != null);
+    try std.testing.expectEqual(@as(usize, 0), result.stderr.len);
+    try std.testing.expectEqualStrings("WARNING: line 1: empty sequence 'empty_rec'\n", result.stdout);
 }

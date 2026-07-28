@@ -1,3 +1,8 @@
+//! Index unit and integration tests: scan parity, `.zfi`/`.fai` load validation, fixtures.
+//!
+//! Covers mmap vs streaming identity, malformed indexes, gates fixtures under
+//! `tests/data/gates/`, and optional large-data / generated edge-case walks.
+
 const std = @import("std");
 const builtin = @import("builtin");
 const main = @import("main");
@@ -59,8 +64,7 @@ fn writeFastaAndRawZfi(allocator: std.mem.Allocator, stem: []const u8, fasta: []
 
 fn supportsPosixFutimens() bool {
     return switch (builtin.os.tag) {
-        .linux, .dragonfly, .freebsd, .netbsd, .openbsd, .illumos,
-        .macos, .ios, .tvos, .watchos, .visionos, .driverkit, .maccatalyst => true,
+        .linux, .dragonfly, .freebsd, .netbsd, .openbsd, .illumos, .macos, .ios, .tvos, .watchos, .visionos, .driverkit, .maccatalyst => true,
         else => false,
     };
 }
@@ -90,8 +94,18 @@ fn markFileStaleOneHourAgo(file: std.Io.File) !void {
                 return error.Unexpected;
             }
         },
-        .dragonfly, .freebsd, .netbsd, .openbsd, .illumos,
-        .macos, .ios, .tvos, .watchos, .visionos, .driverkit, .maccatalyst,
+        .dragonfly,
+        .freebsd,
+        .netbsd,
+        .openbsd,
+        .illumos,
+        .macos,
+        .ios,
+        .tvos,
+        .watchos,
+        .visionos,
+        .driverkit,
+        .maccatalyst,
         => {
             var now: c.timespec = undefined;
             if (c.clock_gettime(c.CLOCK.REALTIME, &now) != 0) return error.Unexpected;
@@ -107,12 +121,35 @@ fn markFileStaleOneHourAgo(file: std.Io.File) !void {
 // ============================================================================
 
 fn readTestFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            std.debug.print("required test fixture missing: {s}\n", .{path});
+            return error.RequiredFixtureMissing;
+        },
+        else => |e| return e,
+    };
     defer file.close(io);
     const stat = try file.stat(io);
     const data = try allocator.alloc(u8, @intCast(stat.size));
     const bytes_read = try std.Io.File.readPositionalAll(file, io, data, 0);
     return data[0..bytes_read];
+}
+
+/// In-repo fixtures required for CI. Missing path fails with a clear message.
+fn requireFixturePath(path: []const u8) !void {
+    std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            std.debug.print("required test fixture missing: {s}\n", .{path});
+            return error.RequiredFixtureMissing;
+        },
+        else => |e| return e,
+    };
+}
+
+/// Optional large or generated fixtures. Prints why and skips the test.
+fn skipOptionalFixture(path: []const u8, how_to_obtain: []const u8) error{SkipZigTest} {
+    std.debug.print("optional fixture absent, skipping: {s}\n  obtain via: {s}\n", .{ path, how_to_obtain });
+    return error.SkipZigTest;
 }
 
 fn expectZfiStreamingMatchesMmap(allocator: std.mem.Allocator, data: []const u8, label: []const u8) !void {
@@ -132,10 +169,11 @@ fn expectZfiStreamingMatchesMmap(allocator: std.mem.Allocator, data: []const u8,
     };
 }
 
-fn walkFastaDirZfiParity(allocator: std.mem.Allocator, dir_path: []const u8) !void {
+fn walkFastaDirZfiParity(allocator: std.mem.Allocator, dir_path: []const u8, strict: bool) !void {
     var dir = try std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true });
     defer dir.close(io);
     var iter = dir.iterate();
+    var checked: usize = 0;
     while (try iter.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".fasta") and !std.mem.endsWith(u8, entry.name, ".fa")) continue;
@@ -145,14 +183,27 @@ fn walkFastaDirZfiParity(allocator: std.mem.Allocator, dir_path: []const u8) !vo
 
         const data = try readTestFile(allocator, path);
         defer allocator.free(data);
+        // Non-FASTA bytes under a .fasta name (e.g. empty file) are not parity targets.
         if (!validateFasta(data)) continue;
 
         var probe_arena = std.heap.ArenaAllocator.init(allocator);
         defer probe_arena.deinit();
-        var probe_index = main.indexer.scanZfiIndex(data, true, probe_arena.allocator()) catch continue;
+        var probe_index = main.indexer.scanZfiIndex(data, true, probe_arena.allocator()) catch |err| {
+            if (strict) {
+                std.debug.print("required fixture failed to index: {s}\n", .{path});
+                return err;
+            }
+            // Optional generated edge cases intentionally include unindexable inputs.
+            continue;
+        };
         probe_index.deinit(probe_arena.allocator());
 
         try expectZfiStreamingMatchesMmap(allocator, data, path);
+        checked += 1;
+    }
+    if (strict and checked == 0) {
+        std.debug.print("required fixture dir produced no parity checks: {s}\n", .{dir_path});
+        return error.RequiredFixtureMissing;
     }
 }
 
@@ -543,7 +594,7 @@ test "zfiIndexToBytes matches encodeZfiHeader prefix and LE side-table count" {
     const side_off: usize = @intCast(rec.sideTableOffset());
     try std.testing.expectEqual(
         @as(u64, 3),
-        std.mem.readInt(u64, bytes[side_off ..][0..8], .little),
+        std.mem.readInt(u64, bytes[side_off..][0..8], .little),
     );
 }
 
@@ -592,30 +643,35 @@ test "scanZfiIndexStreaming zfi loads record names" {
 }
 
 test "scanZfiIndexStreaming matches mmap on tests/data fixtures" {
+    try requireFixturePath("tests/data");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    try walkFastaDirZfiParity(arena.allocator(), "tests/data");
+    try walkFastaDirZfiParity(arena.allocator(), "tests/data", true);
 }
 
-test "scanZfiIndexStreaming matches mmap on edge cases" {
-    const dir = std.Io.Dir.cwd().openDir(io, "bench/index/edge_cases", .{ .iterate = true }) catch |err| switch (err) {
-        error.FileNotFound => return,
+test "scanZfiIndexStreaming matches mmap on edge cases (optional generated fixtures)" {
+    // Generated by `bash bench/index/run.sh`; gitignored. Not required for CI.
+    std.Io.Dir.cwd().access(io, "bench/index/edge_cases", .{}) catch |err| switch (err) {
+        error.FileNotFound => return skipOptionalFixture(
+            "bench/index/edge_cases",
+            "bash bench/index/run.sh (generates edge_cases/)",
+        ),
         else => |e| return e,
     };
-    dir.close(io);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    try walkFastaDirZfiParity(arena.allocator(), "bench/index/edge_cases");
+    try walkFastaDirZfiParity(arena.allocator(), "bench/index/edge_cases", false);
 }
 
 test "scanZfiIndexStreaming matches mmap on messy variants" {
+    try requireFixturePath("bench/index/messy_fixtures");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    try walkFastaDirZfiParity(arena.allocator(), "bench/index/messy_variants");
+    try walkFastaDirZfiParity(arena.allocator(), "bench/index/messy_fixtures", true);
 }
 
-test "scanZfiIndexStreaming matches mmap on REAL references" {
+test "scanZfiIndexStreaming matches mmap on REAL references (optional large data)" {
     const refs = [_][]const u8{
         "bench/shared/data/REAL_Genome.fa",
         "bench/shared/data/REAL_Transcriptome.fa",
@@ -624,12 +680,29 @@ test "scanZfiIndexStreaming matches mmap on REAL references" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
+
+    var ran: usize = 0;
     for (refs) |path| {
-        const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch continue;
-        file.close(io);
+        std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
+            error.FileNotFound => {
+                std.debug.print(
+                    "optional large fixture absent, skipping file: {s}\n  obtain via: bash bench/shared/download_data.sh\n",
+                    .{path},
+                );
+                continue;
+            },
+            else => |e| return e,
+        };
         const data = try readTestFile(allocator, path);
         defer allocator.free(data);
         try expectZfiStreamingMatchesMmap(allocator, data, path);
+        ran += 1;
+    }
+    if (ran == 0) {
+        return skipOptionalFixture(
+            "bench/shared/data/REAL_*.fa(sta)",
+            "bash bench/shared/download_data.sh",
+        );
     }
 }
 
@@ -1778,3 +1851,182 @@ test "streaming scan marks interior blank non-uniform like mmap" {
     try std.testing.expect(!stream_index.records.items[0].isUniformWidth());
 }
 
+test "scanZfiIndexStreaming keeps uniform-prefix side rows after late width break" {
+    // Two equal stride lines, then a wider line: stream must keep both prefix rows.
+    const data = ">seq\nAAAA\nAAAA\nCCCCCC\nAAAA\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try expectZfiStreamingMatchesMmap(arena.allocator(), data, "late-width-break");
+}
+
+// ============================================================================
+// Stable gates fixtures (tests/data/gates): malformed, boundary, portability
+// ============================================================================
+
+test "gates fixture: duplicate names keep first-wins on mmap and streaming" {
+    try requireFixturePath("tests/data/gates/duplicates.fasta");
+    const data = try readTestFile(std.testing.allocator, "tests/data/gates/duplicates.fasta");
+    defer std.testing.allocator.free(data);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var mmap_index = try main.indexer.scanZfiIndex(data, true, allocator);
+    defer mmap_index.deinit(allocator);
+    var stream_index = try main.indexer.scanZfiIndexStreamingData(data, true, allocator);
+    defer stream_index.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), mmap_index.records.items.len);
+    try std.testing.expectEqual(mmap_index.records.items.len, stream_index.records.items.len);
+    try expectZfiStreamingMatchesMmap(allocator, data, "gates/duplicates.fasta");
+
+    const n0 = mmap_index.name_blob.items[mmap_index.records.items[0].name_offset..][0..mmap_index.records.items[0].name_len];
+    const n1 = mmap_index.name_blob.items[mmap_index.records.items[1].name_offset..][0..mmap_index.records.items[1].name_len];
+    try std.testing.expectEqualStrings("dup", n0);
+    try std.testing.expectEqualStrings("other", n1);
+    try std.testing.expectEqual(@as(u64, 4), mmap_index.records.items[0].seq_len);
+    try std.testing.expectEqual(@as(u64, 4), mmap_index.records.items[1].seq_len);
+}
+
+test "gates fixture: long header indexes; over-u16 name rejects on both paths" {
+    try requireFixturePath("tests/data/gates/long_header.fasta");
+    try requireFixturePath("tests/data/gates/long_header_reject.fasta");
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const ok_data = try readTestFile(allocator, "tests/data/gates/long_header.fasta");
+    defer allocator.free(ok_data);
+    var ok_index = try main.indexer.scanZfiIndex(ok_data, true, allocator);
+    defer ok_index.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), ok_index.records.items.len);
+    try std.testing.expectEqual(@as(u16, 1025), ok_index.records.items[0].name_len);
+    try expectZfiStreamingMatchesMmap(allocator, ok_data, "gates/long_header.fasta");
+
+    const reject_data = try readTestFile(allocator, "tests/data/gates/long_header_reject.fasta");
+    defer allocator.free(reject_data);
+    try std.testing.expect(reject_data[0] == '>');
+    try std.testing.expectEqual(main.indexer.max_index_name_len + 1, std.mem.indexOfScalar(u8, reject_data, '\n').? - 1);
+    try std.testing.expectError(error.HeaderTooLong, main.indexer.scanZfiIndex(reject_data, true, allocator));
+    try std.testing.expectError(error.HeaderTooLong, main.indexer.scanZfiIndexStreamingData(reject_data, true, allocator));
+}
+
+test "gates fixture: invalid UTF-8 header bytes index and stay embeddable" {
+    try requireFixturePath("tests/data/gates/invalid_utf8_header.fasta");
+    const data = try readTestFile(std.testing.allocator, "tests/data/gates/invalid_utf8_header.fasta");
+    defer std.testing.allocator.free(data);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try expectZfiStreamingMatchesMmap(allocator, data, "gates/invalid_utf8_header.fasta");
+    var index = try main.indexer.scanZfiIndex(data, true, allocator);
+    defer index.deinit(allocator);
+    // Duplicate headers: first-wins keeps one record with the raw name bytes.
+    try std.testing.expectEqual(@as(usize, 1), index.records.items.len);
+    const name0 = index.name_blob.items[index.records.items[0].name_offset..][0..index.records.items[0].name_len];
+    try std.testing.expectEqualSlices(u8, "bad\xffname", name0);
+}
+
+test "gates fixture: zero geometry and large offset FAI rejected" {
+    try requireFixturePath("tests/data/gates/seq1_zero_geometry.fasta");
+    try requireFixturePath("tests/data/gates/seq1_zero_geometry.fasta.fai");
+    try requireFixturePath("tests/data/gates/seq1_large_offset.fasta");
+    try requireFixturePath("tests/data/gates/seq1_large_offset.fasta.fai");
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Copy into temp paths so a stray checked-in `.zfi` cannot mask the `.fai` case.
+    try expectCorruptFaiFixture(allocator, "tests/data/gates/seq1_zero_geometry");
+    try expectCorruptFaiFixture(allocator, "tests/data/gates/seq1_large_offset");
+}
+
+fn expectCorruptFaiFixture(allocator: std.mem.Allocator, stem: []const u8) !void {
+    const src_fa = try std.fmt.allocPrint(allocator, "{s}.fasta", .{stem});
+    const src_fai = try std.fmt.allocPrint(allocator, "{s}.fasta.fai", .{stem});
+    const fasta_data = try readTestFile(allocator, src_fa);
+    defer allocator.free(fasta_data);
+    const fai_data = try readTestFile(allocator, src_fai);
+    defer allocator.free(fai_data);
+
+    const fasta_path = try uniqueArtifactPath(allocator, "gates-fai", "fa");
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    {
+        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+        defer fasta_file.close(io);
+        try std.Io.File.writeStreamingAll(fasta_file, io, fasta_data);
+    }
+    {
+        const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
+        defer fai_file.close(io);
+        try std.Io.File.writeStreamingAll(fai_file, io, fai_data);
+    }
+    try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, fasta_path));
+}
+
+test "gates fixture: zfi zero geometry from stable seq1 FASTA rejected" {
+    try requireFixturePath("tests/data/gates/seq1_zero_geometry.fasta");
+    const fasta_data = try readTestFile(std.testing.allocator, "tests/data/gates/seq1_zero_geometry.fasta");
+    defer std.testing.allocator.free(fasta_data);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "gates-zfi-zero", "fa");
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+
+    {
+        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+        defer fasta_file.close(io);
+        try std.Io.File.writeStreamingAll(fasta_file, io, fasta_data);
+    }
+    const bad_records = [_]IndexRecord{
+        .{ .name_offset = 1, .name_len = 4, .seq_offset = 6, .seq_len = 4, .line_bases = 0, .line_bytes = 5 },
+    };
+    try writeZfiFromRecords(zfi_path, &bad_records, fasta_data.len, try statMtimeNs(fasta_path), allocator);
+    try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, fasta_path));
+}
+
+test "NameDedup identity holds under forced hash collisions (P0 injectable check)" {
+    // Injectable hasher: every key lands in one bucket. NameDedupWith.observe must still
+    // keep distinct names via Context.eql (same code path as production NameDedup).
+    const CollisionCtx = struct {
+        pub fn hash(_: @This(), _: []const u8) u64 {
+            return 0xC0FFEE;
+        }
+        pub fn eql(_: @This(), a: []const u8, b: []const u8) bool {
+            return std.mem.eql(u8, a, b);
+        }
+    };
+
+    const CollidingDedup = main.indexer.NameDedupWith(CollisionCtx);
+    var seen = CollidingDedup.init(std.testing.allocator, true);
+    defer seen.deinit();
+
+    const names = [_][]const u8{ "alpha", "beta", "alpha", "gamma", "beta" };
+    var kept: usize = 0;
+    for (names) |name| {
+        if (!(try seen.observe(name))) kept += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), kept);
+    try std.testing.expectEqual(@as(usize, 3), seen.map.count());
+
+    var prod = main.indexer.NameDedup.init(std.testing.allocator, true);
+    defer prod.deinit();
+    var prod_kept: usize = 0;
+    for (names) |name| {
+        if (!(try prod.observe(name))) prod_kept += 1;
+    }
+    try std.testing.expectEqual(kept, prod_kept);
+}

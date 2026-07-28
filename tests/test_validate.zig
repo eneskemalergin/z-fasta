@@ -1,3 +1,7 @@
+//! Validate unit and CLI tests: issue kinds, JSON rendering, fix flow, and gates fixtures.
+//!
+//! Also covers validator/indexer agreement on `tests/data/validator_indexer_agreement.fasta`.
+
 const std = @import("std");
 const builtin = @import("builtin");
 const main = @import("main");
@@ -162,6 +166,30 @@ test "validateData to JSON keeps invalid UTF-8 header bytes escapable" {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings("bad\u{00ff}name", parsed.value.object.get("name").?.string);
+}
+
+test "gates fixture: invalid UTF-8 and long header are visible to validate" {
+    const allocator = std.testing.allocator;
+
+    const utf8_data = try readTestFile(allocator, "tests/data/gates/invalid_utf8_header.fasta");
+    defer allocator.free(utf8_data);
+    var utf8_summary = try validator.validateData(allocator, utf8_data, .{});
+    defer utf8_summary.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), utf8_summary.header_count);
+    try std.testing.expectEqual(@as(usize, 1), countKind(&utf8_summary, .duplicate_name));
+    const event = utf8_summary.events.items[0];
+    try std.testing.expectEqual(validator.Kind.duplicate_name, event.kind);
+    try std.testing.expectEqualSlices(u8, "bad\xffname", event.name);
+    const json = try validator.renderJsonEvent(allocator, event);
+    defer allocator.free(json);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(json));
+    try std.testing.expect(std.mem.indexOf(u8, json, "\\u00ff") != null);
+
+    const long_data = try readTestFile(allocator, "tests/data/gates/long_header.fasta");
+    defer allocator.free(long_data);
+    var long_summary = try validator.validateData(allocator, long_data, .{});
+    defer long_summary.deinit(allocator);
+    try std.testing.expect(countKind(&long_summary, .long_header) >= 1);
 }
 
 test "validateData records type sample metadata" {
@@ -335,7 +363,13 @@ test "fixData does not remove empty sequence warnings" {
 // --- integration tests ---
 
 fn readTestFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            std.debug.print("required test fixture missing: {s}\n", .{path});
+            return error.RequiredFixtureMissing;
+        },
+        else => |e| return e,
+    };
     defer file.close(io);
     const stat = try file.stat(io);
     const data = try allocator.alloc(u8, stat.size);
@@ -501,7 +535,7 @@ test "validate --fix then index uses uniform O(1) path on crafted messy FASTA" {
 test "validate --fix then index then get on mixed_line_widths fixture" {
     const broken = try readTestFile(
         std.testing.allocator,
-        "bench/index/messy_variants/mixed_line_widths.fasta",
+        "bench/index/messy_fixtures/mixed_line_widths.fasta",
     );
     defer std.testing.allocator.free(broken);
 
@@ -548,7 +582,7 @@ test "validate --fix then index then get on mixed_line_widths fixture" {
 test "validate --fix then index then get on trailing_whitespace fixture" {
     const broken = try readTestFile(
         std.testing.allocator,
-        "bench/index/messy_variants/trailing_whitespace.fasta",
+        "bench/index/messy_fixtures/trailing_whitespace.fasta",
     );
     defer std.testing.allocator.free(broken);
 
@@ -581,4 +615,81 @@ test "validate --fix then index then get on trailing_whitespace fixture" {
         \\
     ;
     try std.testing.expectEqualStrings(expected, got);
+}
+
+fn zfiEmbeddedName(index: *const main.indexer.ZfiIndex, rec_idx: usize) []const u8 {
+    const rec = index.records.items[rec_idx];
+    return index.name_blob.items[rec.name_offset..][0..rec.name_len];
+}
+
+test "validator and indexer agree on tests/data/validator_indexer_agreement.fasta" {
+    const data = try readTestFile(std.testing.allocator, "tests/data/validator_indexer_agreement.fasta");
+    defer std.testing.allocator.free(data);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Fixture bytes must actually contain each layout feature (not only related warnings).
+    try std.testing.expect(std.mem.indexOf(u8, data, "\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, data, "\n\n") != null);
+    try std.testing.expect(!std.mem.endsWith(u8, data, "\n"));
+    try std.testing.expect(!std.mem.endsWith(u8, data, "\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, data, ">empty_rec\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, data, " \n") != null or std.mem.indexOf(u8, data, "\t\n") != null);
+
+    // --- validator: every listed layout issue is visible ---
+    var summary = try validator.validateData(allocator, data, .{});
+    defer summary.deinit(allocator);
+
+    try std.testing.expect(countKind(&summary, .empty_sequence) >= 1);
+    try std.testing.expect(countKind(&summary, .inconsistent_line_widths) >= 1);
+    try std.testing.expect(countKind(&summary, .trailing_whitespace) >= 1);
+    try std.testing.expect(countKind(&summary, .mixed_line_endings) >= 1);
+    try std.testing.expect(countKind(&summary, .missing_terminal_newline) >= 1);
+    try std.testing.expect(countKind(&summary, .long_header) >= 1);
+
+    try std.testing.expectEqual(@as(usize, 6), summary.header_count);
+    try std.testing.expectEqual(@as(usize, 5), summary.sequence_count);
+
+    // --- indexer: same non-empty catalog, side tables for messy layout ---
+    var index = try scanZfi(allocator, data);
+    defer index.deinit(allocator);
+
+    try std.testing.expectEqual(summary.sequence_count, index.records.items.len);
+    try expectHasSideTable(&index);
+
+    const expected_names = [_][]const u8{
+        "var_widths",
+        "blank_lines",
+        "trailing_ws",
+        "mixed_crlf",
+    };
+    for (expected_names, 0..) |want, i| {
+        try std.testing.expectEqualStrings(want, zfiEmbeddedName(&index, i));
+    }
+    // Empty source record is validated but not indexed.
+    for (0..index.records.items.len) |i| {
+        try std.testing.expect(!std.mem.eql(u8, zfiEmbeddedName(&index, i), "empty_rec"));
+    }
+    // Near validate default --max-header-len (1024): still indexable, triggers long_header.
+    const long_name = zfiEmbeddedName(&index, 4);
+    try std.testing.expect(long_name.len > 1024);
+    try std.testing.expectEqual(@as(usize, 1025), long_name.len);
+
+    // Streaming indexer must match mmap on this shared fixture (full .zfi bytes).
+    try expectZfiStreamingMatchesMmapLocal(allocator, data);
+}
+
+fn expectZfiStreamingMatchesMmapLocal(allocator: std.mem.Allocator, data: []const u8) !void {
+    var mmap_index = try scanZfi(allocator, data);
+    defer mmap_index.deinit(allocator);
+    var stream_index = try main.indexer.scanZfiIndexStreamingData(data, true, allocator);
+    defer stream_index.deinit(allocator);
+
+    const mmap_bytes = try main.indexer.zfiIndexToBytes(&mmap_index, data.len, 0, allocator);
+    defer allocator.free(mmap_bytes);
+    const stream_bytes = try main.indexer.zfiIndexToBytes(&stream_index, data.len, 0, allocator);
+    defer allocator.free(stream_bytes);
+    try std.testing.expectEqualSlices(u8, mmap_bytes, stream_bytes);
 }

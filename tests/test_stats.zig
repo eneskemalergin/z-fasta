@@ -1,3 +1,7 @@
+//! Stats unit and CLI tests: formatting helpers, type detection, and duplicate reporting.
+//!
+//! Exercises index-only vs full-scan output against fixture FASTAs.
+
 const std = @import("std");
 const builtin = @import("builtin");
 const main = @import("main");
@@ -291,4 +295,98 @@ test "stats - proteome Composition shows amino acids" {
     const output = try runStatsAndCapture(arena.allocator(), "tests/data/proteome.fasta", false);
     try std.testing.expect(std.mem.indexOf(u8, output, "Alanine") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "20 amino acids total") != null);
+}
+
+test "tallyFastaHeaderNames counts source duplicate extras" {
+    const fasta =
+        \\>a
+        \\ACGT
+        \\>b
+        \\TTTT
+        \\>a
+        \\GGGG
+        \\
+    ;
+    var map = std.StringHashMap(usize).init(std.testing.allocator);
+    defer map.deinit();
+    try main.stats.tallyFastaHeaderNames(fasta, &map);
+    try std.testing.expectEqual(@as(usize, 1), main.stats.countNameDuplicateExtras(&map));
+}
+
+test "tallyFastaHeaderNames reports zero extras when names unique" {
+    const fasta =
+        \\>seq1
+        \\ACGT
+        \\>seq2
+        \\TTTT
+        \\
+    ;
+    var map = std.StringHashMap(usize).init(std.testing.allocator);
+    defer map.deinit();
+    try main.stats.tallyFastaHeaderNames(fasta, &map);
+    try std.testing.expectEqual(@as(usize, 0), main.stats.countNameDuplicateExtras(&map));
+}
+
+test "stats full reports source duplicates for edge_cases" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const output = try runStatsAndCapture(arena.allocator(), "tests/data/edge_cases.fasta", false);
+    try std.testing.expect(std.mem.indexOf(u8, output, "Duplicates:     1\n") != null);
+}
+
+test "stats full reports zero duplicates when source names are unique" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta", false);
+    try std.testing.expect(std.mem.indexOf(u8, output, "Duplicates:     0\n") != null);
+}
+
+test "stats index-only reports n/a on deduplicated edge_cases index" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const output = try runStatsAndCapture(arena.allocator(), "tests/data/edge_cases.fasta", true);
+    try std.testing.expect(std.mem.indexOf(u8, output, "Duplicates:     n/a (run without --index-only)\n") != null);
+}
+
+test "stats index-only reports duplicates on --no-dedup edge_cases index" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const io = std.testing.io;
+
+    try std.Io.Dir.cwd().createDirPath(io, "zig-cache/test-artifacts");
+    const fasta_path = try std.fmt.allocPrint(allocator, "zig-cache/test-artifacts/stats-nodedup-{d}.fasta", .{
+        @as(u64, @intCast(std.Io.Clock.Timestamp.now(io, .awake).raw.toNanoseconds())),
+    });
+    {
+        const src = try std.Io.Dir.cwd().openFile(io, "tests/data/edge_cases.fasta", .{});
+        defer src.close(io);
+        const st = try src.stat(io);
+        const data = try allocator.alloc(u8, @intCast(st.size));
+        _ = try src.readPositionalAll(io, data, 0);
+        const dst = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+        defer dst.close(io);
+        try std.Io.File.writeStreamingAll(dst, io, data);
+    }
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const spawn_io = threaded.io();
+    const index_result = try std.process.run(allocator, spawn_io, .{
+        .argv = &.{ ZFASTA_BIN, "index", "--no-dedup", fasta_path },
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    });
+    defer allocator.free(index_result.stdout);
+    defer allocator.free(index_result.stderr);
+    switch (index_result.term) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        else => return error.ChildProcessFailed,
+    }
+
+    const output = try runStatsAndCapture(allocator, fasta_path, true);
+    try std.testing.expect(std.mem.indexOf(u8, output, "Duplicates:     1\n") != null);
 }
