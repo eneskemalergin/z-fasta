@@ -86,11 +86,21 @@ Requires an index: either `.zfi` (preferred) or `.fai`. If `.zfi` is not found, 
 - **`--reverse-only`**: reverse without complement.
 - **`--annotate-rc`**: append a transform suffix to headers (for example `(reverse complement)`). Default output stays samtools-style.
 - **`--summary`**: print region count, total bases, elapsed time, and regions/sec to stderr.
-- **`--chunk-size N`**: BED batch size (default `4096`). Use `1` only for debugging. **`--chunk-size -1`**: load all BED rows in one batch when memory allows (names/BED inputs over 512 MiB are rejected with `-1`).
+- **`--chunk-size N`**: BED batch size (default `4096`). Use `1` only for debugging. **`--chunk-size -1`**: load all BED rows in one batch when memory allows (BED inputs over 512 MiB are rejected with `-1`).
+- **`--names`**: always loads the whole names file into memory, capped at 512 MiB. `--chunk-size` does not stream `--names`.
 
-Positional CLI regions are capped at **1024** per invocation (`error: too many regions`). BED and **`--names`** lists are not subject to that cap.
+Positional CLI regions are capped at **1024** per invocation (`error: too many regions`). BED row count and **`--names`** line count are not subject to that cap (size limits above still apply).
 
-Complement-based transforms error on protein FASTA input so **`--rc`** and **`--complement-only`** stay nucleotide-only.
+Complement-based transforms error on protein FASTA input so **`--rc`** and **`--complement-only`** stay nucleotide-only. Classification for that guard samples up to the first **256** bases of each requested record (not the full file).
+
+### Sequence type classification
+
+All commands share `stats.detectType` (IUPAC nucleotide alphabet; nucleotide if those letters are strictly more than 90% of counted bases). Sampling differs on purpose:
+
+- `stats` (default): full-file composition scan
+- `stats --index-only`: no type (composition skipped)
+- `get --rc` / `--complement-only`: up to 256 bases per record
+- `validate`: up to the first 100000 sequence bases; `--json --summary` reports `sequence_type`, `type_bases_sampled`, and `type_sample_cap`
 
 ### Stats
 
@@ -101,7 +111,7 @@ Options:
   --index-only  Compute stats from index only (no FASTA scan; startup-dominated)
 ```
 
-Compute assembly/proteome statistics. Automatically detects nucleotide vs. protein sequences.
+Compute assembly/proteome statistics. Type comes from the full composition scan (not a prefix sample).
 
 **Tier 1 (index-only):** sequence count, total bases, min/max/mean/median lengths, N50, L50, N90, L90, AU, duplicate count.
 

@@ -270,31 +270,40 @@ pub const large_catalog_record_threshold: u32 = 4096;
 
 /// Loaded FASTA + index state (from `.zfi` or samtools-compatible `.fai`).
 ///
-/// `source` tells which index format was loaded. Names resolve through embedded
-/// `name_offset` / `name_len` (`.zfi` → FASTA mmap, `.fai` → `.fai` mmap),
-/// `name_slices` (arena-owned copies when a name hash map is built), or
-/// `name_map` when loaded with `.lookup_full_map`.
+/// Ownership (one owner each; `deinit(io)` is the only cleanup entry point):
+/// - **Maps** (`fasta_map`, optional `zfi_map` / `fai_map`): owned by this struct;
+///   destroyed via `MemoryMap.destroy(io)`. Byte slices (`fasta_data`, `zfi_data`,
+///   `fai_data`, `name_blob`) and `.zfi` `records` / side-table views are borrows
+///   into those maps — never freed separately.
+/// - **Arena**: owns heap for `.fai` record arrays, `name_slices` string copies,
+///   `sidecar_path`, `fai_line_offsets`, and `name_map` table storage. Reclaimed
+///   only via `arena.deinit()` (do not `name_map.deinit()` on an arena-backed map).
+/// - **`name_map` keys**: either borrowed from a map (`buildNameMapFast`) or
+///   arena copies (`buildNameTable` / records-only names). The map never frees keys.
+/// - **`io`**: borrowed for destroy only; caller must keep it alive until `deinit`.
+///
+/// GET and stats load through this type and only call `deinit(io)`. Validator's
+/// CLI path maps the FASTA with `platform.FileView` instead; it must not invent a
+/// second index-ownership model when it does load an index (tests use this API).
 pub const LoadedIndex = struct {
-    /// Io used to create/destroy maps; must outlive this index (caller defers).
-    io: std.Io,
     fasta_map: std.Io.File.MemoryMap,
     zfi_map: ?std.Io.File.MemoryMap = null,
     fai_map: ?std.Io.File.MemoryMap = null,
     records: []const IndexRecord,
     name_map: std.StringHashMap(usize),
     has_name_map: bool,
-    /// Arena-owned name per record index; populated when `has_name_map`.
+    /// Arena-owned name per record index when names were copied into the arena.
     name_slices: []const []const u8 = &.{},
-    /// Populated when `.zfi` stores an embedded name blob (see `ZfiNameFooter`).
+    /// Borrow into `zfi_map` when `.zfi` embeds a name blob.
     name_blob: ?[]const u8 = null,
     fai_data: ?platform.MappedBytes = null,
     fasta_data: platform.MappedBytes,
     fasta_size: u64,
     zfi_data: ?platform.MappedBytes,
     source: IndexSource,
-    /// Optional `.fai` path for on-demand name reads (`stats_scan` without name table).
+    /// Arena-owned `.fai` path for on-demand name reads (`stats_scan`).
     sidecar_path: ?[]const u8 = null,
-    /// Byte offsets into `sidecar_path` for each record line (`stats_scan` only).
+    /// Arena-owned byte offsets into `sidecar_path` (`stats_scan` only).
     fai_line_offsets: []const u64 = &.{},
     arena: std.heap.ArenaAllocator,
 
@@ -336,15 +345,13 @@ pub const LoadedIndex = struct {
         return self.getRecordName(rec_idx);
     }
 
-    pub fn deinit(self: *LoadedIndex) void {
-        self.fasta_map.destroy(self.io);
-        if (self.zfi_map) |*m| m.destroy(self.io);
-        if (self.fai_map) |*m| m.destroy(self.io);
-        // Name-map keys live in `arena` when `name_slices` is populated.
-        // Embedded `.zfi` names keep keys in the mmap'd index; skip key frees.
-        if (self.name_slices.len == 0 and self.source == .zfi and self.name_blob == null) {
-            self.name_map.deinit();
-        }
+    pub fn deinit(self: *LoadedIndex, io: std.Io) void {
+        self.fasta_map.destroy(io);
+        if (self.zfi_map) |*m| m.destroy(io);
+        if (self.fai_map) |*m| m.destroy(io);
+        // `name_map` table bytes and key copies are arena-owned. Do not call
+        // `name_map.deinit()`: Zig 0.16 ArenaAllocator.free is not safe for the
+        // HashMap's non-LIFO buffer free (crashes). `arena.deinit()` reclaims all.
         self.arena.deinit();
     }
 
@@ -423,7 +430,7 @@ pub fn printErrorAndExit(comptime fmt: []const u8, args: anytype) noreturn {
 // ============================================================================
 
 /// Load the index for a FASTA file. Tries .zfi first, then .fai fallback.
-/// The caller must call deinit() on the returned LoadedIndex.
+/// The caller must call `deinit(io)` on the returned LoadedIndex.
 pub fn loadIndex(io: std.Io, fasta_path: []const u8) LoadedIndex {
     return loadIndexWithMode(io, fasta_path, .lookup_full_map);
 }
@@ -568,13 +575,14 @@ fn zfiRecordsEnd(record_count: u32) ?usize {
 }
 
 fn buildNameMapFast(
+    allocator: std.mem.Allocator,
     records: []const IndexRecord,
     name_data: []const u8,
 ) LoadIndexError!struct {
     name_map: std.StringHashMap(usize),
     name_slices: []const []const u8,
 } {
-    var name_map = std.StringHashMap(usize).init(std.heap.page_allocator);
+    var name_map = std.StringHashMap(usize).init(allocator);
     name_map.ensureTotalCapacity(@intCast(records.len)) catch return error.OutOfMemory;
     for (records, 0..) |rec, i| {
         const name = rec.getName(name_data);
@@ -740,12 +748,12 @@ fn tryLoadZfi(
 
     const build_name_map = mode == .lookup_full_map;
 
-    var name_map = std.StringHashMap(usize).init(allocator);
+    var name_map: std.StringHashMap(usize) = undefined;
     var name_slices: []const []const u8 = &.{};
     var has_name_map = false;
     if (build_name_map) {
         if (name_blob) |blob| {
-            const built = buildNameMapFast(records, blob) catch return error.OutOfMemory;
+            const built = buildNameMapFast(allocator, records, blob) catch return error.OutOfMemory;
             name_map = built.name_map;
             name_slices = built.name_slices;
         } else {
@@ -754,11 +762,12 @@ fn tryLoadZfi(
             name_slices = built.name_slices;
         }
         has_name_map = true;
+    } else {
+        name_map = std.StringHashMap(usize).init(allocator);
     }
 
     transferred = true;
     return .{ .loaded = LoadedIndex{
-        .io = io,
         .fasta_map = fasta_view.map,
         .zfi_map = zfi_view.map,
         .records = records,
@@ -876,7 +885,6 @@ fn tryLoadFai(
 
     transferred = true;
     return .{ .loaded = LoadedIndex{
-        .io = io,
         .fasta_map = fasta_view.map,
         .fai_map = fai_view.map,
         .records = loaded_records,
@@ -972,7 +980,6 @@ fn loadFaiRecordsOnly(
 
     transferred = true;
     return .{ .loaded = LoadedIndex{
-        .io = io,
         .fasta_map = fasta_view.map,
         .records = owned_records,
         .name_map = std.StringHashMap(usize).init(allocator),

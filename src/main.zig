@@ -60,8 +60,9 @@ const USAGE =
     \\  --annotate-rc   Annotate transformed headers (for example: reverse complement)
     \\  --chunk-size N  Process BED rows in batches of N (default: 4096). Use 1 only
     \\                  for debugging: one row per batch, high per-row arena overhead.
-    \\  --chunk-size -1 Process all BED rows in one batch
-    \\  Positional regions: max 1024 per invocation. BED and --names are not capped here.
+    \\  --chunk-size -1 Process all BED rows in one batch (512 MiB cap)
+    \\  Positional regions: max 1024 per invocation. --names loads the whole file
+    \\  up to 512 MiB (--chunk-size does not stream --names). BED streams by default.
     \\
     \\Stats options:
     \\  --index-only   Only show index-derived stats (no composition scan)
@@ -76,6 +77,7 @@ const USAGE =
     \\  --schema NAME            Header schema: uniprot or refseq
     \\  --custom-alphabet CHARS  Override nucleotide/protein alphabet checks
     \\  --max-header-len N       Warn on headers longer than N bytes (default: 1024)
+    \\  Event list stops at 10000 issues (deterministic error). --fix streams to -o.
     \\
     \\Examples:
     \\  z-fasta index genome.fa                  Create .zfi binary index

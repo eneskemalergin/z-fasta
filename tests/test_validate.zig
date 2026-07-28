@@ -1,8 +1,11 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const main = @import("main");
 
 const io = std.testing.io;
 const validator = main.validator;
+
+const ZFASTA_BIN = if (builtin.os.tag == .windows) "zig-out\\bin\\z-fasta.exe" else "zig-out/bin/z-fasta";
 
 fn countKind(summary: *const validator.Summary, kind: validator.Kind) usize {
     var count: usize = 0;
@@ -36,6 +39,172 @@ test "validateData reports duplicate and empty sequence" {
     try std.testing.expectEqual(@as(usize, 0), countKind(&summary, .no_sequences));
     try std.testing.expectEqual(@as(usize, 1), summary.sequence_count);
     try std.testing.expectEqual(@as(usize, 2), summary.header_count);
+}
+
+test "validateData caps retained events and sets truncated" {
+    const allocator = std.testing.allocator;
+
+    var at_cap: std.ArrayList(u8) = .empty;
+    defer at_cap.deinit(allocator);
+    try at_cap.appendSlice(allocator, ">seq\n");
+    var i: usize = 0;
+    while (i < validator.max_validate_events) : (i += 1) {
+        try at_cap.appendSlice(allocator, "ACGT \n");
+    }
+
+    var capped = try validator.validateData(allocator, at_cap.items, .{});
+    defer capped.deinit(allocator);
+    try std.testing.expect(!capped.truncated);
+    try std.testing.expectEqual(validator.max_validate_events, capped.events.items.len);
+
+    try at_cap.appendSlice(allocator, "ACGT \n");
+    var over = try validator.validateData(allocator, at_cap.items, .{});
+    defer over.deinit(allocator);
+    try std.testing.expect(over.truncated);
+    try std.testing.expectEqual(validator.max_validate_events, over.events.items.len);
+}
+
+test "renderJsonEvent keeps long names without 256-byte truncation" {
+    const allocator = std.testing.allocator;
+    const long_name = "n" ** 400;
+
+    const json = try validator.renderJsonEvent(allocator, .{
+        .level = .warning,
+        .kind = .empty_sequence,
+        .line = 1,
+        .name = long_name,
+    });
+    defer allocator.free(json);
+
+    try std.testing.expect(std.unicode.utf8ValidateSlice(json));
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+    const message = parsed.value.object.get("message").?.string;
+    try std.testing.expect(std.mem.indexOf(u8, message, long_name) != null);
+    try std.testing.expectEqualStrings(long_name, parsed.value.object.get("name").?.string);
+}
+
+test "renderJsonEvent preserves valid non-ASCII UTF-8 names" {
+    const allocator = std.testing.allocator;
+    const name = "seq_\u{20ac}_α";
+
+    const json = try validator.renderJsonEvent(allocator, .{
+        .level = .warning,
+        .kind = .empty_sequence,
+        .line = 1,
+        .name = name,
+    });
+    defer allocator.free(json);
+
+    try std.testing.expect(std.unicode.utf8ValidateSlice(json));
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(name, parsed.value.object.get("name").?.string);
+}
+
+test "renderJsonEvent escapes quotes and backslashes in names" {
+    const allocator = std.testing.allocator;
+    const name = "seq\"a\\b";
+
+    const json = try validator.renderJsonEvent(allocator, .{
+        .level = .warning,
+        .kind = .empty_sequence,
+        .line = 1,
+        .name = name,
+    });
+    defer allocator.free(json);
+
+    try std.testing.expect(std.unicode.utf8ValidateSlice(json));
+    try std.testing.expect(std.mem.indexOf(u8, json, "\\\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\\\\") != null);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(name, parsed.value.object.get("name").?.string);
+}
+
+test "renderJsonEvent escapes invalid UTF-8 name bytes" {
+    const allocator = std.testing.allocator;
+    const bad_name = "seq\xffname";
+
+    const json = try validator.renderJsonEvent(allocator, .{
+        .level = .error_level,
+        .kind = .duplicate_name,
+        .line = 3,
+        .name = bad_name,
+        .first_line = 1,
+    });
+    defer allocator.free(json);
+
+    try std.testing.expect(std.unicode.utf8ValidateSlice(json));
+    try std.testing.expect(std.mem.indexOf(u8, json, "\\u00ff") != null);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+    // JSON \u00ff decodes to Unicode U+00FF (ÿ), not the raw invalid FASTA byte.
+    try std.testing.expectEqualStrings("seq\u{00ff}name", parsed.value.object.get("name").?.string);
+}
+
+test "validateData to JSON keeps invalid UTF-8 header bytes escapable" {
+    const allocator = std.testing.allocator;
+    const fasta = ">bad\xffname\nACGT\n>bad\xffname\nTTTT\n";
+
+    var summary = try validator.validateData(allocator, fasta, .{});
+    defer summary.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .duplicate_name));
+
+    const event = summary.events.items[0];
+    try std.testing.expectEqual(validator.Kind.duplicate_name, event.kind);
+    try std.testing.expectEqualSlices(u8, "bad\xffname", event.name);
+
+    const json = try validator.renderJsonEvent(allocator, event);
+    defer allocator.free(json);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(json));
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("bad\u{00ff}name", parsed.value.object.get("name").?.string);
+}
+
+test "validateData records type sample metadata" {
+    var summary = try validator.validateData(std.testing.allocator, ">seq\nACGT\n", .{});
+    defer summary.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(main.stats.SequenceType.nucleotide, summary.sequence_type);
+    try std.testing.expectEqual(@as(u64, 4), summary.type_bases_sampled);
+}
+
+test "validate --json --summary reports sequence type sample fields" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try writeFastaArtifact(allocator, "validate-type-json", ">seq\nACGT\n");
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const spawn_io = threaded.io();
+
+    const result = try std.process.run(allocator, spawn_io, .{
+        .argv = &.{ ZFASTA_BIN, "validate", "--json", "--summary", fasta_path },
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        else => return error.ChildProcessFailed,
+    }
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, std.mem.trim(u8, result.stdout, " \t\r\n"), .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("nucleotide", parsed.value.object.get("sequence_type").?.string);
+    try std.testing.expectEqual(@as(i64, 4), parsed.value.object.get("type_bases_sampled").?.integer);
+    try std.testing.expectEqual(
+        @as(i64, @intCast(main.stats.validate_type_sample_bases)),
+        parsed.value.object.get("type_sample_cap").?.integer,
+    );
 }
 
 test "validateData reports missing terminal newline and invalid nucleotide character" {
@@ -227,7 +396,7 @@ fn writeZfiForData(allocator: std.mem.Allocator, fasta_path: []const u8, data: [
 
 fn captureExtractRegion(allocator: std.mem.Allocator, fasta_path: []const u8, region: []const u8) ![]u8 {
     var idx = try main.index_format.loadIndexChecked(io, fasta_path);
-    defer idx.deinit();
+    defer idx.deinit(io);
 
     var out = std.Io.Writer.Allocating.init(allocator);
     main.getter.extractRegion(&idx, region, &out.writer);
@@ -245,6 +414,48 @@ fn expectValidateClean(allocator: std.mem.Allocator, data: []const u8) !void {
     var summary = try validator.validateData(allocator, data, .{});
     defer summary.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 0), summary.events.items.len);
+}
+
+test "validate --fix -o matches fixData rewrite" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const broken =
+        \\>seq
+        \\AAAA  
+        \\CCCC
+        \\
+    ;
+
+    var summary = try validator.validateData(allocator, broken, .{});
+    defer summary.deinit(allocator);
+    const expected = try validator.fixData(allocator, broken, summary.record_widths.items);
+
+    const in_path = try writeFastaArtifact(allocator, "validate-fix-cli-in", broken);
+    const out_path = try uniqueArtifactPath(allocator, "validate-fix-cli-out");
+    defer std.Io.Dir.cwd().deleteFile(io, in_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, out_path) catch {};
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const spawn_io = threaded.io();
+
+    const result = try std.process.run(allocator, spawn_io, .{
+        .argv = &.{ ZFASTA_BIN, "validate", "--fix", "-o", out_path, in_path },
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(1024 * 1024),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        else => return error.ChildProcessFailed,
+    }
+
+    const got = try readTestFile(allocator, out_path);
+    try std.testing.expectEqualStrings(expected, got);
 }
 
 test "validate --fix then index uses uniform O(1) path on crafted messy FASTA" {

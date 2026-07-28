@@ -171,6 +171,22 @@ test "detectType - lowercase nucleotides" {
     try std.testing.expectEqual(SequenceType.nucleotide, detectType(&counts, 1000));
 }
 
+test "detectType - large totals do not overflow the 90% threshold" {
+    var counts: [256]u64 = .{0} ** 256;
+    // total*9 and nuc*10 both overflow u64 at this scale; u128 keeps the compare correct.
+    const total: u64 = 2_300_000_000_000_000_000;
+    const nuc_hi: u64 = 2_070_000_000_000_000_001;
+    counts['A'] = nuc_hi;
+    counts['L'] = total - nuc_hi;
+    try std.testing.expectEqual(SequenceType.nucleotide, detectType(&counts, total));
+
+    counts = .{0} ** 256;
+    const nuc_lo: u64 = 2_070_000_000_000_000_000;
+    counts['A'] = nuc_lo;
+    counts['L'] = total - nuc_lo;
+    try std.testing.expectEqual(SequenceType.protein, detectType(&counts, total));
+}
+
 // ============================================================================
 // Integration: stats via process spawn
 // ============================================================================

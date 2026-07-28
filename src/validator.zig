@@ -11,6 +11,17 @@ const DEFAULT_FIX_WIDTH = 60;
 const SIMD_CHUNK_SIZE = 32;
 const SimdVec = @Vector(SIMD_CHUNK_SIZE, u8);
 
+/// Hard cap on retained validate events. Further issues set `Summary.truncated`
+/// instead of growing an unbounded list.
+pub const max_validate_events: usize = 10_000;
+
+comptime {
+    // Keep the validate help line in src/main.zig synchronized with this value.
+    if (max_validate_events != 10_000) {
+        @compileError("update validate help text for max_validate_events");
+    }
+}
+
 pub const OutputMode = enum {
     text,
     json_lines,
@@ -101,10 +112,14 @@ pub const Summary = struct {
     events: std.ArrayList(ValidateEvent),
     record_widths: std.ArrayList(u32),
     sequence_type: stats.SequenceType = .nucleotide,
+    /// Bases fed into `detectType` (capped at `stats.validate_type_sample_bases`).
+    type_bases_sampled: u64 = 0,
     sequence_count: usize = 0,
     header_count: usize = 0,
     error_count: usize = 0,
     warning_count: usize = 0,
+    /// True when more issues were found after `max_validate_events` were retained.
+    truncated: bool = false,
 
     pub fn deinit(self: *Summary, allocator: std.mem.Allocator) void {
         self.events.deinit(allocator);
@@ -145,6 +160,8 @@ const RecordState = struct {
 };
 
 pub fn runValidate(io: std.Io, fasta_path: []const u8, options: Options) void {
+    // Mapping ownership matches LoadedIndex: one FileView (or empty), destroyed here.
+    // Validation does not load an index; GET/stats use LoadedIndex.deinit(io) instead.
     const file = std.Io.Dir.cwd().openFile(io, fasta_path, .{}) catch |err| switch (err) {
         error.FileNotFound => printErrorAndExit("error: file not found: {s}\n", .{fasta_path}),
         error.AccessDenied => printErrorAndExit("error: access denied: {s}\n", .{fasta_path}),
@@ -196,13 +213,20 @@ pub fn runValidate(io: std.Io, fasta_path: []const u8, options: Options) void {
 
     var out_buf: [65536]u8 = undefined;
     var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
-    writeSummary(&stdout_fw.interface, &summary, options) catch {
+    writeSummary(allocator, &stdout_fw.interface, &summary, options) catch {
         stdout_fw.flush() catch {};
         printErrorAndExit("error: write failed\n", .{});
     };
     stdout_fw.flush() catch {
         printErrorAndExit("error: write failed\n", .{});
     };
+
+    if (summary.truncated) {
+        printErrorAndExit(
+            "error: validate stopped after {d} events; fix reported issues and re-run\n",
+            .{max_validate_events},
+        );
+    }
 
     std.process.exit(exitCodeForOptions(&summary, options));
 }
@@ -303,6 +327,7 @@ pub fn validateData(allocator: std.mem.Allocator, data: []const u8, options: Opt
     }
 
     summary.sequence_type = stats.detectType(&type_counts, type_total);
+    summary.type_bases_sampled = type_total;
     try appendInvalidCharacterEvents(allocator, &summary, options, summary.sequence_type, byte_counts, first_byte_line);
     return summary;
 }
@@ -353,6 +378,10 @@ pub fn fixRejection(summary: *const Summary, options: Options) ?Kind {
 }
 
 fn appendEvent(allocator: std.mem.Allocator, summary: *Summary, event: ValidateEvent) !void {
+    if (summary.events.items.len >= max_validate_events) {
+        summary.truncated = true;
+        return;
+    }
     try summary.events.append(allocator, event);
     switch (event.level) {
         .error_level => summary.error_count += 1,
@@ -499,7 +528,7 @@ fn scanSequenceLine(
         byte_counts[byte] += 1;
         if (first_byte_line[byte] == 0) first_byte_line[byte] = line_number;
 
-        if (type_total.* < 100_000) {
+        if (type_total.* < stats.validate_type_sample_bases) {
             type_counts[byte] += 1;
             type_total.* += 1;
         }
@@ -678,30 +707,15 @@ fn ensureFixAllowed(summary: *const Summary, options: Options) void {
 }
 
 /// Rewrite format-level issues to normalized LF FASTA bytes. Caller must run validateData first.
+/// Allocates the full result for tests and library callers; CLI `--fix` streams via `writeFixed`.
 pub fn fixData(allocator: std.mem.Allocator, data: []const u8, record_widths: []const u32) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try writeFixedContent(&out, allocator, data, record_widths);
-    return out.toOwnedSlice(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    try writeFixedContent(&aw.writer, data, record_widths);
+    return try aw.toOwnedSlice();
 }
 
-const FixedContentWriter = struct {
-    out: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-
-    fn writeAll(self: FixedContentWriter, bytes: []const u8) !void {
-        try self.out.appendSlice(self.allocator, bytes);
-    }
-
-    fn writeByte(self: FixedContentWriter, byte: u8) !void {
-        try self.out.append(self.allocator, byte);
-    }
-};
-
 fn writeFixed(io: std.Io, data: []const u8, record_widths: []const u32, output_path: []const u8) !void {
-    const fixed = try fixData(std.heap.page_allocator, data, record_widths);
-    defer std.heap.page_allocator.free(fixed);
-
     const cwd = std.Io.Dir.cwd();
     const out_file = try cwd.createFile(io, output_path, .{ .truncate = true });
     errdefer cwd.deleteFile(io, output_path) catch {};
@@ -709,13 +723,11 @@ fn writeFixed(io: std.Io, data: []const u8, record_widths: []const u32, output_p
 
     var out_buf: [65536]u8 = undefined;
     var file_fw = out_file.writer(io, &out_buf);
-    try file_fw.interface.writeAll(fixed);
+    try writeFixedContent(&file_fw.interface, data, record_widths);
     try file_fw.flush();
 }
 
-fn writeFixedContent(out: *std.ArrayList(u8), allocator: std.mem.Allocator, data: []const u8, record_widths: []const u32) !void {
-    const writer = FixedContentWriter{ .out = out, .allocator = allocator };
-
+fn writeFixedContent(writer: *std.Io.Writer, data: []const u8, record_widths: []const u32) !void {
     var pos: usize = if (std.mem.startsWith(u8, data, UTF8_BOM)) UTF8_BOM.len else 0;
     var record_index: usize = 0;
     var current_width: u32 = DEFAULT_FIX_WIDTH;
@@ -770,11 +782,11 @@ fn writeFixedContent(out: *std.ArrayList(u8), allocator: std.mem.Allocator, data
     }
 }
 
-fn writeSummary(writer: anytype, summary: *const Summary, options: Options) !void {
+fn writeSummary(allocator: std.mem.Allocator, writer: anytype, summary: *const Summary, options: Options) !void {
     switch (options.output_mode) {
         .text => try writeText(writer, summary),
-        .json_lines => try writeJsonLines(writer, summary),
-        .json_summary => try writeJsonSummary(writer, summary),
+        .json_lines => try writeJsonLines(allocator, writer, summary),
+        .json_summary => try writeJsonSummary(allocator, writer, summary),
     }
 }
 
@@ -808,15 +820,27 @@ fn writeHumanMessage(writer: anytype, event: ValidateEvent) !void {
     }
 }
 
-fn writeJsonLines(writer: anytype, summary: *const Summary) !void {
+fn writeJsonLines(allocator: std.mem.Allocator, writer: anytype, summary: *const Summary) !void {
     for (summary.events.items) |event| {
-        try writeJsonEvent(writer, event);
+        try writeJsonEventObject(allocator, writer, event);
         try writer.writeByte('\n');
     }
 }
 
-fn writeJsonSummary(writer: anytype, summary: *const Summary) !void {
-    try writer.writeAll("{\"schema_version\":\"v1\",\"counts\":{");
+fn writeJsonSummary(allocator: std.mem.Allocator, writer: anytype, summary: *const Summary) !void {
+    const type_str: []const u8 = switch (summary.sequence_type) {
+        .nucleotide => "nucleotide",
+        .protein => "protein",
+    };
+    try writer.print(
+        "{{\"schema_version\":\"v1\",\"truncated\":{s},\"sequence_type\":\"{s}\",\"type_bases_sampled\":{d},\"type_sample_cap\":{d},\"counts\":{{",
+        .{
+            if (summary.truncated) "true" else "false",
+            type_str,
+            summary.type_bases_sampled,
+            stats.validate_type_sample_bases,
+        },
+    );
     for (allKinds(), 0..) |kind, i| {
         if (i > 0) try writer.writeByte(',');
         try writer.print("\"{s}\":{d}", .{ kind.text(), countKind(summary, kind) });
@@ -827,27 +851,23 @@ fn writeJsonSummary(writer: anytype, summary: *const Summary) !void {
         if (firstKind(summary, kind)) |event| {
             if (wrote_example) try writer.writeByte(',');
             try writer.print("\"{s}\":", .{kind.text()});
-            try writeJsonEventObject(writer, event);
+            try writeJsonEventObject(allocator, writer, event);
             wrote_example = true;
         }
     }
     try writer.writeAll("}}\n");
 }
 
-fn writeJsonEvent(writer: anytype, event: ValidateEvent) !void {
-    try writeJsonEventObject(writer, event);
-}
-
-fn writeJsonEventObject(writer: anytype, event: ValidateEvent) !void {
+fn writeJsonEventObject(allocator: std.mem.Allocator, writer: anytype, event: ValidateEvent) !void {
     try writer.print(
         "{{\"schema_version\":\"v1\",\"level\":\"{s}\",\"line\":{d},\"kind\":\"{s}\",\"message\":\"",
         .{ event.level.text(), event.line, event.kind.text() },
     );
-    try writeJsonMessage(writer, event);
+    try writeJsonMessage(allocator, writer, event);
     try writer.writeByte('"');
     if (event.name.len > 0) {
         try writer.writeAll(",\"name\":\"");
-        try writeJsonEscaped(writer, event.name);
+        try writeJsonStringBytes(writer, event.name);
         try writer.writeByte('"');
     }
     if (event.first_line > 0) try writer.print(",\"first_line\":{d}", .{event.first_line});
@@ -855,25 +875,59 @@ fn writeJsonEventObject(writer: anytype, event: ValidateEvent) !void {
     try writer.writeByte('}');
 }
 
-fn writeJsonMessage(writer: anytype, event: ValidateEvent) !void {
-    var buf: [256]u8 = undefined;
-    var fixed = std.Io.Writer.fixed(&buf);
-    try writeHumanMessage(&fixed, event);
-    try writeJsonEscaped(writer, fixed.buffered());
+fn writeJsonMessage(allocator: std.mem.Allocator, writer: anytype, event: ValidateEvent) !void {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try writeHumanMessage(&aw.writer, event);
+    try writeJsonStringBytes(writer, aw.written());
 }
 
-fn writeJsonEscaped(writer: anytype, text: []const u8) !void {
-    for (text) |byte| {
-        switch (byte) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            0...8, 11...12, 14...0x1f => try writer.print("\\u{x:0>4}", .{byte}),
-            else => try writer.writeByte(byte),
+/// Write `text` inside a JSON string. ASCII controls and quotes are escaped.
+/// Invalid UTF-8 bytes become `\u00XX` so the overall document stays valid UTF-8 JSON.
+fn writeJsonStringBytes(writer: anytype, text: []const u8) !void {
+    var i: usize = 0;
+    while (i < text.len) {
+        const byte = text[i];
+        if (byte < 0x80) {
+            switch (byte) {
+                '"' => try writer.writeAll("\\\""),
+                '\\' => try writer.writeAll("\\\\"),
+                '\n' => try writer.writeAll("\\n"),
+                '\r' => try writer.writeAll("\\r"),
+                '\t' => try writer.writeAll("\\t"),
+                0...8, 11...12, 14...0x1f => try writer.print("\\u{x:0>4}", .{byte}),
+                else => try writer.writeByte(byte),
+            }
+            i += 1;
+            continue;
         }
+
+        const seq_len = std.unicode.utf8ByteSequenceLength(byte) catch {
+            try writer.print("\\u{x:0>4}", .{byte});
+            i += 1;
+            continue;
+        };
+        if (i + seq_len > text.len) {
+            try writer.print("\\u{x:0>4}", .{byte});
+            i += 1;
+            continue;
+        }
+        _ = std.unicode.utf8Decode(text[i..][0..seq_len]) catch {
+            try writer.print("\\u{x:0>4}", .{byte});
+            i += 1;
+            continue;
+        };
+        try writer.writeAll(text[i .. i + seq_len]);
+        i += seq_len;
     }
+}
+
+/// Render one JSON event object (no trailing newline). For tests and tooling.
+pub fn renderJsonEvent(allocator: std.mem.Allocator, event: ValidateEvent) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    try writeJsonEventObject(allocator, &aw.writer, event);
+    return try aw.toOwnedSlice();
 }
 
 fn allKinds() []const Kind {

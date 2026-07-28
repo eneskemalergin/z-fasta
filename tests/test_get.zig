@@ -1,8 +1,11 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const main = @import("main");
 const parseRegion = main.getter.parseRegion;
 const resolveRegion = main.getter.resolveRegion;
 const io = std.testing.io;
+
+const ZFASTA_BIN = if (builtin.os.tag == .windows) "zig-out\\bin\\z-fasta.exe" else "zig-out/bin/z-fasta";
 
 // ============================================================================
 // Region parsing tests
@@ -94,7 +97,7 @@ test "parseRegion - name only with dots" {
 
 test "loadIndex - .zfi file" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
-    defer idx.deinit();
+    defer idx.deinit(io);
 
     try std.testing.expectEqual(@as(usize, 2), idx.records.len);
     try std.testing.expectEqual(@as(u64, 24), idx.records[0].seq_len);
@@ -117,7 +120,7 @@ test "loadIndex - .zfi file" {
 
 test "resolveRegion - single region, full sequence" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
-    defer idx.deinit();
+    defer idx.deinit(io);
 
     const r = resolveRegion(&idx, "seq1", 0);
     try std.testing.expectEqualStrings("seq1", r.name);
@@ -128,7 +131,7 @@ test "resolveRegion - single region, full sequence" {
 
 test "resolveRegion - single region, sub-range" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
-    defer idx.deinit();
+    defer idx.deinit(io);
 
     const r = resolveRegion(&idx, "seq1:1-12", 0);
     try std.testing.expectEqualStrings("seq1", r.name);
@@ -140,7 +143,7 @@ test "resolveRegion - single region, sub-range" {
 
 test "resolveRegion - original_index preserved" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
-    defer idx.deinit();
+    defer idx.deinit(io);
 
     const r0 = resolveRegion(&idx, "seq1", 0);
     const r1 = resolveRegion(&idx, "seq2", 1);
@@ -153,7 +156,7 @@ test "resolveRegion - original_index preserved" {
 
 test "resolveRegion - end clamped silently" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
-    defer idx.deinit();
+    defer idx.deinit(io);
 
     // seq1 has 24 bases; request end=9999 should clamp to 24
     const r = resolveRegion(&idx, "seq1:1-9999", 0);
@@ -164,7 +167,7 @@ test "resolveRegion - end clamped silently" {
 
 test "resolveRegion - byte offset for first base" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
-    defer idx.deinit();
+    defer idx.deinit(io);
 
     // seq1 starts immediately after ">seq1 test sequence\n"
     // Verify start_byte is the offset of the first base character
@@ -176,7 +179,7 @@ test "resolveRegion - byte offset for first base" {
 
 test "resolveRegion - duplicate region allowed, same start_byte" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
-    defer idx.deinit();
+    defer idx.deinit(io);
 
     const r0 = resolveRegion(&idx, "seq1:1-5", 0);
     const r1 = resolveRegion(&idx, "seq1:1-5", 1);
@@ -194,7 +197,7 @@ test "resolveRegion - duplicate region allowed, same start_byte" {
 
 test "resolveRegion - open-ended region (NAME:START-) uses seq_len as end" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
-    defer idx.deinit();
+    defer idx.deinit(io);
 
     // seq1 has 24 bases; NAME:13- should return bases 13..24 = 12 bases
     const r = resolveRegion(&idx, "seq1:13-", 0);
@@ -206,7 +209,7 @@ test "resolveRegion - open-ended region (NAME:START-) uses seq_len as end" {
 
 test "resolveRegion - single-base region" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
-    defer idx.deinit();
+    defer idx.deinit(io);
 
     const r = resolveRegion(&idx, "seq1:1-1", 0);
     try std.testing.expectEqual(@as(u64, 1), r.num_bases);
@@ -216,7 +219,7 @@ test "resolveRegion - single-base region" {
 
 test "resolveRegion - last-base region" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
-    defer idx.deinit();
+    defer idx.deinit(io);
 
     // seq1: ACGTACGTACGTACGTACGTACGT (24 bases), last base = 'T'
     const r = resolveRegion(&idx, "seq1:24-24", 0);
@@ -228,7 +231,7 @@ test "resolveRegion - last-base region" {
 
 test "resolveRegion - cross-line region (starts line 1, ends line 2)" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
-    defer idx.deinit();
+    defer idx.deinit(io);
 
     // seq1 wraps at 12 bases per line; region 10-15 crosses the line boundary
     const r = resolveRegion(&idx, "seq1:10-15", 0);
@@ -237,7 +240,7 @@ test "resolveRegion - cross-line region (starts line 1, ends line 2)" {
 
 test "resolveRegion - full sequence start_byte points to first base character" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
-    defer idx.deinit();
+    defer idx.deinit(io);
 
     const r_full = resolveRegion(&idx, "seq1", 0);
     const r_range = resolveRegion(&idx, "seq1:1-24", 1);
@@ -248,7 +251,7 @@ test "resolveRegion - full sequence start_byte points to first base character" {
 
 test "resolveRegion - display_end before clamp, num_bases after clamp" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
-    defer idx.deinit();
+    defer idx.deinit(io);
 
     const r = resolveRegion(&idx, "seq1:1-9999", 0);
     // num_bases clamped to seq_len
@@ -259,7 +262,7 @@ test "resolveRegion - display_end before clamp, num_bases after clamp" {
 
 test "resolveRegion - proteome pipe-delimited name" {
     var idx = main.index_format.loadIndex(io, "tests/data/proteome.fasta");
-    defer idx.deinit();
+    defer idx.deinit(io);
 
     const r = resolveRegion(&idx, "sp|P12345|PROT_HUMAN:1-10", 0);
     try std.testing.expectEqualStrings("sp|P12345|PROT_HUMAN", r.name);
@@ -268,7 +271,7 @@ test "resolveRegion - proteome pipe-delimited name" {
 
 test "resolveRegion - long header name (200-char sequence name)" {
     var idx = main.index_format.loadIndex(io, "tests/data/edge_cases.fasta");
-    defer idx.deinit();
+    defer idx.deinit(io);
 
     const long_name = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     const r = resolveRegion(&idx, long_name, 0);
@@ -279,7 +282,7 @@ test "resolveRegion - long header name (200-char sequence name)" {
 
 test "resolveRegion - lowercase bases preserved (byte offset still correct)" {
     var idx = main.index_format.loadIndex(io, "tests/data/edge_cases.fasta");
-    defer idx.deinit();
+    defer idx.deinit(io);
 
     // 'lowercase' in edge_cases.fasta: acgtACGTacgt (12 bases)
     const r = resolveRegion(&idx, "lowercase:1-1", 0);
@@ -290,7 +293,7 @@ test "resolveRegion - lowercase bases preserved (byte offset still correct)" {
 
 test "resolveRegion - ordering: seq2 has higher file offset than seq1" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
-    defer idx.deinit();
+    defer idx.deinit(io);
 
     const r1 = resolveRegion(&idx, "seq1:1-1", 0);
     const r2 = resolveRegion(&idx, "seq2:1-1", 1);
@@ -300,7 +303,7 @@ test "resolveRegion - ordering: seq2 has higher file offset than seq1" {
 
 test "resolveRegion - reversed CLI order: seq2 before seq1 in args" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
-    defer idx.deinit();
+    defer idx.deinit(io);
 
     // Even if caller passes seq2 first, original_index tracks CLI position
     const r2 = resolveRegion(&idx, "seq2:1-1", 0); // position 0 in args
@@ -313,7 +316,7 @@ test "resolveRegion - reversed CLI order: seq2 before seq1 in args" {
 
 test "resolveRegion - nonstandard characters in sequence (stars/dashes)" {
     var idx = main.index_format.loadIndex(io, "tests/data/edge_cases.fasta");
-    defer idx.deinit();
+    defer idx.deinit(io);
 
     // 'nonstandard' has ACG*-NACGT (10 chars)
     const r = resolveRegion(&idx, "nonstandard:1-10", 0);
@@ -378,7 +381,7 @@ fn writeStreamingZfi(allocator: std.mem.Allocator, fasta_path: []const u8, data:
 
 fn captureExtractRegion(allocator: std.mem.Allocator, fasta_path: []const u8, region: []const u8) ![]u8 {
     var idx = try main.index_format.loadIndexChecked(io, fasta_path);
-    defer idx.deinit();
+    defer idx.deinit(io);
 
     var out = std.Io.Writer.Allocating.init(allocator);
     main.getter.extractRegion(&idx, region, &out.writer);
@@ -466,4 +469,39 @@ test "get on messy mixed_line_widths after low-mem index" {
         \\
     ;
     try std.testing.expectEqualStrings(expected, low_out);
+}
+
+test "--names rejects file over max_input_file_bytes with clear error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const names_path = try uniqueArtifactPath(allocator, "names-oversize", "txt");
+    defer std.Io.Dir.cwd().deleteFile(io, names_path) catch {};
+
+    const names_file = try std.Io.Dir.cwd().createFile(io, names_path, .{});
+    try names_file.setLength(io, main.getter.max_input_file_bytes + 1);
+    names_file.close(io);
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const spawn_io = threaded.io();
+
+    const result = try std.process.run(allocator, spawn_io, .{
+        .argv = &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", names_path },
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| try std.testing.expect(code != 0),
+        else => return error.ChildProcessFailed,
+    }
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "names file exceeds") != null);
+    var limit_phrase_buf: [32]u8 = undefined;
+    const limit_phrase = try std.fmt.bufPrint(&limit_phrase_buf, "{d} MiB limit", .{main.getter.max_input_file_mib});
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, limit_phrase) != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "--chunk-size does not stream --names") != null);
 }

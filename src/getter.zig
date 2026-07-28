@@ -61,8 +61,22 @@ pub const GetOptions = struct {
 
 pub const chunk_size_all = std.math.maxInt(usize);
 
-/// Maximum BED/names input size for the all-in-memory path (`--chunk-size -1`).
-pub const max_input_file_bytes: usize = 512 * 1024 * 1024;
+/// Maximum size for inputs loaded fully into memory: `--names` (always) and
+/// BED with `--chunk-size -1`. Default BED chunking is not size-capped here.
+pub const max_input_file_mib: usize = 512;
+pub const max_input_file_bytes: usize = max_input_file_mib * 1024 * 1024;
+
+comptime {
+    // Keep get help / README "512 MiB" wording synchronized with this constant.
+    if (max_input_file_mib != 512) {
+        @compileError("update get help and README for max_input_file_mib");
+    }
+}
+
+const AllInMemoryInputKind = enum {
+    names_file,
+    bed_all_in_memory,
+};
 
 /// Per-line buffer for chunked BED streaming (`takeDelimiter` limit).
 pub const bed_line_reader_buffer_bytes = 4096;
@@ -363,14 +377,14 @@ fn findRecordIndex(idx: *const LoadedIndex, name: []const u8) ?usize {
 }
 
 /// Classify a record as nucleotide or protein from a short sequence prefix.
-/// Cap is small: protein vs IUPAC nucleotide is clear within a few hundred bases.
-/// Sampling up to 100k on every `--rc` / `--complement-only` was a large share of
-/// the T5 RC overhead on long contigs (Genome).
+/// Uses `stats.get_type_sample_bases` (not full-file): protein vs IUPAC nucleotide
+/// is clear within a few hundred bases, and sampling up to 100k on every `--rc`
+/// path was a large share of Genome RC overhead.
 fn detectRecordType(rec: IndexRecord, fasta: []const u8) stats.SequenceType {
     var counts = [_]u64{0} ** 256;
     var total: u64 = 0;
     var pos: usize = @intCast(rec.seq_offset);
-    const sample_limit: u64 = @min(rec.seq_len, 256);
+    const sample_limit: u64 = @min(rec.seq_len, stats.get_type_sample_bases);
 
     while (pos < fasta.len and total < sample_limit) : (pos += 1) {
         const byte = fasta[pos];
@@ -423,7 +437,10 @@ fn ensureComplementAllowed(idx: *const LoadedIndex, requests: []const ParsedRequ
         };
 
         if (rec_type == .protein) {
-            printErrorAndExit("error: reverse complement is not defined for protein sequences: {s}\n", .{request.region.name});
+            printErrorAndExit(
+                "error: reverse complement is not defined for protein sequences: {s} (classified from up to {d} bases)\n",
+                .{ request.region.name, stats.get_type_sample_bases },
+            );
         }
     }
 }
@@ -1051,15 +1068,21 @@ fn adviseFastaMmap(fasta: []const u8, advice: platform.Advice) void {
     platform.advise(fasta, advice);
 }
 
-fn readAllInput(allocator: std.mem.Allocator, io: std.Io, path: []const u8) []u8 {
+fn readAllInput(allocator: std.mem.Allocator, io: std.Io, path: []const u8, kind: AllInMemoryInputKind) []u8 {
     if (std.mem.eql(u8, path, "-")) {
         var stdin_buf: [4096]u8 = undefined;
         var reader = std.Io.File.stdin().reader(io, &stdin_buf);
         return reader.interface.allocRemaining(allocator, .limited(max_input_file_bytes)) catch |err| switch (err) {
-            error.StreamTooLong => printErrorAndExit(
-                "error: stdin exceeds {d} byte limit; use --chunk-size 4096 for large BED input\n",
-                .{max_input_file_bytes},
-            ),
+            error.StreamTooLong => switch (kind) {
+                .names_file => printErrorAndExit(
+                    "error: --names stdin exceeds {d} MiB limit (--chunk-size does not stream --names)\n",
+                    .{max_input_file_mib},
+                ),
+                .bed_all_in_memory => printErrorAndExit(
+                    "error: BED stdin exceeds {d} MiB limit for --chunk-size -1; use default --chunk-size\n",
+                    .{max_input_file_mib},
+                ),
+            },
             else => printErrorAndExit("error: failed to read stdin\n", .{}),
         };
     }
@@ -1076,10 +1099,16 @@ fn readAllInput(allocator: std.mem.Allocator, io: std.Io, path: []const u8) []u8
     };
 
     if (stat.size > max_input_file_bytes) {
-        printErrorAndExit(
-            "error: input file exceeds {d} byte limit: {s}; use default --chunk-size for large BED files\n",
-            .{ max_input_file_bytes, path },
-        );
+        switch (kind) {
+            .names_file => printErrorAndExit(
+                "error: names file exceeds {d} MiB limit: {s} (--chunk-size does not stream --names)\n",
+                .{ max_input_file_mib, path },
+            ),
+            .bed_all_in_memory => printErrorAndExit(
+                "error: BED file exceeds {d} MiB limit for --chunk-size -1: {s}; use default --chunk-size\n",
+                .{ max_input_file_mib, path },
+            ),
+        }
     }
 
     const bytes = allocator.alloc(u8, stat.size) catch {
@@ -1496,7 +1525,7 @@ fn processBedPathAllInMemory(
     annotate_transform: bool,
     writer: anytype,
 ) BatchStats {
-    const bed_data = readAllInput(allocator, io, path);
+    const bed_data = readAllInput(allocator, io, path, .bed_all_in_memory);
     return processBedData(idx, allocator, bed_data, honor_strand, global_orientation, annotate_transform, writer);
 }
 
@@ -1530,7 +1559,7 @@ pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions
     defer requests.deinit(allocator);
 
     if (options.names_path) |names_path| {
-        const names_data = readAllInput(allocator, io, names_path);
+        const names_data = readAllInput(allocator, io, names_path, .names_file);
         appendNamesRequests(&requests, names_data, options.orientation, allocator);
     }
 
@@ -1542,7 +1571,7 @@ pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions
     // Same rule on every catalog; no dataset-tuned threshold (plan/get-performance.md T1).
     const load_mode: index_format.LoadMode = if (options.bed_path != null or options.names_path != null or requests.items.len > 1) .lookup_full_map else .records_only;
     var idx = index_format.loadIndexWithMode(io, fasta_path, load_mode);
-    defer idx.deinit();
+    defer idx.deinit(io);
 
     // GET-only: open FASTA for sparse positional reads when the catalog is large.
     // Index load stays mmap-only; this fd is not part of LoadedIndex.
@@ -1589,7 +1618,7 @@ pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions
 test "processBedReaderChunked matches non-chunked extraction" {
     const test_io = std.testing.io;
     var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
-    defer idx.deinit();
+    defer idx.deinit(test_io);
 
     const bed_data =
         "# comment\n" ++
@@ -1618,7 +1647,7 @@ test "processBedReaderChunked matches non-chunked extraction" {
 test "processBedReaderChunked preserves strand handling across chunk boundaries" {
     const test_io = std.testing.io;
     var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
-    defer idx.deinit();
+    defer idx.deinit(test_io);
 
     const bed_data =
         "seq1\t0\t5\tname\t0\t-\n" ++
@@ -1641,7 +1670,7 @@ test "processBedReaderChunked preserves strand handling across chunk boundaries"
 test "processBedReaderChunked preserves duplicate chrom cache across chunk boundaries" {
     const test_io = std.testing.io;
     var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
-    defer idx.deinit();
+    defer idx.deinit(test_io);
 
     const bed_data =
         "seq1\t0\t4\n" ++
@@ -1682,7 +1711,7 @@ test "orientation compose behaves like transform composition" {
 test "processParsedRequests applies complement-only and reverse-only transforms" {
     const test_io = std.testing.io;
     var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
-    defer idx.deinit();
+    defer idx.deinit(test_io);
 
     const requests = [_]ParsedRequest{
         .{ .region = parseRegion("seq1:1-5"), .orientation = Orientation.complementOnly() },
@@ -1707,7 +1736,7 @@ test "processParsedRequests applies complement-only and reverse-only transforms"
 test "processParsedRequests annotates transforms on by-record-scan path" {
     const test_io = std.testing.io;
     var idx = index_format.loadIndexWithMode(test_io, "tests/data/simple.fasta", .records_only);
-    defer idx.deinit();
+    defer idx.deinit(test_io);
     try std.testing.expect(!idx.has_name_map);
     try std.testing.expectEqual(index_format.LoadedIndex.IndexSource.zfi, idx.source);
 
@@ -1735,14 +1764,14 @@ test "detectRecordType classifies nucleotide and protein records" {
     const test_io = std.testing.io;
 
     var nucleotide_idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
-    defer nucleotide_idx.deinit();
+    defer nucleotide_idx.deinit(test_io);
     try std.testing.expectEqual(
         stats.SequenceType.nucleotide,
         detectRecordType(nucleotide_idx.records[0], nucleotide_idx.fasta_data),
     );
 
     var protein_idx = index_format.loadIndex(test_io, "tests/data/proteome.fasta");
-    defer protein_idx.deinit();
+    defer protein_idx.deinit(test_io);
     try std.testing.expectEqual(
         stats.SequenceType.protein,
         detectRecordType(protein_idx.records[0], protein_idx.fasta_data),
@@ -1752,7 +1781,7 @@ test "detectRecordType classifies nucleotide and protein records" {
 test "shouldSortByFileOffset rejects small catalogs and wide gaps" {
     const test_io = std.testing.io;
     var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
-    defer idx.deinit();
+    defer idx.deinit(test_io);
 
     var regions: [20]ResolvedRegion = undefined;
     for (&regions, 0..) |*r, i| {

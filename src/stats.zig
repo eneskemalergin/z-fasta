@@ -110,7 +110,7 @@ fn getAminoAcidName(code: u8) []const u8 {
 /// Run the stats command.
 pub fn runStats(io: std.Io, fasta_path: []const u8, index_only: bool) void {
     var idx = index_format.loadIndexWithMode(io, fasta_path, .stats_scan);
-    defer idx.deinit();
+    defer idx.deinit(io);
 
     const records = idx.records;
     const num_seqs = records.len;
@@ -670,7 +670,11 @@ test "countCompositionSlice tallies composition and lowercase" {
     try std.testing.expectEqual(@as(u64, 2), counts['N']);
 }
 
-/// Detect if sequences are nucleotide or protein from the full composition counts.
+/// Detect if sequences are nucleotide or protein from composition counts.
+///
+/// Shared by stats (full-file counts), GET (per-record sample), and validate
+/// (prefix sample). Threshold: nucleotide if IUPAC nuc letters are strictly
+/// more than 90% of counted bases (`nuc * 10 > total * 9`).
 pub fn detectType(counts: *const [256]u64, total: u64) SequenceType {
     if (total == 0) return .nucleotide;
 
@@ -693,9 +697,15 @@ pub fn detectType(counts: *const [256]u64, total: u64) SequenceType {
         counts['N'] + counts['n'] +
         counts['U'] + counts['u'];
 
-    // >90% nucleotide characters => nucleotide
-    if (nuc_count * 10 > total * 9) {
+    // u128 avoids overflow on genome-scale totals (total * 9 and nuc * 10).
+    if (@as(u128, nuc_count) * 10 > @as(u128, total) * 9) {
         return .nucleotide;
     }
     return .protein;
 }
+
+/// Bases sampled per record for GET `--rc` / `--complement-only` protein guard.
+pub const get_type_sample_bases: u64 = 256;
+
+/// Bases sampled across the file for validate alphabet selection.
+pub const validate_type_sample_bases: u64 = 100_000;

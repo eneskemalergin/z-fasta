@@ -583,7 +583,7 @@ test "scanZfiIndexStreaming zfi loads record names" {
     defer std.Io.Dir.cwd().deleteFile(io, paths.zfi_path) catch {};
 
     var idx = try loadIndexChecked(io, paths.fasta_path);
-    defer idx.deinit();
+    defer idx.deinit(io);
     try std.testing.expectEqual(@as(?usize, 0), idx.lookupName("seq1"));
     try std.testing.expectEqual(@as(?usize, 1), idx.lookupName("seq2"));
 }
@@ -1091,7 +1091,7 @@ test "loadIndexChecked accepts production zfi with side tables and name blob" {
     defer std.Io.Dir.cwd().deleteFile(io, paths.zfi_path) catch {};
 
     var idx = try loadIndexChecked(io, paths.fasta_path);
-    defer idx.deinit();
+    defer idx.deinit(io);
     try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.zfi, idx.source);
     try std.testing.expect(idx.name_blob != null);
     try std.testing.expectEqual(@as(usize, 1), idx.records.len);
@@ -1120,9 +1120,9 @@ test "loadIndexCheckedWithMode preserves duplicate lookup semantics" {
     try writeZfiFromRecords(zfi_path, &records, fasta_data.len, try statMtimeNs(fasta_path), allocator);
 
     var full_map_idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .lookup_full_map);
-    defer full_map_idx.deinit();
+    defer full_map_idx.deinit(io);
     var records_only_idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .records_only);
-    defer records_only_idx.deinit();
+    defer records_only_idx.deinit(io);
 
     try std.testing.expectEqual(full_map_idx.lookupName("dup"), records_only_idx.lookupName("dup"));
     try std.testing.expectEqual(@as(?usize, 1), records_only_idx.lookupName("dup"));
@@ -1162,7 +1162,7 @@ test "loadIndexChecked falls back to fai when zfi is stale" {
     try markFileStaleOneHourAgo(zfi_file);
 
     var idx = try loadIndexChecked(io, fasta_path);
-    defer idx.deinit();
+    defer idx.deinit(io);
 
     try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.fai, idx.source);
     try std.testing.expectEqual(@as(?usize, 0), idx.lookupName("seq1"));
@@ -1194,9 +1194,9 @@ test "loadIndexCheckedWithMode preserves fai duplicate lookup semantics" {
     try std.Io.File.writeStreamingAll(zfi_file, io, "stale");
 
     var full_map_idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .lookup_full_map);
-    defer full_map_idx.deinit();
+    defer full_map_idx.deinit(io);
     var records_only_idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .records_only);
-    defer records_only_idx.deinit();
+    defer records_only_idx.deinit(io);
 
     try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.fai, records_only_idx.source);
     try std.testing.expect(!records_only_idx.has_name_map);
@@ -1410,11 +1410,11 @@ test "loadIndexChecked rejects fai name longer than u16" {
 
 fn expectFaiLoaderModesAgree(fasta_path: []const u8) !void {
     var full = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .lookup_full_map);
-    defer full.deinit();
+    defer full.deinit(io);
     var records_only = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .records_only);
-    defer records_only.deinit();
+    defer records_only.deinit(io);
     var stats_scan = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .stats_scan);
-    defer stats_scan.deinit();
+    defer stats_scan.deinit(io);
 
     try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.fai, full.source);
     try std.testing.expectEqual(full.source, records_only.source);
@@ -1531,7 +1531,7 @@ test "loadIndexChecked accepts zfi when FASTA omits terminal newline" {
     try writeZfiFromRecords(zfi_path, records.items, fasta_data.len, try statMtimeNs(fasta_path), allocator);
 
     var idx = try loadIndexChecked(io, fasta_path);
-    defer idx.deinit();
+    defer idx.deinit(io);
     try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.zfi, idx.source);
     try std.testing.expectEqual(@as(u64, 4), idx.records[0].seq_len);
 }
@@ -1654,7 +1654,7 @@ test "loadIndexChecked accepts legacy zfi without source-identity trailer" {
     defer std.Io.Dir.cwd().deleteFile(io, paths.zfi_path) catch {};
 
     var idx = try loadIndexChecked(io, paths.fasta_path);
-    defer idx.deinit();
+    defer idx.deinit(io);
     try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.zfi, idx.source);
 }
 
