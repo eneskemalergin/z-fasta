@@ -274,7 +274,7 @@ pub const large_catalog_record_threshold: u32 = 4096;
 /// - **Maps** (`fasta_map`, optional `zfi_map` / `fai_map`): owned by this struct;
 ///   destroyed via `MemoryMap.destroy(io)`. Byte slices (`fasta_data`, `zfi_data`,
 ///   `fai_data`, `name_blob`) and `.zfi` `records` / side-table views are borrows
-///   into those maps — never freed separately.
+///   into those maps, which are never freed separately.
 /// - **Arena**: owns heap for `.fai` record arrays, `name_slices` string copies,
 ///   `sidecar_path`, `fai_line_offsets`, and `name_map` table storage. Reclaimed
 ///   only via `arena.deinit()` (do not `name_map.deinit()` on an arena-backed map).

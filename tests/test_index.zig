@@ -31,10 +31,13 @@ fn writeFastaAndRawZfi(allocator: std.mem.Allocator, stem: []const u8, fasta: []
     const fasta_path = try uniqueArtifactPath(allocator, stem, "fa");
     const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
 
-    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-    defer fasta_file.close(io);
-    try std.Io.File.writeStreamingAll(fasta_file, io, fasta);
-    const fasta_mtime = main.index_format.timestampToNs((try fasta_file.stat(io)).mtime);
+    {
+        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+        defer fasta_file.close(io);
+        try std.Io.File.writeStreamingAll(fasta_file, io, fasta);
+    }
+    // Re-open for mtime: Windows `stat` on the create handle can return AccessDenied.
+    const fasta_mtime = try statMtimeNs(fasta_path);
 
     var zfi_copy = try allocator.dupe(u8, zfi_bytes);
     defer allocator.free(zfi_copy);
@@ -1609,15 +1612,21 @@ test "loadIndexChecked rejects zfi after same-size FASTA replacement" {
         defer fasta_file.close(io);
         try std.Io.File.writeStreamingAll(fasta_file, io, fasta_a);
     }
+    const mtime_a = try statMtimeNs(fasta_path);
     var index = try main.indexer.scanZfiIndex(fasta_a, true, allocator);
     defer index.deinit(allocator);
-    try main.indexer.writeZfiIndexFile(io, zfi_path, &index, fasta_a.len, try statMtimeNs(fasta_path));
+    try main.indexer.writeZfiIndexFile(io, zfi_path, &index, fasta_a.len, mtime_a);
 
-    // Replacement updates FASTA mtime; stored source_mtime_ns no longer matches.
+    // Replacement updates content; force mtime forward so ZFID staleness is visible
+    // even when the clock has not moved (Windows CI can keep the same stamp).
     {
         const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{ .truncate = true });
         defer fasta_file.close(io);
         try std.Io.File.writeStreamingAll(fasta_file, io, fasta_b);
+        const bumped = std.Io.Timestamp.fromNanoseconds(@as(i96, @intCast(mtime_a + std.time.ns_per_s)));
+        try fasta_file.setTimestamps(io, .{
+            .modify_timestamp = .{ .new = bumped },
+        });
     }
 
     try std.testing.expectError(error.StaleIndex, loadIndexChecked(io, fasta_path));
