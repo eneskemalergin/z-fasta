@@ -3,10 +3,10 @@
   <h1>z-fasta ⚡</h1>
   <p>
     Fast, modular FASTA toolkit built in Zig.<br/>
-    SIMD-accelerated indexing, O(1) region extraction, and instant assembly stats.<br/>
-    samtools-compatible FASTA indexing and extraction, benchmarked against <code>seqkit</code>, <code>fastahack</code>, and <code>pyfaidx</code>.
+    SIMD-accelerated indexing, O(1) region extraction, validation, and assembly stats.<br/>
+    samtools-compatible indexing and extraction, benchmarked against <code>seqkit</code>, <code>fastahack</code>, <code>pyfaidx</code>, and other peers.
   </p>
-  <p>Current release: <strong>v0.2.9</strong></p>
+  <p>Current release: <strong>v0.3.0</strong></p>
   <br/>
   <a href="https://github.com/eneskemalergin/z-fasta/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/CI-passing-22c55e?style=for-the-badge" alt="CI" /></a>
   <a href="https://ziglang.org/download/0.16.0/"><img src="https://img.shields.io/badge/Zig-0.16.0-F7A41D?style=for-the-badge&logo=zig&logoColor=white" alt="Zig 0.16.0" /></a>
@@ -21,15 +21,19 @@ Quick links: [Supported Today](#supported-today) · [Installation](#installation
 
 ## Supported Today
 
-`z-fasta` is focused on uncompressed FASTA workflows: building indexes, extracting one or many indexed regions, and computing assembly/proteome statistics. It supports compact `.zfi` indexes and samtools-compatible `.fai` output. `get` accepts positional regions, BED files, BED from stdin, names files, strand-aware extraction, and explicit orientation transforms through `--rc`, `--reverse-only`, `--complement-only`, and `--annotate-rc`. FASTQ and compressed FASTA/BGZF streams remain outside the current scope.
+`z-fasta` targets uncompressed FASTA: `index`, `get`, `stats`, and `validate`. Default indexes are compact `.zfi` files (embedded names, optional side tables, source identity). `--emit-fai` writes samtools-compatible `.fai` only when every record has fixed line geometry.
+
+`get` accepts positional regions, BED files, BED from stdin, names files, strand-aware extraction, and orientation transforms (`--rc`, `--reverse-only`, `--complement-only`, `--annotate-rc`). FASTQ and compressed FASTA/BGZF remain out of scope.
+
+CI builds and smokes the binary on Linux, macOS, and Windows. File views go through a portable `MemoryMap` layer; POSIX memory advice is an optimization and a no-op on Windows.
 
 ## Why z-fasta?
 
-Modern bioinformatics workflows are often bottlenecked by legacy text parsers. `z-fasta` keeps the hot paths close to the data: memory-mapped FASTA input for the default indexer, explicit SIMD header scanning, compact binary indexes, and startup-conscious CLI dispatch for tiny commands.
+Modern bioinformatics workflows are often bottlenecked by legacy text parsers. `z-fasta` keeps the hot paths close to the data: memory-mapped FASTA for the default indexer, SIMD header scanning, compact binary indexes, and a startup-conscious CLI for tiny commands.
 
-- **samtools-compatible output:** Both `z-fasta index --emit-fai` (uniform FASTA only) and `z-fasta get` produce output byte-identical to `samtools faidx` for the verified cases. `--emit-fai` rejects non-uniform layouts and directs you to default `.zfi` indexing. Lookup prefers `.zfi` (size + embedded source mtime) and falls back to `.fai` (mtime-only identity).
-- **Single binary:** No dependencies, no `conda` environments, no `glibc` version errors.
-- **Arena-scoped allocations:** Uses Zig's `ArenaAllocator` for short-lived command state, keeping heap overhead low and cleanup simple.
+- **samtools-compatible output:** `z-fasta index --emit-fai` (uniform FASTA only) and positional `z-fasta get` match `samtools faidx` on the verified cases. `--emit-fai` rejects non-uniform layouts and points you at default `.zfi` indexing.
+- **Single binary:** no runtime dependencies, no `conda` environments, no `glibc` version traps.
+- **Arena-scoped allocations:** short-lived command state uses Zig arenas so heap overhead stays low and cleanup stays simple.
 
 ## Installation
 
@@ -42,6 +46,7 @@ curl -L https://ziglang.org/download/0.16.0/zig-linux-x86_64-0.16.0.tar.xz | tar
 
 # The executable is now at ./zig-out/bin/z-fasta
 ./zig-out/bin/z-fasta --help
+./zig-out/bin/z-fasta --version
 ```
 
 ## Usage
@@ -56,10 +61,12 @@ Options:
                 otherwise fails and directs you to default .zfi indexing
   --no-dedup    Keep duplicate sequence names in the index (default: first wins at
                 index time). get resolves duplicate names to the last record.
-  --low-mem     Stream input with bounded RAM; same outputs as default index
+  --low-mem     Stream input with bounded RAM; same on-disk outputs as default index
   --help        Show help message
   --version     Print version
 ```
+
+Default `index` and `--low-mem` both write `{file}.zfi` with matching bytes on the supported fixtures. `--low-mem` streams the FASTA instead of mapping it; use it when RSS must stay near a few megabytes. Sequence names longer than 65535 bytes are rejected (`HeaderTooLong`).
 
 ### Get (sequence extraction)
 
@@ -70,11 +77,11 @@ z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt]
             [--chunk-size N|-1] <region> [region ...]
 ```
 
-Extract one or more sequences or sub-regions from an indexed FASTA file. Output is **byte-identical** to `samtools faidx` for the positional-region path, and the BED / names batch flows are verified against `bedtools getfasta` and `samtools faidx -r`. Multiple regions are accepted in a single call; the index loads once and results stream in CLI order. BED rows and names-file entries are appended in source order ahead of later positional arguments.
+Extract one or more sequences or sub-regions from an indexed FASTA. Positional output is **byte-identical** to `samtools faidx` on the verified path. BED and names flows are checked against `bedtools getfasta` and `samtools faidx -r`. Multiple regions load the index once and stream in CLI order. BED rows and names-file entries are appended in source order ahead of later positional arguments.
 
-Requires an index: either `.zfi` (preferred) or `.fai`. If `.zfi` is not found, falls back to `.fai` automatically.
+Requires an index: `.zfi` preferred, then `.fai`. Messy (non-uniform) records need a side-table `.zfi`; a plain `.fai` cannot describe them.
 
-**Region formats:** `NAME` (full sequence); `NAME:START-END` (1-based inclusive sub-region); `NAME:START-` (from START through end of sequence). Ensembl-style names with colons work (for example `chromosome:GRCh38:1:1:248956422:1`).
+**Region formats:** `NAME` (full sequence); `NAME:START-END` (1-based inclusive); `NAME:START-` (from START through end of sequence). Ensembl-style names with colons work (for example `chromosome:GRCh38:1:1:248956422:1`).
 
 **GET flags:**
 
@@ -91,16 +98,25 @@ Requires an index: either `.zfi` (preferred) or `.fai`. If `.zfi` is not found, 
 
 Positional CLI regions are capped at **1024** per invocation (`error: too many regions`). BED row count and **`--names`** line count are not subject to that cap (size limits above still apply).
 
-Complement-based transforms error on protein FASTA input so **`--rc`** and **`--complement-only`** stay nucleotide-only. Classification for that guard samples up to the first **256** bases of each requested record (not the full file).
+Complement-based transforms error on protein FASTA so **`--rc`** and **`--complement-only`** stay nucleotide-only. That guard samples up to the first **256** bases of each requested record.
 
-### Sequence type classification
+### Validate
 
-All commands share `stats.detectType` (IUPAC nucleotide alphabet; nucleotide if those letters are strictly more than 90% of counted bases). Sampling differs on purpose:
+```bash
+z-fasta validate [options] <file.fasta>
 
-- `stats` (default): full-file composition scan
-- `stats --index-only`: no type (composition skipped)
-- `get --rc` / `--complement-only`: up to 256 bases per record
-- `validate`: up to the first 100000 sequence bases; `--json --summary` reports `sequence_type`, `type_bases_sampled`, and `type_sample_cap`
+Options:
+  --strict                 Treat warnings as errors
+  --json                   Emit JSON Lines instead of text
+  --summary                With --json, emit one summary object
+  --fix -o <file.fasta>    Write a fixed FASTA to a separate output path
+  --fix-format-only        With --fix, proceed despite alphabet errors
+  --schema NAME            Header schema: uniprot or refseq
+  --custom-alphabet CHARS  Override nucleotide/protein alphabet checks
+  --max-header-len N       Warn on headers longer than N bytes (default: 1024)
+```
+
+Checks structure, alphabets, and headers (duplicate names, invalid characters, null bytes, UTF-8 BOM, inconsistent line widths, trailing whitespace, empty sequences, missing terminal newlines, mixed line endings, long headers, schema violations). The event list stops at 10000 issues with a deterministic error. `--fix` streams rewritten FASTA to `-o` when the fix is safe.
 
 ### Stats
 
@@ -111,96 +127,117 @@ Options:
   --index-only  Compute stats from index only (no FASTA scan; startup-dominated)
 ```
 
-Compute assembly/proteome statistics. Type comes from the full composition scan (not a prefix sample).
+**Index-derived:** sequence count, total bases, min/max/mean/median lengths, N50, L50, N90, L90, AU, shortest/longest names, and duplicate reporting.
 
-**Tier 1 (index-only):** sequence count, total bases, min/max/mean/median lengths, N50, L50, N90, L90, AU, and duplicate reporting. Duplicate count is source-level (`k-1` extras per repeated name) on a full scan. `--index-only` prints `n/a` when the index is deduplicated (cannot prove source extras); with `--no-dedup` it reports repeats kept in the index.
+**Full scan (default):** composition on top of the index metrics: nucleotide frequencies, GC content (N excluded), GC skew, soft-masked fraction; for proteins, top 3 amino acids with full names.
 
-**Tier 2 (default):** full composition scan: nucleotide frequencies, GC content (N excluded), GC skew, soft-masked fraction. For proteins: top 3 amino acids with full names.
+### Sequence type classification
+
+All commands share `stats.detectType` (IUPAC nucleotide alphabet; nucleotide if those letters are strictly more than 90% of counted bases). Sampling differs on purpose:
+
+- `stats` (default): full-file composition scan
+- `stats --index-only`: no type (composition skipped)
+- `get --rc` / `--complement-only`: up to 256 bases per record
+- `validate`: up to the first 100000 sequence bases; `--json --summary` reports `sequence_type`, `type_bases_sampled`, and `type_sample_cap`
 
 ### Examples
 
 ```bash
-# Create .zfi binary index (default, compact binary format)
+# Create .zfi binary index (default)
 z-fasta index genome.fa
 
-# Output .fai to stdout (samtools-compatible)
+# Bounded-RAM index (same .zfi bytes as default on supported fixtures)
+z-fasta index --low-mem genome.fa
+
+# Output .fai to stdout (uniform FASTA only)
 z-fasta index --emit-fai genome.fa > genome.fai
 
-# Extract a full sequence
+# Keep duplicate names in the index (get still resolves to the last record)
+z-fasta index --no-dedup genome.fa
+
+# Extract a full sequence / sub-region / multi-region
 z-fasta get genome.fa chr1
-
-# Extract a sub-region (1-based, inclusive)
 z-fasta get genome.fa chr1:1000000-2000000
+z-fasta get genome.fa chr1:1000-2000 chr2:5000-6000
 
-# Extract multiple regions in one call (index loads once)
-z-fasta get genome.fa chr1:1000-2000 chr2:5000-6000 chrX:100-200
-
-# Reverse-complement a region
+# Orientation transforms
 z-fasta get genome.fa chr1:1000-2000 --rc
-
-# Reverse without complementing
 z-fasta get genome.fa chr1:1000-2000 --reverse-only
-
-# Complement without reversing
 z-fasta get genome.fa chr1:1000-2000 --complement-only
-
-# Add explicit transform text to the FASTA header
 z-fasta get genome.fa chr1:1000-2000 --rc --annotate-rc
 
-# Extract regions from BED
+# BED / names / strand
 z-fasta get genome.fa --bed regions.bed
-
-# Read BED from stdin
 awk '$5 > 100' raw.bed | z-fasta get genome.fa --bed -
-
-# Extract whole sequences from a names file
 z-fasta get genome.fa --names ids.txt
-
-# Respect BED strand and print a stderr summary
 z-fasta get genome.fa --bed regions.bed --strand-aware --summary
 
-# Compose BED strand handling with a global reverse-complement flip
-z-fasta get genome.fa --bed regions.bed --honor-strand --rc
+# Validate and optionally rewrite a clean copy
+z-fasta validate genome.fa
+z-fasta validate --json --summary genome.fa
+z-fasta validate --fix -o genome.clean.fa genome.fa
 
-# Assembly stats (full composition scan)
+# Assembly stats
 z-fasta stats genome.fa
-
-# Quick stats from index only (does not scan FASTA sequence bytes)
 z-fasta stats --index-only genome.fa
 ```
 
+## Formats and behavior
+
+### Index formats
+
+- **`.zfi` (default, preferred):** binary index with embedded names, optional per-line side tables for messy layout, and source identity (size plus embedded FASTA mtime). Load prefers `.zfi` over `.fai`.
+- **`.fai` (compatibility):** text index for uniform, FAI-representable records only. `--emit-fai` refuses variable widths and other non-representable layouts instead of writing a misleading file. Stale `.fai` checks are mtime-only (weaker than `.zfi`).
+
+### Messy FASTA
+
+Variable line widths, trailing spaces or tabs, blank lines, mixed CRLF/LF, and a final line without a terminal newline are indexed in `.zfi` via side tables. `get` uses those tables for correct extraction. Uniform records keep O(1) byte-offset math. Peers that require classic FAI geometry often reject these files; that is expected. `validate --fix` can rewrite a clean uniform copy when you need `.fai` or stricter tooling.
+
+### Duplicate names
+
+Duplicate *names* are not the same as identical *sequence contents*. Default `index` keeps the first name; `index --no-dedup` keeps all. `get` resolves a repeated name to the **last** matching record in the loaded index. `validate` reports `duplicate_name`. Full `stats` prints source-level extras (`sum(k-1)`); `stats --index-only` prints `n/a (run without --index-only)` on a deduplicated index and never fabricates `0` (with an `--no-dedup` index it reports repeats kept in the index).
+
+## Support and limits
+
+**Formats:** `.zfi` is the default. It handles uniform records and messy layout (variable widths, trailing whitespace, blank lines, mixed CRLF/LF, missing final newline) via side tables. `.fai` is compatibility only for uniform, FAI-representable records; `--emit-fai` refuses messy layout. Load prefers `.zfi`. Compressed FASTA, BGZF, and FASTQ are out of scope.
+
+**Names:** index hard-rejects sequence names longer than 65535 bytes. `validate --max-header-len` warns above N bytes (default 1024) and does not raise that index limit.
+
+**Get / validate caps:** at most 1024 positional regions per `get` call. `--names` loads the whole file (max 512 MiB; `--chunk-size` does not stream it). BED defaults to 4096-row batches; `--chunk-size -1` loads the whole BED up to 512 MiB. `validate` stops after 10000 retained events.
+
+**Memory:** default index/get/stats/validate use mapped file views (RSS often near mapped FASTA size). `index --low-mem` streams with bounded RAM and the same `.zfi` bytes on supported inputs. `stats --index-only` skips the sequence scan. Dense BED releases mapped pages behind the cursor; sparse gets on large FASTAs prefer positional reads.
+
+**Platforms:** Linux, macOS, and Windows share the same commands through portable mapping. Memory-advice hints are POSIX-only (unused on Windows). CI smokes all three. Tagged multi-triple release archives are not published yet.
+
 ## Performance & Correctness
 
-All timings on AMD Ryzen 9 3950X, warm cache.
+All timings below are on AMD Ryzen 9 3950X, warm cache, from the checked-in suite reports (subject binary was labeled 0.2.9 in those runs; behavior matches current gates). Regenerate reports after the v0.3.0 tag if you need subject strings to match exactly.
 
 ### Index: SIMD-Accelerated Indexing
 
-| Dataset       | Size   | z-fasta (no-dedup) | samtools | fastahack | pyfaidx | Speedup vs samtools |
-| ------------- | ------ | ------------------ | -------- | --------- | ------- | ------------------- |
-| Human Genome  | 3.0 GB | 0.39s              | 9.03s    | 21.73s    | 27.48s  | **22.9x**           |
-| Transcriptome | 972 MB | 0.093s             | 1.79s    | 5.72s     | 6.50s   | **19.3x**           |
-| Proteome      | 66 MB  | 0.0056s            | 0.055s   | 0.275s    | 0.368s  | **10.0x**           |
+| Dataset       | Size (on disk) | z-fasta (no-dedup) | samtools | fastahack | pyfaidx | Speedup vs samtools |
+| ------------- | -------------- | ------------------ | -------- | --------- | ------- | ------------------- |
+| Human Genome  | ~2.9 GiB       | 0.39s              | 9.03s    | 21.73s    | 27.48s  | **22.9x**           |
+| Transcriptome | ~459 MiB       | 0.093s             | 1.79s    | 5.72s     | 6.50s   | **19.3x**           |
+| Proteome      | ~13 MiB        | 0.0056s            | 0.055s   | 0.275s    | 0.368s  | **10.0x**           |
 
-**Index modes** on Genome (warm cache; [bench/index/REPORT.md](bench/index/REPORT.md) run `20260706_134943`): **default** mmap ~0.40s, RSS ≈ mapped FASTA size; **`--low-mem`** stream ~1.61s FAI / ~3.4 MB RSS, same `.zfi` bytes as default; **`--no-dedup`** ~0.38s; **`--emit-fai`** writes FAI to stdout only (no on-disk `.zfi`).
+**Index modes** on Genome (warm cache; [bench/index/REPORT.md](bench/index/REPORT.md) run `20260706_134943`): **default** mmap ~0.40s, RSS near mapped FASTA size; **`--low-mem`** stream ~1.61s with ~3.4 MB RSS and the same `.zfi` bytes as default; **`--no-dedup`** ~0.38s; **`--emit-fai`** writes FAI to stdout only (no on-disk `.zfi`).
 
-Both default and **`--low-mem`** write the same `.zfi` unless **`--emit-fai`** is set. The gap is how the FASTA is read during the build, not the on-disk format.
-
-> _`mmap` modes show RSS close to the mapped FASTA size because `/usr/bin/time -v` counts mapped pages, not just private heap._
-> See [bench/index/REPORT.md](bench/index/REPORT.md) for full scaling curves and memory analysis.
+> Mapped modes show RSS close to the FASTA size because `/usr/bin/time -v` counts mapped pages, not only private heap. Full curves: [bench/index/REPORT.md](bench/index/REPORT.md).
 
 ### Get: O(1) Region Extraction
 
-| Dataset                | Region          | z-fasta        | samtools   | seqtk    | pyfaidx | Speedup vs samtools |
-| ---------------------- | --------------- | -------------- | ---------- | -------- | ------- | ------------------- |
-| Any (warm cache)       | 100 bp - 10 kbp | **0.7-0.9 ms** | 1.5-1.6 ms | 4-34 ms  | ~60 ms  | **1.8-2.1x**        |
-| Proteome (14 MB)       | 1 kbp region    | 1.3 ms         | 10.9 ms    | 7.2 ms   | 119 ms  | **8.4x**            |
-| Transcriptome (972 MB) | 1 kbp region    | 25.3 ms        | 278.7 ms   | 220.3 ms | 1103 ms | **11.0x**           |
+| Dataset                  | Region          | z-fasta        | samtools   | seqtk    | pyfaidx | Speedup vs samtools |
+| ------------------------ | --------------- | -------------- | ---------- | -------- | ------- | ------------------- |
+| Any (warm cache)         | 100 bp - 10 kbp | **0.7-0.9 ms** | 1.5-1.6 ms | 4-34 ms  | ~60 ms  | **1.8-2.1x**        |
+| Proteome (~13 MiB)       | 1 kbp region    | 1.3 ms         | 10.9 ms    | 7.2 ms   | 119 ms  | **8.4x**            |
+| Transcriptome (~459 MiB) | 1 kbp region    | 25.3 ms        | 278.7 ms   | 220.3 ms | 1103 ms | **11.0x**           |
 
-> Small-region extraction is O(1), but on this host the end-to-end CLI path is startup-dominated below roughly 10 kbp. The historical checked-in benchmark report for v0.2.6 was generated under a faster local benchmark environment than the current reruns; direct side-by-side rebuilds of v0.2.6, v0.2.7, and current `main` on the same machine do not reproduce a material no-flag `get` regression. For very large full-sequence extraction, fastahack can still win on raw write-path overhead; z-fasta stays ahead of samtools across the real-dataset GET cases.
+> Small-region extraction is O(1), but on this host the end-to-end CLI path is startup-dominated below roughly 10 kbp. For very large full-sequence extraction, fastahack can still win on raw write-path overhead; z-fasta stays ahead of samtools across the real-dataset GET cases.
 
-Orientation note: **`--rc`** uses the same mmap-backed extraction path and applies reverse traversal plus complement lookup during emission instead of materializing a second copy of the region.
+**`--rc`** uses the same mmap-backed extraction path and applies reverse traversal plus complement lookup during emission instead of materializing a second copy of the region.
 
-**Multi-region (v0.2.4):** `z-fasta get` accepts multiple regions per call, loading the index once and streaming all results in CLI order.
+**Multi-region:** one call loads the index once and streams results in CLI order ([bench/get/REPORT.md](bench/get/REPORT.md) run `20260709_094913`):
 
 | Regions | z-fasta | samtools | seqtk  | Speedup vs samtools |
 | ------- | ------- | -------- | ------ | ------------------- |
@@ -209,97 +246,75 @@ Orientation note: **`--rc`** uses the same mmap-backed extraction path and appli
 | 50      | 66.7 ms | 292 ms   | 225 ms | **4.4x**            |
 | 100     | 66.7 ms | 279 ms   | 222 ms | **4.2x**            |
 
-> Benchmarked on REAL_Transcriptome.fa (972 MB, 254,070 sequences). Latency is dominated by index resolution and output setup rather than region byte count. seqtk performs a full-file scan per call regardless of region count and is listed for reference only.
->
-> GET and stats benchmark reports (`bench/get/REPORT.md`, `bench/stats/REPORT.md`) are from pre-cleanup runs; perf harnesses are pending rebuild for v0.3.0. Index numbers above are from [bench/index/REPORT.md](bench/index/REPORT.md) run `20260706_134943`.
+> Benchmarked on REAL_Transcriptome.fa. Latency is dominated by index resolution and output setup rather than region byte count. seqtk performs a full-file scan per call and is listed for reference only.
 
 ### Stats: Assembly/Proteome Statistics
 
 | Mode       | Dataset              | z-fasta     | seqkit -a | seqtk comp | Speedup vs seqkit -a |
 | ---------- | -------------------- | ----------- | --------- | ---------- | -------------------- |
-| Index-only | Genome (3.0 GB)      | **0.9 ms**  | 17.45 s   | N/A        | **~19,000x**         |
-| Index-only | Proteome (14 MB)     | **2.9 ms**  | 57.8 ms   | N/A        | **~20x**             |
+| Index-only | Genome (~2.9 GiB)    | **0.9 ms**  | 17.45 s   | N/A        | **~19,000x**         |
+| Index-only | Proteome (~13 MiB)   | **2.9 ms**  | 57.8 ms   | N/A        | **~20x**             |
 | Full scan  | 1 GB single-seq file | **0.78 s**  | 5.62 s    | 2.65 s     | **~7x**              |
-| Full scan  | Proteome (14 MB)     | **11.8 ms** | 57.8 ms   | 93.0 ms    | **~4.9x**            |
+| Full scan  | Proteome (~13 MiB)   | **11.8 ms** | 57.8 ms   | 93.0 ms    | **~4.9x**            |
 
-> Historical stats benchmarks; harness and `bench/stats/REPORT.md` pending rebuild. Index-only mode reads `.zfi` without scanning sequence bytes.
+> See [bench/stats/REPORT.md](bench/stats/REPORT.md). Index-only mode reads the sidecar without scanning sequence bytes.
 
 ### Correctness
 
-- **Index:** edge-case and messy-fixture correctness via `bench/index/run.sh` (`edge_cases/` generated on the fly; `messy_fixtures/` checked in).
-- **Get:** verification in `bench/get/verify.sh` (single/multi-region, BED, names, RC, messy FASTA) against samtools, bedtools, and seqtk where applicable.
-- **Stats:** verification harness pending rebuild (removed in v0.3.0 bench cleanup).
+- **Index:** `bench/index/run.sh` edge cases **25/25**; messy fixtures under `bench/index/messy_fixtures/` plus proteome-derived layouts in `bench/shared/messy_perf/`.
+- **Get:** `bench/get/verify.sh` **409/409** (positional, multi-region, BED, names, RC, messy, low-mem parity) against samtools, bedtools, and seqtk where applicable.
+- **Stats:** `bench/stats/verify.sh` **92/92** (BioPython oracle, index formats, layout twins, messy fixtures, duplicates policy, peer parity).
 - **Unit tests:** `./zig build test` (index, get, stats, complement, BED parser, validator).
-- **Messy FASTA:** z-fasta indexes mixed-width and trailing-whitespace FASTA files that samtools, fastahack, and pyfaidx reject. See [bench/index/REPORT.md](bench/index/REPORT.md) for the compatibility matrix.
+- **Messy FASTA:** z-fasta indexes and extracts mixed-width and trailing-whitespace FASTA that samtools-style FAI tools reject. Details: [bench/index/REPORT.md](bench/index/REPORT.md).
 
 ## Benchmarking
 
 ```bash
-# Download real test data (~4 GB, one-time)
+# Download real test data (~4 GB, one-time; checksummed via datasets.manifest)
 bash bench/shared/download_data.sh
 
-# Index (full suite: correctness, zebrac perf, messy zebrac, report)
 ./zig build -Doptimize=ReleaseFast
+
+# Index: correctness, zebrac perf, messy zebrac, report
 bash bench/index/run.sh
-bash bench/index/run.sh --skip-report         # benchmarks only; report separately
 
-# Get verification (bench perf report pending rebuild)
+# GET: L2 verify, then optional L3 perf + report
 bash bench/get/verify.sh
+bash bench/get/run.sh
 
-# Regenerate index report after a benchmark run
-.venv/bin/python bench/index/generate_report.py   # -> bench/index/REPORT.md
+# Stats: L2 verify, then optional L3 perf + report
+bash bench/stats/verify.sh
+bash bench/stats/run.sh
 ```
 
-See [bench/index/README.md](bench/index/README.md) for index runner flags. GET/stats zebrac suites and baseline snapshots (`bench/save_baseline.py`) were removed in the July 2026 bench cleanup and are planned to return in v0.3.0.
-
-## Output Formats
-
-- **`.zfi`** (default): compact binary index for fast programmatic read/write.
-- **`.fai`** (`--emit-fai`): tab-separated text for uniform, FAI-representable records only; byte-identical to `samtools faidx` for those cases. Non-uniform layouts require default `.zfi` indexing.
+Suite READMEs: [bench/index/README.md](bench/index/README.md). Shared helpers live in `bench/shared/` (`tools.sh`, `download_data.sh`, `install_tools.sh`).
 
 ## Development
 
 ```bash
-# Build (debug)
 ./zig build
-
-# Run all tests (index + get + stats)
 ./zig build test --summary all
-
-# Build optimized binary
 ./zig build -Doptimize=ReleaseFast
+./zig-out/bin/z-fasta --version
 ```
 
 ## Roadmap
 
-**Delivered**
+**Delivered through v0.3.0**
 
-- [x] `z-fasta index`: SIMD-accelerated FASTA indexing (v0.1)
-- [x] `z-fasta get`: O(1) byte-offset sequence extraction (v0.2)
-- [x] `z-fasta stats`: Assembly/proteome statistics with index-only mode (v0.2)
-- [x] Unified benchmark suite with per-module reports and figures (v0.2.2)
-- [x] Expanded tool comparison: pyfaidx, seqtk added across all benchmark modules; messy FASTA compatibility matrix (v0.2.3)
-- [x] Multi-region `get`: single call with N regions, index loads once, results stream in CLI order; ~2x faster than samtools across 1-100 regions (v0.2.4)
-- [x] Zig 0.16.0 migration plus benchmark/report refresh for v0.2.5
-- [x] v0.2.6 performance recovery: lower startup overhead, faster index loading, buffered GET emission, fixed-width stats/index fast paths, and refreshed benchmark reports
-- [x] v0.2.7 BED batch extraction: `--bed`, `--bed -`, `--names`, `--strand-aware`, bounded chunked processing, and verification/benchmark coverage
-- [x] v0.2.8 reverse/complement extraction: `--rc`, `--reverse-only`, `--complement-only`, `--annotate-rc`, RC verification, and integrated RC benchmark/report coverage
-- [x] v0.2.9 overall quality improvements around memory safety, performance optimization, and code cleanup.
+- [x] `index`, `get`, `stats`, and `validate`
+- [x] Preferred `.zfi` with side tables; `.fai` only for representable uniform records
+- [x] Messy FASTA GET via side tables; `validate --fix` for safe rewrites
+- [x] `index --low-mem` streaming path with mmap parity
+- [x] Portable Linux / macOS / Windows mapping and CI smoke
+- [x] Zebrac benchmark suites for index, GET, and stats with verify gates
 
-**Near-term**
+**Deferred (not v0.3.0)**
 
-- [ ] v0.3.0: Validate + Tier 2 benchmarks + release polish
-    - [ ] `z-fasta validate`: single-pass FASTA format checker with line-numbered error/warning output
-    - [ ] Checks: duplicate names, inconsistent line widths, invalid characters, empty sequences, missing terminal newline
-    - [ ] `--strict` flag treats warnings as errors
-    - [ ] Tier 2 benchmark suite: noodles, rust-bio, Fusta, htslib, bedtools comparisons
-    - [ ] Fix GET on messy FASTA (mixed-width and trailing-whitespace files indexed but not retrievable)
-
-**Long-term / Exploratory**
-
-- [ ] `z-fasta digest`: In-silico trypsin digestion for mass spectrometry (v0.4+)
-- [ ] Parallel mmap scanning for multi-threaded indexing on NVMe arrays
-- [ ] Native BGZF / gzip streaming read support
+- [ ] Compressed or BGZF FASTA
+- [ ] Parallel indexing
+- [ ] `z-fasta digest` and other domain-specific analyses
+- [ ] Broader paper-style baseline collection
 
 ## License
 

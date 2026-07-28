@@ -1,81 +1,76 @@
-<!-- markdownlint-disable MD024 -->
+<!-- markdownlint-disable MD007 MD024 -->
+
 # Changelog
 
 All notable changes to z-fasta will be documented in this file.
 
-## [0.3.0] - Unreleased
+## [0.3.0] - 2026-07-28
 
-Feature-parity release: `validate` subcommand, messy-FASTA side tables, streaming `index --low-mem`, RSS caps on `get` and `stats` composition scans, embedded `.zfi` name table, and a complete benchmark suite rebuild (hyperfine to zebrac).
+Hardening and feature-parity release. Adds `validate`, correct `get` on messy FASTA via `.zfi` side tables, streaming `index --low-mem`, portable Linux/macOS/Windows builds, safer indexes and CLI errors, and rebuilt index/get/stats verification. Version is `0.3.0`. **Re-index required** for existing `.zfi` files (embedded names and stronger source identity).
 
 ### Added
 
-- **`.zfi` source identity (`ZFID`)**: production indexes store the FASTA mtime immediately before the `ZFNM` footer. Load rejects size or embedded-mtime mismatch; legacy files without `ZFID` keep the weaker index-mtime check. `.fai` remains mtime-only.
-- **Portable file mapping (`platform.zig`)**: `std.Io.File.MemoryMap` wrapper for FASTA/index views; Windows-compatible `Args.Iterator.initAllocator`; memory advice is a no-op on Windows. Windows mappings use `populate = true` to avoid a Zig 0.16 `NtCreateSection` bug with empty allocation attributes.
-- **`LoadedIndex` ownership**: maps destroyed via `deinit(io)`; arena owns heap (records for `.fai`, name copies, sidecar path); name-map keys are borrows or arena copies; no separate `page_allocator` name-map path.
-- **`.zfi` embedded name table**: sequence names are stored in the index at build time (`ZFNM` footer + name blob). `lookup_full_map` builds a pointer hash over the blob without touching the FASTA header scan path. **Re-index required** for existing `.zfi` files to pick up the new layout.
-- **`.zfi` name footer**: tight 12-byte on-disk footer (4-byte magic + u64 length); legacy 16-byte footers remain readable.
-- **`get` side-table lookup**: binary search on side tables for non-uniform records (O(log L) per base; L is line count).
-- **`z-fasta validate`**: structure, alphabet, and header checks (duplicate names, invalid characters, null bytes, UTF-8 BOM, inconsistent line widths, trailing whitespace, empty sequences, missing terminal newlines, mixed line endings, long headers, schema violations). Output modes: human text; `--json` JSON Lines (`schema_version: "v1"` per event); `--json --summary` aggregate object. `--strict` promotes warnings to errors. `--fix -o <file>` streams rewritten FASTA (does not materialize a full second copy solely to write). Event list is capped at 10000 (`Summary.truncated`); CLI prints retained events then exits with a deterministic error. JSON string fields accept arbitrary FASTA header bytes (invalid UTF-8 becomes `\u00XX`) with no 256-byte message cap. Also `--fix-format-only`, `--schema uniprot`, `--schema refseq`, `--custom-alphabet`, and `--max-header-len N` (default 1024).
-- **`index --low-mem` streaming `.zfi`**: bounded-RAM build path. Output bytes match mmap `index` on simple and messy fixtures.
-- **Index dedup identity**: mmap and streaming share collision-safe name comparison (`NameDedup`); hash may accelerate lookup but never decides alone.
-- **`tests/test_index.zig`**: v0.2 to v0.3 side-table and index compatibility coverage; `.fai` `records_only` vs `lookup_full_map` duplicate-name parity test; malformed-index and stale-identity coverage.
-- **`build.zig`**: `test_validator` target for validator unit tests.
-- **`complement.complementInto`**: chunked IUPAC complement into a caller buffer (shared by forward and reverse GET emit).
-- **`bench/stats/verify.sh`**: L2 stats gate (BioPython oracle, `.zfi`/`.fai`/cross, layout twins messy==uniform, messy fixtures, low-mem, dedup + Duplicates policy, per-tool parity, CLI errors; 92 checks).
-- **`bench/stats/run.sh` + `generate_report.py`**: L3 stats perf (full peers, four-way mode, size + seq-count scaling) and `REPORT.md` / figures. Indexes preloaded; timed work is `stats` / peers only.
-- **Layout twins** (generated under `bench/stats/data/verify/layout_twins/` by `verify.sh`): same-base FASTA layouts (uniform vs mixed widths / trailing ws / blank lines / mixed CRLF) for layout-invariant stats checks.
-- **`tools/noodles_wrapper` / `tools/rustbio_wrapper` `stats`**: clean-FASTA TSV comparison peers with assembly + composition fields (N50/N90/AU, GC skew, protein top-AA) so benches/verify can compare more than sequences/bases. Not messy/side-table capable.
+- **`validate` command**
+  - Checks structure, alphabets, and headers (duplicate names, invalid characters, null bytes, UTF-8 BOM, inconsistent line widths, trailing whitespace, empty sequences, missing terminal newlines, mixed line endings, long headers, optional UniProt/RefSeq schemas).
+  - Human text output; `--json` / `--json --summary`; `--strict`; `--fix -o <file>` (streamed rewrite); `--fix-format-only`; `--custom-alphabet`; `--max-header-len N` (default 1024).
+  - Stops after 10000 reported issues with a deterministic error.
+
+- **Index and `.zfi`**
+  - Default indexes embed sequence names for fast lookup without rescanning FASTA headers.
+  - Stronger source identity on new indexes (FASTA size and mtime); stale or mismatched indexes fail cleanly. Older indexes without the new identity keep the previous weaker check. `.fai` remains mtime-only.
+  - `index --low-mem`: bounded-RAM build with the same `.zfi` output as the default path on supported inputs (including messy FASTA).
+  - Duplicate-name identity uses the real name string on both index paths (not hash-only).
+
+- **Messy FASTA `get`**
+  - Non-uniform records (variable widths, trailing whitespace, blank lines, mixed line endings) extract correctly through `.zfi` side tables.
+  - Uniform records keep O(1) byte-offset extraction.
+
+- **Portability**
+  - Linux, macOS, and Windows share the same command behavior through a portable file-mapping and argument layer (POSIX memory advice is optional and unused on Windows).
 
 ### Changed
 
-- **CLI unknown options**: `index`, `get`, `stats`, and `validate` reject unrecognized `-`/`--` tokens with a nonzero exit instead of treating them as a FASTA path or region.
-- **CLI failure subprocess tests**: failure paths assert exact exit status, exact stderr (usage dumps must match `--help` stdout), and stdout contracts (empty on hard errors; exact `WARNING` text on validate exit 2) instead of substring-only checks.
-- **Required vs optional fixtures**: missing in-repo fixtures fail with `required test fixture missing: <path>`. Required fixture directory walks must index at least one FASTA and must not swallow index errors. Generated `bench/index/edge_cases/` and downloaded `REAL_*` tests skip via `SkipZigTest` with obtain instructions (no silent pass).
-- **Stable gate fixtures** (`tests/data/gates/`): duplicate names, long headers (indexable and over-`u16` reject), invalid UTF-8 headers, large-offset and zero-geometry `.fai`, plus injectable `NameDedupWith` forced-collision check proving identity is string equality.
-- **GET fixture seeds**: `bench/get/run.sh` multi/BED region generation uses SHA-256-derived seeds instead of process-salted Python `hash()`, so regenerated fixtures are stable across processes and platforms.
-- **Formatter and file headers**: `zig fmt --check src tests` is clean (`tests/test_index.zig` / `tests/test_get.zig` drift fixed). Missing `//!` module headers added across `src/` and `tests/` per `plan/STYLE.md` (comments only).
-- **Bench harness prose**: dropped deleted-plan citations (`plan/stats-bench.md`), fixed runner names (`run.sh` / `verify.sh` instead of `run_benchmarks.sh` / `run_tests.sh` / `run_messy_benchmarks.sh`), and corrected `.zfi` preference vs `.fai` compatibility wording in suite scripts and REPORT generators.
-- **Dataset download manifest**: `bench/shared/datasets.manifest` pins URL, uncompressed size, and sha256 for Genome / Transcriptome / Proteome. `download_data.sh` skips matching sizes, verifies after download, and supports `--verify` for full hash checks. Genome and Transcriptome URLs are release-pinned; Proteome uses UniProt `current_release` (refresh the pin when that file moves).
-- **Bench tool verification**: `install_tools.sh` sources `tools.sh`, checks zebrac and the Tier-1/2 peers suites use (no hyperfine requirement), and uses ASCII status lines. rust-bio pin corrected to **2.2** (matches `tools/rustbio_wrapper/Cargo.toml`); unused `bench_tool_tier` / `label` / `supports_suite` helpers removed.
-- **CI-required fixtures**: track `tests/data/gates/*.fai` (were blocked by `*.fai` gitignore). FASTA/FAI use `eol=lf` so Windows checkouts do not inject `\r` (broke the over-u16 header gate). Intentional CRLF / corrupt-index fixtures stay `-text`.
-- **Bench shared dedup**: `get`/`stats` `verify.sh` and `download_data.sh` source `tools.sh` for tool paths; `file_size_bytes` lives in `tools.sh` (zebrac runner no longer redefines it); orphaned `messy_variants/compatibility.csv` removed.
-- **Messy fixture dirs**: tiny index correctness fixtures live in `bench/index/messy_fixtures/`; proteome-derived GET/index perf fixtures live in `bench/shared/messy_perf/` (was both named `messy_variants`). Index messy zebrac cleans leftover `.fai`/`.zfi` beside those FASTA after the suite.
-- **Stats source duplicates**: `Duplicates` reports source-level extras (`sum(k-1)` over repeated names) on full scans. `--index-only` prints `n/a` on a deduplicated index (never a fabricated `0`); with `--no-dedup` it reports repeats retained in the index.
-- **Validator/indexer agreement fixture**: `tests/data/validator_indexer_agreement.fasta` covers variable widths, trailing whitespace, blank lines, mixed CRLF/LF, missing terminal newline, empty records, and a 1025-byte header (near validate `--max-header-len`). Unit test checks validate issue kinds, indexed non-empty names, side tables, and mmap/stream index parity.
-- **`index --low-mem` side-table prefix**: when a record stays formula-uniform for two or more lines and later becomes non-uniform, streaming now reconstructs the uniform prefix rows so `.zfi` side tables match mmap (previously dropped lines after the first).
-- **Default mmap `index`**: writes `.zfi` via `scanZfiIndex()` with in-memory record and side-table arrays (replaces dummy-header streaming write). `scanFastaRecords` passes sequence data and uniform-width flag to the emit callback.
-- **`index --low-mem`**: default output is `{file}.zfi` (was FAI-only in v0.2.x). Shares line-metrics semantics with mmap via `ChunkParseState` and `LineMetricsBuilder`. Removed duplicate `StreamingParseState` parser.
-- **`.fai` fallback loading** (`index_format.zig`): respects `LoadMode` like `.zfi` (name hash map only for `lookup_full_map`). Single-pass mmap parse; record names live in the mmap'd `.fai` via `name_offset` / `name_len`. `LoadedIndex.getRecordName` resolves names for both index sources.
-- **`.fai` `lookup_full_map` loads**: build a pointer hash over mmap'd `.fai` name fields (same fast path as embedded `.zfi` names; no arena copy).
-- **`get` multi-region name lookup**: load `.lookup_full_map` for any N > 1 (and BED/names); N=1 stays `.records_only`. Removes the old 2..15 record-scan cliff on large catalogs.
-- **`get --names` size bound**: `--names` always loads the whole file (up to 512 MiB). Oversize inputs fail with a names-specific error; `--chunk-size` does not stream `--names`. BED keeps chunked streaming by default and the same 512 MiB cap only for `--chunk-size -1`.
-- **`get` dense BED RSS**: sorted/sequential mmap batches drop FASTA pages behind the scan cursor (`MADV_DONTNEED`, 8 MiB batching) so multi-thousand-row dense runs stay near index size.
-- **`get` sparse BED paths**: skip file-order sort on small catalogs, wide median byte gaps, or FASTA under 64 MiB; emit in request order. Large sparse FASTAs (Genome-scale) open a GET-only `std.Io.File` and read via `readPositionalAll` so scattered rows do not retain mmap pages. `MADV_SEQUENTIAL` only when a true sequential scan is active; end-of-batch cache drop only on the mmap path for FASTA over 256 MiB.
-- **`get` uniform emit**: `emitRegionForwardUniform` / `emitRegionBackwardUniform` for fixed-width records; reverse and RC share the same chunked path.
-- **`get` protein-guard sample**: `detectRecordType` samples at most 256 bases per record (was up to 100k).
-- **Sequence-type classification**: shared `stats.detectType` (overflow-safe 90% IUPAC threshold). Stats uses full-file composition; GET `--rc` / `--complement-only` samples 256 bases per record; validate samples up to 100000 bases and exposes `sequence_type` / `type_bases_sampled` / `type_sample_cap` in `--json --summary`.
-- **`stats` composition scan**: walks records in file-offset order and releases FASTA pages behind the cursor with batched `MADV_DONTNEED` (8 MiB stride). Peak RSS drops from ~1:1 file-size residency to near index size (Genome 3006 MB to 242 MB; Transcriptome 474 MB to 24 MB). `.fai` records are sorted by `seq_offset` before release so both index formats share the same scan path. Fixed-width records use SIMD `countCompositionSlice` on base-only slices; side-table records use separate per-line counting. Wall time stays within +10% of the pre-release baseline.
-- **`stats` nucleotide/protein detection**: `detectType` now checks the full composition counts instead of a 100K-byte sample.
-- **`stats` `.fai` loading**: uses `.stats_scan` mode which streams record data without retaining the full `.fai` mapping or all name strings. Shortest and longest names are fetched on demand via recorded line offsets (two seeks per stats invocation), not by rescanning the sidecar from line zero.
-- **`stats` assembly metrics output**: `formatSize` renders on-disk file size in human-readable units (bytes/KB/MB/GB).
-- **Benchmark suite overhaul** (from v0.2.9 hyperfine): zebrac runners `bench/index/run.sh`, `bench/get/run.sh`, and `bench/stats/run.sh` (verify to perf to report) via shared `bench/shared/zebrac_runner.sh`; rewritten `generate_report.py` / `REPORT.md` for index, GET, and stats; GET verify scripts merged into `bench/get/verify.sh` (409 checks). Stats L2 verify (`bench/stats/verify.sh`, 92 checks) plus L3 full/mode/scale report.
-- **`bench/get` RC figure**: plain z-fasta hatched like seqtk (ref); `--rc` / `--complement-only` / `--reverse-only` use distinct shades of brand gold.
-- **`README.md`**: benchmark commands point at `bench/index/run.sh` and the updated verification workflow.
+- **Version and docs**
+  - Package, CLI (`--version` / `-V`), and README current-release banner are `0.3.0`.
+  - README covers all four commands, index format rules, messy FASTA, duplicates, platform support, a support/limits matrix, and verify entry points.
+
+- **Index**
+  - Default and `--low-mem` both write `{file}.zfi` (streaming path is no longer FAI-oriented by default).
+  - `--emit-fai` still writes samtools-compatible `.fai` to stdout only when every record has fixed line geometry; otherwise it fails and points you at `.zfi`.
+  - `.fai` loads follow the same lookup modes as `.zfi` (full name map only when needed).
+
+- **Get**
+  - Multi-region, BED, and names loads use a full name map when more than one region is requested.
+  - `--names` reads the whole file up to 512 MiB; BED stays chunked by default (`--chunk-size -1` keeps the 512 MiB cap).
+  - Lower RSS on dense and sparse BED workloads; protein detection for `--rc` / `--complement-only` samples at most 256 bases per record.
+
+- **Stats**
+  - `Duplicates` reports source-level extras (`k-1` per repeated name) on a full scan.
+  - `--index-only` prints `n/a (run without --index-only)` on a deduplicated index (never a fabricated `0`); with an `--no-dedup` index, reports repeats kept in the index.
+  - Shared sequence-type detection with get and validate; full-scan composition uses less peak RSS on large files.
+  - On-disk file size prints in human-readable units.
+
+- **CLI**
+  - Unknown options are rejected in every command instead of being treated as a FASTA path or region.
+
+- **Benchmarks and datasets**
+  - Index, get, and stats suites use zebrac runners (`bench/*/run.sh`, `bench/*/verify.sh`).
+  - Get verify: 409 checks. Stats verify: 92 checks. Index edge cases: 25/25.
+  - Shared download manifest with size/hash checks (`bench/shared/datasets.manifest`).
+  - Messy correctness fixtures: `bench/index/messy_fixtures/`. Messy perf fixtures: `bench/shared/messy_perf/`.
 
 ### Fixed
 
-- **`.fai` emit contract**: `--emit-fai` refuses non-uniform layouts instead of writing a misleading text index.
-- **`--low-mem` blank-line parity**: trailing blanks (before EOF or the next header) stay uniform like mmap body trim; interior blanks still force side tables. Fixes `MissingSideTable` scan failures on end-of-record blanks.
-- **`get` on messy FASTAs**: correct extraction via side tables. Previously returned garbage or failed silently on mixed-width files.
-- **`.fai` on single-region GET**: no longer always builds a full name hash map (fixed large slowdown vs `.zfi` on transcriptome-scale indexes).
-- **`index --low-mem`**: skip throwaway side-table work on uniform records (fixes RSS and instruction blow-up on large genomes).
-- **`get` RC / complement wall**: `--rc` and `--complement-only` no longer pay a large protein-guard sample or per-byte complement on the hot path (Genome `--rc`/plain ~1.0x after fix).
-- **`bench/get/run.sh`**: positional perf uses only positional fixture labels (not multi-region lists); region span metadata parsing matches `parseRegion`.
+- `--emit-fai` no longer writes a misleading `.fai` for non-uniform FASTA.
+- `--low-mem` matches default indexing on trailing blank lines and no longer blows RSS on large uniform genomes.
+- `get` on messy FASTA returns the correct sequence (no garbage or silent failure).
+- Single-region `.fai` get is much faster on large catalogs (no unnecessary full name map).
+- `--rc` / `--complement-only` no longer pay a large per-call protein-guard or complement cost on the hot path.
 
 ### Removed
 
-- **Legacy benchmark tooling** (replaced by zebrac overhaul): `bench/wrappers/`, hyperfine `run_benchmarks.sh` runners, `bench/index/run_tests.sh`, split GET verify scripts, baseline snapshot scripts; stats runner/report (`bench/stats/verify_stats.py`). `bench/baselines/BASELINES.md` keeps the v2 schema for when snapshots return.
-- `bench/index/results/figures/scaling_seqs.png` and `speedup.png` (legacy figures).
+- Old hyperfine-based benchmark runners and wrappers, replaced by the zebrac suites above.
+- Obsolete index report figures `scaling_seqs.png` and `speedup.png`.
 
 ## [0.2.9] - 2026-06-24
 
