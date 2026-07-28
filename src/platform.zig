@@ -16,7 +16,12 @@ pub const Advice = enum {
     dont_need,
 };
 
-/// Owns a whole-file mapping created with `.populate = false`.
+/// Owns a whole-file mapping.
+///
+/// On POSIX, `.populate = false` keeps pages lazy. On Windows, Zig 0.16's
+/// `NtCreateSection` path passes `{ .COMMIT = populate }` as allocation
+/// attributes; `populate = false` yields attributes 0 and
+/// `STATUS_INVALID_PARAMETER` (0xc00000f4), so Windows must use `populate = true`.
 pub const FileView = struct {
     map: std.Io.File.MemoryMap,
 
@@ -24,7 +29,7 @@ pub const FileView = struct {
         const map = file.createMemoryMap(io, .{
             .len = len,
             .protection = .{ .read = true, .write = false },
-            .populate = false,
+            .populate = builtin.os.tag == .windows,
         }) catch return error.MmapFailed;
         return .{ .map = map };
     }

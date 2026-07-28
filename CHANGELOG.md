@@ -10,7 +10,7 @@ Feature-parity release: `validate` subcommand, messy-FASTA side tables, streamin
 ### Added
 
 - **`.zfi` source identity (`ZFID`)**: production indexes store the FASTA mtime immediately before the `ZFNM` footer. Load rejects size or embedded-mtime mismatch; legacy files without `ZFID` keep the weaker index-mtime check. `.fai` remains mtime-only.
-- **Portable file mapping (`platform.zig`)**: `std.Io.File.MemoryMap` wrapper for FASTA/index views; Windows-compatible `Args.Iterator.initAllocator`; memory advice is a no-op on Windows.
+- **Portable file mapping (`platform.zig`)**: `std.Io.File.MemoryMap` wrapper for FASTA/index views; Windows-compatible `Args.Iterator.initAllocator`; memory advice is a no-op on Windows. Windows mappings use `populate = true` to avoid a Zig 0.16 `NtCreateSection` bug with empty allocation attributes.
 - **`.zfi` embedded name table**: sequence names are stored in the index at build time (`ZFNM` footer + name blob). `lookup_full_map` builds a pointer hash over the blob without touching the FASTA header scan path. **Re-index required** for existing `.zfi` files to pick up the new layout.
 - **`.zfi` name footer**: tight 12-byte on-disk footer (4-byte magic + u64 length); legacy 16-byte footers remain readable.
 - **`get` side-table lookup**: binary search on side tables for non-uniform records (O(log L) per base; L is line count).
