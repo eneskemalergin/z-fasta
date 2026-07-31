@@ -1,6 +1,0 @@
->blank_lines empty lines inside sequence should not count as bases
-AAAACCCC
-
-GGGG
-
-TTTTAAAA
