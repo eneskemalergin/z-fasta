@@ -532,10 +532,10 @@ test "validate --fix then index uses uniform O(1) path on crafted messy FASTA" {
     try std.testing.expectEqualStrings(expected, got);
 }
 
-test "validate --fix then index then get on mixed_line_widths fixture" {
+test "validate --fix then index then get on mixed_widths fixture" {
     const broken = try readTestFile(
         std.testing.allocator,
-        "bench/index/messy_fixtures/mixed_line_widths.fasta",
+        "bench/shared/cache/messy_fixtures/mixed_widths.fasta",
     );
     defer std.testing.allocator.free(broken);
 
@@ -566,13 +566,13 @@ test "validate --fix then index then get on mixed_line_widths fixture" {
     try writeZfiForData(allocator, messy_path, broken);
     try writeZfiForData(allocator, fixed_path, fixed);
 
-    const region = "mixed_line_widths:3-24";
+    const region = "mixed_widths:3-24";
     const messy_out = try captureExtractRegion(allocator, messy_path, region);
     const fixed_out = try captureExtractRegion(allocator, fixed_path, region);
     try std.testing.expectEqualStrings(messy_out, fixed_out);
 
     const expected =
-        \\>mixed_line_widths:3-24
+        \\>mixed_widths:3-24
         \\AACCCCGGGGTTTTAAAACCCC
         \\
     ;
@@ -582,7 +582,7 @@ test "validate --fix then index then get on mixed_line_widths fixture" {
 test "validate --fix then index then get on trailing_whitespace fixture" {
     const broken = try readTestFile(
         std.testing.allocator,
-        "bench/index/messy_fixtures/trailing_whitespace.fasta",
+        "bench/shared/cache/messy_fixtures/trailing_whitespace.fasta",
     );
     defer std.testing.allocator.free(broken);
 

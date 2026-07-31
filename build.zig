@@ -87,6 +87,13 @@ pub fn build(b: *std.Build) void {
     });
     const run_test_bed_parser = b.addRunArtifact(test_bed_parser);
 
+    // Messy correctness FASTAs live in gitignored cache; materialize before tests that read them.
+    const gen_messy_fixtures = b.addSystemCommand(&.{
+        "python3",
+        "bench/shared/generate_messy.py",
+        "--fixtures",
+    });
+
     const test_validate_module = b.createModule(.{
         .root_source_file = b.path("tests/test_validate.zig"),
         .target = target,
@@ -98,6 +105,9 @@ pub fn build(b: *std.Build) void {
         .root_module = test_validate_module,
     });
     const run_test_validate = b.addRunArtifact(test_validate);
+
+    run_test_index.step.dependOn(&gen_messy_fixtures.step);
+    run_test_validate.step.dependOn(&gen_messy_fixtures.step);
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_test_index.step);

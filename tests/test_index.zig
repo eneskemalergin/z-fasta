@@ -665,10 +665,10 @@ test "scanZfiIndexStreaming matches mmap on edge cases (optional generated fixtu
 }
 
 test "scanZfiIndexStreaming matches mmap on messy variants" {
-    try requireFixturePath("bench/index/messy_fixtures");
+    try requireFixturePath("bench/shared/cache/messy_fixtures");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    try walkFastaDirZfiParity(arena.allocator(), "bench/index/messy_fixtures", true);
+    try walkFastaDirZfiParity(arena.allocator(), "bench/shared/cache/messy_fixtures", true);
 }
 
 test "scanZfiIndexStreaming matches mmap on REAL references (optional large data)" {
