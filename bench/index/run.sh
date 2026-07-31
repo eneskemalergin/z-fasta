@@ -312,8 +312,15 @@ bench_file() {
     nbytes="$(file_size_bytes "$file")"
 
     zebrac_clear_commands
-    bench_add_command "$section" "$workload" "$zfasta_tool" "z-fasta" "$json_out" \
-        "$clean; $qz index --emit-fai $qf > /dev/null" "$nbytes"
+    if [[ "$mode" == "messy" ]]; then
+        # Production `.zfi` is the messy contract. `--emit-fai` must refuse non-uniform
+        # layouts, so timing emit-fai here falsely marks z-fasta as fail in the matrix.
+        bench_add_command "$section" "$workload" "$zfasta_tool" "z-fasta" "$json_out" \
+            "$clean; $qz index $qf > /dev/null" "$nbytes"
+    else
+        bench_add_command "$section" "$workload" "$zfasta_tool" "z-fasta" "$json_out" \
+            "$clean; $qz index --emit-fai $qf > /dev/null" "$nbytes"
+    fi
 
     if [[ "$bench_mode" != "headline" ]]; then
         bench_add_command "$section" "$workload" "z-fasta-nodedup" "z-fasta" "$json_out" \
