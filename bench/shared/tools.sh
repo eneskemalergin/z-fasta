@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shared benchmark tool discovery helpers.
 #
-# Source this file from bench/*/run.sh, verify.sh, install_tools.sh, or
+# Source this file from bench/*/run.sh, install_tools.sh, or
 # zebrac_runner.sh / download_data.sh. It defines tool paths, availability
 # checks, version helpers, and small path utilities.
 
@@ -103,4 +103,28 @@ bench_tool_version() {
 file_size_bytes() {
     local path="$1"
     stat --printf='%s' "$path" 2>/dev/null || stat -f '%z' "$path" 2>/dev/null || echo 0
+}
+
+# Generate messy layouts into bench/shared/cache/ (fixtures and/or perf).
+# Usage: bench_ensure_messy [--force] --fixtures|--perf|--fixtures --perf
+bench_ensure_messy() {
+    local py
+    if [[ -x "$PROJECT_ROOT/.venv/bin/python" ]]; then
+        py="$PROJECT_ROOT/.venv/bin/python"
+    else
+        py=python3
+    fi
+    "$py" "$BENCH_SHARED_DIR/generate_messy.py" "$@"
+}
+
+# Generate synthetic scaling FASTAs into bench/shared/cache/scaling/.
+# Usage: bench_ensure_scaling [--force] [--clean-legacy] [--mode all|size|seq]
+bench_ensure_scaling() {
+    local py
+    if [[ -x "$PROJECT_ROOT/.venv/bin/python" ]]; then
+        py="$PROJECT_ROOT/.venv/bin/python"
+    else
+        py=python3
+    fi
+    "$py" "$BENCH_SHARED_DIR/generate_scaling.py" "$@"
 }
