@@ -1857,9 +1857,13 @@ PY
         if [[ ! -f "$messy_fasta" ]]; then
             echo "  preparing $name (copy + validate --fix + index)..."
             cp "$src" "$messy_fasta"
-            "$ZFASTA" validate --fix -o "$uniform_fasta" "$messy_fasta" > /dev/null 2>&1
-            "$ZFASTA" index "$messy_fasta" > /dev/null
-            "$ZFASTA" index "$uniform_fasta" > /dev/null
+            # stdout is the event dump (can be huge); keep stderr so real failures surface.
+            if ! "$ZFASTA" validate --fix -o "$uniform_fasta" "$messy_fasta" >/dev/null; then
+                echo "error: validate --fix failed for $name" >&2
+                exit 1
+            fi
+            "$ZFASTA" index "$messy_fasta" >/dev/null
+            "$ZFASTA" index "$uniform_fasta" >/dev/null
         fi
     done < <(python3 - "$MESSY_PERF_JSON" <<'PY'
 import json, sys
