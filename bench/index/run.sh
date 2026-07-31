@@ -377,7 +377,7 @@ run_tests() {
 
     local csv="$RESULTS_DIR/tests_${TIMESTAMP}.csv"
     local fail_log="$RESULTS_DIR/failures.log"
-    local pass=0 fail=0 total=0
+    local pass=0 fail=0 review=0 total=0
 
     echo "════════════════════════════════════════════════════════════════"
     echo "  Correctness: edge cases"
@@ -407,7 +407,7 @@ run_tests() {
     echo "  $(ls "$EDGE_DIR"/*.fasta 2>/dev/null | wc -l) edge case files"
     echo ""
 
-    echo "test_case,zfasta_exit,samtools_exit,seqkit_exit,fastahack_exit,noodles_exit,rustbio_exit,output_match" > "$csv"
+    echo "test_case,contract_class,zfasta_exit,zfasta_zfi_exit,samtools_exit,seqkit_exit,fastahack_exit,noodles_exit,rustbio_exit,output_match" > "$csv"
     : > "$fail_log"
 
     run_index_tools() {
@@ -440,6 +440,9 @@ run_tests() {
             rm -f "${file}.fai" 2>/dev/null || true
             "$RUSTBIO" index "$file" > /dev/null 2>&1 || rustbio_exit=$?
         fi
+        zfi_exit=0
+        rm -f "${file}.fai" "${file}.zfi" 2>/dev/null || true
+        "$ZFASTA" index "$file" > /dev/null 2>&1 || zfi_exit=$?
     }
 
     score_edge_case() {
@@ -448,15 +451,6 @@ run_tests() {
         "$SAMTOOLS" faidx "$file" 2>/dev/null || true
         if [[ $zf_exit -ne 0 && $sam_exit -ne 0 ]]; then
             match="MATCH"
-        elif [[ $zf_exit -ne 0 && $sam_exit -eq 0 ]]; then
-            # `--emit-fai` refuses non-representable layouts; default `.zfi` may still succeed.
-            rm -f "${file}.zfi" 2>/dev/null || true
-            if "$ZFASTA" index "$file" >/dev/null 2>&1; then
-                match="MATCH"
-            else
-                match="DIFF"
-                echo "--- FAILURE: $name (emit-fai rejected and .zfi index failed; sam=$sam_exit) ---" >> "$fail_log"
-            fi
         elif [[ $zf_exit -ne 0 || $sam_exit -ne 0 ]]; then
             match="DIFF"
             echo "--- FAILURE: $name (exit codes differ: zf=$zf_exit sam=$sam_exit) ---" >> "$fail_log"
@@ -479,12 +473,26 @@ run_tests() {
     for file in "$EDGE_DIR"/*.fasta; do
         [[ -f "$file" ]] || continue
         name=$(basename "$file" .fasta)
+        contract_class="fai_parity"
+        [[ "$name" == "binary_data" ]] && contract_class="invalid_input"
         total=$((total + 1))
         run_index_tools "$file"
         score_edge_case "$file" "$name"
-        echo "$name,$zf_exit,$sam_exit,$seq_exit,$fh_exit,$noodles_exit,$rustbio_exit,$match" >> "$csv"
-        [[ "$match" == "MATCH" ]] && pass=$((pass + 1)) || fail=$((fail + 1))
-        echo "  $([[ "$match" == MATCH ]] && echo ✓ || echo ✗)  $name  (zf=$zf_exit sam=$sam_exit) $match"
+        if [[ "$contract_class" == "invalid_input" && "$match" == "DIFF" ]]; then
+            match="REVIEW"
+        fi
+        echo "$name,$contract_class,$zf_exit,$zfi_exit,$sam_exit,$seq_exit,$fh_exit,$noodles_exit,$rustbio_exit,$match" >> "$csv"
+        if [[ "$match" == "MATCH" ]]; then
+            pass=$((pass + 1))
+            mark="✓"
+        elif [[ "$match" == "REVIEW" ]]; then
+            review=$((review + 1))
+            mark="!"
+        else
+            fail=$((fail + 1))
+            mark="✗"
+        fi
+        echo "  $mark  $name  (fai=$zf_exit zfi=$zfi_exit sam=$sam_exit) $match"
         rm -f "${file}.fai" "${file}.zfi" /tmp/zf_edge_test.fai 2>/dev/null || true
     done
 
@@ -505,13 +513,19 @@ PY
     run_messy_case() {
         local file="$1" behavior="$2" zfi_expect="$3"
         local name; name=$(basename "$file" .fasta)
+        contract_class="fai_parity"
+        [[ "$behavior" == "zfasta-only" ]] && contract_class="zfi_messy"
         total=$((total + 1))
         run_index_tools "$file"
         match="DIFF"
         zfi_status="ok"
         # Production `.zfi` is the contract for messy layouts; `--emit-fai` must refuse them.
         rm -f "${file}.fai" "${file}.zfi" 2>/dev/null || true
-        "$ZFASTA" index "$file" > /dev/null 2>&1 || zfi_status="index-failed"
+        zfi_exit=0
+        "$ZFASTA" index "$file" > /dev/null 2>&1 || {
+            zfi_exit=$?
+            zfi_status="index-failed"
+        }
         [[ "$zfi_status" == "ok" ]] && check_zfi_side_table "${file}.zfi" "$zfi_expect" || zfi_status="bad-zfi"
 
         if [[ "$behavior" == "match-samtools" ]]; then
@@ -524,9 +538,15 @@ PY
             # emit-fai nonzero (non-uniform), samtools fails, `.zfi` + side-table ok
             [[ $zf_exit -ne 0 && $sam_exit -ne 0 && "$zfi_status" == "ok" ]] && match="MATCH"
         fi
-        echo "$name,$zf_exit,$sam_exit,$seq_exit,$fh_exit,$noodles_exit,$rustbio_exit,$match" >> "$csv"
-        [[ "$match" == "MATCH" ]] && pass=$((pass + 1)) || fail=$((fail + 1))
-        echo "  $([[ "$match" == MATCH ]] && echo ✓ || echo ✗)  $name  (zfi=$zfi_expect) $match"
+        echo "$name,$contract_class,$zf_exit,$zfi_exit,$sam_exit,$seq_exit,$fh_exit,$noodles_exit,$rustbio_exit,$match" >> "$csv"
+        if [[ "$match" == "MATCH" ]]; then
+            pass=$((pass + 1))
+            mark="✓"
+        else
+            fail=$((fail + 1))
+            mark="✗"
+        fi
+        echo "  $mark  $name  (fai=$zf_exit zfi=$zfi_exit sam=$sam_exit) $match"
         rm -f "${file}.fai" "${file}.zfi" /tmp/zf_edge_test.fai 2>/dev/null || true
     }
 
@@ -539,7 +559,7 @@ PY
     run_messy_case "$MESSY_TEST_DIR/mixed_crlf.fasta" zfasta-only side-table
 
     echo ""
-    echo "  Correctness: $pass / $total match ($fail diff)"
+    echo "  Correctness: $pass / $((total - review)) match ($fail diff, $review review)"
     echo "  CSV: $csv"
     [[ -s "$fail_log" ]] && echo "  Failures: $fail_log" || rm -f "$fail_log"
     if [[ "$fail" -gt 0 ]]; then

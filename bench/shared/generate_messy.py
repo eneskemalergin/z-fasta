@@ -29,6 +29,7 @@ MESSY_JSON = ROOT / "bench/get/messy_perf.json"
 TITIN = "sp|Q8WZ42|TITIN_HUMAN"
 WIDTHS = (40, 60, 70, 80, 100)
 PERF_VARIANTS = ("mixed_widths", "trailing_whitespace", "mixed_crlf", "all_messy")
+PERF_LAYOUT_VERSION = "messy-perf.v2"
 
 # Exact correctness fixtures (shared vocabulary). Edit here, then --force.
 FIXTURES: dict[str, bytes] = {
@@ -104,6 +105,10 @@ def wrap_fixed(seq: str, width: int = 60) -> list[str]:
     return [seq[i : i + width] for i in range(0, len(seq), width)]
 
 
+def add_mixed_endings(lines: list[str]) -> list[str]:
+    return [line + "\r" if i % 2 == 0 else line for i, line in enumerate(lines)]
+
+
 def maybe_trail(lines: list[str], rng: random.Random, p: float = 0.3) -> list[str]:
     out: list[str] = []
     for line in lines:
@@ -170,6 +175,7 @@ def generate_fixtures(*, force: bool) -> None:
 def perf_stamp(titin_len: int, max_span_end: int) -> str:
     stat = PROTEOME.stat()
     return (
+        f"layout_version={PERF_LAYOUT_VERSION}\n"
         f"proteome={PROTEOME.resolve()}\n"
         f"proteome_size={stat.st_size}\n"
         f"proteome_mtime_ns={stat.st_mtime_ns}\n"
@@ -225,13 +231,16 @@ def generate_perf(*, force: bool) -> None:
     write_records(
         PERF_DIR / "mixed_crlf.fasta",
         records,
-        line_fn=lambda s: wrap_fixed(s),
-        newline="\r\n",
+        line_fn=lambda s: add_mixed_endings(wrap_fixed(s)),
+        newline="\n",
     )
     write_records(
         PERF_DIR / "all_messy.fasta",
         records,
-        line_fn=lambda s: maybe_trail(wrap_mixed(s, all_rng), trail_all_rng),
+        line_fn=lambda s: add_mixed_endings(
+            maybe_trail(wrap_mixed(s, all_rng), trail_all_rng)
+        ),
+        newline="\n",
     )
 
     PERF_STAMP.write_text(perf_stamp(tlen, need), encoding="utf-8")
