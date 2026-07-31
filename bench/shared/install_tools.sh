@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify benchmark tools used by bench/*/run.sh and verify.sh.
+# Verify benchmark tools used by bench/*/run.sh.
 #
 # Paths and version helpers come from tools.sh (single source of truth).
 # Optional: install the pinned pyfaidx into .venv when missing.
@@ -21,7 +21,7 @@ ok() { printf '  [ok] %s\n' "$*"; }
 warn() { printf '  [warn] %s\n' "$*"; }
 fail() { printf '  [fail] %s\n' "$*"; }
 
-# Tools every L3 suite path expects. Missing any exits nonzero.
+# Tools every full suite path expects. Missing any exits nonzero.
 REQUIRED_TOOLS=(
     z-fasta
     zebrac

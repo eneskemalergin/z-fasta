@@ -2965,7 +2965,7 @@ def md_messy_section(df: pd.DataFrame, nums: ReportCounters) -> str:
     t_matrix = nums.next_table()
     blocks = [
         (
-            "Proteome-derived fixtures in `bench/shared/messy_perf/`. Each cell is zebrac "
+            "Proteome-derived fixtures in `bench/shared/cache/messy_perf/`. Each cell is zebrac "
             "with `--allow-failures` (repeated samples, not a single exit check)."
         ),
         (
@@ -2987,7 +2987,7 @@ def md_messy_section(df: pd.DataFrame, nums: ReportCounters) -> str:
         md_messy_table(df),
         (
             f"**Reading Table {t_matrix}**\n"
-            "- Rows: messy variant names (`all_messy`, `crlf_endings`, `mixed_widths`, "
+            "- Rows: messy variant names (`all_messy`, `mixed_crlf`, `mixed_widths`, "
             "`trailing_whitespace`).\n"
             "- Columns: tools in fixed order (z-fasta, samtools, noodles, rust-bio, fastahack, "
             "pyfaidx when present).\n"

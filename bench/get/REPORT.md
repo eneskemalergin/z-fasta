@@ -1114,7 +1114,7 @@ z-fasta default (`.zfi`) vs `.fai` lane on **1kbp_mid**. The `.fai` lane stashes
 
 ## Messy FASTA GET (z-fasta only)
 
-Paired `get` on proteome-derived messy fixtures in `bench/shared/messy_perf/` (4 layout variants, ~20k sequences each). Each workload extracts the same TITIN sub-regions from a **uniform** (`validate --fix`) and **messy** (side-table `.zfi`) copy of each file. Spans are defined in `bench/get/messy_perf.json`. Index build stays outside zebrac. Zebrac used **50** samples, **10** warmup, **30000 ms** minimum per lane. Peers are omitted.
+Paired `get` on proteome-derived messy fixtures in `bench/shared/cache/messy_perf/` (4 layout variants, ~20k sequences each). Each workload extracts the same TITIN sub-regions from a **uniform** (`validate --fix`) and **messy** (side-table `.zfi`) copy of each file. Spans are defined in `bench/get/messy_perf.json`. Index build stays outside zebrac. Zebrac used **50** samples, **10** warmup, **30000 ms** minimum per lane. Peers are omitted.
 
 **Why ratio charts:** Figures plot **messy / uniform**; dashed line = parity (1.0×). Figure 12 quotes the headline span `titin_mid`. Figure 13 summarizes all spans (median bar, min-max whiskers, `titin_mid` diamond) to show overhead tracks layout type, not extraction length. Collapsible Table below has per-span microseconds and ratios.
 
@@ -1130,10 +1130,10 @@ Paired `get` on proteome-derived messy fixtures in `bench/shared/messy_perf/` (4
 | trailing_whitespace | titin_10k | sp&#124;Q8WZ42&#124;TITIN_HUMAN:1-10000     | 10000 | 10 kbp N-terminal on TITIN                        |          |
 | trailing_whitespace | titin_mid | sp&#124;Q8WZ42&#124;TITIN_HUMAN:500-2500    |  2001 | 2 kbp interior slice (headline side-table stress) | yes      |
 | trailing_whitespace | titin_40k | sp&#124;Q8WZ42&#124;TITIN_HUMAN:10000-50000 | 40001 | 40 kbp mid-protein slice                          |          |
-| crlf_endings        | titin_1k  | sp&#124;Q8WZ42&#124;TITIN_HUMAN:1-1000      |  1000 | 1 kbp N-terminal on TITIN                         |          |
-| crlf_endings        | titin_10k | sp&#124;Q8WZ42&#124;TITIN_HUMAN:1-10000     | 10000 | 10 kbp N-terminal on TITIN                        |          |
-| crlf_endings        | titin_mid | sp&#124;Q8WZ42&#124;TITIN_HUMAN:500-2500    |  2001 | 2 kbp interior slice (headline side-table stress) | yes      |
-| crlf_endings        | titin_40k | sp&#124;Q8WZ42&#124;TITIN_HUMAN:10000-50000 | 40001 | 40 kbp mid-protein slice                          |          |
+| mixed_crlf        | titin_1k  | sp&#124;Q8WZ42&#124;TITIN_HUMAN:1-1000      |  1000 | 1 kbp N-terminal on TITIN                         |          |
+| mixed_crlf        | titin_10k | sp&#124;Q8WZ42&#124;TITIN_HUMAN:1-10000     | 10000 | 10 kbp N-terminal on TITIN                        |          |
+| mixed_crlf        | titin_mid | sp&#124;Q8WZ42&#124;TITIN_HUMAN:500-2500    |  2001 | 2 kbp interior slice (headline side-table stress) | yes      |
+| mixed_crlf        | titin_40k | sp&#124;Q8WZ42&#124;TITIN_HUMAN:10000-50000 | 40001 | 40 kbp mid-protein slice                          |          |
 | all_messy           | titin_1k  | sp&#124;Q8WZ42&#124;TITIN_HUMAN:1-1000      |  1000 | 1 kbp N-terminal on TITIN                         |          |
 | all_messy           | titin_10k | sp&#124;Q8WZ42&#124;TITIN_HUMAN:1-10000     | 10000 | 10 kbp N-terminal on TITIN                        |          |
 | all_messy           | titin_mid | sp&#124;Q8WZ42&#124;TITIN_HUMAN:500-2500    |  2001 | 2 kbp interior slice (headline side-table stress) | yes      |
@@ -1155,9 +1155,9 @@ Paired `get` on proteome-derived messy fixtures in `bench/shared/messy_perf/` (4
 | trailing_whitespace | titin_mid | wall time ×    | 2368.9 µs | 2845.9 µs | 1.201×          |
 | trailing_whitespace | titin_mid | peak RSS ×     | 4.03 MB   | 7.95 MB   | 1.974×          |
 | trailing_whitespace | titin_mid | minor faults × | 314       | 320       | 1.019×          |
-| crlf_endings        | titin_mid | wall time ×    | 2382.4 µs | 2336.6 µs | 0.981×          |
-| crlf_endings        | titin_mid | peak RSS ×     | 4.03 MB   | 3.40 MB   | 0.844×          |
-| crlf_endings        | titin_mid | minor faults × | 313       | 315       | 1.006×          |
+| mixed_crlf        | titin_mid | wall time ×    | 2382.4 µs | 2336.6 µs | 0.981×          |
+| mixed_crlf        | titin_mid | peak RSS ×     | 4.03 MB   | 3.40 MB   | 0.844×          |
+| mixed_crlf        | titin_mid | minor faults × | 313       | 315       | 1.006×          |
 | all_messy           | titin_mid | wall time ×    | 2348.2 µs | 2834.7 µs | 1.207×          |
 | all_messy           | titin_mid | peak RSS ×     | 4.03 MB   | 7.67 MB   | 1.904×          |
 | all_messy           | titin_mid | minor faults × | 314       | 320       | 1.019×          |
@@ -1197,10 +1197,10 @@ Paired `get` on proteome-derived messy fixtures in `bench/shared/messy_perf/` (4
 | trailing_whitespace | titin_10k | sp&#124;Q8WZ42&#124;TITIN_HUMAN:1-10000     | 10000 | 2361.3 µs ±103.2 | 2901.3 µs ±181.8 | 1.229× | 1.974× | 1.018×   |
 | trailing_whitespace | titin_mid | sp&#124;Q8WZ42&#124;TITIN_HUMAN:500-2500    |  2001 | 2368.9 µs ±81.8  | 2845.9 µs ±128.0 | 1.201× | 1.974× | 1.019×   |
 | trailing_whitespace | titin_40k | sp&#124;Q8WZ42&#124;TITIN_HUMAN:10000-50000 | 40001 | 2395.4 µs ±93.4  | 2874.7 µs ±131.6 | 1.200× | 1.974× | 1.019×   |
-| crlf_endings        | titin_1k  | sp&#124;Q8WZ42&#124;TITIN_HUMAN:1-1000      |  1000 | 2356.2 µs ±92.8  | 2360.5 µs ±111.6 | 1.002× | 0.843× | 1.000×   |
-| crlf_endings        | titin_10k | sp&#124;Q8WZ42&#124;TITIN_HUMAN:1-10000     | 10000 | 2360.3 µs ±97.0  | 2403.7 µs ±122.1 | 1.018× | 0.838× | 1.001×   |
-| crlf_endings        | titin_mid | sp&#124;Q8WZ42&#124;TITIN_HUMAN:500-2500    |  2001 | 2382.4 µs ±145.8 | 2336.6 µs ±97.6  | 0.981× | 0.844× | 1.006×   |
-| crlf_endings        | titin_40k | sp&#124;Q8WZ42&#124;TITIN_HUMAN:10000-50000 | 40001 | 2398.2 µs ±118.2 | 2372.6 µs ±118.0 | 0.989× | 0.841× | 0.998×   |
+| mixed_crlf        | titin_1k  | sp&#124;Q8WZ42&#124;TITIN_HUMAN:1-1000      |  1000 | 2356.2 µs ±92.8  | 2360.5 µs ±111.6 | 1.002× | 0.843× | 1.000×   |
+| mixed_crlf        | titin_10k | sp&#124;Q8WZ42&#124;TITIN_HUMAN:1-10000     | 10000 | 2360.3 µs ±97.0  | 2403.7 µs ±122.1 | 1.018× | 0.838× | 1.001×   |
+| mixed_crlf        | titin_mid | sp&#124;Q8WZ42&#124;TITIN_HUMAN:500-2500    |  2001 | 2382.4 µs ±145.8 | 2336.6 µs ±97.6  | 0.981× | 0.844× | 1.006×   |
+| mixed_crlf        | titin_40k | sp&#124;Q8WZ42&#124;TITIN_HUMAN:10000-50000 | 40001 | 2398.2 µs ±118.2 | 2372.6 µs ±118.0 | 0.989× | 0.841× | 0.998×   |
 | all_messy           | titin_1k  | sp&#124;Q8WZ42&#124;TITIN_HUMAN:1-1000      |  1000 | 2365.6 µs ±93.2  | 2810.7 µs ±171.5 | 1.188× | 1.904× | 1.019×   |
 | all_messy           | titin_10k | sp&#124;Q8WZ42&#124;TITIN_HUMAN:1-10000     | 10000 | 2366.4 µs ±107.0 | 2808.9 µs ±113.3 | 1.187× | 1.904× | 1.015×   |
 | all_messy           | titin_mid | sp&#124;Q8WZ42&#124;TITIN_HUMAN:500-2500    |  2001 | 2348.2 µs ±79.3  | 2834.7 µs ±138.9 | 1.207× | 1.904× | 1.019×   |

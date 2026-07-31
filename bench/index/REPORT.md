@@ -822,7 +822,7 @@ Structural edge-case fixtures from `bench/index/run.sh` (edge_cases/). Each row 
 
 ## Messy FASTA Compatibility
 
-Proteome-derived fixtures in `bench/shared/messy_perf/`. Each cell is zebrac with `--allow-failures` (repeated samples, not a single exit check).
+Proteome-derived fixtures in `bench/shared/cache/messy_perf/`. Each cell is zebrac with `--allow-failures` (repeated samples, not a single exit check).
 
 **What z-fasta handles:** irregular line wrapping, trailing whitespace on sequence lines, blank lines between records, and mixed CRLF/LF. Those are common export glitches, not arbitrary byte corruption. z-fasta records true sequence boundaries in a side-table `.zfi` instead of assuming every line in a record has the same width.
 
@@ -833,13 +833,13 @@ Proteome-derived fixtures in `bench/shared/messy_perf/`. Each cell is zebrac wit
 | Variant             | z-fasta | samtools | noodles | rust-bio | fastahack | pyfaidx | seqkit |
 | :------------------ | :------ | :------- | :------ | :------- | :-------- | :------ | :----- |
 | all_messy           | ok      | fail     | fail    | fail     | fail      | fail    | fail   |
-| crlf_endings        | ok      | ok       | ok      | ok       | ok        | ok      | ok     |
+| mixed_crlf        | ok      | ok       | ok      | ok       | ok        | ok      | ok     |
 | mixed_widths        | ok      | fail     | fail    | fail     | fail      | fail    | fail   |
 | trailing_whitespace | ok      | fail     | fail    | fail     | fail      | fail    | fail   |
 
 **Reading Table 29**
 
-- Rows: messy variant names (`all_messy`, `crlf_endings`, `mixed_widths`, `trailing_whitespace`).
+- Rows: messy variant names (`all_messy`, `mixed_crlf`, `mixed_widths`, `trailing_whitespace`).
 - Columns: tools in fixed order (z-fasta, samtools, noodles, rust-bio, fastahack, pyfaidx when present).
 - Refresh with `bash bench/index/run.sh` (messy zebrac section).
 

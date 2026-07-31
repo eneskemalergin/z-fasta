@@ -16,7 +16,7 @@ This report times `z-fasta stats` against clean-FASTA peers on the shared REAL d
 
 **Index policy:** sidecars are preloaded once. Timed commands only run `stats` / peer tools; index _build_ is outside this wall (see `bench/index/REPORT.md`).
 
-L2 verify reported **92** passing checks before perf (see `bench/stats/verify.sh`).
+Correctness reported **95** passing checks before perf (see `bench/stats/run.sh`).
 
 Correctness values (N50, GC, ...) are gated by verify against BioPython (`bench/stats/oracle.py`), not re-tabulated here.
 
@@ -44,7 +44,7 @@ z-fasta has two stats modes. **Full** (`z-fasta stats`) prints assembly metrics 
 
 **How to read the benches:** Full-stats peers are fair for composition work. Indexed lanes in mode / scaling charts are lengths-only (near-flat vs file size). seqkit also reports Q1/Q3/gaps/Q20 (FASTA/Q QC); those are out of scope for z-fasta. Wrappers are clean-FASTA peers only (no messy / side-table path).
 
-Oracle: [`bench/stats/oracle.py`](oracle.py). Verify: [`bench/stats/verify.sh`](verify.sh).
+Oracle: [`bench/stats/oracle.py`](oracle.py). Verify: [`bench/stats/run.sh`](run.sh) correctness (`run_tests`).
 
 ## Run Provenance
 
@@ -194,7 +194,7 @@ Minor page faults for the same full-stats commands.
 
 ## Scaling: file size
 
-Synthetic FASTAs under `bench/stats/data/` (generated on demand). Indexes preloaded; timed work is composition `stats` / peers only (no `--index-only` here; that lives in Mode Comparison). Two figures per sweep: absolute wall / RSS / faults, then whether the x vs z-fasta gap grows from the smallest fixture to the largest. Per-point x values stay in the collapsible tables.
+Synthetic FASTAs under `bench/shared/cache/scaling/` (generated on demand). Indexes preloaded; timed work is composition `stats` / peers only (no `--index-only` here; that lives in Mode Comparison). Two figures per sweep: absolute wall / RSS / faults, then whether the x vs z-fasta gap grows from the smallest fixture to the largest. Per-point x values stay in the collapsible tables.
 
 **Table 7:** Mean ± stddev wall time by File size (MB) and tool.
 
@@ -426,7 +426,7 @@ Synthetic FASTAs under `bench/stats/data/` (generated on demand). Indexes preloa
 
 ## Scaling: sequence count (fixed 1024 bp)
 
-Synthetic FASTAs under `bench/stats/data/` (generated on demand). Indexes preloaded; timed work is composition `stats` / peers only (no `--index-only` here; that lives in Mode Comparison). Two figures per sweep: absolute wall / RSS / faults, then whether the x vs z-fasta gap grows from the smallest fixture to the largest. Per-point x values stay in the collapsible tables.
+Synthetic FASTAs under `bench/shared/cache/scaling/` (generated on demand). Indexes preloaded; timed work is composition `stats` / peers only (no `--index-only` here; that lives in Mode Comparison). Two figures per sweep: absolute wall / RSS / faults, then whether the x vs z-fasta gap grows from the smallest fixture to the largest. Per-point x values stay in the collapsible tables.
 
 **Table 13:** Mean ± stddev wall time by Sequence count and tool.
 
