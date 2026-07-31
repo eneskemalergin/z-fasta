@@ -31,10 +31,12 @@ tools/zebrac
 tools/*/target/
 
 # Bench: downloads, on-demand fixtures, raw results (keep figures for REPORT.md)
+# Use results/* (not **) so !figures/ can re-include; ** blocks parent re-include.
 bench/*/data/**
 bench/index/edge_cases/
-bench/*/results/**
+bench/*/results/*
 !bench/*/results/figures/
+bench/shared/cache/**
 bench/baselines/
 bench/*/.verify*/
 bench/*/.fixture*/

@@ -492,6 +492,51 @@ test "validate --fix -o matches fixData rewrite" {
     try std.testing.expectEqualStrings(expected, got);
 }
 
+test "validate --fix succeeds after event list truncation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var input: std.ArrayList(u8) = .empty;
+    defer input.deinit(allocator);
+    try input.appendSlice(allocator, ">seq\n");
+    var i: usize = 0;
+    while (i <= validator.max_validate_events) : (i += 1) {
+        try input.appendSlice(allocator, "A \n");
+    }
+
+    var summary = try validator.validateData(allocator, input.items, .{});
+    defer summary.deinit(allocator);
+    try std.testing.expect(summary.truncated);
+
+    const in_path = try writeFastaArtifact(allocator, "validate-fix-truncated-in", input.items);
+    const out_path = try uniqueArtifactPath(allocator, "validate-fix-truncated-out");
+    defer std.Io.Dir.cwd().deleteFile(io, in_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, out_path) catch {};
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const spawn_io = threaded.io();
+
+    const result = try std.process.run(allocator, spawn_io, .{
+        .argv = &.{ ZFASTA_BIN, "validate", "--fix", "-o", out_path, in_path },
+        .stdout_limit = .limited(4 * 1024 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        else => return error.ChildProcessFailed,
+    }
+
+    const fixed = try readTestFile(allocator, out_path);
+    var fixed_summary = try validator.validateData(allocator, fixed, .{});
+    defer fixed_summary.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), fixed_summary.events.items.len);
+}
+
 test "validate --fix then index uses uniform O(1) path on crafted messy FASTA" {
     const broken =
         \\>messy_seq widths and trailing ws
@@ -532,10 +577,10 @@ test "validate --fix then index uses uniform O(1) path on crafted messy FASTA" {
     try std.testing.expectEqualStrings(expected, got);
 }
 
-test "validate --fix then index then get on mixed_line_widths fixture" {
+test "validate --fix then index then get on mixed_widths fixture" {
     const broken = try readTestFile(
         std.testing.allocator,
-        "bench/index/messy_fixtures/mixed_line_widths.fasta",
+        "bench/shared/cache/messy_fixtures/mixed_widths.fasta",
     );
     defer std.testing.allocator.free(broken);
 
@@ -566,13 +611,13 @@ test "validate --fix then index then get on mixed_line_widths fixture" {
     try writeZfiForData(allocator, messy_path, broken);
     try writeZfiForData(allocator, fixed_path, fixed);
 
-    const region = "mixed_line_widths:3-24";
+    const region = "mixed_widths:3-24";
     const messy_out = try captureExtractRegion(allocator, messy_path, region);
     const fixed_out = try captureExtractRegion(allocator, fixed_path, region);
     try std.testing.expectEqualStrings(messy_out, fixed_out);
 
     const expected =
-        \\>mixed_line_widths:3-24
+        \\>mixed_widths:3-24
         \\AACCCCGGGGTTTTAAAACCCC
         \\
     ;
@@ -582,7 +627,7 @@ test "validate --fix then index then get on mixed_line_widths fixture" {
 test "validate --fix then index then get on trailing_whitespace fixture" {
     const broken = try readTestFile(
         std.testing.allocator,
-        "bench/index/messy_fixtures/trailing_whitespace.fasta",
+        "bench/shared/cache/messy_fixtures/trailing_whitespace.fasta",
     );
     defer std.testing.allocator.free(broken);
 

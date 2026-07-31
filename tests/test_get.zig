@@ -437,9 +437,9 @@ test "get on low-mem zfi output for simple.fasta seq1:1-10" {
     try std.testing.expectEqualStrings(expected, got);
 }
 
-test "get on messy mixed_line_widths after low-mem index" {
+test "get on messy mixed_widths after low-mem index" {
     const data =
-        \\>mixed_line_widths internal line widths vary
+        \\>mixed_widths internal line widths vary
         \\AAAACCCCGGGG
         \\TTTTAA
         \\AACCCCGGGGTT
@@ -462,13 +462,13 @@ test "get on messy mixed_line_widths after low-mem index" {
     try writeMmapZfi(allocator, mmap_path, data);
     try writeStreamingZfi(allocator, low_path, data);
 
-    const region = "mixed_line_widths:3-24";
+    const region = "mixed_widths:3-24";
     const mmap_out = try captureExtractRegion(allocator, mmap_path, region);
     const low_out = try captureExtractRegion(allocator, low_path, region);
     try std.testing.expectEqualStrings(mmap_out, low_out);
 
     const expected =
-        \\>mixed_line_widths:3-24
+        \\>mixed_widths:3-24
         \\AACCCCGGGGTTTTAAAACCCC
         \\
     ;

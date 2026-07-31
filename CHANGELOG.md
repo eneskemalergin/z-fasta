@@ -4,6 +4,17 @@
 
 All notable changes to z-fasta will be documented in this file.
 
+## [0.3.1] - Unreleased
+
+### Changed
+
+- **Bench runners:** get and stats correctness live in each suite `run.sh` as inlined `run_tests` (same shape as index). `--skip-tests` / `--skip-verify`, `--skip-benchmarks` / `--skip-perf`; `--skip-messy` skips messy *perf* only.
+- **Messy fixtures:** `python3 bench/shared/generate_messy.py` writes correctness layouts to `bench/shared/cache/messy_fixtures/` and proteome perf layouts to `bench/shared/cache/messy_perf/` (generate-if-missing). Large tracked `shared/messy_perf/*.fasta` and checked-in `index/messy_fixtures/` are gone; cache is gitignored.
+- Shared messy vocabulary: `mixed_widths`, `trailing_whitespace`, `blank_lines`, `mixed_crlf`, `uniform`, `all_messy`.
+- **Scaling fixtures:** `python3 bench/shared/generate_scaling.py` writes into `bench/shared/cache/scaling/` (shared by index and stats; stamp fingerprints params).
+- Shared runner helpers: `bench/shared/runner_common.sh` (sourced by all three suites).
+- Stats correctness count: **95** (was 92 in 0.3.0 docs). Get remains **409**; index edge **25/25**.
+
 ## [0.3.0] - 2026-07-28
 
 Hardening and feature-parity release. Adds `validate`, correct `get` on messy FASTA via `.zfi` side tables, streaming `index --low-mem`, portable Linux/macOS/Windows builds, safer indexes and CLI errors, and rebuilt index/get/stats verification. Version is `0.3.0`. **Re-index required** for existing `.zfi` files (embedded names and stronger source identity).

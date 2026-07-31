@@ -344,7 +344,7 @@ def load_manifest(results_dir: Path) -> dict | None:
 
 def is_incomplete(manifest: dict | None) -> bool:
     if not manifest:
-        return False
+        return True
     sections = manifest.get("sections") or {}
     for key in ("perf_pos", "perf_multi", "perf_bed", "perf_rc"):
         if key not in sections:
@@ -2716,7 +2716,7 @@ def md_overview(manifest: dict | None) -> str:
         "metric) on each REAL dataset present "
         "in this run, RC overhead on nucleotide datasets, and z-fasta messy vs uniform "
         "GET pairs on verify fixtures.",
-        "**Correctness:** `bench/get/verify.sh` (not timed here) checks byte-identical output "
+        "**Correctness:** `bench/get/run.sh` (not timed here) checks byte-identical output "
         "against golden fixtures.",
         "**Tool order in charts:** z-fasta, noodles, rust-bio, samtools, fastahack (on "
         "`full seq`), then reference lanes (seqtk positional; multi seqtk/fastahack loops "
@@ -2741,7 +2741,7 @@ def md_overview(manifest: dict | None) -> str:
     ]
     if manifest and not manifest.get("verify_skipped") and manifest.get("verify_pass"):
         lines.append(
-            f"**Verify:** `bench/get/verify.sh` passed **{manifest['verify_pass']}** checks before this perf run."
+            f"**Verify:** `bench/get/run.sh` correctness passed **{manifest['verify_pass']}** checks before this perf run."
         )
     if manifest and manifest.get("skip_multi"):
         lines.append("_This run skipped multi-region scaling (`skip_multi=true`)._")
@@ -4240,7 +4240,7 @@ def md_messy_section(df: pd.DataFrame, nums, ir, figures_dir: Path, manifest: di
     n_variants = len(cfg["variants"])
     return "\n\n".join(
         [
-            "Paired `get` on proteome-derived messy fixtures in `bench/shared/messy_perf/` "
+            "Paired `get` on proteome-derived messy fixtures in `bench/shared/cache/messy_perf/` "
             f"({n_variants} layout variants, ~20k sequences each). Each workload extracts the same "
             "TITIN sub-regions from a **uniform** (`validate --fix`) and **messy** (side-table "
             f"`.zfi`) copy of each file. Spans are defined in `bench/get/messy_perf.json`. Index "

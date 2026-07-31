@@ -82,7 +82,7 @@ const USAGE =
     \\  --schema NAME            Header schema: uniprot or refseq
     \\  --custom-alphabet CHARS  Override nucleotide/protein alphabet checks
     \\  --max-header-len N       Warn on headers longer than N bytes (default: 1024)
-    \\  Event list stops at 10000 issues (deterministic error). --fix streams to -o.
+    \\  Event list stops at 10000 issues (error without --fix). --fix still streams to -o.
     \\
     \\Examples:
     \\  z-fasta index genome.fa                  Create .zfi binary index

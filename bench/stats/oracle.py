@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stats oracles for bench/stats/verify.sh only. Extend in place; no sibling scripts."""
+"""Stats oracles for bench/stats/run.sh correctness (run_tests) only. Extend in place; no sibling scripts."""
 
 from __future__ import annotations
 

@@ -261,9 +261,9 @@ All timings below are on AMD Ryzen 9 3950X, warm cache, from the checked-in suit
 
 ### Correctness
 
-- **Index:** `bench/index/run.sh` edge cases **25/25**; messy fixtures under `bench/index/messy_fixtures/` plus proteome-derived layouts in `bench/shared/messy_perf/`.
-- **Get:** `bench/get/verify.sh` **409/409** (positional, multi-region, BED, names, RC, messy, low-mem parity) against samtools, bedtools, and seqtk where applicable.
-- **Stats:** `bench/stats/verify.sh` **92/92** (BioPython oracle, index formats, layout twins, messy fixtures, duplicates policy, peer parity).
+- **Index:** `bench/index/run.sh` edge cases **25/25**; messy layouts from `python3 bench/shared/generate_messy.py` into `bench/shared/cache/messy_fixtures/` (correctness) and `messy_perf/` (proteome perf).
+- **Get:** `bench/get/run.sh` correctness **409/409** (positional, multi-region, BED, names, RC, messy, low-mem parity) against samtools, bedtools, and seqtk where applicable.
+- **Stats:** `bench/stats/run.sh` correctness **95/95** (BioPython oracle, index formats, layout twins, messy fixtures, duplicates policy, peer parity).
 - **Unit tests:** `./zig build test` (index, get, stats, complement, BED parser, validator).
 - **Messy FASTA:** z-fasta indexes and extracts mixed-width and trailing-whitespace FASTA that samtools-style FAI tools reject. Details: [bench/index/REPORT.md](bench/index/REPORT.md).
 
@@ -277,17 +277,21 @@ bash bench/shared/download_data.sh
 
 # Index: correctness, zebrac perf, messy zebrac, report
 bash bench/index/run.sh
+# Correctness only:
+bash bench/index/run.sh --skip-benchmarks --skip-messy --skip-report
 
-# GET: L2 verify, then optional L3 perf + report
-bash bench/get/verify.sh
+# GET: correctness, then optional perf + report
 bash bench/get/run.sh
+# Correctness only:
+bash bench/get/run.sh --skip-benchmarks --skip-report
 
-# Stats: L2 verify, then optional L3 perf + report
-bash bench/stats/verify.sh
+# Stats: correctness, then optional perf + report
 bash bench/stats/run.sh
+# Correctness only:
+bash bench/stats/run.sh --skip-benchmarks --skip-report
 ```
 
-Suite READMEs: [bench/index/README.md](bench/index/README.md). Shared helpers live in `bench/shared/` (`tools.sh`, `download_data.sh`, `install_tools.sh`).
+Details: [bench/README.md](bench/README.md). Shared helpers live in `bench/shared/`.
 
 ## Development
 

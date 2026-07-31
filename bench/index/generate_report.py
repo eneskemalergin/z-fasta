@@ -69,6 +69,30 @@ DISPLAY_NAMES = {
     "noodles": "noodles",
     "rustbio-custom-index": "rust-bio",
 }
+EDGE_EXIT_COLUMNS = (
+    "zfasta_exit",
+    "zfasta_zfi_exit",
+    "samtools_exit",
+    "seqkit_exit",
+    "fastahack_exit",
+    "noodles_exit",
+    "rustbio_exit",
+)
+EDGE_EXIT_LABELS = {
+    "zfasta_exit": "z-fasta (.fai)",
+    "zfasta_zfi_exit": "z-fasta (.zfi)",
+    "samtools_exit": "samtools",
+    "seqkit_exit": "seqkit",
+    "fastahack_exit": "fastahack",
+    "noodles_exit": "noodles",
+    "rustbio_exit": "rust-bio",
+}
+EDGE_CONTRACT_CLASSES = {
+    "fai_parity": "FAI parity",
+    "zfi_messy": "ZFI messy support",
+    "invalid_input": "Invalid input review",
+}
+EDGE_MESSY_CASES = {"uniform", "mixed_widths", "trailing_whitespace", "blank_lines", "mixed_crlf"}
 TOOL_ORDER = [
     "z-fasta-default",
     "z-fasta-nodedup",
@@ -220,6 +244,28 @@ def dataset_sort_key(name):
 
 def display_tool(name):
     return DISPLAY_NAMES.get(name, name)
+
+
+def edge_exit_columns(df: pd.DataFrame) -> list[str]:
+    return [column for column in EDGE_EXIT_COLUMNS if column in df.columns]
+
+
+def edge_exit_label(column: str) -> str:
+    return EDGE_EXIT_LABELS.get(column, column)
+
+
+def edge_contract_classes(df: pd.DataFrame) -> pd.Series:
+    if "contract_class" in df.columns:
+        return df["contract_class"]
+
+    def classify(case: str) -> str:
+        if case == "binary_data":
+            return "invalid_input"
+        if case in EDGE_MESSY_CASES and case != "uniform":
+            return "zfi_messy"
+        return "fai_parity"
+
+    return df["test_case"].map(classify)
 
 
 def pivot_with_display_names(pivot: pd.DataFrame) -> pd.DataFrame:
@@ -390,12 +436,12 @@ def discover_latest(results_dir: Path, prefix: str, manifest: dict | None = None
         "scale_seqs_budget": "scale_seqs_budget",
         "scale_seqs_fixed": "scale_seqs_fixed",
     }.get(prefix)
-    if manifest and section_key:
+    if manifest is not None and section_key:
         rel = manifest.get("sections", {}).get(section_key)
-        if rel:
-            candidate = results_dir / rel
-            if candidate.exists():
-                return candidate
+        if not rel:
+            return None
+        candidate = results_dir / rel
+        return candidate if candidate.exists() else None
 
     dirs = sorted(results_dir.glob(f"{prefix}_*"), reverse=True)
     dirs = [d for d in dirs if d.is_dir()]
@@ -537,7 +583,7 @@ def resolve_tool_versions(manifest: dict | None, project_root: Path) -> dict[str
 def is_incomplete_run(manifest: dict | None) -> bool:
     """Protect tracked reports from smoke or partial benchmark runs."""
     if not manifest:
-        return False
+        return True
     if manifest.get("skip_real"):
         return True
     if manifest.get("skip_scaling"):
@@ -1447,13 +1493,10 @@ def fig_zebrac_instructions_per_mib(df: pd.DataFrame, out: Path) -> Path | None:
 
 
 def fig_edge_heatmap(df: pd.DataFrame, out: Path) -> Path:
-    """Heatmap: rows = test cases, columns = tools + expected-behavior match."""
+    """Raw FAI/ZFI exit codes plus the composite contract result."""
     cases = df["test_case"].tolist()
-    tool_cols = [c for c in df.columns if c.endswith("_exit")]
-    tool_labels = [
-        display_tool(c.replace("_exit", "").replace("zfasta", "z-fasta-default").replace("rustbio", "rustbio-custom-index"))
-        for c in tool_cols
-    ]
+    tool_cols = edge_exit_columns(df)
+    tool_labels = [edge_exit_label(column) for column in tool_cols]
 
     n_tools = len(tool_cols)
     match_x = n_tools + 0.3
@@ -1466,14 +1509,15 @@ def fig_edge_heatmap(df: pd.DataFrame, out: Path) -> Path:
         yi = len(cases) - i - 1
         for j, col in enumerate(tool_cols):
             val = df.iloc[i][col]
-            clr = "#4CAF50" if val == 0 else "#F44336"
+            missing = pd.isna(val) or int(val) == 127
+            clr = "#9E9E9E" if missing else "#4CAF50" if int(val) == 0 else "#F44336"
             ax.add_patch(
                 plt.Rectangle((j, yi), 1, 1, facecolor=clr, edgecolor="white", lw=2)
             )
             ax.text(
                 j + 0.5,
                 yi + 0.5,
-                "ok" if val == 0 else "fail",
+                "n/a" if missing else str(int(val)),
                 ha="center",
                 va="center",
                 fontsize=7,
@@ -1482,7 +1526,12 @@ def fig_edge_heatmap(df: pd.DataFrame, out: Path) -> Path:
             )
 
         m = df.iloc[i]["output_match"]
-        clr = "#4CAF50" if m == "MATCH" else "#FF9800"
+        if m == "MATCH":
+            clr, label = "#4CAF50", "Y"
+        elif m == "REVIEW":
+            clr, label = "#7E57C2", "R"
+        else:
+            clr, label = "#FF9800", "N"
         ax.add_patch(
             plt.Rectangle(
                 (match_x, yi), 1, 1, facecolor=clr, edgecolor="white", lw=2
@@ -1491,7 +1540,7 @@ def fig_edge_heatmap(df: pd.DataFrame, out: Path) -> Path:
         ax.text(
             match_x + 0.5,
             yi + 0.5,
-            "Y" if m == "MATCH" else "N",
+            label,
             ha="center",
             va="center",
             fontsize=9,
@@ -1503,7 +1552,7 @@ def fig_edge_heatmap(df: pd.DataFrame, out: Path) -> Path:
     ax.set_ylim(0, len(cases))
     ax.set_xticks([j + 0.5 for j in range(n_tools)] + [match_x + 0.5])
     ax.set_xticklabels(
-        tool_labels + ["Expected"],
+        tool_labels + ["Contract"],
         fontweight="bold",
         rotation=90,
         ha="center",
@@ -1512,15 +1561,17 @@ def fig_edge_heatmap(df: pd.DataFrame, out: Path) -> Path:
     ax.set_yticks([len(cases) - i - 0.5 for i in range(len(cases))])
     ax.set_yticklabels(cases, fontsize=8)
     ax.set_title(
-        "Index Edge Cases: per-tool exit code and expected behavior",
+        "Index Edge Cases: raw exit codes and contract result",
         fontweight="bold",
         pad=12,
     )
 
     patches = [
-        mpatches.Patch(color="#4CAF50", label="Exit 0 / expected"),
+        mpatches.Patch(color="#4CAF50", label="Exit 0 (accepted)"),
         mpatches.Patch(color="#F44336", label="Non-zero exit"),
-        mpatches.Patch(color="#FF9800", label="Unexpected behavior"),
+        mpatches.Patch(color="#9E9E9E", label="Not run"),
+        mpatches.Patch(color="#7E57C2", label="Review"),
+        mpatches.Patch(color="#FF9800", label="Contract mismatch"),
     ]
     ax.legend(handles=patches, loc="upper left", bbox_to_anchor=(1.02, 1), fontsize=8)
     fig.subplots_adjust(bottom=0.28, right=0.82)
@@ -2835,9 +2886,17 @@ def md_zebrac_counters_real_datasets(df: pd.DataFrame, nums: ReportCounters) -> 
     return "\n\n".join(blocks)
 
 
-def load_messy_index(results_dir: Path) -> pd.DataFrame | None:
+def load_messy_index(
+    results_dir: Path, manifest: dict | None = None
+) -> pd.DataFrame | None:
     """Load messy FASTA indexing results from messy_* directories."""
-    dirs = sorted(results_dir.glob("messy_*"), reverse=True)
+    dirs: list[Path] = []
+    if manifest and manifest.get("timestamp"):
+        candidate = results_dir / f"messy_{manifest['timestamp']}"
+        if candidate.is_dir():
+            dirs = [candidate]
+    if not dirs:
+        dirs = sorted(results_dir.glob("messy_*"), reverse=True)
     if not dirs:
         return None
     d = dirs[0]
@@ -2863,6 +2922,12 @@ def load_messy_index(results_dir: Path) -> pd.DataFrame | None:
                     tool = "pyfaidx"
             if tool == "rustbio-custom-index":
                 tool = "rust-bio"
+            if tool == "z-fasta":
+                tool = (
+                    "z-fasta (.fai)"
+                    if "--emit-fai" in cmd
+                    else "z-fasta (.zfi)"
+                )
             failed = r.get("failed_sample_count", 0)
             samples = r.get("sample_count", 0)
             success = failed == 0 and samples > 0
@@ -2874,7 +2939,15 @@ def load_messy_index(results_dir: Path) -> pd.DataFrame | None:
 
 def md_messy_table(df: pd.DataFrame) -> str:
     """Markdown compatibility matrix for messy FASTA variants."""
-    messy_order = ["z-fasta", "samtools", "noodles", "rust-bio", "fastahack", "pyfaidx"]
+    messy_order = [
+        "z-fasta (.zfi)",
+        "z-fasta (.fai)",
+        "samtools",
+        "noodles",
+        "rust-bio",
+        "fastahack",
+        "pyfaidx",
+    ]
     tools = [t for t in messy_order if t in df["tool"].values]
     # append any unexpected tools at end
     for t in df["tool"].unique():
@@ -2888,31 +2961,36 @@ def md_messy_table(df: pd.DataFrame) -> str:
             sub = df[(df["variant"] == variant) & (df["tool"] == tool)]
             if sub.empty:
                 row[tool] = "n/a"
-            else:
+            elif tool.startswith("z-fasta (.zfi)"):
                 row[tool] = "ok" if sub.iloc[0]["success"] else "fail"
+            else:
+                row[tool] = "not compatible"
         rows.append(row)
     return pd.DataFrame(rows).to_markdown(index=False)
 
 
 def md_edge_case_summary_table(df: pd.DataFrame) -> str:
-    """Aggregate exit-0 counts and expected-behavior matches from tests CSV."""
-    tool_cols = [c for c in df.columns if c.endswith("_exit")]
-    matches = int((df["output_match"] == "MATCH").sum())
-    total = len(df)
-    rows: list[dict] = [
-        {
-            "Measure": "Cases matching rules (`output_match` = MATCH)",
-            "Value": f"{matches}/{total}",
-        }
-    ]
-    for col in tool_cols:
-        label = display_tool(
-            col.replace("_exit", "")
-            .replace("zfasta", "z-fasta-default")
-            .replace("rustbio", "rustbio-custom-index")
+    """Summarize comparability by the rule used for each case class."""
+    classes = edge_contract_classes(df)
+    meanings = {
+        "fai_parity": "z-fasta (.fai) vs samtools acceptance and FAI bytes",
+        "zfi_messy": "z-fasta (.zfi) side table; FAI peers expected incompatible",
+        "invalid_input": "raw behavior shown; no parity claim for binary input",
+    }
+    rows = []
+    for class_name, label in EDGE_CONTRACT_CLASSES.items():
+        subset = df[classes == class_name]
+        if subset.empty:
+            continue
+        matches = int((subset["output_match"] == "MATCH").sum())
+        rows.append(
+            {
+                "Contract basis": label,
+                "Cases": len(subset),
+                "Matches": f"{matches}/{len(subset)}",
+                "Comparison": meanings[class_name],
+            }
         )
-        ok = int((df[col] == 0).sum())
-        rows.append({"Measure": f"{label} exit 0", "Value": f"{ok}/{total}"})
     return pd.DataFrame(rows).to_markdown(index=False)
 
 
@@ -2923,27 +3001,37 @@ def md_edge_case_section(df: pd.DataFrame, nums: ReportCounters) -> str:
     blocks = [
         (
             "Structural edge-case fixtures from `bench/index/run.sh` (edge_cases/). Each "
-            "row in the heatmap is one test file; tool columns show process exit codes. "
-            "The **Expected** column marks whether z-fasta met that test's rules."
+            "row in the heatmap is one test file. The z-fasta columns separate the "
+            "samtools-compatible FAI attempt from the production `.zfi` index. The "
+            "**Contract** column marks whether z-fasta met that test's rules."
+        ),
+        (
+            "**Contract meaning:** for structural cases, `z-fasta (.fai)` must agree with "
+            "samtools on FAI acceptance and bytes when both accept. If one accepts and the "
+            "other rejects, the contract is `N`. For the four named messy fixtures, the "
+            "`.zfi` side-table path is the contract because samtools cannot represent those "
+            "layouts; the FAI rejection pair plus valid `.zfi` side table is `Y`."
         ),
         "**Scoring rules:**",
         (
             "- *Samtools parity* cases: when both z-fasta and samtools accept a file, their "
-            "`.fai` output must match. When both reject it, that also counts as a match."
+            "`.fai` output must match. When both reject it, that also counts as a match. "
+            "A production `.zfi` success does not hide an FAI exit-code mismatch."
         ),
         (
             "- *z-fasta-only* messy cases: z-fasta must index files where samtools rejects "
             "non-uniform wrapping (side-table `.zfi`)."
         ),
         (
-            f"**Table {t_summary}:** Summary from the tests CSV. Exit 0 = clean process exit; "
-            "MATCH = z-fasta behavior matched the test expectation."
+            f"**Table {t_summary}:** Comparability summary by contract class. Raw exit codes "
+            "are diagnostic; `Matches` applies the class-specific comparison rule."
         ),
         md_edge_case_summary_table(df),
         '<div style="margin: 1.5em 0"></div>',
         (
-            f"**Figure {f_edge}:** Per-test exit codes and expected-behavior column. Green = "
-            "exit 0; red = non-zero exit; orange = unexpected behavior (Expected = N)."
+            f"**Figure {f_edge}:** Raw per-test exit codes and the composite contract result. "
+            "Green = exit 0; red = non-zero exit; gray = tool not run; orange = contract "
+            "mismatch."
         ),
         (
             f"![Figure {f_edge}: edge-case exit codes](results/figures/edge_cases.png)"
@@ -2951,9 +3039,9 @@ def md_edge_case_section(df: pd.DataFrame, nums: ReportCounters) -> str:
         (
             f"**Reading Figure {f_edge}**\n"
             "- Rows: test case names from `bench/index/run.sh` edge_cases/.\n"
-            "- Tool columns: `ok` = exit 0, `fail` = non-zero exit.\n"
-            "- **Expected:** `Y` = MATCH, `N` = mismatch vs test rules.\n"
-            "- Green / red / orange cells match the legend on the chart.\n"
+            "- Tool columns show the numeric exit code; `n/a` means the optional tool was not run.\n"
+            "- **Contract:** `Y` = MATCH, `N` = mismatch vs test rules.\n"
+            "- Green / red / gray / orange cells match the legend on the chart.\n"
             f"- Aggregate counts are in Table {t_summary}."
         ),
     ]
@@ -2963,10 +3051,21 @@ def md_edge_case_section(df: pd.DataFrame, nums: ReportCounters) -> str:
 def md_messy_section(df: pd.DataFrame, nums: ReportCounters) -> str:
     """Messy FASTA compatibility: matrix table and reading notes."""
     t_matrix = nums.next_table()
+    if "z-fasta (.zfi)" in set(df["tool"]):
+        zf_lane = "`z-fasta (.zfi)` via default `index`"
+    elif "z-fasta (.fai)" in set(df["tool"]):
+        zf_lane = "historical `z-fasta (.fai)` data"
+    else:
+        zf_lane = "no z-fasta lane"
     blocks = [
         (
-            "Proteome-derived fixtures in `bench/shared/messy_perf/`. Each cell is zebrac "
+            "Proteome-derived fixtures in `bench/shared/cache/messy_perf/`. Each cell is zebrac "
             "with `--allow-failures` (repeated samples, not a single exit check)."
+        ),
+        (
+            f"**z-fasta lane:** This table must use {zf_lane}. The `.fai` lane is not the "
+            "messy compatibility claim; variable widths, trailing whitespace, and mixed "
+            "line endings require the production `.zfi` side table."
         ),
         (
             "**What z-fasta handles:** irregular line wrapping, trailing whitespace on "
@@ -2981,16 +3080,23 @@ def md_messy_section(df: pd.DataFrame, nums: ReportCounters) -> str:
             "Correctness** above). We do not claim to repair truncated or binary-corrupted FASTA."
         ),
         (
+            "`mixed_crlf` deliberately alternates LF and CRLF sequence-line endings. It is "
+            "not a uniformly CRLF-wrapped control file."
+        ),
+        (
             f"**Table {t_matrix}:** Indexing success per variant and tool from the messy "
-            "benchmark CSV. `ok` = every zebrac sample exited 0; `fail` = every sample failed."
+            "benchmark CSV. The z-fasta `.zfi` lane is `ok` only when every sample exits 0. "
+            "FAI peers are `not compatible` for these variable-width, whitespace, and mixed-"
+            "ending layouts; an exit 0 alone does not prove that their index reproduces the "
+            "sequence correctly."
         ),
         md_messy_table(df),
         (
             f"**Reading Table {t_matrix}**\n"
-            "- Rows: messy variant names (`all_messy`, `crlf_endings`, `mixed_widths`, "
+            "- Rows: messy variant names (`all_messy`, `mixed_crlf`, `mixed_widths`, "
             "`trailing_whitespace`).\n"
-            "- Columns: tools in fixed order (z-fasta, samtools, noodles, rust-bio, fastahack, "
-            "pyfaidx when present).\n"
+            "- Columns: production `z-fasta (.zfi)` followed by FAI peers.\n"
+            "- `not compatible` is a layout contract result, not a raw process exit code.\n"
             "- Refresh with `bash bench/index/run.sh` (messy zebrac section)."
         ),
     ]
@@ -3011,9 +3117,9 @@ def md_tools_tested(tools: dict[str, str] | None = None, z_fasta: str | None = N
 
     zf = f" ({z_fasta})" if z_fasta else ""
     return (
-        f"- **z-fasta (bench FAI){zf}:** `index --emit-fai`, mmap + dedup; stdout FAI for "
+        f"- **z-fasta (.fai){zf}:** `index --emit-fai`, mmap + dedup; stdout FAI for "
         "cross-tool tables.\n"
-        "- **z-fasta (production `.zfi`):** `index`, mmap + dedup; writes `.zfi` on disk.\n"
+        "- **z-fasta (.zfi):** `index`, mmap + dedup; writes `.zfi` on disk.\n"
         "- **z-fasta (`--no-dedup`):** `index --emit-fai --no-dedup`.\n"
         "- **z-fasta (`--low-mem`):** bench lane is `index --low-mem --emit-fai` "
         "(streaming IO, low peak RSS); default `index --low-mem` writes `.zfi`.\n"
@@ -3272,7 +3378,7 @@ def main():
         p = fig_edge_heatmap(test_df, figures_dir / "edge_cases.png")
         generated_figs.append(str(p))
 
-    messy_df = load_messy_index(results_dir)
+    messy_df = load_messy_index(results_dir, manifest)
     if messy_df is not None and len(messy_df):
         section("Messy FASTA Compatibility")
         report_lines.append(md_messy_section(messy_df, nums))

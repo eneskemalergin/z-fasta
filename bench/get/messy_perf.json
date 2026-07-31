@@ -1,9 +1,9 @@
 {
-  "messy_dir": "bench/shared/messy_perf",
+  "messy_dir": "bench/shared/cache/messy_perf",
   "variants": [
     "mixed_widths",
     "trailing_whitespace",
-    "crlf_endings",
+    "mixed_crlf",
     "all_messy"
   ],
   "headline_span": "titin_mid",
@@ -21,8 +21,8 @@
       "purpose": "2 kbp interior slice (headline side-table stress)"
     },
     "titin_40k": {
-      "region": "sp|Q8WZ42|TITIN_HUMAN:10000-50000",
-      "purpose": "40 kbp mid-protein slice"
+      "region": "sp|Q8WZ42|TITIN_HUMAN:10000-30000",
+      "purpose": "20 kbp mid-protein slice (within current TITIN length)"
     }
   }
 }

@@ -142,8 +142,8 @@ def load_manifest(results_dir: Path) -> dict | None:
 def resolve_verify_status(manifest: dict, results_dir: Path) -> tuple[bool, str | None]:
     """Return (skipped, pass_count). Prefer verify_<ts>.log when present.
 
-    Resume with `--skip-verify` can rewrite the manifest and clear `verify_pass`
-    even when `verify_<timestamp>.log` already recorded a green L2 run.
+    Resume with `--skip-tests` (alias `--skip-verify`) can rewrite the manifest and clear `verify_pass`
+    even when `verify_<timestamp>.log` already recorded a green correctness run.
     """
     ts = str(manifest.get("timestamp") or "")
     log = results_dir / f"verify_{ts}.log" if ts else None
@@ -970,11 +970,11 @@ def md_combined_metric_figure(
 def md_overview(manifest: dict, results_dir: Path) -> str:
     verify_skipped, verify = resolve_verify_status(manifest, results_dir)
     if verify_skipped:
-        verify_line = "Verify was skipped for this run (`--skip-verify`)."
+        verify_line = "Verify was skipped for this run (`--skip-tests` / `--skip-verify`)."
     elif verify is not None:
         verify_line = (
-            f"L2 verify reported **{verify}** passing checks before perf "
-            "(see `bench/stats/verify.sh`)."
+            f"Correctness reported **{verify}** passing checks before perf "
+            "(see `bench/stats/run.sh`)."
         )
     else:
         verify_line = "Verify status was not recorded in the manifest."
@@ -1038,7 +1038,7 @@ def md_field_matrix() -> str:
             "Wrappers are clean-FASTA peers only (no messy / side-table path).",
             "",
             "Oracle: [`bench/stats/oracle.py`](oracle.py). Verify: "
-            "[`bench/stats/verify.sh`](verify.sh).",
+            "[`bench/stats/run.sh`](run.sh) correctness (`run_tests`).",
         ]
     )
 
@@ -1243,7 +1243,7 @@ def md_scaling_section(
         [
             f"## {section_title}",
             "",
-            "Synthetic FASTAs under `bench/stats/data/` (generated on demand). "
+            "Synthetic FASTAs under `bench/shared/cache/scaling/` (generated on demand). "
             "Indexes preloaded; timed work is composition `stats` / peers only "
             "(no `--index-only` here; that lives in Mode Comparison). "
             "Two figures per sweep: absolute wall / RSS / faults, then whether the "

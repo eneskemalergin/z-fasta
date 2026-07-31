@@ -227,8 +227,17 @@ pub fn runValidate(io: std.Io, fasta_path: []const u8, options: Options) void {
     };
 
     if (summary.truncated) {
-        printErrorAndExit(
-            "error: validate stopped after {d} events; fix reported issues and re-run\n",
+        // Event retention is capped for reporting. Scanning (and --fix rewrite via
+        // record_widths) still covers the whole file. Without --fix, stop so callers
+        // know the report is incomplete. With --fix, the rewrite already finished.
+        if (!options.fix) {
+            printErrorAndExit(
+                "error: validate stopped after {d} events; fix reported issues and re-run\n",
+                .{max_validate_events},
+            );
+        }
+        std.debug.print(
+            "warning: validate event list truncated at {d}; --fix output was still written\n",
             .{max_validate_events},
         );
     }
