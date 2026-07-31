@@ -344,7 +344,7 @@ def load_manifest(results_dir: Path) -> dict | None:
 
 def is_incomplete(manifest: dict | None) -> bool:
     if not manifest:
-        return False
+        return True
     sections = manifest.get("sections") or {}
     for key in ("perf_pos", "perf_multi", "perf_bed", "perf_rc"):
         if key not in sections:

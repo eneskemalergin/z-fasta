@@ -52,7 +52,7 @@ preload_indexes_for_file() {
     fi
     if bench_has_tool samtools; then
         if [[ ! -f "${fa}.fai" ]] || [[ "$fa" -nt "${fa}.fai" ]]; then
-            samtools faidx "$fa" > /dev/null 2>&1 || true
+            "$SAMTOOLS" faidx "$fa" > /dev/null 2>&1 || true
         fi
     fi
 }

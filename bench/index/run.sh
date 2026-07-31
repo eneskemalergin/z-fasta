@@ -281,7 +281,7 @@ preserve_real_index_sidecars() {
         [[ -f "$fa" ]] || continue
         "$ZFASTA" index "$fa" > /dev/null
         if bench_has_tool samtools; then
-            samtools faidx "$fa" > /dev/null 2>&1 || true
+            "$SAMTOOLS" faidx "$fa" > /dev/null 2>&1 || true
         fi
     done
 }
@@ -415,24 +415,28 @@ run_tests() {
         rm -f "${file}.fai" "${file}.zfi" 2>/dev/null || true
         zf_exit=0; "$ZFASTA" index --emit-fai "$file" > /tmp/zf_edge_test.fai 2>/dev/null || zf_exit=$?
         rm -f "${file}.fai" 2>/dev/null || true
-        sam_exit=0; $SAMTOOLS faidx "$file" 2>/dev/null || sam_exit=$?
-        seq_exit=0
+        sam_exit=0; "$SAMTOOLS" faidx "$file" 2>/dev/null || sam_exit=$?
+        seq_exit=127
         if bench_has_tool seqkit; then
+            seq_exit=0
             rm -f "${file}.fai" 2>/dev/null || true
             "$SEQKIT" faidx "$file" > /dev/null 2>&1 || seq_exit=$?
         fi
-        fh_exit=0
+        fh_exit=127
         if bench_has_tool fastahack; then
+            fh_exit=0
             rm -f "${file}.fai" 2>/dev/null || true
             "$FASTAHACK" -i "$file" > /dev/null 2>&1 || fh_exit=$?
         fi
-        noodles_exit=0
+        noodles_exit=127
         if bench_has_tool noodles; then
+            noodles_exit=0
             rm -f "${file}.fai" 2>/dev/null || true
             "$NOODLES" index "$file" > /dev/null 2>&1 || noodles_exit=$?
         fi
-        rustbio_exit=0
+        rustbio_exit=127
         if bench_has_tool rustbio; then
+            rustbio_exit=0
             rm -f "${file}.fai" 2>/dev/null || true
             "$RUSTBIO" index "$file" > /dev/null 2>&1 || rustbio_exit=$?
         fi
@@ -441,7 +445,7 @@ run_tests() {
     score_edge_case() {
         local file="$1" name="$2"
         rm -f "${file}.fai" "${file}.zfi" 2>/dev/null || true
-        $SAMTOOLS faidx "$file" 2>/dev/null || true
+        "$SAMTOOLS" faidx "$file" 2>/dev/null || true
         if [[ $zf_exit -ne 0 && $sam_exit -ne 0 ]]; then
             match="MATCH"
         elif [[ $zf_exit -ne 0 && $sam_exit -eq 0 ]]; then
@@ -512,7 +516,7 @@ PY
 
         if [[ "$behavior" == "match-samtools" ]]; then
             rm -f "${file}.fai" "${file}.zfi" 2>/dev/null || true
-            $SAMTOOLS faidx "$file" 2>/dev/null || true
+            "$SAMTOOLS" faidx "$file" 2>/dev/null || true
             [[ $zf_exit -eq 0 && $sam_exit -eq 0 && -f "${file}.fai" ]] \
                 && diff -q /tmp/zf_edge_test.fai "${file}.fai" &>/dev/null \
                 && [[ "$zfi_status" == "ok" ]] && match="MATCH"

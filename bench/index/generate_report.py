@@ -537,7 +537,7 @@ def resolve_tool_versions(manifest: dict | None, project_root: Path) -> dict[str
 def is_incomplete_run(manifest: dict | None) -> bool:
     """Protect tracked reports from smoke or partial benchmark runs."""
     if not manifest:
-        return False
+        return True
     if manifest.get("skip_real"):
         return True
     if manifest.get("skip_scaling"):

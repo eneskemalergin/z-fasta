@@ -288,7 +288,7 @@ PY
 
 ensure_fai() {
     local fa="$1"
-    [[ -f "${fa}.fai" ]] || samtools faidx "$fa"
+    [[ -f "${fa}.fai" ]] || "$SAMTOOLS" faidx "$fa"
 }
 
 generate_get_fixtures() {
@@ -871,7 +871,7 @@ verify_expected_bed() {
 parity_bedtools() {
     local label="[parity:bedtools] $1" bed="$2" honor_strand="$3" fasta="$4"
     local chunk="${5:-4096}" stdin="${6:-0}" strand_flag="${7:---strand-aware}"
-    local bt=(bedtools getfasta -fi "$fasta" -bed "$bed")
+    local bt=("$BEDTOOLS" getfasta -fi "$fasta" -bed "$bed")
     [[ "$honor_strand" == "1" ]] && bt+=(-s)
     local zf=(get "$fasta" --bed "$bed" --chunk-size "$chunk")
     [[ "$honor_strand" == "1" ]] && zf+=("$strand_flag")
@@ -1620,12 +1620,29 @@ run_perf_pos() {
             bench_group "$json"
 
             # .fai lane: stash .zfi outside zebrac so timed get does not include mv cost.
-            mv -f "${fa}.zfi" "${fa}.zfi.stash" 2>/dev/null || true
+            local zfi_stashed=false
+            if [[ -f "${fa}.zfi" ]]; then
+                mv -f "${fa}.zfi" "${fa}.zfi.stash" 2>/dev/null || {
+                    echo "error: failed to stash ${fa}.zfi for FAI lane" >&2
+                    return 1
+                }
+                zfi_stashed=true
+            fi
             zebrac_clear_commands
             get_add_command perf_pos "$workload" z-fasta-fai z-fasta "$json_fai" \
                 "$qz get $qf $qrgn > /dev/null" "$nbytes" "$out_bases"
-            bench_group "$json_fai"
-            mv -f "${fa}.zfi.stash" "${fa}.zfi" 2>/dev/null || true
+            if ! bench_group "$json_fai"; then
+                if $zfi_stashed; then
+                    mv -f "${fa}.zfi.stash" "${fa}.zfi" 2>/dev/null || true
+                fi
+                return 1
+            fi
+            if $zfi_stashed; then
+                mv -f "${fa}.zfi.stash" "${fa}.zfi" 2>/dev/null || {
+                    echo "error: failed to restore ${fa}.zfi after FAI lane" >&2
+                    return 1
+                }
+            fi
             echo "  perf_pos $workload"
         done
     done

@@ -167,10 +167,24 @@ def generate_fixtures(*, force: bool) -> None:
     print(f"wrote {len(FIXTURES)} messy fixtures -> {FIXTURES_DIR}")
 
 
-def perf_ready() -> bool:
+def perf_stamp(titin_len: int, max_span_end: int) -> str:
+    stat = PROTEOME.stat()
+    return (
+        f"proteome={PROTEOME.resolve()}\n"
+        f"proteome_size={stat.st_size}\n"
+        f"proteome_mtime_ns={stat.st_mtime_ns}\n"
+        f"titin_len={titin_len}\n"
+        f"max_span_end={max_span_end}\n"
+    )
+
+
+def perf_ready(titin_len: int, max_span_end: int) -> bool:
     if not PERF_STAMP.is_file():
         return False
-    return all((PERF_DIR / f"{name}.fasta").is_file() for name in PERF_VARIANTS)
+    return (
+        PERF_STAMP.read_text(encoding="utf-8") == perf_stamp(titin_len, max_span_end)
+        and all((PERF_DIR / f"{name}.fasta").is_file() for name in PERF_VARIANTS)
+    )
 
 
 def generate_perf(*, force: bool) -> None:
@@ -188,7 +202,7 @@ def generate_perf(*, force: bool) -> None:
             "refresh bench/get/messy_perf.json spans"
         )
 
-    if perf_ready() and not force:
+    if perf_ready(tlen, need) and not force:
         print(f"messy perf cache ok: {PERF_DIR}")
         return
 
@@ -220,12 +234,7 @@ def generate_perf(*, force: bool) -> None:
         line_fn=lambda s: maybe_trail(wrap_mixed(s, all_rng), trail_all_rng),
     )
 
-    PERF_STAMP.write_text(
-        f"proteome={PROTEOME.resolve()}\n"
-        f"titin_len={tlen}\n"
-        f"max_span_end={need}\n",
-        encoding="utf-8",
-    )
+    PERF_STAMP.write_text(perf_stamp(tlen, need), encoding="utf-8")
     print(f"wrote {len(PERF_VARIANTS)} messy perf FASTAs -> {PERF_DIR}")
 
 
