@@ -20,6 +20,7 @@ All notable changes to z-fasta will be documented in this file.
 - **`index --low-mem` catalog path:** stream FAI `NameDedup` keeps owned names in a child arena instead of per-name heap `dupe`/`free`; `--emit-fai` spills through a sibling temp file then copies to stdout. Stream `.zfi` uses blob-backed `NameDedup` (one catalog for dedup + embedded names) and observes at emit (mmap-aligned). `--low-mem` builds with `page_allocator` so ArrayList/HashMap growth frees (a parent arena retained abandoned buffers and inflated Transcriptome `.zfi` RSS). Portable `std.Io` only.
 - **Empty sequence names (`>\n…`):** `.zfi` / `.fai` loaders accept `name_len == 0` (samtools writes a leading-tab `.fai` line). Lookup and `getRecordName` treat `""` as a real name; mmap and `--low-mem` FAI/ZFI stay aligned.
 - **Trailing space/tab before LF:** treated as non-uniform on mmap and `--low-mem` (FAI rejected; `.zfi` side table). Content density is required for fixed-width FAI geometry so space+LF is not mistaken for CRLF.
+- **Trailing vs interior CRLF:** final CRLF after an LF body stays uniform (FAI accepted). Interior mixed LF/CRLF is non-uniform on both paths; stream stride does not skip the pending-line uniformity flip after a mid-body separator mismatch.
 
 ## [0.3.0] - 2026-07-28
 

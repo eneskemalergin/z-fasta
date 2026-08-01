@@ -486,8 +486,10 @@ const LineMetricsBuilder = struct {
         // Trailing blanks do not break uniformity (same as mmap body trim).
         self.blank_after_bases = false;
         if (self.metrics.line_count > 1 and self.have_pending) {
+            // Final wrap only: mmap trims trailing `\r`/`\n`, so CRLF vs LF on the last
+            // line must not flip when content width does not grow.
             if (self.pending_bases > self.metrics.line_bases or
-                self.pending_actual_bytes > self.first_actual_bytes)
+                self.pending_content_len > self.first_content_len)
             {
                 self.metrics.is_uniform_width = false;
             }
@@ -1145,7 +1147,8 @@ const ChunkParseState = struct {
             metrics.line_bases > 0 and
             dense and
             bases <= metrics.line_bases and
-            actual_bytes <= self.line_builder.first_actual_bytes;
+            content_len <= self.line_builder.first_content_len and
+            actual_bytes <= self.line_builder.first_actual_bytes + 1; // allow final CRLF vs LF (+1)
         if (short_ok_if_final) {
             self.deferred_short_tail = .{
                 .bases = bases,
@@ -1177,7 +1180,17 @@ const ChunkParseState = struct {
         if (m.line_count == 0 or !m.is_uniform_width) return false;
         if (!m.first_content_dense or !firstLineIsDense(m.line_bases, m.line_bytes)) return false;
         // Stride uses the first line's on-wire byte length (includes LF/CRLF).
-        return self.line_builder.first_actual_bytes == m.line_bytes;
+        if (self.line_builder.first_actual_bytes != m.line_bytes) return false;
+        // FAI skips `deferred_short_tail`, so a mid-body CRLF vs LF mismatch lives only in
+        // `pending_*` until the next `ingestLine`. Do not stride over that next line or the
+        // pending comparison (and uniformity flip) is skipped.
+        if (self.line_builder.have_pending and
+            (self.line_builder.pending_bases != m.line_bases or
+                self.line_builder.pending_actual_bytes != self.line_builder.first_actual_bytes))
+        {
+            return false;
+        }
+        return true;
     }
 
     /// Bulk-account `n_lines` consecutive full wraps already validated by `strideLineLooksValid`.

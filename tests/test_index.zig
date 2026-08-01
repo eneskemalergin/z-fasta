@@ -936,6 +936,63 @@ test "trailing tab before LF is non-uniform like space (FAI rejected both paths)
     );
 }
 
+test "LF body with final CRLF stays uniform; FAI accepted on mmap and stream" {
+    // Mmap trims trailing record newlines; final CRLF is terminator, not a wider wrap.
+    const data = ">seq\nAAAA\nAAAA\r\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try expectZfiStreamingMatchesMmap(allocator, data, "final-crlf");
+
+    var mmap_index = try main.indexer.scanZfiIndex(data, true, allocator);
+    defer mmap_index.deinit(allocator);
+    var stream_index = try main.indexer.scanZfiIndexStreamingData(data, true, allocator);
+    defer stream_index.deinit(allocator);
+    try std.testing.expect(mmap_index.records.items[0].isUniformWidth());
+    try std.testing.expect(stream_index.records.items[0].isUniformWidth());
+    try std.testing.expectEqual(@as(usize, 0), mmap_index.side_tables.items.len);
+    try std.testing.expectEqual(@as(usize, 0), stream_index.side_tables.items.len);
+
+    var mmap_fai = std.Io.Writer.Allocating.init(allocator);
+    defer mmap_fai.deinit();
+    var stream_fai = std.Io.Writer.Allocating.init(allocator);
+    defer stream_fai.deinit();
+    _ = try main.indexer.streamingScan(data, &mmap_fai.writer, .fai, true, allocator);
+    _ = try scanChunkedData(data, &stream_fai.writer, true, allocator);
+    try std.testing.expectEqualStrings(mmap_fai.written(), stream_fai.written());
+    try std.testing.expectEqualStrings("seq\t8\t5\t4\t5\n", mmap_fai.written());
+}
+
+test "mixed interior LF/CRLF is non-uniform on both paths (mmap body keeps CRLF)" {
+    // Unlike a trailing CRLF (trimmed), an interior CRLF breaks fixed-width stride.
+    const data = ">seq\nAAAA\nAAAA\r\nAAAA\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try expectZfiStreamingMatchesMmap(allocator, data, "mixed-sep-interior");
+    var mmap_index = try main.indexer.scanZfiIndex(data, true, allocator);
+    defer mmap_index.deinit(allocator);
+    var stream_index = try main.indexer.scanZfiIndexStreamingData(data, true, allocator);
+    defer stream_index.deinit(allocator);
+    try std.testing.expect(!mmap_index.records.items[0].isUniformWidth());
+    try std.testing.expect(!stream_index.records.items[0].isUniformWidth());
+
+    var mmap_fai = std.Io.Writer.Allocating.init(allocator);
+    defer mmap_fai.deinit();
+    var stream_fai = std.Io.Writer.Allocating.init(allocator);
+    defer stream_fai.deinit();
+    try std.testing.expectError(
+        error.NonUniformFai,
+        main.indexer.streamingScan(data, &mmap_fai.writer, .fai, true, allocator),
+    );
+    try std.testing.expectError(
+        error.NonUniformFai,
+        scanChunkedData(data, &stream_fai.writer, true, allocator),
+    );
+}
+
 test "mmap and streaming ZFI agree when blank lines sit between sequence lines" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
