@@ -3,7 +3,8 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      # Glob (not regex): digits only, three components. Excludes v0.3.1-rc1 / vfoo.
+      - "v[0-9]+.[0-9]+.[0-9]+"
 
 permissions:
   contents: read
@@ -13,35 +14,61 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Single version gate so the six-way matrix does not re-parse tag/zon/VERSION.
+  gate:
+    name: Version gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Check tag matches package versions
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "tag must be vX.Y.Z, got: $tag" >&2
+            exit 1
+          }
+          version="${tag#v}"
+          zon=$(sed -n 's/^[[:space:]]*\.version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' build.zig.zon | head -n1)
+          main=$(sed -n 's/^const VERSION = "\([^"]*\)";.*/\1/p' src/main.zig | head -n1)
+          [[ "$zon" == "$version" && "$main" == "$version" ]] || {
+            echo "version mismatch: tag=$version zon=$zon main=$main" >&2
+            exit 1
+          }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build (${{ matrix.system }})
+    needs: gate
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      max-parallel: 6
       matrix:
         include:
           - system: linux_x86_64
             os: ubuntu-latest
             exe: z-fasta
-            target_flag: ""
           - system: linux_arm64
             os: ubuntu-24.04-arm
             exe: z-fasta
-            target_flag: ""
           - system: macos_x86_64
             os: macos-15-intel
             exe: z-fasta
-            target_flag: ""
           - system: macos_arm64
             os: macos-latest
             exe: z-fasta
-            target_flag: ""
           - system: windows_x86_64
             os: windows-latest
             exe: z-fasta.exe
-            target_flag: ""
           # Zig 0.16.0 aarch64-windows host segfaults; cross-build like ci.yml.
           - system: windows_arm64
             os: windows-11-arm
@@ -70,23 +97,10 @@ jobs:
           echo "$GITHUB_WORKSPACE/zig-sdk/zig-x86_64-windows-0.16.0" >> "$GITHUB_PATH"
 
       - name: Build ReleaseFast
-        id: ver
         shell: bash
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
-          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-            echo "tag must be vX.Y.Z, got: $tag" >&2
-            exit 1
-          }
-          version="${tag#v}"
-          zon=$(sed -n 's/^[[:space:]]*\.version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' build.zig.zon | head -n1)
-          main=$(sed -n 's/^const VERSION = "\([^"]*\)";.*/\1/p' src/main.zig | head -n1)
-          [[ "$zon" == "$version" && "$main" == "$version" ]] || {
-            echo "version mismatch: tag=$version zon=$zon main=$main" >&2
-            exit 1
-          }
-
+          version="${{ needs.gate.outputs.version }}"
           zig build -Doptimize=ReleaseFast ${{ matrix.target_flag }}
 
           bin="zig-out/bin/${{ matrix.exe }}"
@@ -96,13 +110,33 @@ jobs:
             echo "binary --version: got '$got'" >&2
             exit 1
           }
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          # Primary strip gate: size (works on ELF / Mach-O / PE).
+          # Unstripped RF is ~5 MiB; stripped RF is ~0.5–0.6 MiB on linux_x86_64.
+          size="$(wc -c < "$bin" | tr -d ' ')"
+          if [[ "$size" -gt 1048576 ]]; then
+            echo "release binary too large (${size} bytes); expected stripped ReleaseFast (<1 MiB)" >&2
+            exit 1
+          fi
+          # Tighter linux budget (~600 KiB target + headroom).
+          if [[ "${{ matrix.system }}" == linux_* && "$size" -gt 750000 ]]; then
+            echo "linux release binary too large (${size} bytes); expected <=750 KiB stripped RF" >&2
+            exit 1
+          fi
+          # file(1) "not stripped" / "with debug_info" is reliable on ELF only.
+          if [[ "${{ matrix.system }}" == linux_* ]] && command -v file >/dev/null 2>&1; then
+            info="$(file -b "$bin" || true)"
+            if echo "$info" | grep -qiE 'with debug_info|not stripped'; then
+              echo "linux release binary still has debug info: $info" >&2
+              exit 1
+            fi
+          fi
 
       - name: Package and smoke
         shell: bash
         run: |
           set -euo pipefail
-          version="${{ steps.ver.outputs.version }}"
+          version="${{ needs.gate.outputs.version }}"
           system="${{ matrix.system }}"
           exe="${{ matrix.exe }}"
 
@@ -154,7 +188,7 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: build
+    needs: [gate, build]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -179,11 +213,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          version="${tag#v}"
-          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-            echo "tag must be vX.Y.Z, got: $tag" >&2
-            exit 1
-          }
+          version="${{ needs.gate.outputs.version }}"
 
           count=$(find artifacts -maxdepth 1 -type f | wc -l)
           [[ "$count" -eq 6 ]] || {
