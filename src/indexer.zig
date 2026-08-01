@@ -219,6 +219,9 @@ const LineMetrics = struct {
     line_bytes: u32 = 0,
     is_uniform_width: bool = true,
     line_count: u64 = 0,
+    /// First base line: every content byte was a base (no trailing space/tab) and the
+    /// on-wire separator was LF or CRLF. Needed so `AAAA \\n` is not treated as CRLF-dense.
+    first_content_dense: bool = false,
 };
 
 const SequenceLengthInfo = struct {
@@ -359,6 +362,8 @@ fn trimTrailingRecordNewlines(data: []const u8) []const u8 {
 fn firstLineIsDense(line_bases: u32, line_bytes: u32) bool {
     if (line_bases == 0 or line_bytes <= line_bases) return false;
     const sep_len = line_bytes - line_bases;
+    // Count-only check: callers that saw the bytes must also require content density
+    // (`LineMetrics.first_content_dense`) so space+LF is not mistaken for CRLF.
     return (sep_len == 1 or sep_len == 2) and line_bases + sep_len == line_bytes;
 }
 
@@ -428,14 +433,16 @@ fn findNextNewline(data: []const u8, start: usize, end: usize) usize {
 const LineMetricsBuilder = struct {
     metrics: LineMetrics = .{},
     first_actual_bytes: u32 = 0,
+    first_content_len: u32 = 0,
     pending_bases: u32 = 0,
     pending_actual_bytes: u32 = 0,
+    pending_content_len: u32 = 0,
     have_pending: bool = false,
     /// Blank seen after at least one base line; applied when another base line follows
     /// (trailing blanks before EOF/next header match mmap `trimTrailingRecordNewlines`).
     blank_after_bases: bool = false,
 
-    fn ingestLine(self: *LineMetricsBuilder, bases: u32, actual_bytes: u32, has_lf: bool) void {
+    fn ingestLine(self: *LineMetricsBuilder, bases: u32, actual_bytes: u32, has_lf: bool, content_len: u32) void {
         if (bases == 0) {
             // Leading blanks ignored. Trailing blanks ignored until a later base line proves
             // an interior blank (mmap trims trailing newlines from the sequence body).
@@ -453,9 +460,15 @@ const LineMetricsBuilder = struct {
 
         if (self.metrics.line_count == 1) {
             self.first_actual_bytes = actual_bytes;
+            self.first_content_len = content_len;
             self.metrics.line_bases = bases;
             self.metrics.line_bytes = if (has_lf) actual_bytes else actual_bytes + 1;
+            // Dense FAI geometry: content is all bases; trailing bytes are only LF or CRLF.
+            const sep_len = if (has_lf) actual_bytes -| content_len else @as(u32, 1);
+            self.metrics.first_content_dense = bases == content_len and (sep_len == 1 or sep_len == 2);
         } else if (self.have_pending) {
+            // Interior full wraps must match on-wire bytes (LF vs CRLF is a real break;
+            // mmap `countFixedWidthBases` rejects mixed separators in the body).
             if (self.pending_bases != self.metrics.line_bases or
                 self.pending_actual_bytes != self.first_actual_bytes)
             {
@@ -465,6 +478,7 @@ const LineMetricsBuilder = struct {
 
         self.pending_bases = bases;
         self.pending_actual_bytes = actual_bytes;
+        self.pending_content_len = content_len;
         self.have_pending = true;
     }
 
@@ -484,7 +498,7 @@ const LineMetricsBuilder = struct {
 
 fn sequenceLengthInfoFromMetrics(metrics: LineMetrics) SequenceLengthInfo {
     if (metrics.seq_len == 0) return .{ .seq_len = 0, .uses_uniform_formula = false };
-    if (!metrics.is_uniform_width or metrics.line_bases == 0) {
+    if (!metrics.is_uniform_width or metrics.line_bases == 0 or !metrics.first_content_dense) {
         return .{ .seq_len = metrics.seq_len, .uses_uniform_formula = false };
     }
     return .{
@@ -516,7 +530,8 @@ fn scanSequenceRegion(data: []const u8, seq_region_start: usize, seq_end: usize)
 
         const bases = countBasesInLineSlice(data, line_start, content_end);
         const actual_bytes: u32 = @intCast((if (has_lf) line_end + 1 else line_end) - line_start);
-        builder.ingestLine(bases, actual_bytes, has_lf);
+        const content_len: u32 = @intCast(content_end - line_start);
+        builder.ingestLine(bases, actual_bytes, has_lf, content_len);
         if (bases > 0 and first_base_line_start == null) {
             first_base_line_start = line_start;
         }
@@ -590,7 +605,8 @@ fn appendSideTable(
 
         const bases = countBasesInLineSlice(data, line_start, content_end);
         const actual_bytes: u32 = @intCast((if (has_lf) line_end + 1 else line_end) - line_start);
-        builder.ingestLine(bases, actual_bytes, has_lf);
+        const content_len: u32 = @intCast(content_end - line_start);
+        builder.ingestLine(bases, actual_bytes, has_lf, content_len);
 
         if (bases > 0) {
             const entry = index_format.SideTableLine{
@@ -976,6 +992,9 @@ const ChunkParseState = struct {
     in_pending_line: bool = false,
     pending_line_bases: u32 = 0,
     pending_line_bytes: u32 = 0,
+    /// Pre-LF byte count (updated in appendPendingFragment; LF +1 happens after).
+    pending_pre_lf_bytes: u32 = 0,
+    pending_pre_lf_ends_with_cr: bool = false,
     pending_line_file_offset: u64 = 0,
     side_table: std.ArrayList(u8) = .empty,
     side_base_start: u64 = 0,
@@ -1033,6 +1052,8 @@ const ChunkParseState = struct {
         self.in_pending_line = false;
         self.pending_line_bases = 0;
         self.pending_line_bytes = 0;
+        self.pending_pre_lf_bytes = 0;
+        self.pending_pre_lf_ends_with_cr = false;
         self.pending_line_file_offset = 0;
         self.side_base_start = 0;
         self.side_table.clearRetainingCapacity();
@@ -1080,9 +1101,10 @@ const ChunkParseState = struct {
         bases: u32,
         actual_bytes: u32,
         has_lf: bool,
+        content_len: u32,
         line_file_offset: u64,
     ) !void {
-        self.line_builder.ingestLine(bases, actual_bytes, has_lf);
+        self.line_builder.ingestLine(bases, actual_bytes, has_lf, content_len);
 
         if (!self.zfi_mode) return;
 
@@ -1094,7 +1116,7 @@ const ChunkParseState = struct {
         const matches_stride = metrics.line_bases > 0 and
             bases == metrics.line_bases and
             actual_bytes == self.line_builder.first_actual_bytes;
-        const dense = firstLineIsDense(metrics.line_bases, metrics.line_bytes);
+        const dense = metrics.first_content_dense and firstLineIsDense(metrics.line_bases, metrics.line_bytes);
         const can_use_formula = metrics.is_uniform_width and matches_stride and dense;
 
         if (can_use_formula) {
@@ -1153,7 +1175,7 @@ const ChunkParseState = struct {
         if (self.line_builder.blank_after_bases) return false;
         const m = self.line_builder.metrics;
         if (m.line_count == 0 or !m.is_uniform_width) return false;
-        if (!firstLineIsDense(m.line_bases, m.line_bytes)) return false;
+        if (!m.first_content_dense or !firstLineIsDense(m.line_bases, m.line_bytes)) return false;
         // Stride uses the first line's on-wire byte length (includes LF/CRLF).
         return self.line_builder.first_actual_bytes == m.line_bytes;
     }
@@ -1170,6 +1192,7 @@ const ChunkParseState = struct {
         self.line_builder.metrics.line_count += n_lines;
         self.line_builder.pending_bases = bases;
         self.line_builder.pending_actual_bytes = line_bytes;
+        self.line_builder.pending_content_len = self.line_builder.first_content_len;
         self.line_builder.have_pending = true;
         self.at_line_start = true;
     }
@@ -1188,14 +1211,17 @@ const ChunkParseState = struct {
         }
 
         const actual_bytes: u32 = @intCast((if (has_lf) line_end + 1 else line_end) - line_start);
+        const content_len: u32 = @intCast(content_end - line_start);
         const bases = countBasesInLineSlice(data, line_start, content_end);
         if (bases > 0) self.noteSeqOffset(line_file_offset);
 
-        try self.recordSequenceLine(bases, actual_bytes, has_lf, line_file_offset);
+        try self.recordSequenceLine(bases, actual_bytes, has_lf, content_len, line_file_offset);
         self.at_line_start = has_lf;
         self.in_pending_line = false;
         self.pending_line_bases = 0;
         self.pending_line_bytes = 0;
+        self.pending_pre_lf_bytes = 0;
+        self.pending_pre_lf_ends_with_cr = false;
     }
 
     fn appendPendingFragment(self: *ChunkParseState, fragment: []const u8, fragment_file_offset: u64) void {
@@ -1203,25 +1229,38 @@ const ChunkParseState = struct {
             self.in_pending_line = true;
             self.pending_line_bases = 0;
             self.pending_line_bytes = 0;
+            self.pending_pre_lf_bytes = 0;
+            self.pending_pre_lf_ends_with_cr = false;
             self.pending_line_file_offset = fragment_file_offset;
         }
         self.pending_line_bases += countBasesInLineSlice(fragment, 0, fragment.len);
         self.pending_line_bytes += @intCast(fragment.len);
+        self.pending_pre_lf_bytes = self.pending_line_bytes;
+        if (fragment.len > 0) {
+            self.pending_pre_lf_ends_with_cr = fragment[fragment.len - 1] == '\r';
+        }
     }
 
     fn commitPendingLine(self: *ChunkParseState, has_lf: bool) !void {
         if (!self.in_pending_line and self.pending_line_bytes == 0) return;
         if (self.pending_line_bases > 0) self.noteSeqOffset(self.pending_line_file_offset);
+        var content_len = if (has_lf) self.pending_pre_lf_bytes else self.pending_line_bytes;
+        if (content_len > 0 and self.pending_pre_lf_ends_with_cr) {
+            content_len -= 1;
+        }
         try self.recordSequenceLine(
             self.pending_line_bases,
             self.pending_line_bytes,
             has_lf,
+            content_len,
             self.pending_line_file_offset,
         );
         self.at_line_start = has_lf;
         self.in_pending_line = false;
         self.pending_line_bases = 0;
         self.pending_line_bytes = 0;
+        self.pending_pre_lf_bytes = 0;
+        self.pending_pre_lf_ends_with_cr = false;
     }
 
     fn finalizeHeader(self: *ChunkParseState) void {

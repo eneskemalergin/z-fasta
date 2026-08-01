@@ -890,6 +890,52 @@ test "mmap and streaming FAI agree when final line omits terminal newline" {
     try std.testing.expectEqualStrings(expected.written(), actual.written());
 }
 
+test "trailing space before LF is non-uniform; FAI rejected on mmap and stream" {
+    // `AAAA ` + LF looks like sep_len==2 by counts alone but is not CRLF.
+    const data = ">s\nAAAA \n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try expectZfiStreamingMatchesMmap(allocator, data, "space-before-lf");
+
+    var mmap_index = try main.indexer.scanZfiIndex(data, true, allocator);
+    defer mmap_index.deinit(allocator);
+    var stream_index = try main.indexer.scanZfiIndexStreamingData(data, true, allocator);
+    defer stream_index.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), mmap_index.records.items.len);
+    try std.testing.expect(!mmap_index.records.items[0].isUniformWidth());
+    try std.testing.expect(!stream_index.records.items[0].isUniformWidth());
+
+    var mmap_fai = std.Io.Writer.Allocating.init(allocator);
+    defer mmap_fai.deinit();
+    var stream_fai = std.Io.Writer.Allocating.init(allocator);
+    defer stream_fai.deinit();
+    try std.testing.expectError(
+        error.NonUniformFai,
+        main.indexer.streamingScan(data, &mmap_fai.writer, .fai, true, allocator),
+    );
+    try std.testing.expectError(
+        error.NonUniformFai,
+        scanChunkedData(data, &stream_fai.writer, true, allocator),
+    );
+}
+
+test "trailing tab before LF is non-uniform like space (FAI rejected both paths)" {
+    const data = ">s\nAAAA\t\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try expectZfiStreamingMatchesMmap(allocator, data, "tab-before-lf");
+    var stream_fai = std.Io.Writer.Allocating.init(allocator);
+    defer stream_fai.deinit();
+    try std.testing.expectError(
+        error.NonUniformFai,
+        scanChunkedData(data, &stream_fai.writer, true, allocator),
+    );
+}
+
 test "mmap and streaming ZFI agree when blank lines sit between sequence lines" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
