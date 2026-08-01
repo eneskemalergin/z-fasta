@@ -833,6 +833,14 @@ const ChunkParseState = struct {
         actual_bytes: u32,
         line_file_offset: u64,
     } = null,
+    /// Short-or-equal stride mismatch that `finish()` still treats as FAI-uniform when it is
+    /// the final base line. Do not materialize O(lines) side-table rows until a later base
+    /// line proves the short line was interior (Genome `--low-mem` RSS bug).
+    deferred_short_tail: ?struct {
+        bases: u32,
+        actual_bytes: u32,
+        line_file_offset: u64,
+    } = null,
 
     fn ensureSideTableHeader(self: *ChunkParseState) !void {
         if (self.side_table.items.len >= @sizeOf(u64)) return;
@@ -879,6 +887,7 @@ const ChunkParseState = struct {
         self.side_table.clearRetainingCapacity();
         self.side_table_active = false;
         self.deferred_side_line = null;
+        self.deferred_short_tail = null;
     }
 
     fn appendSideTableLine(
@@ -895,6 +904,24 @@ const ChunkParseState = struct {
         };
         try self.side_table.appendSlice(self.allocator, std.mem.asBytes(&entry));
         self.side_base_start += bases;
+    }
+
+    /// Flush a deferred short tail plus the current base line into the side table.
+    /// `metrics.line_count` includes the current line; the short tail was the previous base line.
+    fn flushDeferredShortTailThen(
+        self: *ChunkParseState,
+        metrics_line_count: u64,
+        bases: u32,
+        actual_bytes: u32,
+        line_file_offset: u64,
+    ) !void {
+        const short = self.deferred_short_tail orelse return error.MissingSideTable;
+        self.deferred_short_tail = null;
+        // Uniform stride rows before the short line, then short, then current.
+        if (metrics_line_count < 2) return error.MissingSideTable;
+        try self.activateSideTable(metrics_line_count - 2);
+        try self.appendSideTableLine(short.bases, short.actual_bytes, short.line_file_offset);
+        try self.appendSideTableLine(bases, actual_bytes, line_file_offset);
     }
 
     fn recordSequenceLine(
@@ -916,8 +943,8 @@ const ChunkParseState = struct {
         const matches_stride = metrics.line_bases > 0 and
             bases == metrics.line_bases and
             actual_bytes == self.line_builder.first_actual_bytes;
-        const can_use_formula = metrics.is_uniform_width and matches_stride and
-            firstLineIsDense(metrics.line_bases, metrics.line_bytes);
+        const dense = firstLineIsDense(metrics.line_bases, metrics.line_bytes);
+        const can_use_formula = metrics.is_uniform_width and matches_stride and dense;
 
         if (can_use_formula) {
             // Keep the first line deferred for the whole uniform prefix. Clearing it on
@@ -932,7 +959,30 @@ const ChunkParseState = struct {
             return;
         }
 
-        // Reconstruct the uniform prefix, then append the line that broke it.
+        // A later base line after a deferred short last-line candidate: short was interior.
+        if (self.deferred_short_tail != null) {
+            try self.flushDeferredShortTailThen(metrics.line_count, bases, actual_bytes, line_file_offset);
+            return;
+        }
+
+        // Short-or-equal mismatch: same rule as `LineMetricsBuilder.finish` (only a *longer*
+        // final line flips non-uniform). Defer materialization so Genome-scale uniform
+        // records with a short final wrap do not allocate O(lines) side-table RAM.
+        const short_ok_if_final = metrics.is_uniform_width and
+            metrics.line_bases > 0 and
+            dense and
+            bases <= metrics.line_bases and
+            actual_bytes <= self.line_builder.first_actual_bytes;
+        if (short_ok_if_final) {
+            self.deferred_short_tail = .{
+                .bases = bases,
+                .actual_bytes = actual_bytes,
+                .line_file_offset = line_file_offset,
+            };
+            return;
+        }
+
+        // Wider line or other hard break: reconstruct the uniform prefix, then append.
         try self.activateSideTable(metrics.line_count - 1);
         try self.appendSideTableLine(bases, actual_bytes, line_file_offset);
     }
@@ -1012,14 +1062,29 @@ const ChunkParseState = struct {
         try self.commitPendingLine(false);
         const metrics = self.line_builder.finish();
         const seq_info = sequenceLengthInfoFromMetrics(metrics);
-        if (seq_info.seq_len == 0 or self.is_duplicate) return;
+        if (seq_info.seq_len == 0 or self.is_duplicate) {
+            self.deferred_short_tail = null;
+            return;
+        }
 
         const name_len: u16 = @intCast(self.name.items.len);
         var side_table_slice: []const u8 = &.{};
-        if (!seq_info.uses_uniform_formula and self.zfi_mode) {
+        if (seq_info.uses_uniform_formula) {
+            // Short final wrap was deferred and never needed; drop it.
+            self.deferred_short_tail = null;
+        } else if (self.zfi_mode) {
             // finish() can mark non-uniform after every line looked formula-ready (e.g. last
             // line longer than the stride). Materialize the full uniform-looking prefix then.
-            if (!self.side_table_active) {
+            // If a short tail was deferred then finish still went non-uniform (rare denseness
+            // / policy edge), flush short as the final side-table row.
+            if (self.deferred_short_tail) |short| {
+                if (!self.side_table_active) {
+                    if (metrics.line_count < 1) return error.MissingSideTable;
+                    try self.activateSideTable(metrics.line_count - 1);
+                    try self.appendSideTableLine(short.bases, short.actual_bytes, short.line_file_offset);
+                }
+                self.deferred_short_tail = null;
+            } else if (!self.side_table_active) {
                 try self.activateSideTable(metrics.line_count);
             }
             if (!self.side_table_active) {

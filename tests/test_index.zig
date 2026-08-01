@@ -1859,6 +1859,95 @@ test "scanZfiIndexStreaming keeps uniform-prefix side rows after late width brea
     try expectZfiStreamingMatchesMmap(arena.allocator(), data, "late-width-break");
 }
 
+test "streaming short final line stays uniform without side table (Track A)" {
+    // Many full-width lines + short last wrap: mmap is formula-uniform; streaming must match
+    // without materializing O(lines) side-table rows (Genome --low-mem RSS bug).
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var fasta: std.ArrayList(u8) = .empty;
+    defer fasta.deinit(allocator);
+    try fasta.appendSlice(allocator, ">chrom\n");
+    var line: [61]u8 = undefined;
+    @memset(line[0..60], 'A');
+    line[60] = '\n';
+    var i: usize = 0;
+    while (i < 4000) : (i += 1) {
+        try fasta.appendSlice(allocator, line[0..]);
+    }
+    try fasta.appendSlice(allocator, "ACGT\n");
+
+    try expectZfiStreamingMatchesMmap(allocator, fasta.items, "short-final-wrap");
+
+    var stream_index = try main.indexer.scanZfiIndexStreamingData(fasta.items, true, allocator);
+    defer stream_index.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), stream_index.records.items.len);
+    try std.testing.expect(stream_index.records.items[0].isUniformWidth());
+    try std.testing.expectEqual(@as(usize, 0), stream_index.side_tables.items.len);
+    try std.testing.expectEqual(@as(u64, 4000 * 60 + 4), stream_index.records.items[0].seq_len);
+}
+
+test "streaming interior short line then resume matches mmap side table" {
+    const data = ">seq\nAAAA\nAAAA\nAA\nAAAA\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    try expectZfiStreamingMatchesMmap(allocator, data, "interior-short-then-resume");
+
+    var stream_index = try main.indexer.scanZfiIndexStreamingData(data, true, allocator);
+    defer stream_index.deinit(allocator);
+    try std.testing.expect(!stream_index.records.items[0].isUniformWidth());
+    try std.testing.expect(stream_index.side_tables.items.len > 0);
+}
+
+test "streaming long final line is non-uniform like mmap" {
+    const data = ">seq\nAAAA\nAAAA\nAAAAAA\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    try expectZfiStreamingMatchesMmap(allocator, data, "long-final-line");
+
+    var stream_index = try main.indexer.scanZfiIndexStreamingData(data, true, allocator);
+    defer stream_index.deinit(allocator);
+    try std.testing.expect(!stream_index.records.items[0].isUniformWidth());
+    try std.testing.expect(stream_index.side_tables.items.len > 0);
+}
+
+test "streaming short final line without terminal newline matches mmap" {
+    const data = ">seq\nAAAA\nAAAA\nAC";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    try expectZfiStreamingMatchesMmap(allocator, data, "short-final-no-terminal-nl");
+
+    var stream_index = try main.indexer.scanZfiIndexStreamingData(data, true, allocator);
+    defer stream_index.deinit(allocator);
+    try std.testing.expect(stream_index.records.items[0].isUniformWidth());
+    try std.testing.expectEqual(@as(usize, 0), stream_index.side_tables.items.len);
+}
+
+test "streaming short final line across chunk boundary matches mmap" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var fasta: std.ArrayList(u8) = .empty;
+    defer fasta.deinit(allocator);
+    try fasta.appendSlice(allocator, ">seq\n");
+    const full_line = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"; // 60 + nl
+    while (fasta.items.len + full_line.len < low_mem_chunk_size + 200) {
+        try fasta.appendSlice(allocator, full_line);
+    }
+    try fasta.appendSlice(allocator, "ACGT\n");
+
+    try expectZfiStreamingMatchesMmap(allocator, fasta.items, "short-final-chunk-boundary");
+    var stream_index = try main.indexer.scanZfiIndexStreamingData(fasta.items, true, allocator);
+    defer stream_index.deinit(allocator);
+    try std.testing.expect(stream_index.records.items[0].isUniformWidth());
+    try std.testing.expectEqual(@as(usize, 0), stream_index.side_tables.items.len);
+}
+
 // ============================================================================
 // Stable gates fixtures (tests/data/gates): malformed, boundary, portability
 // ============================================================================
