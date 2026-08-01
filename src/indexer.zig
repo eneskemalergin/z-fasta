@@ -29,50 +29,152 @@ pub const low_mem_chunk_size = 1 * 1024 * 1024;
 const FILE_IO_BUF_SIZE = 8 * 1024;
 pub const max_index_name_len = std.math.maxInt(u16);
 
+/// Offset into a name blob for stream `.zfi` catalog dedup (one store for map + embed).
+pub const NameBlobRef = struct { off: u32, len: u32 };
+
 /// First-wins name set for indexing. A hash accelerates the map; discarding a record
 /// requires full-string equality (`Context.eql`), never hash equality alone.
 /// Production uses `NameDedup` (`StringContext`). Tests may inject a colliding hasher via
 /// `NameDedupWith` to prove identity stays byte equality under forced collisions.
+///
+/// Modes:
+/// - Borrow (`owns_keys=false`): mmap; keys borrow the source buffer.
+/// - Arena (`owns_keys=true`, no blob): stream FAI; keys in a child arena.
+/// - Blob (`initOwningBlob`): stream `.zfi`; keys are offsets into `name_blob` so embed
+///   does not copy each name a second time (Tx RSS was ~2× catalog without this).
 pub fn NameDedupWith(comptime Context: type) type {
     return struct {
         map: std.HashMap([]const u8, void, Context, std.hash_map.default_max_load_percentage),
-        /// When true, keys were `dupe`d with `map.allocator` and are freed in `deinit`.
+        /// When true, keys are allocated from `key_arena` and freed only when the arena dies.
         /// Mmap scans set this false and borrow name slices from the source buffer.
         owns_keys: bool,
+        key_arena: ?std.heap.ArenaAllocator = null,
+        /// When set, stream `.zfi` dedup stores `NameBlobRef` keys into this blob (not `map`).
+        name_blob: ?*std.ArrayList(u8) = null,
+        ref_map: ?BlobRefMap = null,
+        /// After a successful first-seen `observe` in blob mode, the embedded span.
+        last_offset: u32 = 0,
+        last_len: u16 = 0,
+
+        const BlobHashContext = struct {
+            blob: *std.ArrayList(u8),
+            pub fn hash(self: @This(), key: NameBlobRef) u64 {
+                return std.hash_map.hashString(self.blob.items[key.off..][0..key.len]);
+            }
+            pub fn eql(self: @This(), a: NameBlobRef, b: NameBlobRef) bool {
+                if (a.len != b.len) return false;
+                return std.mem.eql(
+                    u8,
+                    self.blob.items[a.off..][0..a.len],
+                    self.blob.items[b.off..][0..b.len],
+                );
+            }
+        };
+
+        const BlobRefMap = std.HashMap(
+            NameBlobRef,
+            void,
+            BlobHashContext,
+            std.hash_map.default_max_load_percentage,
+        );
+
+        const SliceLookup = struct {
+            blob: *std.ArrayList(u8),
+            pub fn hash(_: @This(), name: []const u8) u64 {
+                return std.hash_map.hashString(name);
+            }
+            pub fn eql(self: @This(), name: []const u8, ref: NameBlobRef) bool {
+                if (name.len != ref.len) return false;
+                return std.mem.eql(u8, name, self.blob.items[ref.off..][0..ref.len]);
+            }
+        };
 
         const Self = @This();
 
+        /// Soft start capacity for stream catalogs; map grows geometrically after this.
+        /// Keep modest so Genome `--low-mem` RSS stays in the few-MB class.
+        pub const stream_dedup_pre_cap: u32 = 16384;
+
         pub fn init(allocator: std.mem.Allocator, owns_keys: bool) Self {
-            return .{
+            var self: Self = .{
                 .map = std.HashMap([]const u8, void, Context, std.hash_map.default_max_load_percentage).init(allocator),
                 .owns_keys = owns_keys,
+                .key_arena = null,
+            };
+            if (owns_keys) {
+                self.key_arena = std.heap.ArenaAllocator.init(allocator);
+            }
+            return self;
+        }
+
+        /// Stream `.zfi`: one catalog in `blob` for both dedup and embedded names.
+        pub fn initOwningBlob(allocator: std.mem.Allocator, blob: *std.ArrayList(u8)) Self {
+            return .{
+                .map = std.HashMap([]const u8, void, Context, std.hash_map.default_max_load_percentage).init(allocator),
+                .owns_keys = true,
+                .name_blob = blob,
+                .ref_map = BlobRefMap.initContext(allocator, .{ .blob = blob }),
             };
         }
 
-        pub fn deinit(self: *Self) void {
-            if (self.owns_keys) {
-                var it = self.map.keyIterator();
-                while (it.next()) |key| {
-                    self.map.allocator.free(key.*);
-                }
+        pub fn bindsToBlob(self: *const Self) bool {
+            return self.name_blob != null;
+        }
+
+        pub fn ensureStreamCapacity(self: *Self, min_cap: u32) !void {
+            if (self.ref_map) |*rm| {
+                try rm.ensureTotalCapacity(min_cap);
+                return;
             }
+            try self.map.ensureTotalCapacity(min_cap);
+        }
+
+        pub fn deinit(self: *Self) void {
+            if (self.ref_map) |*rm| {
+                rm.deinit();
+                self.ref_map = null;
+            }
+            // Map entries borrow arena memory; free the table first, then the arena.
             self.map.deinit();
+            if (self.key_arena) |*arena| arena.deinit();
+            self.key_arena = null;
+            self.name_blob = null;
         }
 
         /// Returns true when `name` was already observed (caller should skip the record).
         pub fn observe(self: *Self, name: []const u8) !bool {
+            if (self.name_blob) |blob| {
+                var rm = &(self.ref_map orelse return error.OutOfMemory);
+                const lookup = SliceLookup{ .blob = blob };
+                const gop = try rm.getOrPutAdapted(name, lookup);
+                if (gop.found_existing) {
+                    self.last_offset = gop.key_ptr.off;
+                    self.last_len = @intCast(gop.key_ptr.len);
+                    return true;
+                }
+                const off: u32 = @intCast(blob.items.len);
+                blob.appendSlice(rm.allocator, name) catch |err| {
+                    _ = rm.removeByPtr(gop.key_ptr);
+                    return err;
+                };
+                gop.key_ptr.* = .{ .off = off, .len = @intCast(name.len) };
+                self.last_offset = off;
+                self.last_len = @intCast(name.len);
+                return false;
+            }
             if (!self.owns_keys) {
                 const gop = try self.map.getOrPut(name);
                 return gop.found_existing;
             }
-            // Own before insert so a failed alloc cannot leave a borrowed key in the map.
-            const owned = try self.map.allocator.dupe(u8, name);
-            errdefer self.map.allocator.free(owned);
-            const gop = try self.map.getOrPut(owned);
-            if (gop.found_existing) {
-                self.map.allocator.free(owned);
-                return true;
-            }
+            const arena = &(self.key_arena orelse return error.OutOfMemory);
+            const gop = try self.map.getOrPut(name);
+            if (gop.found_existing) return true;
+            // Replace the temporary lookup key with an arena-owned copy (stable until deinit).
+            const owned = arena.allocator().dupe(u8, name) catch |err| {
+                _ = self.map.remove(name);
+                return err;
+            };
+            gop.key_ptr.* = owned;
             return false;
         }
     };
@@ -94,6 +196,9 @@ pub const FastaRecordEmit = struct {
     uses_uniform_formula: bool,
     /// Incremental side-table bytes for streaming `.zfi` (line count + `SideTableLine` rows).
     streaming_side_table: []const u8 = &.{},
+    /// When true, `record` already has blob-relative `name_offset`/`name_len` and `name_in_zfi_flag`
+    /// (stream `.zfi` blob-backed `NameDedup`); skip `embedZfiName`.
+    name_embedded: bool = false,
 };
 
 pub const ZfiIndex = struct {
@@ -705,6 +810,8 @@ pub fn scanZfiIndexStreaming(
         .name_blob = .empty,
     };
     errdefer index.deinit(allocator);
+    // Modest pre-size: enough for Proteome/small catalogs; Tx grows geometrically.
+    try index.records.ensureTotalCapacity(allocator, 4096);
 
     const Ctx = struct {
         index: *ZfiIndex,
@@ -717,13 +824,33 @@ pub fn scanZfiIndexStreaming(
                 try ctx.index.side_tables.appendSlice(ctx.allocator, emit_info.streaming_side_table);
                 try rec.markNonUniform(local_offset);
             }
-            try embedZfiName(&rec, emit_info.name, &ctx.index.name_blob, ctx.allocator);
+            if (!emit_info.name_embedded) {
+                try embedZfiName(&rec, emit_info.name, &ctx.index.name_blob, ctx.allocator);
+            }
             try ctx.index.records.append(ctx.allocator, rec);
         }
     };
 
     var ctx = Ctx{ .index = &index, .allocator = allocator };
-    _ = try scanFastaReader(reader, read_buf, enable_dedup, null, allocator, true, &ctx, Ctx.emit);
+    // One catalog: dedup refs into `name_blob` (no arena + embed double copy).
+    var blob_dedup: ?NameDedup = null;
+    if (enable_dedup) {
+        blob_dedup = NameDedup.initOwningBlob(allocator, &index.name_blob);
+        try blob_dedup.?.ensureStreamCapacity(NameDedup.stream_dedup_pre_cap);
+    }
+    defer if (blob_dedup) |*seen| seen.deinit();
+    const external_dedup: ?*NameDedup = if (blob_dedup) |*s| s else null;
+    _ = try scanFastaReader(
+        reader,
+        read_buf,
+        enable_dedup,
+        null,
+        allocator,
+        true,
+        external_dedup,
+        &ctx,
+        Ctx.emit,
+    );
     try finalizeSideTableOffsets(&index);
     return index;
 }
@@ -840,7 +967,6 @@ const ChunkParseState = struct {
     active: bool = false,
     in_header: bool = false,
     parsing_name: bool = false,
-    is_duplicate: bool = false,
     at_line_start: bool = true,
     header_start_offset: u64 = 0,
     name: std.ArrayList(u8) = .empty,
@@ -898,7 +1024,6 @@ const ChunkParseState = struct {
         self.active = true;
         self.in_header = true;
         self.parsing_name = true;
-        self.is_duplicate = false;
         self.at_line_start = false;
         self.header_start_offset = header_start_offset;
         self.name.clearRetainingCapacity();
@@ -1099,30 +1224,45 @@ const ChunkParseState = struct {
         self.pending_line_bytes = 0;
     }
 
-    fn finalizeHeader(self: *ChunkParseState, seen_names: ?*NameDedup) !void {
+    fn finalizeHeader(self: *ChunkParseState) void {
+        // Dedup runs at emit time (after seq_len > 0), matching mmap: empty sequences
+        // never claim a name. Blob-backed stream `.zfi` also embeds only kept records.
         self.in_header = false;
-        const name = self.name.items;
-        if (seen_names) |seen| {
-            if (try seen.observe(name)) self.is_duplicate = true;
-        }
         self.at_line_start = true;
     }
 
     fn emitRecordIfReady(
         self: *ChunkParseState,
         ctx: anytype,
+        seen_names: ?*NameDedup,
         comptime emitRecord: fn (@TypeOf(ctx), FastaRecordEmit) anyerror!void,
         record_count: *u32,
     ) !void {
         try self.commitPendingLine(false);
         const metrics = self.line_builder.finish();
         const seq_info = sequenceLengthInfoFromMetrics(metrics);
-        if (seq_info.seq_len == 0 or self.is_duplicate) {
+        if (seq_info.seq_len == 0) {
             self.deferred_short_tail = null;
             return;
         }
 
-        const name_len: u16 = @intCast(self.name.items.len);
+        var name_embedded = false;
+        var name_offset: u64 = self.header_start_offset + 1;
+        var out_name_len: u16 = @intCast(self.name.items.len);
+        var name_pad: [6]u8 = .{0} ** 6;
+        if (seen_names) |seen| {
+            if (try seen.observe(self.name.items)) {
+                self.deferred_short_tail = null;
+                return;
+            }
+            if (seen.bindsToBlob()) {
+                name_offset = seen.last_offset;
+                out_name_len = seen.last_len;
+                name_pad[0] = index_format.name_in_zfi_flag;
+                name_embedded = true;
+            }
+        }
+
         var side_table_slice: []const u8 = &.{};
         if (seq_info.uses_uniform_formula) {
             // Short final wrap was deferred and never needed; drop it.
@@ -1150,17 +1290,19 @@ const ChunkParseState = struct {
         }
         try emitRecord(ctx, .{
             .record = .{
-                .name_offset = self.header_start_offset + 1,
-                .name_len = name_len,
+                .name_offset = name_offset,
+                .name_len = out_name_len,
                 .seq_offset = self.seq_offset,
                 .seq_len = seq_info.seq_len,
                 .line_bases = metrics.line_bases,
                 .line_bytes = metrics.line_bytes,
+                ._pad = name_pad,
             },
             .name = self.name.items,
             .seq_data = &.{},
             .uses_uniform_formula = seq_info.uses_uniform_formula,
             .streaming_side_table = side_table_slice,
+            .name_embedded = name_embedded,
         });
         record_count.* += 1;
     }
@@ -1197,7 +1339,7 @@ fn processChunkBytes(
 
         if (state.at_line_start and byte == '>') {
             if (state.active) {
-                try state.emitRecordIfReady(ctx, emitRecord, record_count);
+                try state.emitRecordIfReady(ctx, seen_names, emitRecord, record_count);
             }
             try state.startHeader(byte_offset);
             i += 1;
@@ -1206,7 +1348,7 @@ fn processChunkBytes(
 
         if (state.in_header) {
             if (byte == '\n') {
-                try state.finalizeHeader(seen_names);
+                state.finalizeHeader();
                 i += 1;
                 continue;
             }
@@ -1298,22 +1440,29 @@ pub fn scanFastaReader(
     max_name_len: ?usize,
     allocator: std.mem.Allocator,
     zfi_mode: bool,
+    external_dedup: ?*NameDedup,
     ctx: anytype,
     comptime emitRecord: fn (@TypeOf(ctx), FastaRecordEmit) anyerror!void,
 ) !u32 {
-    // Streaming reuses one name buffer; NameDedup must own key copies.
-    var dedup_names: ?NameDedup = null;
-    if (enable_dedup) {
-        dedup_names = NameDedup.init(allocator, true);
-    }
-    defer if (dedup_names) |*seen| seen.deinit();
+    // Stream FAI: arena-backed NameDedup. Stream `.zfi`: caller passes blob-backed dedup
+    // via `external_dedup` so catalog lives once in `name_blob`.
+    var owned_dedup: ?NameDedup = null;
+    const dedup_ptr: ?*NameDedup = blk: {
+        if (external_dedup) |p| break :blk p;
+        if (enable_dedup) {
+            owned_dedup = NameDedup.init(allocator, true);
+            try owned_dedup.?.ensureStreamCapacity(NameDedup.stream_dedup_pre_cap);
+            break :blk &owned_dedup.?;
+        }
+        break :blk null;
+    };
+    defer if (owned_dedup) |*seen| seen.deinit();
 
     var state = ChunkParseState{ .allocator = allocator, .zfi_mode = zfi_mode };
     defer state.name.deinit(allocator);
     defer if (zfi_mode) state.side_table.deinit(allocator);
     var record_count: u32 = 0;
     var file_offset: u64 = 0;
-    const dedup_ptr: ?*NameDedup = if (dedup_names) |*s| s else null;
 
     while (true) {
         const n = reader.readSliceShort(read_buf) catch |err| return err;
@@ -1332,7 +1481,7 @@ pub fn scanFastaReader(
     }
 
     if (state.active) {
-        try state.emitRecordIfReady(ctx, emitRecord, &record_count);
+        try state.emitRecordIfReady(ctx, dedup_ptr, emitRecord, &record_count);
     }
 
     return record_count;
@@ -1390,7 +1539,7 @@ fn scanChunkedReader(
     };
 
     var ctx = Ctx{ .buffer = &fai_buf };
-    const count = try scanFastaReader(reader, read_buf, enable_dedup, null, allocator, false, &ctx, Ctx.emit);
+    const count = try scanFastaReader(reader, read_buf, enable_dedup, null, allocator, false, null, &ctx, Ctx.emit);
     try fai_buf.flush();
     return count;
 }
@@ -1442,9 +1591,10 @@ pub fn runIndexLowMem(
         err_exit("error: not a FASTA file: {s}\n", .{path});
     }
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    // Must free on growth: ArrayList/HashMap realloc under an arena keeps every old
+    // buffer until process end (Tx `--low-mem` `.zfi` was ~3× payload RSS). Stream FAI
+    // still uses a child arena inside `NameDedup` for stable name keys.
+    const allocator = std.heap.page_allocator;
 
     var io_buf: [FILE_IO_BUF_SIZE]u8 = undefined;
     var read_buf: [low_mem_chunk_size]u8 = undefined;
@@ -1453,11 +1603,29 @@ pub fn runIndexLowMem(
     if (emit_fai) {
         var out_buf: [65536]u8 = undefined;
         var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
-        // Buffer first so a mid-file NonUniformFai does not leave a partial `.fai` on stdout.
-        var fai_aw: std.Io.Writer.Allocating = .init(allocator);
-        defer fai_aw.deinit();
 
-        const record_count = scanChunkedReader(&file_reader.interface, &read_buf, &fai_aw.writer, enable_dedup, allocator) catch |err| switch (err) {
+        // Spill to a sibling temp file so a mid-file NonUniformFai does not leave a partial
+        // `.fai` on stdout and so Tx-scale catalogs do not keep the whole FAI text in RSS.
+        var fai_tmp_buf: [4096]u8 = undefined;
+        const fai_tmp_path = std.fmt.bufPrint(&fai_tmp_buf, "{s}.fai.stdout.tmp", .{path}) catch {
+            err_exit("error: path too long\n", .{});
+        };
+        const cwd = std.Io.Dir.cwd();
+        cwd.deleteFile(io, fai_tmp_path) catch {};
+
+        const tmp_file = cwd.createFile(io, fai_tmp_path, .{}) catch {
+            err_exit("error: failed to create temp fai: {s}\n", .{fai_tmp_path});
+        };
+        var tmp_open = true;
+        defer {
+            if (tmp_open) tmp_file.close(io);
+            cwd.deleteFile(io, fai_tmp_path) catch {};
+        }
+
+        var tmp_io_buf: [65536]u8 = undefined;
+        var tmp_fw = tmp_file.writer(io, &tmp_io_buf);
+
+        const record_count = scanChunkedReader(&file_reader.interface, &read_buf, &tmp_fw.interface, enable_dedup, allocator) catch |err| switch (err) {
             error.HeaderTooLong => err_exit("error: sequence name exceeds {d} bytes: {s}\n", .{ max_index_name_len, path }),
             error.NonUniformFai => err_exit(
                 "error: cannot emit .fai for non-uniform sequence layout; run 'z-fasta index' (default) to write .zfi\n",
@@ -1465,13 +1633,38 @@ pub fn runIndexLowMem(
             ),
             else => err_exit("error: processing failed\n", .{}),
         };
+        tmp_fw.interface.flush() catch {
+            err_exit("error: write failed\n", .{});
+        };
+        // Streaming writer mode on `tmp_file` can block positional reads; reopen for replay.
+        tmp_file.close(io);
+        tmp_open = false;
 
         if (record_count == 0) {
             err_exit("error: no valid sequences found in: {s}\n", .{path});
         }
-        stdout_fw.interface.writeAll(fai_aw.written()) catch {
-            err_exit("error: write failed\n", .{});
+
+        const read_file = cwd.openFile(io, fai_tmp_path, .{}) catch {
+            err_exit("error: failed to reopen temp fai\n", .{});
         };
+        defer read_file.close(io);
+
+        const tmp_size = (read_file.stat(io) catch {
+            err_exit("error: failed to stat temp fai\n", .{});
+        }).size;
+        var offset: u64 = 0;
+        var copy_buf: [65536]u8 = undefined;
+        while (offset < tmp_size) {
+            const want: usize = @intCast(@min(copy_buf.len, tmp_size - offset));
+            const n = std.Io.File.readPositionalAll(read_file, io, copy_buf[0..want], offset) catch {
+                err_exit("error: failed to read temp fai\n", .{});
+            };
+            if (n == 0) break;
+            stdout_fw.interface.writeAll(copy_buf[0..n]) catch {
+                err_exit("error: write failed\n", .{});
+            };
+            offset += n;
+        }
         stdout_fw.flush() catch {};
         return;
     }

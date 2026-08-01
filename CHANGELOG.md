@@ -15,6 +15,10 @@ All notable changes to z-fasta will be documented in this file.
 - Shared runner helpers: `bench/shared/runner_common.sh` (sourced by all three suites).
 - Stats correctness count: **95** (was 92 in 0.3.0 docs). Get remains **409**; index edge **25/25**.
 
+### Fixed
+
+- **`index --low-mem` catalog path:** stream FAI `NameDedup` keeps owned names in a child arena instead of per-name heap `dupe`/`free`; `--emit-fai` spills through a sibling temp file then copies to stdout. Stream `.zfi` uses blob-backed `NameDedup` (one catalog for dedup + embedded names) and observes at emit (mmap-aligned). `--low-mem` builds with `page_allocator` so ArrayList/HashMap growth frees (a parent arena retained abandoned buffers and inflated Transcriptome `.zfi` RSS). Portable `std.Io` only.
+
 ## [0.3.0] - 2026-07-28
 
 Hardening and feature-parity release. Adds `validate`, correct `get` on messy FASTA via `.zfi` side tables, streaming `index --low-mem`, portable Linux/macOS/Windows builds, safer indexes and CLI errors, and rebuilt index/get/stats verification. Version is `0.3.0`. **Re-index required** for existing `.zfi` files (embedded names and stronger source identity).
