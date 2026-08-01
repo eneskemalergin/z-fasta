@@ -148,18 +148,9 @@ preload_scaling_indexes() {
 }
 
 export_manifest_tool_versions() {
-    export BENCH_VER_ZEBRAC="$(bench_tool_version zebrac)"
-    export BENCH_VER_ZFASTA="$(bench_tool_version z-fasta 2>/dev/null || echo unknown)"
-    export BENCH_VER_SAMTOOLS="$(bench_tool_version samtools 2>/dev/null || echo unknown)"
-    local seqtk_ver
-    seqtk_ver="$(bench_tool_version seqtk 2>/dev/null | head -1 || true)"
-    export BENCH_VER_SEQTK="${seqtk_ver:-unknown}"
-    for tool in seqkit noodles rustbio; do
-        if bench_has_tool "$tool"; then
-            upper="${tool^^}"
-            export "BENCH_VER_${upper}=$(bench_tool_version "$tool")"
-        fi
-    done
+    export_manifest_core_versions
+    export_manifest_required_tool_versions seqtk
+    export_manifest_optional_tool_versions seqkit noodles rustbio
 }
 
 write_run_manifest() {

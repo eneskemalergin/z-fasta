@@ -199,17 +199,9 @@ multi_positional_get_cmd() {
 
 
 export_manifest_tool_versions() {
-    export BENCH_VER_ZEBRAC="$(bench_tool_version zebrac)"
-    export BENCH_VER_ZFASTA="$(bench_tool_version z-fasta 2>/dev/null || echo unknown)"
-    export BENCH_VER_SAMTOOLS="$(bench_tool_version samtools 2>/dev/null || echo unknown)"
-    export BENCH_VER_BEDTOOLS="$(bench_tool_version bedtools 2>/dev/null || echo unknown)"
-    export BENCH_VER_SEQTK="$(bench_tool_version seqtk 2>/dev/null | head -1 || echo unknown)"
-    for tool in fastahack pyfaidx noodles rustbio; do
-        if bench_has_tool "$tool"; then
-            upper="${tool^^}"
-            export "BENCH_VER_${upper}=$(bench_tool_version "$tool")"
-        fi
-    done
+    export_manifest_core_versions
+    export_manifest_required_tool_versions bedtools seqtk
+    export_manifest_optional_tool_versions fastahack pyfaidx noodles rustbio
 }
 
 write_run_manifest() {
@@ -612,10 +604,6 @@ _zfasta_get() {
     else
         "$ZFASTA" get "$fasta" "$@"
     fi
-}
-
-bed_to_regions() {
-    awk -F'\t' '!/^[[:space:]]*$|^#|^track|^browser/{sub(/\r$/,""); printf "%s:%d-%d\n",$1,$2+1,$3}' "$1"
 }
 
 names_to_regions() { awk '!/^[[:space:]]*$|^#/{sub(/\r$/,""); print}' "$1"; }

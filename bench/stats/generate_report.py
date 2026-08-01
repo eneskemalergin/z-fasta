@@ -126,19 +126,6 @@ def load_index_report():
     return mod
 
 
-def load_manifest(results_dir: Path) -> dict | None:
-    latest = results_dir / "LATEST"
-    if latest.is_file():
-        ts = latest.read_text().strip()
-        path = results_dir / f"run_{ts}.json"
-        if path.is_file():
-            return json.loads(path.read_text())
-    paths = sorted(results_dir.glob("run_*.json"), reverse=True)
-    if paths:
-        return json.loads(paths[0].read_text())
-    return None
-
-
 def resolve_verify_status(manifest: dict, results_dir: Path) -> tuple[bool, str | None]:
     """Return (skipped, pass_count). Prefer verify_<ts>.log when present.
 
@@ -163,26 +150,6 @@ def resolve_verify_status(manifest: dict, results_dir: Path) -> tuple[bool, str 
     return skipped, str(raw)
 
 
-def is_incomplete(manifest: dict | None) -> bool:
-    if not manifest:
-        return True
-    sections = manifest.get("sections") or {}
-    for key in ("perf_full", "perf_mode", "scale_size", "scale_seqs_fixed"):
-        if key not in sections:
-            return True
-    for flag in ("skip_full", "skip_mode", "skip_scale_size", "skip_scale_seqs_fixed"):
-        if manifest.get(flag):
-            return True
-    try:
-        if int(manifest.get("warmup", 0)) < 1:
-            return True
-        if int(manifest.get("runs", 0)) < 3:
-            return True
-    except (TypeError, ValueError):
-        return True
-    return False
-
-
 def tools_in_run(df: pd.DataFrame | None, order: list[str]) -> list[str]:
     if df is None or df.empty:
         return []
@@ -202,19 +169,9 @@ def dataset_sort_key(name):
         return len(DATASET_ORDER), str(name)
 
 
-def load_zebrac_json(path: Path, metadata_df: pd.DataFrame | None) -> pd.DataFrame:
+def load_zebrac_json(path: Path, metadata_df: pd.DataFrame | None, ir) -> pd.DataFrame:
     data = json.loads(path.read_text())
-    meta_rows: list[dict] = []
-    if metadata_df is not None and "raw_json" in metadata_df.columns:
-        resolved = path.resolve()
-        for _, row in metadata_df.iterrows():
-            raw = Path(row["raw_json"])
-            try:
-                if raw.resolve() == resolved:
-                    meta_rows.append(row.to_dict())
-            except OSError:
-                if raw == path:
-                    meta_rows.append(row.to_dict())
+    meta_rows = ir.meta_rows_for_json(metadata_df, path)
     meta_by_command = {row.get("command"): row for row in meta_rows}
 
     rows = []
@@ -274,21 +231,13 @@ def load_zebrac_json(path: Path, metadata_df: pd.DataFrame | None) -> pd.DataFra
 
 
 def load_section(results_dir: Path, manifest: dict | None, key: str, ir) -> pd.DataFrame | None:
-    rel = (manifest or {}).get("sections", {}).get(key)
-    if not rel:
-        return None
-    section_dir = results_dir / rel
-    if not section_dir.is_dir():
-        return None
-    metadata = ir.load_metadata(results_dir, manifest)
-    frames = []
-    for jf in sorted(section_dir.glob("*.json")):
-        frame = load_zebrac_json(jf, metadata)
-        if not frame.empty:
-            frames.append(frame)
-    if not frames:
-        return None
-    return pd.concat(frames, ignore_index=True)
+    return ir.load_section_frames(
+        results_dir,
+        manifest,
+        key,
+        load_json=lambda p, m: load_zebrac_json(p, m, ir),
+        load_metadata=ir.load_metadata,
+    )
 
 
 def enrich_size(df: pd.DataFrame | None) -> pd.DataFrame | None:
@@ -1104,14 +1053,6 @@ def md_composition_tax(mode_df: pd.DataFrame, nums) -> str:
     )
 
 
-def prune_stale_figures(figures_dir: Path) -> None:
-    if not figures_dir.is_dir():
-        return
-    for path in figures_dir.glob("*.png"):
-        if path.name not in REPORT_FIGURES:
-            path.unlink()
-
-
 def _scaling_pivot(df: pd.DataFrame, tools: list[str], param_col: str, param_order: list, xlabel: str, fmt, ir) -> str:
     work = ir.filter_tools(df, tools).copy()
     work["cell"] = work.apply(fmt, axis=1)
@@ -1326,10 +1267,14 @@ def main() -> None:
     # Keep index helper dataset sort aligned with stats facet order.
     ir.DATASET_ORDER = list(DATASET_ORDER)
 
-    manifest = load_manifest(results_dir)
+    manifest = ir.load_run_manifest(results_dir)
     if not manifest:
         raise SystemExit(f"No run_*.json under {results_dir}")
-    incomplete = is_incomplete(manifest)
+    incomplete = ir.is_incomplete_run(
+        manifest,
+        required_sections=("perf_full", "perf_mode", "scale_size", "scale_seqs_fixed"),
+        skip_flags=("skip_full", "skip_mode", "skip_scale_size", "skip_scale_seqs_fixed"),
+    )
     if incomplete and not args.allow_incomplete:
         raise SystemExit(
             "Refusing to overwrite REPORT.md from incomplete run "
@@ -1346,7 +1291,7 @@ def main() -> None:
 
     figures_dir = results_dir / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
-    prune_stale_figures(figures_dir)
+    ir.prune_stale_pngs(figures_dir, REPORT_FIGURES)
 
     nums = ir.ReportCounters()
     report_lines: list[str] = [

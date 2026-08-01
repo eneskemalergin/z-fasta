@@ -79,3 +79,39 @@ existing_section_dir() {
         echo "${prefix}_${TIMESTAMP}"
     fi
 }
+
+# Core versions every suite manifest records.
+export_manifest_core_versions() {
+    export BENCH_VER_ZEBRAC="$(bench_tool_version zebrac)"
+    export BENCH_VER_ZFASTA="$(bench_tool_version z-fasta 2>/dev/null || echo unknown)"
+    export BENCH_VER_SAMTOOLS="$(bench_tool_version samtools 2>/dev/null || echo unknown)"
+}
+
+# Always export BENCH_VER_<TOOL> (unknown if missing). seqtk uses the first line only.
+export_manifest_required_tool_versions() {
+    local tool upper ver
+    for tool in "$@"; do
+        case "$tool" in
+            seqtk)
+                # Match prior stats behavior: empty stdout becomes "unknown".
+                ver="$(bench_tool_version seqtk 2>/dev/null | head -1 || true)"
+                export BENCH_VER_SEQTK="${ver:-unknown}"
+                ;;
+            *)
+                upper="${tool^^}"
+                export "BENCH_VER_${upper}=$(bench_tool_version "$tool" 2>/dev/null || echo unknown)"
+                ;;
+        esac
+    done
+}
+
+# Export BENCH_VER_<TOOL> only when the peer is installed.
+export_manifest_optional_tool_versions() {
+    local tool upper
+    for tool in "$@"; do
+        if bench_has_tool "$tool"; then
+            upper="${tool^^}"
+            export "BENCH_VER_${upper}=$(bench_tool_version "$tool")"
+        fi
+    done
+}

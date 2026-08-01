@@ -61,7 +61,8 @@
 # ── Notes ───────────────────────────────────────────────────────────
 #   Partial runs overwrite LATEST; use --allow-incomplete for report drafts.
 #   generate_report.py refuses incomplete manifests unless --allow-incomplete.
-#   Headline scaling uses z-fasta default only; all three modes on real data.
+#   Headline scaling uses z-fasta (.fai) only (peer-comparable). Real data times all
+#   eight I/O x format x dedup lanes; Mode Comparison reports them.
 #
 #   -h|--help  print this header
 
@@ -291,9 +292,9 @@ bench_file() {
     local section="${4:-index}" workload="${5:-$(basename "$json_out" .json)}"
     local mode="${6:-all}"
 
-    local zfasta_tool="z-fasta-default" bench_mode="$mode"
+    local bench_mode="$mode"
     if [[ "$mode" == "messy" ]]; then
-        zfasta_tool="z-fasta"
+        # Messy matrix uses production `.zfi` only; treat like headline for peer set.
         bench_mode="headline"
     fi
 
@@ -307,7 +308,6 @@ bench_file() {
     qn="$(quote_arg "$NOODLES")"
     qr="$(quote_arg "$RUSTBIO")"
     local clean="rm -f ${qf}.fai ${qf}.zfi"
-    local clean_zfi="rm -f ${qf}.zfi"
     local nbytes
     nbytes="$(file_size_bytes "$file")"
 
@@ -315,18 +315,30 @@ bench_file() {
     if [[ "$mode" == "messy" ]]; then
         # Production `.zfi` is the messy contract. `--emit-fai` must refuse non-uniform
         # layouts, so timing emit-fai here falsely marks z-fasta as fail in the matrix.
-        bench_add_command "$section" "$workload" "$zfasta_tool" "z-fasta" "$json_out" \
+        bench_add_command "$section" "$workload" "z-fasta" "z-fasta" "$json_out" \
             "$clean; $qz index $qf > /dev/null" "$nbytes"
-    else
-        bench_add_command "$section" "$workload" "$zfasta_tool" "z-fasta" "$json_out" \
+    elif [[ "$bench_mode" == "headline" ]]; then
+        # Peer-comparable lane only (scaling sweeps).
+        bench_add_command "$section" "$workload" "z-fasta-fai" "z-fasta" "$json_out" \
             "$clean; $qz index --emit-fai $qf > /dev/null" "$nbytes"
-    fi
-
-    if [[ "$bench_mode" != "headline" ]]; then
-        bench_add_command "$section" "$workload" "z-fasta-nodedup" "z-fasta" "$json_out" \
+    else
+        # Full 8-cell matrix: {mmap, --low-mem} x {.fai, .zfi} x {dedup, --no-dedup}.
+        bench_add_command "$section" "$workload" "z-fasta-fai" "z-fasta" "$json_out" \
+            "$clean; $qz index --emit-fai $qf > /dev/null" "$nbytes"
+        bench_add_command "$section" "$workload" "z-fasta-fai-nodedup" "z-fasta" "$json_out" \
             "$clean; $qz index --emit-fai --no-dedup $qf > /dev/null" "$nbytes"
-        bench_add_command "$section" "$workload" "z-fasta-lowmem" "z-fasta" "$json_out" \
+        bench_add_command "$section" "$workload" "z-fasta-fai-lowmem" "z-fasta" "$json_out" \
             "$clean; $qz index --low-mem --emit-fai $qf > /dev/null" "$nbytes"
+        bench_add_command "$section" "$workload" "z-fasta-fai-lowmem-nodedup" "z-fasta" "$json_out" \
+            "$clean; $qz index --low-mem --emit-fai --no-dedup $qf > /dev/null" "$nbytes"
+        bench_add_command "$section" "$workload" "z-fasta-zfi" "z-fasta" "$json_out" \
+            "$clean; $qz index $qf > /dev/null" "$nbytes"
+        bench_add_command "$section" "$workload" "z-fasta-zfi-nodedup" "z-fasta" "$json_out" \
+            "$clean; $qz index --no-dedup $qf > /dev/null" "$nbytes"
+        bench_add_command "$section" "$workload" "z-fasta-zfi-lowmem" "z-fasta" "$json_out" \
+            "$clean; $qz index --low-mem $qf > /dev/null" "$nbytes"
+        bench_add_command "$section" "$workload" "z-fasta-zfi-lowmem-nodedup" "z-fasta" "$json_out" \
+            "$clean; $qz index --low-mem --no-dedup $qf > /dev/null" "$nbytes"
     fi
 
     bench_add_command "$section" "$workload" "samtools" "samtools" "$json_out" \
@@ -342,27 +354,13 @@ bench_file() {
     bench_has_tool rustbio && bench_add_command "$section" "$workload" "rustbio-custom-index" "rustbio" "$json_out" \
         "$clean; $qr index $qf" "$nbytes"
 
-    # Last: production `.zfi` lane. Only remove `.zfi` so competitor `.fai` remains for
-    # the report on-disk size table (`bench/index/generate_report.py`).
-    if [[ "$bench_mode" != "headline" ]]; then
-        bench_add_command "$section" "$workload" "z-fasta-zfi" "z-fasta" "$json_out" \
-            "$clean_zfi; $qz index $qf > /dev/null" "$nbytes"
-    fi
-
     zebrac_run_current_group "$json_out" "$metadata_jsonl"
     zebrac_clear_commands
 }
 
 export_manifest_tool_versions() {
-    export BENCH_VER_ZEBRAC="$(bench_tool_version zebrac)"
-    export BENCH_VER_ZFASTA="$(bench_tool_version z-fasta 2>/dev/null || echo unknown)"
-    export BENCH_VER_SAMTOOLS="$(bench_tool_version samtools 2>/dev/null || echo unknown)"
-    for tool in seqkit fastahack pyfaidx noodles rustbio; do
-        if bench_has_tool "$tool"; then
-            upper="${tool^^}"
-            export "BENCH_VER_${upper}=$(bench_tool_version "$tool")"
-        fi
-    done
+    export_manifest_core_versions
+    export_manifest_optional_tool_versions seqkit fastahack pyfaidx noodles rustbio
 }
 
 # ══════════════════════════════════════════════════════════════════════
