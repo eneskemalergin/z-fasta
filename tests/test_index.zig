@@ -1948,6 +1948,102 @@ test "streaming short final line across chunk boundary matches mmap" {
     try std.testing.expectEqual(@as(usize, 0), stream_index.side_tables.items.len);
 }
 
+test "streaming CRLF uniform body with short final matches mmap (Track A2)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var fasta: std.ArrayList(u8) = .empty;
+    defer fasta.deinit(allocator);
+    try fasta.appendSlice(allocator, ">chrom\r\n");
+    var line: [62]u8 = undefined;
+    @memset(line[0..60], 'A');
+    line[60] = '\r';
+    line[61] = '\n';
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        try fasta.appendSlice(allocator, line[0..]);
+    }
+    try fasta.appendSlice(allocator, "ACGT\r\n");
+
+    try expectZfiStreamingMatchesMmap(allocator, fasta.items, "crlf-short-final");
+    var stream_index = try main.indexer.scanZfiIndexStreamingData(fasta.items, true, allocator);
+    defer stream_index.deinit(allocator);
+    try std.testing.expect(stream_index.records.items[0].isUniformWidth());
+    try std.testing.expectEqual(@as(usize, 0), stream_index.side_tables.items.len);
+    try std.testing.expectEqual(@as(u32, 62), stream_index.records.items[0].line_bytes);
+}
+
+test "streaming multi-record uniform bodies stay mmap-identical (Track A2)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var fasta: std.ArrayList(u8) = .empty;
+    defer fasta.deinit(allocator);
+    const full = "AAAA\n";
+    var r: usize = 0;
+    while (r < 3) : (r += 1) {
+        var hdr_buf: [16]u8 = undefined;
+        const hdr = try std.fmt.bufPrint(&hdr_buf, ">r{d}\n", .{r});
+        try fasta.appendSlice(allocator, hdr);
+        var i: usize = 0;
+        while (i < 50) : (i += 1) {
+            try fasta.appendSlice(allocator, full);
+        }
+        try fasta.appendSlice(allocator, "AC\n");
+    }
+
+    try expectZfiStreamingMatchesMmap(allocator, fasta.items, "multi-record-stride");
+    var stream_index = try main.indexer.scanZfiIndexStreamingData(fasta.items, true, allocator);
+    defer stream_index.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 3), stream_index.records.items.len);
+    for (stream_index.records.items) |rec| {
+        try std.testing.expect(rec.isUniformWidth());
+    }
+}
+
+test "streaming interior blank after stride prefix matches mmap" {
+    const data = ">seq\nAAAA\nAAAA\nAAAA\n\nAAAA\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try expectZfiStreamingMatchesMmap(arena.allocator(), data, "interior-blank-after-stride");
+}
+
+test "streaming short final plus next header spanning stride width matches mmap (Track A2)" {
+    // Genome chr10→chr11: `NN\\n` + `>11 ... REF\\n` is exactly line_bytes (61). Stride must
+    // not treat that span as one wrap or the next record is swallowed into the previous.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var fasta: std.ArrayList(u8) = .empty;
+    defer fasta.deinit(allocator);
+    try fasta.appendSlice(allocator, ">a\n");
+    const full = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"; // 60+nl
+    var i: usize = 0;
+    while (i < 5) : (i += 1) {
+        try fasta.appendSlice(allocator, full);
+    }
+    // short final (2) + nl + header line crafted so short+header == 61 bytes
+    try fasta.appendSlice(allocator, "NN\n");
+    // 58-byte header line (incl. `\n`) so `NN\n` + header == 61 == line_bytes.
+    const hdr = ">b xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n";
+    try std.testing.expectEqual(@as(usize, 58), hdr.len);
+    try fasta.appendSlice(allocator, hdr);
+    try fasta.appendSlice(allocator, full);
+    try fasta.appendSlice(allocator, "AC\n");
+
+    try expectZfiStreamingMatchesMmap(allocator, fasta.items, "short-plus-header-eq-stride");
+    var stream_index = try main.indexer.scanZfiIndexStreamingData(fasta.items, true, allocator);
+    defer stream_index.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), stream_index.records.items.len);
+    const n0 = stream_index.name_blob.items[stream_index.records.items[0].name_offset..][0..stream_index.records.items[0].name_len];
+    const n1 = stream_index.name_blob.items[stream_index.records.items[1].name_offset..][0..stream_index.records.items[1].name_len];
+    try std.testing.expectEqualStrings("a", n0);
+    try std.testing.expectEqualStrings("b", n1);
+}
+
 // ============================================================================
 // Stable gates fixtures (tests/data/gates): malformed, boundary, portability
 // ============================================================================

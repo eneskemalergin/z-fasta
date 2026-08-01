@@ -257,6 +257,32 @@ fn firstLineIsDense(line_bases: u32, line_bytes: u32) bool {
     return (sep_len == 1 or sep_len == 2) and line_bases + sep_len == line_bytes;
 }
 
+/// One full wrap: separator at `line_bases`, dense last base, no interior line breaks.
+/// Interior-break rejection matters: a short final plus the next header can land on
+/// exactly `line_bytes` (Genome chr10→chr11) and would otherwise be swallowed.
+fn strideLineLooksValid(data: []const u8, start: usize, line_bases: u32, line_bytes: u32) bool {
+    if (start + line_bytes > data.len) return false;
+    if (line_bases == 0 or line_bytes <= line_bases) return false;
+    const sep_len = line_bytes - line_bases;
+    if (sep_len == 1) {
+        // First `\n` in the window must be exactly at the stride boundary.
+        const window = data[start .. start + line_bytes];
+        const nl = std.mem.indexOfScalar(u8, window, '\n') orelse return false;
+        if (nl != line_bases) return false;
+        if (data[start + line_bases - 1] <= ' ') return false;
+        return true;
+    }
+    if (sep_len == 2) {
+        const base_span = data[start .. start + line_bases];
+        if (std.mem.indexOfScalar(u8, base_span, '\n') != null) return false;
+        if (std.mem.indexOfScalar(u8, base_span, '\r') != null) return false;
+        if (!hasLineSeparatorAt(data, start + line_bases, 2)) return false;
+        if (data[start + line_bases - 1] <= ' ') return false;
+        return true;
+    }
+    return false;
+}
+
 fn measureSequenceLength(data: []const u8, line_bases: u32, line_bytes: u32) SequenceLengthInfo {
     const body = trimTrailingRecordNewlines(data);
     const fixed_width = countFixedWidthBases(body, line_bases, line_bytes) orelse return .{
@@ -994,6 +1020,35 @@ const ChunkParseState = struct {
         self.seq_offset_set = true;
     }
 
+    /// True when further body wraps can use fixed `line_bytes` strides (Track A2).
+    fn strideEligible(self: *const ChunkParseState) bool {
+        if (!self.active or self.in_header or self.in_pending_line) return false;
+        if (self.side_table_active or self.deferred_short_tail != null) return false;
+        // Interior blank must hit `ingestLine` so uniformity flips like mmap.
+        if (self.line_builder.blank_after_bases) return false;
+        const m = self.line_builder.metrics;
+        if (m.line_count == 0 or !m.is_uniform_width) return false;
+        if (!firstLineIsDense(m.line_bases, m.line_bytes)) return false;
+        // Stride uses the first line's on-wire byte length (includes LF/CRLF).
+        return self.line_builder.first_actual_bytes == m.line_bytes;
+    }
+
+    /// Bulk-account `n_lines` consecutive full wraps already validated by `strideLineLooksValid`.
+    /// Caller must have ingested the first dense line via the line machine (`strideEligible`).
+    /// Avoids per-wrap `recordSequenceLine` on long Genome bodies (Track A2 wall).
+    fn ingestStrideRun(self: *ChunkParseState, n_lines: u64) void {
+        std.debug.assert(n_lines >= 1);
+        std.debug.assert(self.line_builder.metrics.line_count >= 1);
+        const bases = self.line_builder.metrics.line_bases;
+        const line_bytes = self.line_builder.metrics.line_bytes;
+        self.line_builder.metrics.seq_len += n_lines * @as(u64, bases);
+        self.line_builder.metrics.line_count += n_lines;
+        self.line_builder.pending_bases = bases;
+        self.line_builder.pending_actual_bytes = line_bytes;
+        self.line_builder.have_pending = true;
+        self.at_line_start = true;
+    }
+
     fn ingestSequenceLine(
         self: *ChunkParseState,
         data: []const u8,
@@ -1174,6 +1229,45 @@ fn processChunkBytes(
             state.at_line_start = byte == '\n';
             i += 1;
             continue;
+        }
+
+        // Track A2: after the first dense full-width line, consume further full wraps by
+        // fixed stride instead of scanning for each `\n`. Validation is the mmap dense-line
+        // predicates plus an interior-break check (required on the stream path because the
+        // next header is still in-band; mmap measures each record body in isolation).
+        if (state.at_line_start and state.strideEligible()) {
+            const line_bases = state.line_builder.metrics.line_bases;
+            const line_bytes = state.line_builder.metrics.line_bytes;
+            var run_lines: u64 = 0;
+            while (i < data.len) {
+                const b = data[i];
+                if (b == '>') break;
+                if (b == '\n' or b == '\r') break;
+                const remaining = data.len - i;
+                if (remaining < line_bytes) {
+                    if (run_lines > 0) {
+                        state.ingestStrideRun(run_lines);
+                        run_lines = 0;
+                    }
+                    // Short final, next header, or a true mid-line chunk split.
+                    // Never absorb a span that already contains `\n` as "partial stride"
+                    // — that can swallow the next record's `>` into the previous body.
+                    if (findNextNewline(data, i, data.len) < data.len) break;
+                    state.appendPendingFragment(
+                        data[i..],
+                        file_offset + @as(u64, @intCast(i)),
+                    );
+                    return;
+                }
+                if (!strideLineLooksValid(data, i, line_bases, line_bytes)) break;
+                run_lines += 1;
+                i += line_bytes;
+            }
+            if (run_lines > 0) state.ingestStrideRun(run_lines);
+            if (i >= data.len) return;
+            // Next header: re-enter so the `>` branch runs. Blank/invalid: fall through
+            // to the line machine once (must not re-enter stride on the same offset).
+            if (data[i] == '>') continue;
         }
 
         const line_start = i;
