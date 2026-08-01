@@ -323,7 +323,13 @@ pub const LoadedIndex = struct {
             return self.name_slices[rec_idx];
         }
         const rec = self.records[rec_idx];
-        if (rec.name_len > 0) {
+        // Wire names (including empty `>\n…` / `.fai` lines that start with tab).
+        // `.zfi` always stores name_offset/name_len on the record. FAI `records_only`
+        // zeros name_len for non-empty names and relies on name_map / sidecar instead.
+        if (rec.name_len > 0 or rec.nameInZfi() or self.source == .zfi) {
+            return rec.getName(self.recordNameData(rec));
+        }
+        if (self.fai_data != null) {
             return rec.getName(self.recordNameData(rec));
         }
         var it = self.name_map.iterator();
@@ -372,7 +378,6 @@ pub const LoadedIndex = struct {
 
         var found: ?usize = null;
         for (self.records, 0..) |rec, i| {
-            if (rec.name_len == 0) continue;
             if (std.mem.eql(u8, rec.getName(self.recordNameData(rec)), name)) {
                 found = i;
             }
@@ -1098,10 +1103,9 @@ fn parseFaiIndexLine(line: []const u8) LoadIndexError!FaiLineFields {
     };
 }
 
-// `IndexRecord.name_len` is u16. Empty names and longer names are not representable,
-// so FAI loaders reject them as corrupt rather than truncating with `@intCast`.
+// `IndexRecord.name_len` is u16. Names longer than 65535 are not representable;
+// empty names (`name_end == 0`, samtools `>\n…` → `.fai` line starting with tab) are.
 fn faiNameLen(name_end: usize) ?u16 {
-    if (name_end == 0) return null;
     return std.math.cast(u16, name_end);
 }
 
@@ -1166,14 +1170,13 @@ fn isValidZfiRecordMetadata(
     side_region_end: usize,
     prev_side_end: *usize,
 ) bool {
-    if (rec.name_len == 0) return false;
     if (rec.nameInZfi()) {
         const blob = name_blob orelse return false;
         if (!rangeFitsUsize(rec.name_offset, rec.name_len, blob.len)) return false;
     } else {
         if (rec.name_offset == 0) return false;
         if (!rangeFitsUsize(rec.name_offset, rec.name_len, fasta_data.len)) return false;
-        // Name points at the byte after `>` in the FASTA.
+        // Name points at the byte after `>` in the FASTA (may be empty: `>\n…`).
         if (fasta_data[rec.name_offset - 1] != '>') return false;
     }
 

@@ -921,6 +921,93 @@ test "mmap and streaming skip empty records equivalently" {
     try expectZfiStreamingMatchesMmap(allocator, data, "empty-record-skip");
 }
 
+test "empty sequence name: mmap and streaming ZFI load and look up like samtools FAI" {
+    // `>\nACGT\n`: samtools writes `.fai` with an empty name field (line starts with tab).
+    const data = ">\nACGT\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try expectZfiStreamingMatchesMmap(allocator, data, "empty-name");
+
+    var mmap_fai = std.Io.Writer.Allocating.init(allocator);
+    defer mmap_fai.deinit();
+    var stream_fai = std.Io.Writer.Allocating.init(allocator);
+    defer stream_fai.deinit();
+    _ = try main.indexer.streamingScan(data, &mmap_fai.writer, .fai, true, allocator);
+    _ = try scanChunkedData(data, &stream_fai.writer, true, allocator);
+    try std.testing.expectEqualStrings(mmap_fai.written(), stream_fai.written());
+    // Samtools shape: empty name, seq_len=4, seq_offset=2, line_bases=4, line_bytes=5.
+    try std.testing.expectEqualStrings("\t4\t2\t4\t5\n", mmap_fai.written());
+
+    var stream_index = try main.indexer.scanZfiIndexStreamingData(data, true, allocator);
+    defer stream_index.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), stream_index.records.items.len);
+    try std.testing.expectEqual(@as(u16, 0), stream_index.records.items[0].name_len);
+    try std.testing.expect(stream_index.records.items[0].nameInZfi());
+
+    const zfi_bytes = try main.indexer.zfiIndexToBytes(&stream_index, data.len, 0, allocator);
+    defer allocator.free(zfi_bytes);
+
+    const paths = try writeFastaAndRawZfi(allocator, "empty-name-zfi", data, zfi_bytes);
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, paths.zfi_path) catch {};
+
+    var idx = try loadIndexChecked(io, paths.fasta_path);
+    defer idx.deinit(io);
+    try std.testing.expectEqual(@as(usize, 1), idx.records.len);
+    try std.testing.expectEqualStrings("", idx.getRecordName(0));
+    try std.testing.expectEqual(@as(?usize, 0), idx.lookupName(""));
+}
+
+test "empty sequence name: first-wins when a later empty-name record appears" {
+    const data = ">\nACGT\n>\nTTAA\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try expectZfiStreamingMatchesMmap(allocator, data, "empty-name-dup");
+
+    var fai = std.Io.Writer.Allocating.init(allocator);
+    defer fai.deinit();
+    _ = try scanChunkedData(data, &fai.writer, true, allocator);
+    try std.testing.expectEqualStrings("\t4\t2\t4\t5\n", fai.written());
+
+    var index = try main.indexer.scanZfiIndex(data, true, allocator);
+    defer index.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), index.records.items.len);
+    try std.testing.expectEqual(@as(u64, 4), index.records.items[0].seq_len);
+}
+
+test "empty sequence name: FAI text loads and resolves empty lookup" {
+    const data = ">\nACGT\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "empty-name-fai", "fa");
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    {
+        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+        defer fasta_file.close(io);
+        try std.Io.File.writeStreamingAll(fasta_file, io, data);
+    }
+    {
+        const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{});
+        defer fai_file.close(io);
+        try std.Io.File.writeStreamingAll(fai_file, io, "\t4\t2\t4\t5\n");
+    }
+
+    var idx = try loadIndexChecked(io, fasta_path);
+    defer idx.deinit(io);
+    try std.testing.expectEqual(@as(usize, 1), idx.records.len);
+    try std.testing.expectEqualStrings("", idx.getRecordName(0));
+    try std.testing.expectEqual(@as(?usize, 0), idx.lookupName(""));
+}
+
 test "low-mem FAI matches mmap for long sequence names" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
