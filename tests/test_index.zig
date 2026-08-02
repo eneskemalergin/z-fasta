@@ -207,6 +207,100 @@ fn walkFastaDirZfiParity(allocator: std.mem.Allocator, dir_path: []const u8, str
     }
 }
 
+fn scanFaiReaderForTest(
+    reader: *std.Io.Reader,
+    read_buf: []u8,
+    writer: *std.Io.Writer,
+    enable_dedup: bool,
+    allocator: std.mem.Allocator,
+) !u32 {
+    const Sink = struct {
+        writer: *std.Io.Writer,
+
+        fn emit(ctx: *@This(), emit_info: main.indexer.FastaRecordEmit) !void {
+            if (!emit_info.uses_uniform_formula) return error.NonUniformFai;
+            const rec = emit_info.record;
+            try ctx.writer.print("{s}\t{d}\t{d}\t{d}\t{d}\n", .{
+                emit_info.name,
+                rec.seq_len,
+                rec.seq_offset,
+                rec.line_bases,
+                rec.line_bytes,
+            });
+        }
+    };
+
+    var sink = Sink{ .writer = writer };
+    return main.indexer.scanFastaReader(
+        reader,
+        read_buf,
+        enable_dedup,
+        null,
+        allocator,
+        false,
+        null,
+        &sink,
+        Sink.emit,
+    );
+}
+
+fn expectReaderMatchesMmap(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    read_buf: []u8,
+    enable_dedup: bool,
+    label: []const u8,
+) !void {
+    var mmap_index = try main.indexer.scanZfiIndex(data, enable_dedup, allocator);
+    defer mmap_index.deinit(allocator);
+
+    var zfi_reader = std.Io.Reader.fixed(data);
+    var stream_index = try main.indexer.scanZfiIndexStreaming(
+        &zfi_reader,
+        read_buf,
+        enable_dedup,
+        allocator,
+    );
+    defer stream_index.deinit(allocator);
+
+    const mmap_bytes = try main.indexer.zfiIndexToBytes(&mmap_index, data.len, 0, allocator);
+    defer allocator.free(mmap_bytes);
+    const stream_bytes = try main.indexer.zfiIndexToBytes(&stream_index, data.len, 0, allocator);
+    defer allocator.free(stream_bytes);
+
+    std.testing.expectEqualSlices(u8, mmap_bytes, stream_bytes) catch {
+        std.debug.print("ZFI mmap/reader mismatch: {s}, buffer={d}\n", .{ label, read_buf.len });
+        return error.TestExpectedEqual;
+    };
+
+    var mmap_fai = std.Io.Writer.Allocating.init(allocator);
+    defer mmap_fai.deinit();
+    const mmap_count = try main.indexer.streamingScan(
+        data,
+        &mmap_fai.writer,
+        .fai,
+        enable_dedup,
+        allocator,
+    );
+
+    var stream_fai = std.Io.Writer.Allocating.init(allocator);
+    defer stream_fai.deinit();
+    var fai_reader = std.Io.Reader.fixed(data);
+    const stream_count = try scanFaiReaderForTest(
+        &fai_reader,
+        read_buf,
+        &stream_fai.writer,
+        enable_dedup,
+        allocator,
+    );
+
+    try std.testing.expectEqual(mmap_count, stream_count);
+    std.testing.expectEqualStrings(mmap_fai.written(), stream_fai.written()) catch {
+        std.debug.print("FAI mmap/reader mismatch: {s}, buffer={d}\n", .{ label, read_buf.len });
+        return error.TestExpectedEqual;
+    };
+}
+
 // ============================================================================
 // validateFasta tests
 // ============================================================================
@@ -778,6 +872,77 @@ test "low-mem indexing with header at chunk boundary" {
     _ = try scanChunkedData(fasta.items, &actual.writer, true, allocator);
 
     try std.testing.expectEqualStrings(expected.written(), actual.written());
+}
+
+test "streaming headers match both formats across read sizes" {
+    const data = ">alpha\tlong description\r\nACGT\r\n>beta other text\nTTAA\n>alpha duplicate\nGG\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var read_storage: [32]u8 = undefined;
+    for ([_]bool{ false, true }) |enable_dedup| {
+        for (1..read_storage.len + 1) |read_size| {
+            try expectReaderMatchesMmap(
+                allocator,
+                data,
+                read_storage[0..read_size],
+                enable_dedup,
+                "header-read-sizes",
+            );
+        }
+    }
+}
+
+test "streaming header limit is exact across read fragments" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var fasta: std.ArrayList(u8) = .empty;
+    defer fasta.deinit(allocator);
+    try fasta.append(allocator, '>');
+    try fasta.appendNTimes(allocator, 'A', main.indexer.max_index_name_len);
+    try fasta.appendSlice(allocator, "\nACGT\n");
+
+    var read_storage: [31]u8 = undefined;
+    for ([_]bool{ false, true }) |enable_dedup| {
+        try expectReaderMatchesMmap(
+            allocator,
+            fasta.items,
+            &read_storage,
+            enable_dedup,
+            "maximum-fragmented-header",
+        );
+    }
+
+    try fasta.insert(allocator, main.indexer.max_index_name_len + 1, 'A');
+    for ([_]bool{ false, true }) |enable_dedup| {
+        var zfi_reader = std.Io.Reader.fixed(fasta.items);
+        try std.testing.expectError(
+            error.HeaderTooLong,
+            main.indexer.scanZfiIndexStreaming(
+                &zfi_reader,
+                &read_storage,
+                enable_dedup,
+                allocator,
+            ),
+        );
+
+        var fai = std.Io.Writer.Allocating.init(allocator);
+        defer fai.deinit();
+        var fai_reader = std.Io.Reader.fixed(fasta.items);
+        try std.testing.expectError(
+            error.HeaderTooLong,
+            scanFaiReaderForTest(
+                &fai_reader,
+                &read_storage,
+                &fai.writer,
+                enable_dedup,
+                allocator,
+            ),
+        );
+    }
 }
 
 test "low-mem indexing with sequence byte split across chunk boundary" {

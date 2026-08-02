@@ -430,6 +430,11 @@ fn findNextNewline(data: []const u8, start: usize, end: usize) usize {
     return end;
 }
 
+fn findNextStreamingNewline(data: []const u8, start: usize, end: usize) usize {
+    const relative = std.mem.findScalar(u8, data[start..end], '\n') orelse return end;
+    return start + relative;
+}
+
 const LineMetricsBuilder = struct {
     metrics: LineMetrics = .{},
     first_actual_bytes: u32 = 0,
@@ -1373,7 +1378,7 @@ fn processChunkBytes(
     var i: usize = 0;
 
     if (state.in_pending_line) {
-        const nl = findNextNewline(data, 0, data.len);
+        const nl = findNextStreamingNewline(data, 0, data.len);
         if (nl >= data.len) {
             state.appendPendingFragment(data, file_offset);
             return;
@@ -1399,23 +1404,43 @@ fn processChunkBytes(
         }
 
         if (state.in_header) {
-            if (byte == '\n') {
-                state.finalizeHeader();
-                i += 1;
-                continue;
-            }
             if (state.parsing_name) {
-                if (byte == ' ' or byte == '\t' or byte == '\r') {
-                    state.parsing_name = false;
-                } else {
-                    try state.name.append(state.allocator, byte);
-                    if (state.name.items.len > max_index_name_len) return error.HeaderTooLong;
-                    if (max_name_len) |limit| {
-                        if (state.name.items.len > limit) return error.HeaderTooLong;
+                var name_end = i;
+                while (name_end < data.len and
+                    data[name_end] != ' ' and
+                    data[name_end] != '\t' and
+                    data[name_end] != '\r' and
+                    data[name_end] != '\n')
+                {
+                    name_end += 1;
+                }
+
+                const fragment = data[i..name_end];
+                if (state.name.items.len > max_index_name_len or
+                    fragment.len > max_index_name_len - state.name.items.len)
+                {
+                    return error.HeaderTooLong;
+                }
+                if (max_name_len) |limit| {
+                    if (state.name.items.len > limit or fragment.len > limit - state.name.items.len) {
+                        return error.HeaderTooLong;
                     }
                 }
+                try state.name.appendSlice(state.allocator, fragment);
+                i = name_end;
+                if (i >= data.len) return;
+                if (data[i] == '\n') {
+                    state.finalizeHeader();
+                    i += 1;
+                    continue;
+                }
+                state.parsing_name = false;
             }
-            i += 1;
+
+            const header_end = findNextStreamingNewline(data, i, data.len);
+            if (header_end >= data.len) return;
+            state.finalizeHeader();
+            i = header_end + 1;
             continue;
         }
 
@@ -1446,7 +1471,7 @@ fn processChunkBytes(
                     // Short final, next header, or a true mid-line chunk split.
                     // Never absorb a span that already contains `\n` as "partial stride"
                     // — that can swallow the next record's `>` into the previous body.
-                    if (findNextNewline(data, i, data.len) < data.len) break;
+                    if (findNextStreamingNewline(data, i, data.len) < data.len) break;
                     state.appendPendingFragment(
                         data[i..],
                         file_offset + @as(u64, @intCast(i)),
@@ -1465,7 +1490,7 @@ fn processChunkBytes(
         }
 
         const line_start = i;
-        const nl = findNextNewline(data, i, data.len);
+        const nl = findNextStreamingNewline(data, i, data.len);
         if (nl >= data.len) {
             state.appendPendingFragment(
                 data[line_start..],
