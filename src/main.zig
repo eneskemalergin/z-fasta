@@ -218,7 +218,7 @@ pub fn main(init: std.process.Init.Minimal) void {
     const io = threaded.io();
 
     if (std.mem.eql(u8, cmd, "index")) {
-        runIndex(io, &args);
+        runIndex(io, init.environ, &args);
     } else if (std.mem.eql(u8, cmd, "get")) {
         runGetCmd(io, &args);
     } else if (std.mem.eql(u8, cmd, "stats")) {
@@ -234,7 +234,7 @@ pub fn main(init: std.process.Init.Minimal) void {
 // Subcommand: index
 // ============================================================================
 
-fn runIndex(io: std.Io, args: *std.process.Args.Iterator) void {
+fn runIndex(io: std.Io, environ: std.process.Environ, args: *std.process.Args.Iterator) void {
     var emit_fai = false;
     var enable_dedup = true;
     var low_mem = false;
@@ -264,7 +264,54 @@ fn runIndex(io: std.Io, args: *std.process.Args.Iterator) void {
     };
 
     if (low_mem) {
-        indexer.runIndexLowMem(io, path, emit_fai, enable_dedup);
+        indexer.runIndexLowMem(io, environ, path, emit_fai, enable_dedup) catch |err| switch (err) {
+            error.FileNotFound => printErrorAndExit("error: file not found: {s}\n", .{path}),
+            error.AccessDenied => printErrorAndExit("error: access denied: {s}\n", .{path}),
+            error.SourceOpenFailed => printErrorAndExit("error: failed to open file: {s}\n", .{path}),
+            error.SourceStatFailed => printErrorAndExit("error: failed to stat file: {s}\n", .{path}),
+            error.EmptyFile => printErrorAndExit("error: file is empty: {s}\n", .{path}),
+            error.NotFasta => printErrorAndExit("error: not a FASTA file: {s}\n", .{path}),
+            error.HeaderTooLong => printErrorAndExit(
+                "error: sequence name exceeds {d} bytes: {s}\n",
+                .{ indexer.max_index_name_len, path },
+            ),
+            error.NonUniformFai => printErrorAndExit(
+                "error: cannot emit .fai for non-uniform sequence layout; run 'z-fasta index' (default) to write .zfi\n",
+                .{},
+            ),
+            error.NoValidSequences => printErrorAndExit(
+                "error: no valid sequences found in: {s}\n",
+                .{path},
+            ),
+            error.SourceReadFailed => printErrorAndExit("error: failed to read file: {s}\n", .{path}),
+            error.NoUsableFaiSpool => printErrorAndExit(
+                "error: no usable temporary directory for FAI spool\n",
+                .{},
+            ),
+            error.FaiSpoolWriteFailed => printErrorAndExit(
+                "error: failed to write temporary FAI spool\n",
+                .{},
+            ),
+            error.FaiSpoolReadFailed => printErrorAndExit(
+                "error: failed to read temporary FAI spool\n",
+                .{},
+            ),
+            error.StdoutReplayFailed => printErrorAndExit("error: failed to replay FAI stdout\n", .{}),
+            error.StdoutFlushFailed => printErrorAndExit("error: failed to flush FAI stdout\n", .{}),
+            error.SourceChanged => printErrorAndExit(
+                "error: source changed while indexing: {s}\n",
+                .{path},
+            ),
+            error.OutputPathTooLong => printErrorAndExit("error: path too long\n", .{}),
+            error.ZfiWriteFailed => printErrorAndExit("error: write failed\n", .{}),
+            error.ZfiFinalizeFailed => printErrorAndExit(
+                "error: failed to finalize index: {s}.zfi\n",
+                .{path},
+            ),
+            error.ProcessingFailed => printErrorAndExit("error: processing failed\n", .{}),
+            error.OutOfMemory => printErrorAndExit("error: processing failed\n", .{}),
+            else => printErrorAndExit("error: processing failed\n", .{}),
+        };
         return;
     }
 

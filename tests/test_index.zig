@@ -6,6 +6,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const main = @import("main");
+const ZFASTA_BIN = if (builtin.os.tag == .windows) "zig-out\\bin\\z-fasta.exe" else "zig-out/bin/z-fasta";
 const validateFasta = main.validateFasta;
 const scanHeaders = main.scanHeaders;
 const scanChunkedData = main.indexer.scanChunkedData;
@@ -78,6 +79,22 @@ fn uniqueArtifactPath(allocator: std.mem.Allocator, stem: []const u8, ext: []con
         nanos,
         ext,
     });
+}
+
+fn uniqueArtifactDirPath(allocator: std.mem.Allocator, stem: []const u8) ![]u8 {
+    try std.Io.Dir.cwd().createDirPath(io, "zig-cache/test-artifacts");
+    const now = std.Io.Clock.Timestamp.now(io, .awake);
+    const nanos: u64 = @intCast(now.raw.toNanoseconds());
+    const path = try std.fmt.allocPrint(allocator, "zig-cache/test-artifacts/{s}-{d}", .{ stem, nanos });
+    try std.Io.Dir.cwd().createDirPath(io, path);
+    return path;
+}
+
+fn expectDirectoryEmpty(path: []const u8) !void {
+    var dir = try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
+    defer dir.close(io);
+    var entries = dir.iterate();
+    try std.testing.expectEqual(null, try entries.next(io));
 }
 
 fn markFileStaleOneHourAgo(file: std.Io.File) !void {
@@ -234,10 +251,8 @@ fn scanFaiReaderForTest(
     return main.indexer.scanFastaReader(
         reader,
         read_buf,
-        enable_dedup,
-        null,
+        .{ .enable_dedup = enable_dedup },
         allocator,
-        false,
         null,
         &sink,
         Sink.emit,
@@ -2005,6 +2020,118 @@ test "emit-fai rejects non-uniform sequence layout" {
         scanChunkedData(data, &out.writer, true, allocator),
     );
     try std.testing.expectEqual(@as(usize, 0), out.written().len);
+}
+
+test "low-mem FAI uses a separate spool and cleans it after success" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source_dir_path = try uniqueArtifactDirPath(allocator, "fai-read-only-source");
+    defer std.Io.Dir.cwd().deleteTree(io, source_dir_path) catch {};
+    const spool_dir_path = try uniqueArtifactDirPath(allocator, "fai-spool-success");
+    defer std.Io.Dir.cwd().deleteTree(io, spool_dir_path) catch {};
+    const fasta_path = try std.fmt.allocPrint(allocator, "{s}/records.fa", .{source_dir_path});
+
+    var expected = std.Io.Writer.Allocating.init(allocator);
+    defer expected.deinit();
+    {
+        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+        defer fasta_file.close(io);
+        var file_buf: [4096]u8 = undefined;
+        var fasta_writer = fasta_file.writer(io, &file_buf);
+        for (0..2048) |record_index| {
+            const offset = fasta_writer.logicalPos();
+            try fasta_writer.interface.print(">r{d}\nA\n", .{record_index});
+            try expected.writer.print("r{d}\t1\t{d}\t1\t2\n", .{
+                record_index,
+                offset + 3 + std.fmt.count("{d}", .{record_index}),
+            });
+        }
+        try fasta_writer.interface.flush();
+    }
+
+    var source_dir = try std.Io.Dir.cwd().openDir(io, source_dir_path, .{ .iterate = true });
+    defer source_dir.close(io);
+    const source_permissions = (try source_dir.stat(io)).permissions;
+    try source_dir.setPermissions(io, source_permissions.setReadOnly(true));
+    defer source_dir.setPermissions(io, source_permissions) catch {};
+
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+    try env.put("TMPDIR", spool_dir_path);
+    const missing_fallback = try std.fmt.allocPrint(allocator, "{s}/missing", .{spool_dir_path});
+    try env.put("TEMP", missing_fallback);
+    try env.put("TMP", missing_fallback);
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const result = try std.process.run(allocator, threaded.io(), .{
+        .argv = &.{ ZFASTA_BIN, "index", "--low-mem", "--emit-fai", fasta_path },
+        .environ_map = &env,
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        else => return error.ChildProcessFailed,
+    }
+    try std.testing.expectEqual(expected.written().len, result.stdout.len);
+    try std.testing.expectEqual(null, std.mem.findDiff(u8, expected.written(), result.stdout));
+    try std.testing.expect(result.stdout.len > (try std.Io.Dir.cwd().statFile(io, fasta_path, .{})).size);
+    try std.testing.expectEqual(@as(usize, 0), result.stderr.len);
+    try expectDirectoryEmpty(spool_dir_path);
+
+    var sibling_buf: [4096]u8 = undefined;
+    const sibling = try std.fmt.bufPrint(&sibling_buf, "{s}.fai.stdout.tmp", .{fasta_path});
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, sibling, .{}));
+}
+
+test "low-mem FAI failure leaves stdout and spool empty" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "fai-nonuniform-spool", "fa");
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const spool_dir_path = try uniqueArtifactDirPath(allocator, "fai-spool-failure");
+    defer std.Io.Dir.cwd().deleteTree(io, spool_dir_path) catch {};
+    {
+        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+        defer fasta_file.close(io);
+        try std.Io.File.writeStreamingAll(fasta_file, io, ">mixed\nAAAA\nBBBBBB\nCC\n");
+    }
+
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+    try env.put("TMPDIR", "zig-cache/test-artifacts/definitely-missing-spool");
+    try env.put("TEMP", spool_dir_path);
+    try env.put("TMP", "");
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const result = try std.process.run(allocator, threaded.io(), .{
+        .argv = &.{ ZFASTA_BIN, "index", "--low-mem", "--emit-fai", fasta_path },
+        .environ_map = &env,
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 1), code),
+        else => return error.ChildProcessFailed,
+    }
+    try std.testing.expectEqual(@as(usize, 0), result.stdout.len);
+    try std.testing.expectEqualStrings(
+        "error: cannot emit .fai for non-uniform sequence layout; run 'z-fasta index' (default) to write .zfi\n",
+        result.stderr,
+    );
+    try expectDirectoryEmpty(spool_dir_path);
 }
 
 test "loadIndexChecked rejects zfi after FASTA size change" {

@@ -17,6 +17,7 @@
 //! use a hash, but identity is always full-string equality (`NameDedup`).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const index_format = @import("index_format.zig");
 
 pub const IndexRecord = index_format.IndexRecord;
@@ -30,7 +31,16 @@ const STREAM_VECTOR_LEN = std.simd.suggestVectorLength(u8) orelse 1;
 const STRIDE_VALIDATION_BLOCK_LINES = 256;
 pub const low_mem_chunk_size = 1 * 1024 * 1024;
 const FILE_IO_BUF_SIZE = 8 * 1024;
+// Exclusive creation retries only random name collisions within one candidate directory.
+const FAI_SPOOL_CREATE_ATTEMPTS = 16;
 pub const max_index_name_len = std.math.maxInt(u16);
+
+pub const ScanOptions = struct {
+    enable_dedup: bool,
+    max_name_len: ?usize = null,
+    zfi_mode: bool = false,
+    require_initial_header: bool = false,
+};
 
 /// Offset into a name blob for stream `.zfi` catalog dedup (one store for map + embed).
 pub const NameBlobRef = struct { off: u32, len: u32 };
@@ -883,6 +893,20 @@ pub fn scanZfiIndexStreaming(
     enable_dedup: bool,
     allocator: std.mem.Allocator,
 ) !ZfiIndex {
+    return scanZfiIndexStreamingWithOptions(
+        reader,
+        read_buf,
+        .{ .enable_dedup = enable_dedup },
+        allocator,
+    );
+}
+
+fn scanZfiIndexStreamingWithOptions(
+    reader: *std.Io.Reader,
+    read_buf: []u8,
+    options: ScanOptions,
+    allocator: std.mem.Allocator,
+) !ZfiIndex {
     var index = ZfiIndex{
         .records = .empty,
         .side_tables = .empty,
@@ -913,7 +937,7 @@ pub fn scanZfiIndexStreaming(
     var ctx = Ctx{ .index = &index, .allocator = allocator };
     // One catalog: dedup refs into `name_blob` (no arena + embed double copy).
     var blob_dedup: ?NameDedup = null;
-    if (enable_dedup) {
+    if (options.enable_dedup) {
         blob_dedup = NameDedup.initOwningBlob(allocator, &index.name_blob);
         try blob_dedup.?.ensureStreamCapacity(NameDedup.stream_dedup_pre_cap);
     }
@@ -922,10 +946,12 @@ pub fn scanZfiIndexStreaming(
     _ = try scanFastaReader(
         reader,
         read_buf,
-        enable_dedup,
-        null,
+        .{
+            .enable_dedup = options.enable_dedup,
+            .zfi_mode = true,
+            .require_initial_header = options.require_initial_header,
+        },
         allocator,
-        true,
         external_dedup,
         &ctx,
         Ctx.emit,
@@ -1562,10 +1588,8 @@ fn processChunkBytes(
 pub fn scanFastaReader(
     reader: *std.Io.Reader,
     read_buf: []u8,
-    enable_dedup: bool,
-    max_name_len: ?usize,
+    options: ScanOptions,
     allocator: std.mem.Allocator,
-    zfi_mode: bool,
     external_dedup: ?*NameDedup,
     ctx: anytype,
     comptime emitRecord: fn (@TypeOf(ctx), FastaRecordEmit) anyerror!void,
@@ -1575,7 +1599,7 @@ pub fn scanFastaReader(
     var owned_dedup: ?NameDedup = null;
     const dedup_ptr: ?*NameDedup = blk: {
         if (external_dedup) |p| break :blk p;
-        if (enable_dedup) {
+        if (options.enable_dedup) {
             owned_dedup = NameDedup.init(allocator, true);
             try owned_dedup.?.ensureStreamCapacity(NameDedup.stream_dedup_pre_cap);
             break :blk &owned_dedup.?;
@@ -1584,20 +1608,23 @@ pub fn scanFastaReader(
     };
     defer if (owned_dedup) |*seen| seen.deinit();
 
-    var state = ChunkParseState{ .allocator = allocator, .zfi_mode = zfi_mode };
+    var state = ChunkParseState{ .allocator = allocator, .zfi_mode = options.zfi_mode };
     defer state.name.deinit(allocator);
-    defer if (zfi_mode) state.side_table.deinit(allocator);
+    defer if (options.zfi_mode) state.side_table.deinit(allocator);
     var record_count: u32 = 0;
     var file_offset: u64 = 0;
 
     while (true) {
-        const n = reader.readSliceShort(read_buf) catch |err| return err;
+        const n = reader.readSliceShort(read_buf) catch return error.SourceReadFailed;
         if (n == 0) break;
+        if (file_offset == 0 and options.require_initial_header and read_buf[0] != '>') {
+            return error.NotFasta;
+        }
         try processChunkBytes(
             &state,
             read_buf[0..n],
             file_offset,
-            max_name_len,
+            options.max_name_len,
             dedup_ptr,
             ctx,
             emitRecord,
@@ -1620,7 +1647,7 @@ const FaiEmitBuffer = struct {
 
     fn flush(self: *FaiEmitBuffer) !void {
         if (self.len == 0) return;
-        try self.writer.writeAll(self.buf[0..self.len]);
+        self.writer.writeAll(self.buf[0..self.len]) catch return error.FaiSpoolWriteFailed;
         self.len = 0;
     }
 
@@ -1628,16 +1655,12 @@ const FaiEmitBuffer = struct {
         if (!emit_info.uses_uniform_formula) return error.NonUniformFai;
         const rec = emit_info.record;
         var suffix_buf: [128]u8 = undefined;
-        const suffix = try std.fmt.bufPrint(
-            &suffix_buf,
-            "\t{d}\t{d}\t{d}\t{d}\n",
-            .{ rec.seq_len, rec.seq_offset, rec.line_bases, rec.line_bytes },
-        );
+        const suffix = formatFaiSuffix(&suffix_buf, rec);
         const total = emit_info.name.len + suffix.len;
         if (total > self.buf.len) {
             try self.flush();
-            try self.writer.writeAll(emit_info.name);
-            try self.writer.writeAll(suffix);
+            self.writer.writeAll(emit_info.name) catch return error.FaiSpoolWriteFailed;
+            self.writer.writeAll(suffix) catch return error.FaiSpoolWriteFailed;
             return;
         }
         if (self.len + total > self.buf.len) try self.flush();
@@ -1648,11 +1671,127 @@ const FaiEmitBuffer = struct {
     }
 };
 
+fn appendUnsignedDecimal(buffer: []u8, value: u64) usize {
+    var reversed: [20]u8 = undefined;
+    var remaining = value;
+    var digit_count: usize = 0;
+    while (true) {
+        reversed[digit_count] = @intCast('0' + remaining % 10);
+        digit_count += 1;
+        remaining /= 10;
+        if (remaining == 0) break;
+    }
+
+    for (0..digit_count) |index| {
+        buffer[index] = reversed[digit_count - index - 1];
+    }
+    return digit_count;
+}
+
+fn formatFaiSuffix(buffer: *[128]u8, rec: IndexRecord) []const u8 {
+    const values = [_]u64{ rec.seq_len, rec.seq_offset, rec.line_bases, rec.line_bytes };
+    var len: usize = 0;
+    for (values) |value| {
+        buffer[len] = '\t';
+        len += 1;
+        len += appendUnsignedDecimal(buffer[len..], value);
+    }
+    buffer[len] = '\n';
+    return buffer[0 .. len + 1];
+}
+
+const FaiSpool = struct {
+    dir: std.Io.Dir,
+    close_dir: bool,
+    file: std.Io.File,
+    name: [64]u8,
+    name_len: usize,
+
+    fn deinit(self: *FaiSpool, io: std.Io) void {
+        self.file.close(io);
+        self.dir.deleteFile(io, self.name[0..self.name_len]) catch {};
+        if (self.close_dir) self.dir.close(io);
+    }
+};
+
+fn tryCreateFaiSpool(io: std.Io, dir: std.Io.Dir, close_dir: bool) ?FaiSpool {
+    for (0..FAI_SPOOL_CREATE_ATTEMPTS) |_| {
+        var nonce: u128 = undefined;
+        std.Io.randomSecure(io, std.mem.asBytes(&nonce)) catch return null;
+
+        var name_buf: [64]u8 = undefined;
+        const name = std.fmt.bufPrint(&name_buf, "z-fasta-{x}.fai.tmp", .{nonce}) catch unreachable;
+        const file = dir.createFile(io, name, .{ .read = true, .exclusive = true }) catch |err| switch (err) {
+            error.PathAlreadyExists => continue,
+            else => return null,
+        };
+
+        var spool = FaiSpool{
+            .dir = dir,
+            .close_dir = close_dir,
+            .file = file,
+            .name = undefined,
+            .name_len = name.len,
+        };
+        @memcpy(spool.name[0..name.len], name);
+        return spool;
+    }
+    return null;
+}
+
+fn tryOpenFaiSpoolDir(io: std.Io, path: []const u8) ?FaiSpool {
+    const dir = std.Io.Dir.cwd().openDir(io, path, .{}) catch return null;
+    return tryCreateFaiSpool(io, dir, true) orelse {
+        dir.close(io);
+        return null;
+    };
+}
+
+fn openFaiSpool(
+    io: std.Io,
+    environ: std.process.Environ,
+    allocator: std.mem.Allocator,
+) !FaiSpool {
+    const env_names = [_][]const u8{ "TMPDIR", "TEMP", "TMP" };
+    if (comptime @hasDecl(std.process.Environ.Block, "view")) {
+        for (env_names) |env_name| {
+            const path = std.process.Environ.getPosix(environ, env_name) orelse continue;
+            if (path.len == 0) continue;
+            if (tryOpenFaiSpoolDir(io, path)) |spool| return spool;
+        }
+    } else {
+        var env_map = environ.createMap(allocator) catch return error.OutOfMemory;
+        defer env_map.deinit();
+        for (env_names) |env_name| {
+            const path = env_map.get(env_name) orelse continue;
+            if (path.len == 0) continue;
+            if (tryOpenFaiSpoolDir(io, path)) |spool| return spool;
+        }
+    }
+
+    if (builtin.os.tag != .windows) {
+        if (tryOpenFaiSpoolDir(io, "/tmp")) |spool| return spool;
+    }
+    return tryCreateFaiSpool(io, .cwd(), false) orelse error.NoUsableFaiSpool;
+}
+
+fn sourceMetadataMatches(before: std.Io.File.Stat, after: std.Io.File.Stat) bool {
+    return before.size == after.size and before.mtime.nanoseconds == after.mtime.nanoseconds;
+}
+
+fn sourcePathUnchanged(io: std.Io, path: []const u8, before: std.Io.File.Stat) !bool {
+    const after = std.Io.Dir.cwd().statFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return error.SourceStatFailed,
+    };
+    return sourceMetadataMatches(before, after);
+}
+
 fn scanChunkedReader(
     reader: *std.Io.Reader,
     read_buf: []u8,
     writer: anytype,
-    enable_dedup: bool,
+    options: ScanOptions,
     allocator: std.mem.Allocator,
 ) !u32 {
     var fai_buf = FaiEmitBuffer{ .writer = writer };
@@ -1665,7 +1804,7 @@ fn scanChunkedReader(
     };
 
     var ctx = Ctx{ .buffer = &fai_buf };
-    const count = try scanFastaReader(reader, read_buf, enable_dedup, null, allocator, false, null, &ctx, Ctx.emit);
+    const count = try scanFastaReader(reader, read_buf, options, allocator, null, &ctx, Ctx.emit);
     try fai_buf.flush();
     return count;
 }
@@ -1678,44 +1817,28 @@ pub fn scanChunkedData(
 ) !u32 {
     var r = std.Io.Reader.fixed(data);
     var read_buf: [low_mem_chunk_size]u8 = undefined;
-    return scanChunkedReader(&r, &read_buf, writer, enable_dedup, allocator);
+    return scanChunkedReader(&r, &read_buf, writer, .{ .enable_dedup = enable_dedup }, allocator);
 }
 
-pub fn runChunkedMode(io: std.Io, path: []const u8, enable_dedup: bool) void {
-    runIndexLowMem(io, path, true, enable_dedup);
+pub fn runChunkedMode(io: std.Io, path: []const u8, enable_dedup: bool) !void {
+    return runIndexLowMem(io, .empty, path, true, enable_dedup);
 }
 
 pub fn runIndexLowMem(
     io: std.Io,
+    environ: std.process.Environ,
     path: []const u8,
     emit_fai: bool,
     enable_dedup: bool,
-) void {
-    const err_exit = index_format.printErrorAndExit;
-
-    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| {
-        switch (err) {
-            error.FileNotFound => err_exit("error: file not found: {s}\n", .{path}),
-            error.AccessDenied => err_exit("error: access denied: {s}\n", .{path}),
-            else => err_exit("error: failed to open file: {s}\n", .{path}),
-        }
+) !void {
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound, error.AccessDenied => return err,
+        else => return error.SourceOpenFailed,
     };
     defer file.close(io);
 
-    const stat = file.stat(io) catch {
-        err_exit("error: failed to stat file: {s}\n", .{path});
-    };
-    if (stat.size == 0) {
-        err_exit("error: file is empty: {s}\n", .{path});
-    }
-
-    var first_byte: [1]u8 = undefined;
-    const first_read = file.readPositional(io, &.{&first_byte}, 0) catch {
-        err_exit("error: failed to read file: {s}\n", .{path});
-    };
-    if (first_read == 0 or first_byte[0] != '>') {
-        err_exit("error: not a FASTA file: {s}\n", .{path});
-    }
+    const stat = file.stat(io) catch return error.SourceStatFailed;
+    if (stat.size == 0) return error.EmptyFile;
 
     // Must free on growth: ArrayList/HashMap realloc under an arena keeps every old
     // buffer until process end (Tx `--low-mem` `.zfi` was ~3× payload RSS). Stream FAI
@@ -1727,106 +1850,90 @@ pub fn runIndexLowMem(
     var file_reader = file.reader(io, &io_buf);
 
     if (emit_fai) {
+        var spool = try openFaiSpool(io, environ, allocator);
+        defer spool.deinit(io);
+
         var out_buf: [65536]u8 = undefined;
         var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
 
-        // Spill to a sibling temp file so a mid-file NonUniformFai does not leave a partial
-        // `.fai` on stdout and so Tx-scale catalogs do not keep the whole FAI text in RSS.
-        var fai_tmp_buf: [4096]u8 = undefined;
-        const fai_tmp_path = std.fmt.bufPrint(&fai_tmp_buf, "{s}.fai.stdout.tmp", .{path}) catch {
-            err_exit("error: path too long\n", .{});
-        };
-        const cwd = std.Io.Dir.cwd();
-        cwd.deleteFile(io, fai_tmp_path) catch {};
-
-        const tmp_file = cwd.createFile(io, fai_tmp_path, .{}) catch {
-            err_exit("error: failed to create temp fai: {s}\n", .{fai_tmp_path});
-        };
-        var tmp_open = true;
-        defer {
-            if (tmp_open) tmp_file.close(io);
-            cwd.deleteFile(io, fai_tmp_path) catch {};
-        }
-
         var tmp_io_buf: [65536]u8 = undefined;
-        var tmp_fw = tmp_file.writer(io, &tmp_io_buf);
+        var tmp_fw = spool.file.writer(io, &tmp_io_buf);
 
-        const record_count = scanChunkedReader(&file_reader.interface, &read_buf, &tmp_fw.interface, enable_dedup, allocator) catch |err| switch (err) {
-            error.HeaderTooLong => err_exit("error: sequence name exceeds {d} bytes: {s}\n", .{ max_index_name_len, path }),
-            error.NonUniformFai => err_exit(
-                "error: cannot emit .fai for non-uniform sequence layout; run 'z-fasta index' (default) to write .zfi\n",
-                .{},
-            ),
-            else => err_exit("error: processing failed\n", .{}),
+        const record_count = scanChunkedReader(
+            &file_reader.interface,
+            &read_buf,
+            &tmp_fw.interface,
+            .{ .enable_dedup = enable_dedup, .require_initial_header = true },
+            allocator,
+        ) catch |err| switch (err) {
+            error.HeaderTooLong,
+            error.NotFasta,
+            error.NonUniformFai,
+            error.FaiSpoolWriteFailed,
+            error.SourceReadFailed,
+            error.OutOfMemory,
+            => return err,
+            else => return error.ProcessingFailed,
         };
-        tmp_fw.interface.flush() catch {
-            err_exit("error: write failed\n", .{});
-        };
-        // Streaming writer mode on `tmp_file` can block positional reads; reopen for replay.
-        tmp_file.close(io);
-        tmp_open = false;
+        tmp_fw.interface.flush() catch return error.FaiSpoolWriteFailed;
+        if (record_count == 0) return error.NoValidSequences;
 
-        if (record_count == 0) {
-            err_exit("error: no valid sequences found in: {s}\n", .{path});
-        }
+        if (!try sourcePathUnchanged(io, path, stat)) return error.SourceChanged;
 
-        const read_file = cwd.openFile(io, fai_tmp_path, .{}) catch {
-            err_exit("error: failed to reopen temp fai\n", .{});
-        };
-        defer read_file.close(io);
-
-        const tmp_size = (read_file.stat(io) catch {
-            err_exit("error: failed to stat temp fai\n", .{});
-        }).size;
+        const tmp_size = (spool.file.stat(io) catch return error.FaiSpoolReadFailed).size;
         var offset: u64 = 0;
         var copy_buf: [65536]u8 = undefined;
         while (offset < tmp_size) {
             const want: usize = @intCast(@min(copy_buf.len, tmp_size - offset));
-            const n = std.Io.File.readPositionalAll(read_file, io, copy_buf[0..want], offset) catch {
-                err_exit("error: failed to read temp fai\n", .{});
-            };
-            if (n == 0) break;
-            stdout_fw.interface.writeAll(copy_buf[0..n]) catch {
-                err_exit("error: write failed\n", .{});
-            };
+            const n = std.Io.File.readPositionalAll(
+                spool.file,
+                io,
+                copy_buf[0..want],
+                offset,
+            ) catch return error.FaiSpoolReadFailed;
+            if (n == 0) return error.FaiSpoolReadFailed;
+            stdout_fw.interface.writeAll(copy_buf[0..n]) catch return error.StdoutReplayFailed;
             offset += n;
         }
-        stdout_fw.flush() catch {};
+        stdout_fw.flush() catch return error.StdoutFlushFailed;
         return;
     }
 
     var zfi_path_buf: [4096]u8 = undefined;
-    const zfi_path = std.fmt.bufPrint(&zfi_path_buf, "{s}.zfi", .{path}) catch {
-        err_exit("error: path too long\n", .{});
-    };
+    const zfi_path = std.fmt.bufPrint(&zfi_path_buf, "{s}.zfi", .{path}) catch
+        return error.OutputPathTooLong;
 
     var zfi_tmp_buf: [4096]u8 = undefined;
-    const zfi_tmp_path = std.fmt.bufPrint(&zfi_tmp_buf, "{s}.zfi.tmp", .{path}) catch {
-        err_exit("error: path too long\n", .{});
-    };
+    const zfi_tmp_path = std.fmt.bufPrint(&zfi_tmp_buf, "{s}.zfi.tmp", .{path}) catch
+        return error.OutputPathTooLong;
 
     const cwd = std.Io.Dir.cwd();
     cwd.deleteFile(io, zfi_tmp_path) catch {};
 
-    var zfi_index = scanZfiIndexStreaming(&file_reader.interface, &read_buf, enable_dedup, allocator) catch |err| switch (err) {
-        error.HeaderTooLong => err_exit("error: sequence name exceeds {d} bytes: {s}\n", .{ max_index_name_len, path }),
-        error.MissingSideTable => err_exit("error: scan failed\n", .{}),
-        else => err_exit("error: scan failed\n", .{}),
+    var zfi_index = scanZfiIndexStreamingWithOptions(
+        &file_reader.interface,
+        &read_buf,
+        .{ .enable_dedup = enable_dedup, .require_initial_header = true },
+        allocator,
+    ) catch |err| switch (err) {
+        error.HeaderTooLong, error.NotFasta, error.SourceReadFailed, error.OutOfMemory => return err,
+        error.MissingSideTable => return error.ProcessingFailed,
+        else => return error.ProcessingFailed,
     };
     defer zfi_index.deinit(allocator);
 
-    if (zfi_index.records.items.len == 0) {
-        err_exit("error: no valid sequences found in: {s}\n", .{path});
-    }
+    if (zfi_index.records.items.len == 0) return error.NoValidSequences;
+
+    if (!try sourcePathUnchanged(io, path, stat)) return error.SourceChanged;
 
     writeZfiIndexFile(io, zfi_tmp_path, &zfi_index, stat.size, index_format.timestampToNs(stat.mtime)) catch {
         cwd.deleteFile(io, zfi_tmp_path) catch {};
-        err_exit("error: write failed\n", .{});
+        return error.ZfiWriteFailed;
     };
 
     cwd.rename(zfi_tmp_path, cwd, zfi_path, io) catch {
         cwd.deleteFile(io, zfi_tmp_path) catch {};
-        err_exit("error: failed to finalize index: {s}\n", .{zfi_path});
+        return error.ZfiFinalizeFailed;
     };
 
     std.debug.print("wrote {s} ({d} sequences)\n", .{ zfi_path, zfi_index.records.items.len });
@@ -1884,4 +1991,152 @@ test "stride block validation matches scalar for structural mutations" {
             block[mutation_offset] = original;
         }
     }
+}
+
+test "FAI suffix formatter matches std.fmt at field boundaries" {
+    const cases = [_]IndexRecord{
+        .{ .seq_len = 0, .seq_offset = 0, .line_bases = 0, .line_bytes = 0 },
+        .{
+            .seq_len = std.math.maxInt(u64),
+            .seq_offset = std.math.maxInt(u64),
+            .line_bases = std.math.maxInt(u32),
+            .line_bytes = std.math.maxInt(u32),
+        },
+        .{
+            .seq_len = 0,
+            .seq_offset = std.math.maxInt(u64),
+            .line_bases = 0,
+            .line_bytes = std.math.maxInt(u32),
+        },
+        .{
+            .seq_len = std.math.maxInt(u64),
+            .seq_offset = 0,
+            .line_bases = std.math.maxInt(u32),
+            .line_bytes = 0,
+        },
+    };
+
+    for (cases) |rec| {
+        var actual_buf: [128]u8 = undefined;
+        const actual = formatFaiSuffix(&actual_buf, rec);
+        var expected_buf: [128]u8 = undefined;
+        const expected = try std.fmt.bufPrint(
+            &expected_buf,
+            "\t{d}\t{d}\t{d}\t{d}\n",
+            .{ rec.seq_len, rec.seq_offset, rec.line_bases, rec.line_bytes },
+        );
+
+        try std.testing.expectEqualStrings(expected, actual);
+    }
+}
+
+test "initial FASTA validation is an explicit scan option" {
+    const data = "not-fasta\n";
+    var read_buf: [4]u8 = undefined;
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+
+    var unchecked_reader = std.Io.Reader.fixed(data);
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        try scanChunkedReader(
+            &unchecked_reader,
+            &read_buf,
+            &output.writer,
+            .{ .enable_dedup = true },
+            std.testing.allocator,
+        ),
+    );
+
+    var checked_reader = std.Io.Reader.fixed(data);
+    try std.testing.expectError(
+        error.NotFasta,
+        scanChunkedReader(
+            &checked_reader,
+            &read_buf,
+            &output.writer,
+            .{ .enable_dedup = true, .require_initial_header = true },
+            std.testing.allocator,
+        ),
+    );
+}
+
+test "reader failures map to SourceReadFailed" {
+    var reader: std.Io.Reader = .failing;
+    var read_buf: [4]u8 = undefined;
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+
+    try std.testing.expectError(
+        error.SourceReadFailed,
+        scanChunkedReader(
+            &reader,
+            &read_buf,
+            &output.writer,
+            .{ .enable_dedup = true },
+            std.testing.allocator,
+        ),
+    );
+}
+
+test "FAI writer failures map to FaiSpoolWriteFailed" {
+    var reader = std.Io.Reader.fixed(">seq\nA\n");
+    var read_buf: [4]u8 = undefined;
+    var writer: std.Io.Writer = .failing;
+
+    try std.testing.expectError(
+        error.FaiSpoolWriteFailed,
+        scanChunkedReader(
+            &reader,
+            &read_buf,
+            &writer,
+            .{ .enable_dedup = true },
+            std.testing.allocator,
+        ),
+    );
+}
+
+test "FAI spools use independent exclusive files and clean up" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    var first = tryCreateFaiSpool(std.testing.io, tmp.dir, false) orelse
+        return error.TestUnexpectedResult;
+    var second = tryCreateFaiSpool(std.testing.io, tmp.dir, false) orelse {
+        first.deinit(std.testing.io);
+        return error.TestUnexpectedResult;
+    };
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        first.name[0..first.name_len],
+        second.name[0..second.name_len],
+    ));
+
+    first.deinit(std.testing.io);
+    second.deinit(std.testing.io);
+    var entries = tmp.dir.iterate();
+    try std.testing.expectEqual(null, try entries.next(std.testing.io));
+}
+
+test "source metadata check observes path replacement" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const original = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
+    try std.Io.File.writeStreamingAll(original, std.testing.io, ">seq\nAAAA\n");
+    const before = try original.stat(std.testing.io);
+    original.close(std.testing.io);
+
+    try tmp.dir.rename("source.fa", tmp.dir, "old.fa", std.testing.io);
+    const replacement = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
+    try std.Io.File.writeStreamingAll(replacement, std.testing.io, ">seq\nA\n");
+    replacement.close(std.testing.io);
+
+    var path_buf: [128]u8 = undefined;
+    const source_path = try std.fmt.bufPrint(
+        &path_buf,
+        ".zig-cache/tmp/{s}/source.fa",
+        .{tmp.sub_path},
+    );
+    try std.testing.expect(!try sourcePathUnchanged(std.testing.io, source_path, before));
 }
