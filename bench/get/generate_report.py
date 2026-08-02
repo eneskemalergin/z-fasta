@@ -19,6 +19,10 @@ PROJECT_ROOT = SCRIPT_DIR.parent.parent
 
 DATASET_ORDER = ["Genome", "Transcriptome", "Proteome"]
 
+# Shared ratio helpers live in index/generate_report.py and require an explicit baseline
+# tool id (index uses z-fasta-fai; get's headline lane is default .zfi get).
+BASELINE = "z-fasta-default"
+
 # Chart/table order: z-fasta first, then Rust peers, then samtools/bedtools, then reference lanes.
 TOOL_ORDER = [
     "z-fasta-default",
@@ -1343,9 +1347,9 @@ def build_throughput_comparisons(
 ) -> pd.DataFrame:
     peers = speedup_peer_tools(tools)
     ratio = ir.build_ratio_comparisons(
-        work, "mean", peer_tools=peers, group_col=group_col
+        work, "mean", baseline=BASELINE, peer_tools=peers, group_col=group_col
     )
-    return ir.build_time_throughput_comparisons(work, ratio)
+    return ir.build_time_throughput_comparisons(work, ratio, baseline=BASELINE)
 
 
 def fig_throughput_dual_axis(
@@ -1479,6 +1483,7 @@ def md_bed_zfasta_vs_metric_table(
     comparisons = ir.build_ratio_comparisons(
         tagged,
         value_col,
+        baseline=BASELINE,
         peer_tools=speedup_peer_tools(headline_tools),
         group_col="ds_row",
         group_sort=bed_ds_row_sort_key,
@@ -1556,6 +1561,7 @@ def md_bed_zfasta_vs_table(work: pd.DataFrame, tools: list[str], ir) -> str:
     comparisons = ir.build_ratio_comparisons(
         tagged,
         "mean",
+        baseline=BASELINE,
         peer_tools=speedup_peer_tools(headline_tools),
         group_col="ds_row",
         group_sort=bed_ds_row_sort_key,
@@ -1593,7 +1599,11 @@ def fig_metric_bars(
 ) -> Path:
     filtered = ir.filter_tools(work, tools)
     comparisons = ir.build_ratio_comparisons(
-        filtered, value_col, peer_tools=speedup_peer_tools(tools), group_col="dataset"
+        filtered,
+        value_col,
+        baseline=BASELINE,
+        peer_tools=speedup_peer_tools(tools),
+        group_col="dataset",
     )
     return ir._fig_metric_bars(
         filtered,
@@ -1783,6 +1793,7 @@ def fig_pos_grouped_bars(
                 comparisons = ir.build_ratio_comparisons(
                     reg_work,
                     value_col,
+                    baseline=BASELINE,
                     peer_tools=peer_tools,
                 )
                 if not comparisons.empty:
@@ -1923,6 +1934,7 @@ def fig_multi_grouped_bars(
                 comparisons = ir.build_ratio_comparisons(
                     n_work,
                     value_col,
+                    baseline=BASELINE,
                     peer_tools=peer_tools,
                 )
                 if not comparisons.empty:
@@ -2061,6 +2073,7 @@ def fig_bed_grouped_bars(
                 comparisons = ir.build_ratio_comparisons(
                     n_work,
                     value_col,
+                    baseline=BASELINE,
                     peer_tools=peer_tools,
                 )
                 if not comparisons.empty:
@@ -2483,7 +2496,11 @@ def md_zfasta_vs_table(work: pd.DataFrame, tools: list[str], ir, *, group_col: s
 def md_zfasta_vs_metric_table(work: pd.DataFrame, tools: list[str], value_col: str, ir, *, unit: str, ratio_label: str) -> str:
     filtered = ir.filter_tools(work, tools)
     comparisons = ir.build_ratio_comparisons(
-        filtered, value_col, peer_tools=speedup_peer_tools(tools), group_col="dataset"
+        filtered,
+        value_col,
+        baseline=BASELINE,
+        peer_tools=speedup_peer_tools(tools),
+        group_col="dataset",
     )
     if value_col == "peak_rss_mb":
         fmt_zf = lambda r: f"{r.zfasta_v:.2f} MB"
@@ -2794,6 +2811,7 @@ def md_pos_zfasta_vs_table(work: pd.DataFrame, tools: list[str], ir) -> str:
     comparisons = ir.build_ratio_comparisons(
         tagged,
         "mean",
+        baseline=BASELINE,
         peer_tools=peers,
         group_col="ds_region",
         group_sort=None,
@@ -2830,6 +2848,7 @@ def md_pos_zfasta_vs_metric_table(
     comparisons = ir.build_ratio_comparisons(
         tagged,
         value_col,
+        baseline=BASELINE,
         peer_tools=peers,
         group_col="ds_region",
         group_sort=None,
@@ -3206,7 +3225,9 @@ def md_mode_comparison(df: pd.DataFrame, nums, ir, figures_dir: Path) -> str:
             f"<summary><strong>Table {t_cmp}:</strong> default vs `.fai` lane.</summary>",
             "",
             ir.md_zfasta_vs_ratio_table(
-                ir.build_ratio_comparisons(sub, "mean", peer_tools=MODE_POS_TOOLS[1:]),
+                ir.build_ratio_comparisons(
+                    sub, "mean", baseline=BASELINE, peer_tools=MODE_POS_TOOLS[1:]
+                ),
                 zf_label="z-fasta",
                 comp_label="z-fasta (.fai)",
                 ratio_label="Time ×",
@@ -3272,6 +3293,7 @@ def md_multi_zfasta_vs_table(work: pd.DataFrame, tools: list[str], ir) -> str:
     comparisons = ir.build_ratio_comparisons(
         tagged,
         "mean",
+        baseline=BASELINE,
         peer_tools=peers,
         group_col="ds_n",
         group_sort=multi_ds_n_sort_key,
@@ -3308,6 +3330,7 @@ def md_multi_zfasta_vs_metric_table(
     comparisons = ir.build_ratio_comparisons(
         tagged,
         value_col,
+        baseline=BASELINE,
         peer_tools=peers,
         group_col="ds_n",
         group_sort=multi_ds_n_sort_key,

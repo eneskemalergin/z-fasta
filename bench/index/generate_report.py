@@ -771,13 +771,17 @@ def build_ratio_comparisons(
     work: pd.DataFrame,
     value_col: str,
     *,
-    baseline: str = "z-fasta-fai",
+    baseline: str,
     peer_tools: list[str],
     group_col: str = "dataset",
     group_sort=None,
     label_group=None,
 ) -> pd.DataFrame:
-    """Baseline vs each peer; ratio = peer value / baseline value."""
+    """Baseline vs each peer; ratio = peer value / baseline value.
+
+    ``baseline`` is required: suites use different tool ids (index: ``z-fasta-fai``,
+    get: ``z-fasta-default``, stats: ``z-fasta-full``).
+    """
     if group_sort is None:
         group_sort = dataset_sort_key if group_col == "dataset" else None
     groups = sorted(work[group_col].unique(), key=group_sort) if group_sort else sorted(
@@ -815,6 +819,7 @@ def build_headline_ratio_comparisons(work: pd.DataFrame, value_col: str) -> pd.D
     return build_ratio_comparisons(
         work,
         value_col,
+        baseline="z-fasta-fai",
         peer_tools=HEADLINE_PERF_TOOLS[1:],
     )
 
@@ -841,6 +846,7 @@ def build_scaling_ratio_comparisons(
     return build_ratio_comparisons(
         work,
         value_col,
+        baseline="z-fasta-fai",
         peer_tools=HEADLINE_PERF_TOOLS[1:],
         group_col=param_col,
         label_group=lambda p: _scaling_param_label(param_col, p),
@@ -851,7 +857,7 @@ def build_time_throughput_comparisons(
     work: pd.DataFrame,
     ratio_df: pd.DataFrame,
     *,
-    baseline: str = "z-fasta-fai",
+    baseline: str,
 ) -> pd.DataFrame:
     """Wall-time ratio rows enriched with throughput columns."""
     if ratio_df.empty:
@@ -890,13 +896,17 @@ def build_time_throughput_comparisons(
 
 def build_headline_comparisons(work: pd.DataFrame) -> pd.DataFrame:
     return build_time_throughput_comparisons(
-        work, build_headline_ratio_comparisons(work, "mean")
+        work,
+        build_headline_ratio_comparisons(work, "mean"),
+        baseline="z-fasta-fai",
     )
 
 
 def build_mode_comparisons(work: pd.DataFrame) -> pd.DataFrame:
     return build_time_throughput_comparisons(
-        work, build_mode_ratio_comparisons(work, "mean")
+        work,
+        build_mode_ratio_comparisons(work, "mean"),
+        baseline="z-fasta-fai",
     )
 
 
