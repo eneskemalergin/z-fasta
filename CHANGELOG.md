@@ -4,23 +4,31 @@
 
 All notable changes to z-fasta will be documented in this file.
 
-## [0.3.1] - Unreleased
+## [0.3.1] - 2026-08-02
+
+Release hardening and benchmark consolidation. No new commands or `.zfi` format changes. **Re-index not required.**
 
 ### Changed
 
-- **Bench runners:** get and stats correctness live in each suite `run.sh` as inlined `run_tests` (same shape as index). `--skip-tests` / `--skip-verify`, `--skip-benchmarks` / `--skip-perf`; `--skip-messy` skips messy *perf* only.
-- **Messy fixtures:** `python3 bench/shared/generate_messy.py` writes correctness layouts to `bench/shared/cache/messy_fixtures/` and proteome perf layouts to `bench/shared/cache/messy_perf/` (generate-if-missing). Large tracked `shared/messy_perf/*.fasta` and checked-in `index/messy_fixtures/` are gone; cache is gitignored.
-- Shared messy vocabulary: `mixed_widths`, `trailing_whitespace`, `blank_lines`, `mixed_crlf`, `uniform`, `all_messy`.
-- **Scaling fixtures:** `python3 bench/shared/generate_scaling.py` writes into `bench/shared/cache/scaling/` (shared by index and stats; stamp fingerprints params).
-- Shared runner helpers: `bench/shared/runner_common.sh` (sourced by all three suites).
-- Stats correctness count: **95** (was 92 in 0.3.0 docs). Get remains **409**; index edge **25/25**.
+- **Release builds and CI**
+  - ReleaseFast artifacts strip debug information by default; Debug builds remain unchanged.
+  - All six Linux, macOS, and Windows lanes test and smoke the ship-mode binary. Linux x86_64 also keeps Debug safety-check coverage.
+  - Release publication rejects version mismatches, unexpectedly large or unstripped binaries, and incomplete platform archives.
+
+- **Benchmarks**
+  - Index, get, and stats now use consistent correctness and performance gates and refuse incomplete results for published reports.
+  - Reports separate the default `.zfi` path from `.fai` compatibility and expand peer and mode comparisons.
+  - GET passes 409 correctness checks and stats passes 95. Index now reports 24 matching cases plus one binary-input policy review instead of claiming 25/25.
 
 ### Fixed
 
-- **`index --low-mem` catalog path:** stream FAI `NameDedup` keeps owned names in a child arena instead of per-name heap `dupe`/`free`; `--emit-fai` spills through a sibling temp file then copies to stdout. Stream `.zfi` uses blob-backed `NameDedup` (one catalog for dedup + embedded names) and observes at emit (mmap-aligned). `--low-mem` builds with `page_allocator` so ArrayList/HashMap growth frees (a parent arena retained abandoned buffers and inflated Transcriptome `.zfi` RSS). Portable `std.Io` only.
-- **Empty sequence names (`>\n…`):** `.zfi` / `.fai` loaders accept `name_len == 0` (samtools writes a leading-tab `.fai` line). Lookup and `getRecordName` treat `""` as a real name; mmap and `--low-mem` FAI/ZFI stay aligned.
-- **Trailing space/tab before LF:** treated as non-uniform on mmap and `--low-mem` (FAI rejected; `.zfi` side table). Content density is required for fixed-width FAI geometry so space+LF is not mistaken for CRLF.
-- **Trailing vs interior CRLF:** final CRLF after an LF body stays uniform (FAI accepted). Interior mixed LF/CRLF is non-uniform on both paths; stream stride does not skip the pending-line uniformity flip after a mid-body separator mismatch.
+- **Index**
+  - `index --low-mem` uses less memory on large record catalogs while producing the same index output.
+  - Empty FASTA names load and resolve correctly through `.zfi` and `.fai`.
+  - Default and low-memory indexing now agree on trailing whitespace and mixed LF/CRLF layouts; `--emit-fai` rejects layouts that FAI cannot represent.
+
+- **Validate**
+  - `validate --fix` completes the rewrite when the retained event list reaches 10000 entries, prints a truncation warning, and returns success when the repaired output is clean. Validation without `--fix` still fails when the report is incomplete.
 
 ## [0.3.0] - 2026-07-28
 

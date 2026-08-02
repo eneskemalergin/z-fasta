@@ -23,7 +23,7 @@ pub const scanHeaders = indexer.scanHeaders;
 
 const printErrorAndExit = index_format.printErrorAndExit;
 
-const VERSION = "0.3.0";
+const VERSION = "0.3.1";
 const CHUNK_SIZE_FLAG = "--chunk-size";
 const STRAND_AWARE_FLAG = "--strand-aware";
 const STRAND_AWARE_ALIAS = "--honor-strand";

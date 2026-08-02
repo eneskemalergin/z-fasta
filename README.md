@@ -1,23 +1,22 @@
 <!-- markdownlint-disable MD033 MD036 MD041 -->
 <div align="center">
-  <h1>z-fasta ⚡</h1>
+  <h1>z-fasta</h1>
   <p>
     Fast, modular FASTA toolkit built in Zig.<br/>
     SIMD-accelerated indexing, O(1) region extraction, validation, and assembly stats.<br/>
     samtools-compatible indexing and extraction, benchmarked against <code>seqkit</code>, <code>fastahack</code>, <code>pyfaidx</code>, and other peers.
   </p>
-  <p>Current release: <strong>v0.3.0</strong></p>
+  <p>Current development version: <strong>v0.3.1</strong></p>
   <br/>
   <a href="https://github.com/eneskemalergin/z-fasta/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/CI-passing-22c55e?style=for-the-badge" alt="CI" /></a>
   <a href="https://ziglang.org/download/0.16.0/"><img src="https://img.shields.io/badge/Zig-0.16.0-F7A41D?style=for-the-badge&logo=zig&logoColor=white" alt="Zig 0.16.0" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-6366f1?style=for-the-badge" alt="License: MIT" /></a>
-  <a href="bench/"><img src="https://img.shields.io/badge/indexing-22%C3%97_faster_than_samtools-0ea5e9?style=for-the-badge" alt="22x faster than samtools for indexing" /></a>
 </div>
 <!-- markdownlint-enable MD041 -->
 
 ---
 
-Quick links: [Supported Today](#supported-today) · [Installation](#installation) · [Usage](#usage) · [Performance & Correctness](#performance--correctness) · [Benchmarking](#benchmarking) · [Roadmap](#roadmap)
+Quick links: [Supported Today](#supported-today) | [Installation](#installation) | [Usage](#usage) | [Performance & Correctness](#performance--correctness) | [Benchmarking](#benchmarking) | [Roadmap](#roadmap)
 
 ## Supported Today
 
@@ -195,7 +194,7 @@ Variable line widths, trailing spaces or tabs, blank lines, mixed CRLF/LF, and a
 
 ### Duplicate names
 
-Duplicate *names* are not the same as identical *sequence contents*. Default `index` keeps the first name; `index --no-dedup` keeps all. `get` resolves a repeated name to the **last** matching record in the loaded index. `validate` reports `duplicate_name`. Full `stats` prints source-level extras (`sum(k-1)`); `stats --index-only` prints `n/a (run without --index-only)` on a deduplicated index and never fabricates `0` (with an `--no-dedup` index it reports repeats kept in the index).
+Duplicate _names_ are not the same as identical _sequence contents_. Default `index` keeps the first name; `index --no-dedup` keeps all. `get` resolves a repeated name to the **last** matching record in the loaded index. `validate` reports `duplicate_name`. Full `stats` prints source-level extras (`sum(k-1)`); `stats --index-only` prints `n/a (run without --index-only)` on a deduplicated index and never fabricates `0` (with an `--no-dedup` index it reports repeats kept in the index).
 
 ## Support and limits
 
@@ -207,61 +206,62 @@ Duplicate *names* are not the same as identical *sequence contents*. Default `in
 
 **Memory:** default index/get/stats/validate use mapped file views (RSS often near mapped FASTA size). `index --low-mem` streams with bounded RAM and the same `.zfi` bytes on supported inputs. `stats --index-only` skips the sequence scan. Dense BED releases mapped pages behind the cursor; sparse gets on large FASTAs prefer positional reads.
 
-**Platforms:** Linux, macOS, and Windows share the same commands through portable mapping. Memory-advice hints are POSIX-only (unused on Windows). CI smokes all three. Tagged multi-triple release archives are not published yet.
+**Platforms:** Linux, macOS, and Windows share the same commands through portable mapping. Memory-advice hints are POSIX-only (unused on Windows). CI tests six native platform lanes: x86_64 and arm64 on all three operating systems. Tagged releases publish the same six archives; v0.3.0 was the first complete six-archive release.
 
 ## Performance & Correctness
 
-All timings below are on AMD Ryzen 9 3950X, warm cache, from the checked-in suite reports (subject binary was labeled 0.2.9 in those runs; behavior matches current gates). Regenerate reports after the v0.3.0 tag if you need subject strings to match exactly.
+All timings below are on AMD Ryzen 9 3950X with warm cache and come from the checked-in August 1 suite reports. Those runs captured `z-fasta 0.3.0`; they are not relabeled as 0.3.1 measurements. Regenerating the reports with the final 0.3.1 ship binary remains a release gate.
 
 ### Index: SIMD-Accelerated Indexing
 
-| Dataset       | Size (on disk) | z-fasta (no-dedup) | samtools | fastahack | pyfaidx | Speedup vs samtools |
-| ------------- | -------------- | ------------------ | -------- | --------- | ------- | ------------------- |
-| Human Genome  | ~2.9 GiB       | 0.39s              | 9.03s    | 21.73s    | 27.48s  | **22.9x**           |
-| Transcriptome | ~459 MiB       | 0.093s             | 1.79s    | 5.72s     | 6.50s   | **19.3x**           |
-| Proteome      | ~13 MiB        | 0.0056s            | 0.055s   | 0.275s    | 0.368s  | **10.0x**           |
+| Dataset       | Size on disk | z-fasta (.fai) | samtools | fastahack | pyfaidx   | Speedup vs samtools |
+| ------------- | ------------ | -------------- | -------- | --------- | --------- | ------------------- |
+| Human Genome  | ~2.9 GiB     | 0.3805 s       | 9.1403 s | 21.8748 s | 27.6308 s | **24.0x**           |
+| Transcriptome | ~459 MiB     | 0.2555 s       | 1.8136 s | 5.7379 s  | 6.4614 s  | **7.1x**            |
+| Proteome      | ~13 MiB      | 0.0120 s       | 0.0579 s | 0.2732 s  | 0.3745 s  | **4.8x**            |
 
-**Index modes** on Genome (warm cache; [bench/index/REPORT.md](bench/index/REPORT.md) run `20260706_134943`): **default** mmap ~0.40s, RSS near mapped FASTA size; **`--low-mem`** stream ~1.61s with ~3.4 MB RSS and the same `.zfi` bytes as default; **`--no-dedup`** ~0.38s; **`--emit-fai`** writes FAI to stdout only (no on-disk `.zfi`).
+**Index modes** on Genome (warm cache; [bench/index/REPORT.md](bench/index/REPORT.md) run `20260801_084241`): default mmap `.zfi` 0.3705 s with 3005.9 MB peak RSS; streaming `.zfi` `--low-mem` 0.8324 s with 3.38 MB peak RSS and the same output bytes on supported inputs; mmap `.zfi --no-dedup` 0.3737 s; peer-comparable mmap `.fai` 0.3805 s.
 
 > Mapped modes show RSS close to the FASTA size because `/usr/bin/time -v` counts mapped pages, not only private heap. Full curves: [bench/index/REPORT.md](bench/index/REPORT.md).
 
 ### Get: O(1) Region Extraction
 
-| Dataset                  | Region          | z-fasta        | samtools   | seqtk    | pyfaidx | Speedup vs samtools |
-| ------------------------ | --------------- | -------------- | ---------- | -------- | ------- | ------------------- |
-| Any (warm cache)         | 100 bp - 10 kbp | **0.7-0.9 ms** | 1.5-1.6 ms | 4-34 ms  | ~60 ms  | **1.8-2.1x**        |
-| Proteome (~13 MiB)       | 1 kbp region    | 1.3 ms         | 10.9 ms    | 7.2 ms   | 119 ms  | **8.4x**            |
-| Transcriptome (~459 MiB) | 1 kbp region    | 25.3 ms        | 278.7 ms   | 220.3 ms | 1103 ms | **11.0x**           |
+| Dataset                  | Region       | z-fasta | noodles | rust-bio | samtools | Speedup vs samtools |
+| ------------------------ | ------------ | ------- | ------- | -------- | -------- | ------------------- |
+| Genome (~2.9 GiB)        | 1 kbp region | 2.1 ms  | 2.5 ms  | 2.5 ms   | 3.2 ms   | **1.5x**            |
+| Proteome (~13 MiB)       | 1 kbp region | 2.3 ms  | 6.7 ms  | 19.8 ms  | 12.7 ms  | **5.5x**            |
+| Transcriptome (~459 MiB) | 1 kbp region | 4.4 ms  | 87.6 ms | 544.1 ms | 289.3 ms | **65.8x**           |
 
 > Small-region extraction is O(1), but on this host the end-to-end CLI path is startup-dominated below roughly 10 kbp. For very large full-sequence extraction, fastahack can still win on raw write-path overhead; z-fasta stays ahead of samtools across the real-dataset GET cases.
 
 **`--rc`** uses the same mmap-backed extraction path and applies reverse traversal plus complement lookup during emission instead of materializing a second copy of the region.
 
-**Multi-region:** one call loads the index once and streams results in CLI order ([bench/get/REPORT.md](bench/get/REPORT.md) run `20260709_094913`):
+**Multi-region:** one call loads the index once and streams results in CLI order ([bench/get/REPORT.md](bench/get/REPORT.md) run `20260801_093130`, Transcriptome, 1 kbp per region):
 
-| Regions | z-fasta | samtools | seqtk  | Speedup vs samtools |
-| ------- | ------- | -------- | ------ | ------------------- |
-| 1       | 25.6 ms | 289 ms   | 221 ms | **11.3x**           |
-| 10      | 33.8 ms | 283 ms   | 226 ms | **8.4x**            |
-| 50      | 66.7 ms | 292 ms   | 225 ms | **4.4x**            |
-| 100     | 66.7 ms | 279 ms   | 222 ms | **4.2x**            |
+| Regions | z-fasta | samtools | noodles  | Speedup vs samtools |
+| ------- | ------- | -------- | -------- | ------------------- |
+| 1       | 5.5 ms  | 294.2 ms | 88.1 ms  | **53.1x**           |
+| 10      | 28.3 ms | 294.3 ms | 91.6 ms  | **10.4x**           |
+| 100     | 28.2 ms | 298.3 ms | 129.0 ms | **10.6x**           |
+| 1,000   | 37.2 ms | 297.0 ms | 462.0 ms | **8.0x**            |
 
-> Benchmarked on REAL_Transcriptome.fa. Latency is dominated by index resolution and output setup rather than region byte count. seqtk performs a full-file scan per call and is listed for reference only.
+> Benchmarked on REAL_Transcriptome.fa. Latency is dominated by index resolution and output setup rather than region byte count.
 
 ### Stats: Assembly/Proteome Statistics
 
-| Mode       | Dataset              | z-fasta     | seqkit -a | seqtk comp | Speedup vs seqkit -a |
-| ---------- | -------------------- | ----------- | --------- | ---------- | -------------------- |
-| Index-only | Genome (~2.9 GiB)    | **0.9 ms**  | 17.45 s   | N/A        | **~19,000x**         |
-| Index-only | Proteome (~13 MiB)   | **2.9 ms**  | 57.8 ms   | N/A        | **~20x**             |
-| Full scan  | 1 GB single-seq file | **0.78 s**  | 5.62 s    | 2.65 s     | **~7x**              |
-| Full scan  | Proteome (~13 MiB)   | **11.8 ms** | 57.8 ms   | 93.0 ms    | **~4.9x**            |
+| Mode       | Dataset                  | z-fasta     | seqkit -a | Speedup vs seqkit -a |
+| ---------- | ------------------------ | ----------- | --------- | -------------------- |
+| Index-only | Genome (~2.9 GiB)        | **2.11 ms** | 17.418 s  | **~8,250x**          |
+| Index-only | Proteome (~13 MiB)       | **6.08 ms** | 63.3 ms   | **~10.4x**           |
+| Full scan  | Genome (~2.9 GiB)        | **5.149 s** | 17.418 s  | **3.38x**            |
+| Full scan  | Transcriptome (~459 MiB) | **0.870 s** | 2.390 s   | **2.75x**            |
+| Full scan  | Proteome (~13 MiB)       | **25.7 ms** | 63.3 ms   | **2.46x**            |
 
 > See [bench/stats/REPORT.md](bench/stats/REPORT.md). Index-only mode reads the sidecar without scanning sequence bytes.
 
 ### Correctness
 
-- **Index:** `bench/index/run.sh` edge cases **25/25**; messy layouts from `python3 bench/shared/generate_messy.py` into `bench/shared/cache/messy_fixtures/` (correctness) and `messy_perf/` (proteome perf).
+- **Index:** `bench/index/run.sh` edge cases **24/24 matching cases plus one `binary_data` review**; messy layouts from `python3 bench/shared/generate_messy.py` into `bench/shared/cache/messy_fixtures/` (correctness) and `messy_perf/` (proteome perf).
 - **Get:** `bench/get/run.sh` correctness **409/409** (positional, multi-region, BED, names, RC, messy, low-mem parity) against samtools, bedtools, and seqtk where applicable.
 - **Stats:** `bench/stats/run.sh` correctness **95/95** (BioPython oracle, index formats, layout twins, messy fixtures, duplicates policy, peer parity).
 - **Unit tests:** `./zig build test` (index, get, stats, complement, BED parser, validator).
@@ -298,13 +298,14 @@ Details: [bench/README.md](bench/README.md). Shared helpers live in `bench/share
 ```bash
 ./zig build
 ./zig build test --summary all
+./zig build test -Doptimize=ReleaseFast --summary all
 ./zig build -Doptimize=ReleaseFast
 ./zig-out/bin/z-fasta --version
 ```
 
 ## Roadmap
 
-**Delivered through v0.3.0**
+**Delivered through v0.3.1**
 
 - [x] `index`, `get`, `stats`, and `validate`
 - [x] Preferred `.zfi` with side tables; `.fai` only for representable uniform records
@@ -312,8 +313,9 @@ Details: [bench/README.md](bench/README.md). Shared helpers live in `bench/share
 - [x] `index --low-mem` streaming path with mmap parity
 - [x] Portable Linux / macOS / Windows mapping and CI smoke
 - [x] Zebrac benchmark suites for index, GET, and stats with verify gates
+- [x] Stripped ReleaseFast artifacts and ship-mode tests across the six-platform CI matrix
 
-**Deferred (not v0.3.0)**
+**Deferred (not v0.3.1)**
 
 - [ ] Compressed or BGZF FASTA
 - [ ] Parallel indexing

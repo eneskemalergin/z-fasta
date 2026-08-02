@@ -82,13 +82,14 @@ jobs:
           echo "target_flag=${{ matrix.target_flag }}"
           zig version
 
-      - name: Build
+      - name: Run tests (Debug safety lane)
+        if: matrix.name == 'Linux x86_64'
         shell: bash
-        run: zig build ${{ matrix.target_flag }}
+        run: zig build test --summary all
 
-      - name: Build (ReleaseFast)
+      - name: Run tests (ReleaseFast ship mode)
         shell: bash
-        run: zig build -Doptimize=ReleaseFast ${{ matrix.target_flag }}
+        run: zig build test -Doptimize=ReleaseFast --summary all ${{ matrix.target_flag }}
 
       - name: Smoke test
         shell: bash
@@ -121,7 +122,3 @@ jobs:
             tests/data/mixed_widths.fasta; do
             "${{ matrix.binary }}" index "$f"
           done
-
-      - name: Run tests
-        shell: bash
-        run: zig build test --summary all ${{ matrix.target_flag }}
