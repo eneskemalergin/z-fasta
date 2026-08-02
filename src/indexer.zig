@@ -25,6 +25,9 @@ pub const ZFI_MAGIC = index_format.ZFI_MAGIC;
 
 const SIMD_CHUNK_SIZE = 32;
 const SimdVec = @Vector(SIMD_CHUNK_SIZE, u8);
+const STREAM_VECTOR_LEN = std.simd.suggestVectorLength(u8) orelse 1;
+// Measured block size from the retained experiment; validation uses no extra storage.
+const STRIDE_VALIDATION_BLOCK_LINES = 256;
 pub const low_mem_chunk_size = 1 * 1024 * 1024;
 const FILE_IO_BUF_SIZE = 8 * 1024;
 pub const max_index_name_len = std.math.maxInt(u16);
@@ -367,30 +370,83 @@ fn firstLineIsDense(line_bases: u32, line_bytes: u32) bool {
     return (sep_len == 1 or sep_len == 2) and line_bases + sep_len == line_bytes;
 }
 
-/// One full wrap: separator at `line_bases`, dense last base, no interior line breaks.
-/// Interior-break rejection matters: a short final plus the next header can land on
-/// exactly `line_bytes` (Genome chr10→chr11) and would otherwise be swallowed.
-fn strideLineLooksValid(data: []const u8, start: usize, line_bases: u32, line_bytes: u32) bool {
-    if (start + line_bytes > data.len) return false;
-    if (line_bases == 0 or line_bytes <= line_bases) return false;
+fn countWhitespace(comptime vector_len: usize, data: []const u8) usize {
+    const Vec = @Vector(vector_len, u8);
+    var count: usize = 0;
+    var pos: usize = 0;
+    while (pos + vector_len <= data.len) : (pos += vector_len) {
+        const chunk: Vec = data[pos..][0..vector_len].*;
+        count += std.simd.countTrues(chunk <= @as(Vec, @splat(' ')));
+    }
+    while (pos < data.len) : (pos += 1) {
+        count += @intFromBool(data[pos] <= ' ');
+    }
+    return count;
+}
+
+fn validatedStrideBlock(
+    comptime vector_len: usize,
+    data: []const u8,
+    start: usize,
+    line_count: usize,
+    line_bases: usize,
+    line_bytes: usize,
+) usize {
     const sep_len = line_bytes - line_bases;
-    if (sep_len == 1) {
-        // First `\n` in the window must be exactly at the stride boundary.
-        const window = data[start .. start + line_bytes];
-        const nl = std.mem.indexOfScalar(u8, window, '\n') orelse return false;
-        if (nl != line_bases) return false;
-        if (data[start + line_bases - 1] <= ' ') return false;
-        return true;
+    const block_end = start + line_count * line_bytes;
+    var line_index: usize = 0;
+    while (line_index < line_count) : (line_index += 1) {
+        const line_start = start + line_index * line_bytes;
+        if (data[line_start] == '>') return line_index;
+        if (!hasLineSeparatorAt(data, line_start + line_bases, @intCast(sep_len))) {
+            return line_index;
+        }
     }
-    if (sep_len == 2) {
-        const base_span = data[start .. start + line_bases];
-        if (std.mem.indexOfScalar(u8, base_span, '\n') != null) return false;
-        if (std.mem.indexOfScalar(u8, base_span, '\r') != null) return false;
-        if (!hasLineSeparatorAt(data, start + line_bases, 2)) return false;
-        if (data[start + line_bases - 1] <= ' ') return false;
-        return true;
+    if (countWhitespace(vector_len, data[start..block_end]) == line_count * sep_len) {
+        return line_count;
     }
-    return false;
+
+    line_index = 0;
+    while (line_index < line_count) : (line_index += 1) {
+        const line_start = start + line_index * line_bytes;
+        if (countWhitespace(vector_len, data[line_start .. line_start + line_bases]) != 0) {
+            return line_index;
+        }
+    }
+    return 0;
+}
+
+fn validatedStrideRun(
+    comptime vector_len: usize,
+    data: []const u8,
+    start: usize,
+    line_bases_u32: u32,
+    line_bytes_u32: u32,
+) usize {
+    const line_bases: usize = line_bases_u32;
+    const line_bytes: usize = line_bytes_u32;
+    if (line_bases == 0 or line_bytes <= line_bases) return 0;
+    const sep_len = line_bytes - line_bases;
+    if (sep_len != 1 and sep_len != 2) return 0;
+
+    var cursor = start;
+    var accepted_lines: usize = 0;
+    while (data.len - cursor >= line_bytes) {
+        const available_lines = (data.len - cursor) / line_bytes;
+        const block_lines = @min(available_lines, STRIDE_VALIDATION_BLOCK_LINES);
+        const valid_lines = validatedStrideBlock(
+            vector_len,
+            data,
+            cursor,
+            block_lines,
+            line_bases,
+            line_bytes,
+        );
+        accepted_lines += valid_lines;
+        if (valid_lines != block_lines) return accepted_lines;
+        cursor += block_lines * line_bytes;
+    }
+    return accepted_lines;
 }
 
 fn measureSequenceLength(data: []const u8, line_bases: u32, line_bytes: u32) SequenceLengthInfo {
@@ -1198,7 +1254,7 @@ const ChunkParseState = struct {
         return true;
     }
 
-    /// Bulk-account `n_lines` consecutive full wraps already validated by `strideLineLooksValid`.
+    /// Bulk-account `n_lines` consecutive full wraps already validated as one stride block.
     /// Caller must have ingested the first dense line via the line machine (`strideEligible`).
     /// Avoids per-wrap `recordSequenceLine` on long Genome bodies (Track A2 wall).
     fn ingestStrideRun(self: *ChunkParseState, n_lines: u64) void {
@@ -1450,43 +1506,36 @@ fn processChunkBytes(
             continue;
         }
 
-        // Track A2: after the first dense full-width line, consume further full wraps by
-        // fixed stride instead of scanning for each `\n`. Validation is the mmap dense-line
-        // predicates plus an interior-break check (required on the stream path because the
-        // next header is still in-band; mmap measures each record body in isolation).
+        // After the first dense full-width line, accept blocks only when every separator is
+        // exact and every other byte is greater than space. The next header remains in-band.
         if (state.at_line_start and state.strideEligible()) {
             const line_bases = state.line_builder.metrics.line_bases;
             const line_bytes = state.line_builder.metrics.line_bytes;
-            var run_lines: u64 = 0;
-            while (i < data.len) {
-                const b = data[i];
-                if (b == '>') break;
-                if (b == '\n' or b == '\r') break;
-                const remaining = data.len - i;
-                if (remaining < line_bytes) {
-                    if (run_lines > 0) {
-                        state.ingestStrideRun(run_lines);
-                        run_lines = 0;
-                    }
-                    // Short final, next header, or a true mid-line chunk split.
-                    // Never absorb a span that already contains `\n` as "partial stride"
-                    // — that can swallow the next record's `>` into the previous body.
-                    if (findNextStreamingNewline(data, i, data.len) < data.len) break;
+            const run_lines = validatedStrideRun(
+                STREAM_VECTOR_LEN,
+                data,
+                i,
+                line_bases,
+                line_bytes,
+            );
+            if (run_lines > 0) {
+                state.ingestStrideRun(run_lines);
+                i += run_lines * @as(usize, line_bytes);
+            }
+            if (i >= data.len) return;
+            // Next header: re-enter so the `>` branch runs. Blank/invalid: fall through
+            // to the line machine once (must not re-enter stride on the same offset).
+            if (data[i] == '>') continue;
+            if (data.len - i < line_bytes) {
+                // A partial chunk has no complete line when LF is absent.
+                if (findNextStreamingNewline(data, i, data.len) >= data.len) {
                     state.appendPendingFragment(
                         data[i..],
                         file_offset + @as(u64, @intCast(i)),
                     );
                     return;
                 }
-                if (!strideLineLooksValid(data, i, line_bases, line_bytes)) break;
-                run_lines += 1;
-                i += line_bytes;
             }
-            if (run_lines > 0) state.ingestStrideRun(run_lines);
-            if (i >= data.len) return;
-            // Next header: re-enter so the `>` branch runs. Blank/invalid: fall through
-            // to the line machine once (must not re-enter stride on the same offset).
-            if (data[i] == '>') continue;
         }
 
         const line_start = i;
@@ -1786,4 +1835,53 @@ pub fn runIndexLowMem(
 /// Validates that the data is a FASTA file (starts with '>')
 pub fn validateFasta(data: []const u8) bool {
     return data.len > 0 and data[0] == '>';
+}
+
+test "stride block validation matches scalar for structural mutations" {
+    const line_bases: u32 = 4;
+    const line_count = 520;
+    const target_line = 256;
+    const cases = [_][]const u8{
+        "AAAA\n",
+        "AAAA\r\n",
+    };
+    const mutations = [_]u8{ ' ', '\t', '\r', '\n', 0, '>' };
+
+    var storage: [line_count * 6]u8 = undefined;
+    for (cases) |line| {
+        const line_bytes: u32 = @intCast(line.len);
+        const block = storage[0 .. line_count * line.len];
+        for (0..line_count) |line_index| {
+            @memcpy(block[line_index * line.len ..][0..line.len], line);
+        }
+
+        for (0..line.len + 1) |line_offset| {
+            const mutation_offset = target_line * line.len + line_offset;
+            const original = block[mutation_offset];
+            for (mutations) |mutation| {
+                block[mutation_offset] = mutation;
+
+                const native = validatedStrideRun(
+                    STREAM_VECTOR_LEN,
+                    block,
+                    0,
+                    line_bases,
+                    line_bytes,
+                );
+                const scalar = validatedStrideRun(1, block, 0, line_bases, line_bytes);
+
+                try std.testing.expectEqual(scalar, native);
+                const at_next_line = line_offset == line.len;
+                const invalid = if (line_offset < line_bases)
+                    mutation <= ' ' or (line_offset == 0 and mutation == '>')
+                else if (!at_next_line)
+                    mutation != line[line_offset]
+                else
+                    mutation <= ' ' or mutation == '>';
+                const stop_line = target_line + @as(usize, @intFromBool(at_next_line));
+                try std.testing.expectEqual(if (invalid) stop_line else line_count, native);
+            }
+            block[mutation_offset] = original;
+        }
+    }
 }

@@ -275,13 +275,28 @@ fn expectReaderMatchesMmap(
 
     var mmap_fai = std.Io.Writer.Allocating.init(allocator);
     defer mmap_fai.deinit();
-    const mmap_count = try main.indexer.streamingScan(
+    const mmap_count = main.indexer.streamingScan(
         data,
         &mmap_fai.writer,
         .fai,
         enable_dedup,
         allocator,
-    );
+    ) catch |mmap_err| {
+        var stream_fai = std.Io.Writer.Allocating.init(allocator);
+        defer stream_fai.deinit();
+        var fai_reader = std.Io.Reader.fixed(data);
+        try std.testing.expectError(
+            mmap_err,
+            scanFaiReaderForTest(
+                &fai_reader,
+                read_buf,
+                &stream_fai.writer,
+                enable_dedup,
+                allocator,
+            ),
+        );
+        return;
+    };
 
     var stream_fai = std.Io.Writer.Allocating.init(allocator);
     defer stream_fai.deinit();
@@ -2327,6 +2342,62 @@ test "streaming CRLF uniform body with short final matches mmap (Track A2)" {
     try std.testing.expect(stream_index.records.items[0].isUniformWidth());
     try std.testing.expectEqual(@as(usize, 0), stream_index.side_tables.items.len);
     try std.testing.expectEqual(@as(u32, 62), stream_index.records.items[0].line_bytes);
+}
+
+test "streaming stride blocks fall back at validation boundaries" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const full_line = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n";
+    var read_storage: [64 * 1024]u8 = undefined;
+    for ([_]usize{ 255, 256, 257 }) |break_line| {
+        var fasta: std.ArrayList(u8) = .empty;
+        defer fasta.deinit(allocator);
+        try fasta.appendSlice(allocator, ">seq\n");
+        for (0..520) |line_index| {
+            try fasta.appendSlice(
+                allocator,
+                if (line_index == break_line) "AAAA\n" else full_line,
+            );
+        }
+
+        for ([_]bool{ false, true }) |enable_dedup| {
+            try expectReaderMatchesMmap(
+                allocator,
+                fasta.items,
+                &read_storage,
+                enable_dedup,
+                "stride-block-boundary",
+            );
+        }
+    }
+}
+
+test "streaming CRLF stride blocks match both formats" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var fasta: std.ArrayList(u8) = .empty;
+    defer fasta.deinit(allocator);
+    try fasta.appendSlice(allocator, ">seq\r\n");
+    const full_line = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n";
+    for (0..600) |_| {
+        try fasta.appendSlice(allocator, full_line);
+    }
+    try fasta.appendSlice(allocator, "ACGT\r\n");
+
+    var read_storage: [64 * 1024]u8 = undefined;
+    for ([_]bool{ false, true }) |enable_dedup| {
+        try expectReaderMatchesMmap(
+            allocator,
+            fasta.items,
+            &read_storage,
+            enable_dedup,
+            "crlf-stride-blocks",
+        );
+    }
 }
 
 test "streaming multi-record uniform bodies stay mmap-identical (Track A2)" {
