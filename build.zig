@@ -97,6 +97,22 @@ pub fn build(b: *std.Build) void {
         "--fixtures",
     });
 
+    // GET and stats subprocess tests load sidecars from tests/data. Generate them
+    // with the selected build mode so `zig build test` works on a clean checkout.
+    const test_fasta_paths = [_][]const u8{
+        "tests/data/simple.fasta",
+        "tests/data/proteome.fasta",
+        "tests/data/single.fasta",
+        "tests/data/edge_cases.fasta",
+        "tests/data/mixed_widths.fasta",
+    };
+    for (test_fasta_paths) |fasta_path| {
+        const gen_test_index = b.addRunArtifact(exe);
+        gen_test_index.addArgs(&.{ "index", fasta_path });
+        run_test_get.step.dependOn(&gen_test_index.step);
+        run_test_stats.step.dependOn(&gen_test_index.step);
+    }
+
     const test_validate_module = b.createModule(.{
         .root_source_file = b.path("tests/test_validate.zig"),
         .target = target,

@@ -110,15 +110,3 @@ jobs:
           test -s .ci-smoke/get.out
           "${{ matrix.binary }}" stats .ci-smoke/test.fasta > .ci-smoke/stats.out
           test -s .ci-smoke/stats.out
-
-      - name: Generate test indexes
-        shell: bash
-        run: |
-          for f in \
-            tests/data/simple.fasta \
-            tests/data/proteome.fasta \
-            tests/data/single.fasta \
-            tests/data/edge_cases.fasta \
-            tests/data/mixed_widths.fasta; do
-            "${{ matrix.binary }}" index "$f"
-          done
