@@ -202,7 +202,7 @@ Duplicate _names_ are not the same as identical _sequence contents_. Default `in
 
 **Memory:** index reads sequence payload through a bounded buffer. Get, stats, and validate retain mapped FASTA paths, so their RSS can approach the mapped file size. `stats --index-only` skips the sequence scan. Dense BED releases mapped pages behind the cursor; sparse gets on large FASTAs prefer positional reads.
 
-**Platforms:** Linux, macOS, and Windows share the same commands through portable mapping. Memory-advice hints are POSIX-only (unused on Windows). CI tests six native platform lanes: x86_64 and arm64 on all three operating systems. Tagged releases publish the same six archives; v0.3.0 was the first complete six-archive release.
+**Platforms:** Linux, macOS, and Windows share the same commands through portable mapping. Memory-advice hints are POSIX-only (unused on Windows). CI builds and smokes six native platform lanes: x86_64 and arm64 on all three operating systems. Tagged releases publish the same six archives; v0.3.0 was the first complete six-archive release.
 
 ## Performance & Correctness
 
@@ -299,7 +299,7 @@ Details: [bench/README.md](bench/README.md). Shared helpers live in `bench/share
 
 ## Roadmap
 
-**Implemented on the v0.3.2 development branch**
+**Implemented in current development**
 
 - [x] `index`, `get`, `stats`, and `validate`
 - [x] Preferred `.zfi` with side tables; `.fai` only for representable uniform records
@@ -307,9 +307,9 @@ Details: [bench/README.md](bench/README.md). Shared helpers live in `bench/share
 - [x] Bounded index reader shared by `.zfi` and `.fai` output
 - [x] Portable Linux / macOS / Windows mapping and CI smoke
 - [x] Zebrac benchmark suites for index, GET, and stats with verify gates
-- [x] Stripped ReleaseFast artifacts and ship-mode tests across the six-platform CI matrix
+- [x] Stripped ReleaseFast artifacts, ship-mode tests, and six-platform CI smoke
 
-**Deferred (not v0.3.2)**
+**Deferred**
 
 - [ ] Compressed or BGZF FASTA
 - [ ] Parallel indexing
