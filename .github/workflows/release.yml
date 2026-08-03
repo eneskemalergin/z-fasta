@@ -117,7 +117,7 @@ jobs:
         run: .github/scripts/package_release.sh "$VERSION" "$SYSTEM" "$EXE"
 
       - name: Upload archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: archive-${{ matrix.system }}
           path: release-out/*
