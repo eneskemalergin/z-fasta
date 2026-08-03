@@ -329,7 +329,7 @@ test "resolveRegion - nonstandard characters in sequence (stars/dashes)" {
 }
 
 // ============================================================================
-// Low-mem index get
+// Index-backed get fixtures
 // ============================================================================
 
 fn uniqueArtifactPath(allocator: std.mem.Allocator, stem: []const u8, ext: []const u8) ![]u8 {

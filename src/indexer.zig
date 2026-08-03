@@ -12,30 +12,46 @@ const std = @import("std");
 const builtin = @import("builtin");
 const index_format = @import("index_format.zig");
 
-pub const IndexRecord = index_format.IndexRecord;
-pub const ZfiHeader = index_format.ZfiHeader;
-pub const ZFI_MAGIC = index_format.ZFI_MAGIC;
+const IndexRecord = index_format.IndexRecord;
+const ZfiHeader = index_format.ZfiHeader;
+const ZFI_MAGIC = index_format.ZFI_MAGIC;
 
 const SIMD_CHUNK_SIZE = 32;
 const SimdVec = @Vector(SIMD_CHUNK_SIZE, u8);
-const STREAM_VECTOR_LEN = std.simd.suggestVectorLength(u8) orelse 1;
-// Measured block size from the retained experiment; validation uses no extra storage.
+const STRIDE_VECTOR_LEN = std.simd.suggestVectorLength(u8) orelse 1;
+// Processes 256 lines per proof batch without additional storage.
 const STRIDE_VALIDATION_BLOCK_LINES = 256;
+// The input payload occupies this fixed stack buffer regardless of FASTA size.
 pub const index_read_buffer_size = 1 * 1024 * 1024;
 const FILE_IO_BUF_SIZE = 8 * 1024;
-// Exclusive creation retries only random name collisions within one candidate directory.
+// Each output and replay stage uses one fixed stack buffer of this size.
+const INDEX_OUTPUT_BUFFER_SIZE = 64 * 1024;
+// Output paths longer than this fail without allocating from sequence-derived input.
+const INDEX_PATH_BUFFER_SIZE = 4096;
+// Catalogs start modestly and grow with records or names, never sequence payload bytes.
+const ZFI_INITIAL_RECORD_CAPACITY = 4096;
+const DEDUP_INITIAL_CAPACITY: u32 = 16384;
+const FAI_SPOOL_NAME_BUFFER_SIZE = 64;
+const FAI_U64_DECIMAL_DIGITS = 20;
+const FAI_SUFFIX_BUFFER_SIZE = 4 * (1 + FAI_U64_DECIMAL_DIGITS) + 1;
+// Exclusive creation retries only random name collisions within one directory.
 const FAI_SPOOL_CREATE_ATTEMPTS = 16;
 pub const max_index_name_len = std.math.maxInt(u16);
 
 pub const ScanOptions = struct {
     enable_dedup: bool,
     max_name_len: ?usize = null,
-    zfi_mode: bool = false,
+    collect_side_tables: bool = false,
     require_initial_header: bool = false,
 };
 
-/// Offset into a name blob for `.zfi` catalog dedup (one store for map and output).
-pub const NameBlobRef = struct { off: u32, len: u32 };
+pub const IndexOptions = struct {
+    emit_fai: bool = false,
+    enable_dedup: bool = true,
+};
+
+// Offset into a name blob for `.zfi` catalog dedup (one store for map and output).
+const NameBlobRef = struct { off: u32, len: u32 };
 
 /// First-wins name set for indexing. A hash accelerates the map; discarding a record
 /// requires full-string equality (`Context.eql`), never hash equality alone.
@@ -48,7 +64,7 @@ pub fn NameDedupWith(comptime Context: type) type {
     return struct {
         map: std.HashMap([]const u8, void, Context, std.hash_map.default_max_load_percentage),
         key_arena: ?std.heap.ArenaAllocator = null,
-        /// When set, stream `.zfi` dedup stores `NameBlobRef` keys into this blob (not `map`).
+        /// When set, `.zfi` dedup stores `NameBlobRef` keys into this blob (not `map`).
         name_blob: ?*std.ArrayList(u8) = null,
         ref_map: ?BlobRefMap = null,
         /// After a successful first-seen `observe` in blob mode, the embedded span.
@@ -90,10 +106,6 @@ pub fn NameDedupWith(comptime Context: type) type {
 
         const Self = @This();
 
-        /// Soft start capacity for name catalogs; map grows geometrically after this.
-        /// Keep modest so dedup RSS stays in the few-MB class on low-record-count genomes.
-        pub const stream_dedup_pre_cap: u32 = 16384;
-
         pub fn init(allocator: std.mem.Allocator) Self {
             return .{
                 .map = std.HashMap([]const u8, void, Context, std.hash_map.default_max_load_percentage).init(allocator),
@@ -102,7 +114,7 @@ pub fn NameDedupWith(comptime Context: type) type {
         }
 
         /// `.zfi`: one catalog in `blob` for both dedup and embedded names.
-        pub fn initOwningBlob(allocator: std.mem.Allocator, blob: *std.ArrayList(u8)) Self {
+        fn initOwningBlob(allocator: std.mem.Allocator, blob: *std.ArrayList(u8)) Self {
             return .{
                 .map = std.HashMap([]const u8, void, Context, std.hash_map.default_max_load_percentage).init(allocator),
                 .name_blob = blob,
@@ -110,11 +122,11 @@ pub fn NameDedupWith(comptime Context: type) type {
             };
         }
 
-        pub fn bindsToBlob(self: *const Self) bool {
+        fn bindsToBlob(self: *const Self) bool {
             return self.name_blob != null;
         }
 
-        pub fn ensureStreamCapacity(self: *Self, min_cap: u32) !void {
+        fn ensureCapacity(self: *Self, min_cap: u32) !void {
             if (self.ref_map) |*rm| {
                 try rm.ensureTotalCapacity(min_cap);
                 return;
@@ -177,7 +189,7 @@ pub const FastaRecordEmit = struct {
     name: []const u8,
     uses_uniform_formula: bool,
     /// Incremental side-table bytes for `.zfi` (line count plus `SideTableLine` rows).
-    streaming_side_table: []const u8 = &.{},
+    side_table: []const u8 = &.{},
     /// When true, `record` already has blob-relative `name_offset`/`name_len` and `name_in_zfi_flag`
     /// (`.zfi` blob-backed `NameDedup`); skip `embedZfiName`.
     name_embedded: bool = false,
@@ -211,7 +223,7 @@ const SequenceLengthInfo = struct {
     uses_uniform_formula: bool,
 };
 
-pub fn countBases(data: []const u8) u64 {
+fn countBases(data: []const u8) u64 {
     var count: u64 = 0;
     var pos: usize = 0;
     while (pos + SIMD_CHUNK_SIZE <= data.len) {
@@ -254,8 +266,8 @@ fn lineSliceHasWhitespace(data: []const u8, start: usize, end: usize) bool {
     return false;
 }
 
-/// Bases in one sequence line's content slice (no trailing `\n`/`\r`).
-/// Dense lines (no bytes `<= ' '`) use length only; otherwise falls back to `countBases`.
+// Bases in one sequence line's content slice (no trailing `\n`/`\r`).
+// Dense lines use length only; other lines fall back to `countBases`.
 fn countBasesInLineSlice(data: []const u8, start: usize, end: usize) u32 {
     if (start >= end) return 0;
     if (!lineSliceHasWhitespace(data, start, end)) {
@@ -351,7 +363,7 @@ fn validatedStrideRun(
     return accepted_lines;
 }
 
-fn findNextStreamingNewline(data: []const u8, start: usize, end: usize) usize {
+fn findNextNewline(data: []const u8, start: usize, end: usize) usize {
     const relative = std.mem.findScalar(u8, data[start..end], '\n') orelse return end;
     return start + relative;
 }
@@ -482,8 +494,8 @@ fn scanZfiReaderWithOptions(
         .name_blob = .empty,
     };
     errdefer index.deinit(allocator);
-    // Modest pre-size: enough for Proteome/small catalogs; Tx grows geometrically.
-    try index.records.ensureTotalCapacity(allocator, 4096);
+    // Bounds fixed catalog startup cost; larger catalogs grow geometrically.
+    try index.records.ensureTotalCapacity(allocator, ZFI_INITIAL_RECORD_CAPACITY);
 
     const Ctx = struct {
         index: *ZfiIndex,
@@ -493,7 +505,7 @@ fn scanZfiReaderWithOptions(
             var rec = emit_info.record;
             if (!emit_info.uses_uniform_formula) {
                 const local_offset = ctx.index.side_tables.items.len;
-                try ctx.index.side_tables.appendSlice(ctx.allocator, emit_info.streaming_side_table);
+                try ctx.index.side_tables.appendSlice(ctx.allocator, emit_info.side_table);
                 try rec.markNonUniform(local_offset);
             }
             if (!emit_info.name_embedded) {
@@ -504,11 +516,11 @@ fn scanZfiReaderWithOptions(
     };
 
     var ctx = Ctx{ .index = &index, .allocator = allocator };
-    // One catalog: dedup refs into `name_blob` (no arena + embed double copy).
+    // One catalog avoids a second copy of embedded names.
     var blob_dedup: ?NameDedup = null;
     if (options.enable_dedup) {
         blob_dedup = NameDedup.initOwningBlob(allocator, &index.name_blob);
-        try blob_dedup.?.ensureStreamCapacity(NameDedup.stream_dedup_pre_cap);
+        try blob_dedup.?.ensureCapacity(DEDUP_INITIAL_CAPACITY);
     }
     defer if (blob_dedup) |*seen| seen.deinit();
     const external_dedup: ?*NameDedup = if (blob_dedup) |*s| s else null;
@@ -517,7 +529,7 @@ fn scanZfiReaderWithOptions(
         read_buf,
         .{
             .enable_dedup = options.enable_dedup,
-            .zfi_mode = true,
+            .collect_side_tables = true,
             .require_initial_header = options.require_initial_header,
         },
         allocator,
@@ -556,7 +568,7 @@ pub fn zfiIndexFromRecords(records: []const IndexRecord, allocator: std.mem.Allo
 
 /// Single on-disk `.zfi` serialization path (`plan/zfi-format.md`):
 /// header, records, side tables, name blob, `ZFID` source identity, `ZFNM` footer.
-pub fn writeZfiIndex(
+fn writeZfiIndex(
     writer: *std.Io.Writer,
     index: *const ZfiIndex,
     source_size: u64,
@@ -588,7 +600,7 @@ pub fn writeZfiIndexFile(
     const file = try std.Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
 
-    var file_buf: [65536]u8 = undefined;
+    var file_buf: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
     var file_fw = file.writer(io, &file_buf);
     try writeZfiIndex(&file_fw.interface, index, source_size, source_mtime_ns);
     try file_fw.flush();
@@ -609,7 +621,7 @@ pub fn zfiIndexToBytes(
 
 const ChunkParseState = struct {
     allocator: std.mem.Allocator,
-    zfi_mode: bool = false,
+    collect_side_tables: bool = false,
     active: bool = false,
     in_header: bool = false,
     parsing_name: bool = false,
@@ -622,7 +634,7 @@ const ChunkParseState = struct {
     in_pending_line: bool = false,
     pending_line_bases: u32 = 0,
     pending_line_bytes: u32 = 0,
-    /// Pre-LF byte count (updated in appendPendingFragment; LF +1 happens after).
+    // Pre-LF byte count. The LF is counted when the line commits.
     pending_pre_lf_bytes: u32 = 0,
     pending_pre_lf_ends_with_cr: bool = false,
     pending_line_file_offset: u64 = 0,
@@ -634,9 +646,8 @@ const ChunkParseState = struct {
         actual_bytes: u32,
         line_file_offset: u64,
     } = null,
-    /// Short-or-equal stride mismatch that `finish()` still treats as FAI-uniform when it is
-    /// the final base line. Do not materialize O(lines) side-table rows until a later base
-    /// line proves the short line was interior.
+    // A short final line remains FAI-uniform. Side-table rows stay deferred until a later
+    // base line proves the short line was interior.
     deferred_short_tail: ?struct {
         bases: u32,
         actual_bytes: u32,
@@ -649,9 +660,7 @@ const ChunkParseState = struct {
         try self.side_table.appendSlice(self.allocator, std.mem.asBytes(&line_count));
     }
 
-    /// Materialize `lines_to_materialize` uniform stride rows from the deferred first line.
-    /// Call with `line_count - 1` before appending the line that broke uniformity, or with
-    /// full `line_count` when `finish()` flips non-uniform after all lines looked formula-ready.
+    // Materialize uniform stride rows only after the record proves non-uniform.
     fn activateSideTable(self: *ChunkParseState, lines_to_materialize: u64) !void {
         if (self.side_table_active) return;
         self.side_table_active = true;
@@ -708,8 +717,7 @@ const ChunkParseState = struct {
         self.side_base_start += bases;
     }
 
-    /// Flush a deferred short tail plus the current base line into the side table.
-    /// `metrics.line_count` includes the current line; the short tail was the previous base line.
+    // Flush a deferred short tail once the current line proves it was interior.
     fn flushDeferredShortTailThen(
         self: *ChunkParseState,
         metrics_line_count: u64,
@@ -736,7 +744,7 @@ const ChunkParseState = struct {
     ) !void {
         self.line_builder.ingestLine(bases, actual_bytes, has_lf, content_len);
 
-        if (!self.zfi_mode) return;
+        if (!self.collect_side_tables) return;
 
         // Blank lines never become side-table rows.
         // Interior blanks flip uniformity when the next base line arrives.
@@ -750,8 +758,7 @@ const ChunkParseState = struct {
         const can_use_formula = metrics.is_uniform_width and matches_stride and dense;
 
         if (can_use_formula) {
-            // Keep the first line deferred for the whole uniform prefix. Clearing it on
-            // line 2+ dropped prior rows when a later line forced a side table.
+            // The first line anchors reconstruction if a later line forces a side table.
             if (metrics.line_count == 1) {
                 self.deferred_side_line = .{
                     .bases = bases,
@@ -762,7 +769,7 @@ const ChunkParseState = struct {
             return;
         }
 
-        // A later base line after a deferred short last-line candidate: short was interior.
+        // A later base line proves the deferred short line was interior.
         if (self.deferred_short_tail != null) {
             try self.flushDeferredShortTailThen(metrics.line_count, bases, actual_bytes, line_file_offset);
             return;
@@ -798,7 +805,7 @@ const ChunkParseState = struct {
         self.seq_offset_set = true;
     }
 
-    /// True when further body wraps can use fixed `line_bytes` strides (Track A2).
+    // True when further body wraps can use fixed `line_bytes` strides.
     fn strideEligible(self: *const ChunkParseState) bool {
         if (!self.active or self.in_header or self.in_pending_line) return false;
         if (self.side_table_active or self.deferred_short_tail != null) return false;
@@ -821,9 +828,7 @@ const ChunkParseState = struct {
         return true;
     }
 
-    /// Bulk-account `n_lines` consecutive full wraps already validated as one stride block.
-    /// Caller must have ingested the first dense line via the line machine (`strideEligible`).
-    /// Avoids per-wrap `recordSequenceLine` on long Genome bodies (Track A2 wall).
+    // Bulk-account full wraps only after `strideEligible` and block validation prove them.
     fn ingestStrideRun(self: *ChunkParseState, n_lines: u64) void {
         std.debug.assert(n_lines >= 1);
         std.debug.assert(self.line_builder.metrics.line_count >= 1);
@@ -947,11 +952,10 @@ const ChunkParseState = struct {
         if (seq_info.uses_uniform_formula) {
             // Short final wrap was deferred and never needed; drop it.
             self.deferred_short_tail = null;
-        } else if (self.zfi_mode) {
+        } else if (self.collect_side_tables) {
             // finish() can mark non-uniform after every line looked formula-ready (e.g. last
             // line longer than the stride). Materialize the full uniform-looking prefix then.
-            // If a short tail was deferred then finish still went non-uniform (rare denseness
-            // / policy edge), flush short as the final side-table row.
+            // A deferred short tail becomes the final side-table row if finish rejects it.
             if (self.deferred_short_tail) |short| {
                 if (!self.side_table_active) {
                     if (metrics.line_count < 1) return error.MissingSideTable;
@@ -980,7 +984,7 @@ const ChunkParseState = struct {
             },
             .name = self.name.items,
             .uses_uniform_formula = seq_info.uses_uniform_formula,
-            .streaming_side_table = side_table_slice,
+            .side_table = side_table_slice,
             .name_embedded = name_embedded,
         });
         record_count.* += 1;
@@ -1000,7 +1004,7 @@ fn processChunkBytes(
     var i: usize = 0;
 
     if (state.in_pending_line) {
-        const nl = findNextStreamingNewline(data, 0, data.len);
+        const nl = findNextNewline(data, 0, data.len);
         if (nl >= data.len) {
             state.appendPendingFragment(data, file_offset);
             return;
@@ -1059,7 +1063,7 @@ fn processChunkBytes(
                 state.parsing_name = false;
             }
 
-            const header_end = findNextStreamingNewline(data, i, data.len);
+            const header_end = findNextNewline(data, i, data.len);
             if (header_end >= data.len) return;
             state.finalizeHeader();
             i = header_end + 1;
@@ -1078,7 +1082,7 @@ fn processChunkBytes(
             const line_bases = state.line_builder.metrics.line_bases;
             const line_bytes = state.line_builder.metrics.line_bytes;
             const run_lines = validatedStrideRun(
-                STREAM_VECTOR_LEN,
+                STRIDE_VECTOR_LEN,
                 data,
                 i,
                 line_bases,
@@ -1094,7 +1098,7 @@ fn processChunkBytes(
             if (data[i] == '>') continue;
             if (data.len - i < line_bytes) {
                 // A partial chunk has no complete line when LF is absent.
-                if (findNextStreamingNewline(data, i, data.len) >= data.len) {
+                if (findNextNewline(data, i, data.len) >= data.len) {
                     state.appendPendingFragment(
                         data[i..],
                         file_offset + @as(u64, @intCast(i)),
@@ -1105,7 +1109,7 @@ fn processChunkBytes(
         }
 
         const line_start = i;
-        const nl = findNextStreamingNewline(data, i, data.len);
+        const nl = findNextNewline(data, i, data.len);
         if (nl >= data.len) {
             state.appendPendingFragment(
                 data[line_start..],
@@ -1134,23 +1138,25 @@ pub fn scanFastaReader(
     ctx: anytype,
     comptime emitRecord: fn (@TypeOf(ctx), FastaRecordEmit) anyerror!void,
 ) !u32 {
-    // Stream FAI: arena-backed NameDedup. Stream `.zfi`: caller passes blob-backed dedup
-    // via `external_dedup` so catalog lives once in `name_blob`.
+    // FAI owns stable arena keys. `.zfi` receives blob-backed dedup so names live once.
     var owned_dedup: ?NameDedup = null;
     const dedup_ptr: ?*NameDedup = blk: {
         if (external_dedup) |p| break :blk p;
         if (options.enable_dedup) {
             owned_dedup = NameDedup.init(allocator);
-            try owned_dedup.?.ensureStreamCapacity(NameDedup.stream_dedup_pre_cap);
+            try owned_dedup.?.ensureCapacity(DEDUP_INITIAL_CAPACITY);
             break :blk &owned_dedup.?;
         }
         break :blk null;
     };
     defer if (owned_dedup) |*seen| seen.deinit();
 
-    var state = ChunkParseState{ .allocator = allocator, .zfi_mode = options.zfi_mode };
+    var state = ChunkParseState{
+        .allocator = allocator,
+        .collect_side_tables = options.collect_side_tables,
+    };
     defer state.name.deinit(allocator);
-    defer if (options.zfi_mode) state.side_table.deinit(allocator);
+    defer if (options.collect_side_tables) state.side_table.deinit(allocator);
     var record_count: u32 = 0;
     var file_offset: u64 = 0;
 
@@ -1182,7 +1188,7 @@ pub fn scanFastaReader(
 
 const FaiEmitBuffer = struct {
     writer: *std.Io.Writer,
-    buf: [65536]u8 = undefined,
+    buf: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined,
     len: usize = 0,
 
     fn flush(self: *FaiEmitBuffer) !void {
@@ -1194,7 +1200,7 @@ const FaiEmitBuffer = struct {
     fn emitRecord(self: *FaiEmitBuffer, emit_info: FastaRecordEmit) !void {
         if (!emit_info.uses_uniform_formula) return error.NonUniformFai;
         const rec = emit_info.record;
-        var suffix_buf: [128]u8 = undefined;
+        var suffix_buf: [FAI_SUFFIX_BUFFER_SIZE]u8 = undefined;
         const suffix = formatFaiSuffix(&suffix_buf, rec);
         const total = emit_info.name.len + suffix.len;
         if (total > self.buf.len) {
@@ -1212,7 +1218,7 @@ const FaiEmitBuffer = struct {
 };
 
 fn appendUnsignedDecimal(buffer: []u8, value: u64) usize {
-    var reversed: [20]u8 = undefined;
+    var reversed: [FAI_U64_DECIMAL_DIGITS]u8 = undefined;
     var remaining = value;
     var digit_count: usize = 0;
     while (true) {
@@ -1228,7 +1234,7 @@ fn appendUnsignedDecimal(buffer: []u8, value: u64) usize {
     return digit_count;
 }
 
-fn formatFaiSuffix(buffer: *[128]u8, rec: IndexRecord) []const u8 {
+fn formatFaiSuffix(buffer: *[FAI_SUFFIX_BUFFER_SIZE]u8, rec: IndexRecord) []const u8 {
     const values = [_]u64{ rec.seq_len, rec.seq_offset, rec.line_bases, rec.line_bytes };
     var len: usize = 0;
     for (values) |value| {
@@ -1244,7 +1250,7 @@ const FaiSpool = struct {
     dir: std.Io.Dir,
     close_dir: bool,
     file: std.Io.File,
-    name: [64]u8,
+    name: [FAI_SPOOL_NAME_BUFFER_SIZE]u8,
     name_len: usize,
 
     fn deinit(self: *FaiSpool, io: std.Io) void {
@@ -1259,7 +1265,7 @@ fn tryCreateFaiSpool(io: std.Io, dir: std.Io.Dir, close_dir: bool) ?FaiSpool {
         var nonce: u128 = undefined;
         std.Io.randomSecure(io, std.mem.asBytes(&nonce)) catch return null;
 
-        var name_buf: [64]u8 = undefined;
+        var name_buf: [FAI_SPOOL_NAME_BUFFER_SIZE]u8 = undefined;
         const name = std.fmt.bufPrint(&name_buf, "z-fasta-{x}.fai.tmp", .{nonce}) catch unreachable;
         const file = dir.createFile(io, name, .{ .read = true, .exclusive = true }) catch |err| switch (err) {
             error.PathAlreadyExists => continue,
@@ -1364,8 +1370,7 @@ pub fn runIndex(
     io: std.Io,
     environ: std.process.Environ,
     path: []const u8,
-    emit_fai: bool,
-    enable_dedup: bool,
+    options: IndexOptions,
 ) !void {
     const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound, error.AccessDenied => return err,
@@ -1376,30 +1381,29 @@ pub fn runIndex(
     const stat = file.stat(io) catch return error.SourceStatFailed;
     if (stat.size == 0) return error.EmptyFile;
 
-    // Must free on growth: ArrayList/HashMap realloc under an arena keeps every old
-    // buffer until process end (the old reader `.zfi` was ~3x payload RSS). Stream FAI
-    // still uses a child arena inside `NameDedup` for stable name keys.
+    // Page allocation releases grown catalogs instead of retaining every old buffer.
+    // FAI dedup still uses a child arena because its slice keys must remain stable.
     const allocator = std.heap.page_allocator;
 
     var io_buf: [FILE_IO_BUF_SIZE]u8 = undefined;
     var read_buf: [index_read_buffer_size]u8 = undefined;
     var file_reader = file.reader(io, &io_buf);
 
-    if (emit_fai) {
+    if (options.emit_fai) {
         var spool = try openFaiSpool(io, environ, allocator);
         defer spool.deinit(io);
 
-        var out_buf: [65536]u8 = undefined;
+        var out_buf: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
         var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
 
-        var tmp_io_buf: [65536]u8 = undefined;
+        var tmp_io_buf: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
         var tmp_fw = spool.file.writer(io, &tmp_io_buf);
 
         const record_count = scanFaiReader(
             &file_reader.interface,
             &read_buf,
             &tmp_fw.interface,
-            .{ .enable_dedup = enable_dedup, .require_initial_header = true },
+            .{ .enable_dedup = options.enable_dedup, .require_initial_header = true },
             allocator,
         ) catch |err| switch (err) {
             error.HeaderTooLong,
@@ -1418,7 +1422,7 @@ pub fn runIndex(
 
         const tmp_size = (spool.file.stat(io) catch return error.FaiSpoolReadFailed).size;
         var offset: u64 = 0;
-        var copy_buf: [65536]u8 = undefined;
+        var copy_buf: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
         while (offset < tmp_size) {
             const want: usize = @intCast(@min(copy_buf.len, tmp_size - offset));
             const n = std.Io.File.readPositionalAll(
@@ -1435,11 +1439,11 @@ pub fn runIndex(
         return;
     }
 
-    var zfi_path_buf: [4096]u8 = undefined;
+    var zfi_path_buf: [INDEX_PATH_BUFFER_SIZE]u8 = undefined;
     const zfi_path = std.fmt.bufPrint(&zfi_path_buf, "{s}.zfi", .{path}) catch
         return error.OutputPathTooLong;
 
-    var zfi_tmp_buf: [4096]u8 = undefined;
+    var zfi_tmp_buf: [INDEX_PATH_BUFFER_SIZE]u8 = undefined;
     const zfi_tmp_path = std.fmt.bufPrint(&zfi_tmp_buf, "{s}.zfi.tmp", .{path}) catch
         return error.OutputPathTooLong;
 
@@ -1449,7 +1453,7 @@ pub fn runIndex(
     var zfi_index = scanZfiReaderWithOptions(
         &file_reader.interface,
         &read_buf,
-        .{ .enable_dedup = enable_dedup, .require_initial_header = true },
+        .{ .enable_dedup = options.enable_dedup, .require_initial_header = true },
         allocator,
     ) catch |err| switch (err) {
         error.HeaderTooLong, error.NotFasta, error.SourceReadFailed, error.OutOfMemory => return err,
@@ -1475,7 +1479,7 @@ pub fn runIndex(
     std.debug.print("wrote {s} ({d} sequences)\n", .{ zfi_path, zfi_index.records.items.len });
 }
 
-/// Validates that the data is a FASTA file (starts with '>')
+/// Returns whether data begins with a FASTA header marker.
 pub fn validateFasta(data: []const u8) bool {
     return data.len > 0 and data[0] == '>';
 }
@@ -1505,7 +1509,7 @@ test "stride block validation matches scalar for structural mutations" {
                 block[mutation_offset] = mutation;
 
                 const native = validatedStrideRun(
-                    STREAM_VECTOR_LEN,
+                    STRIDE_VECTOR_LEN,
                     block,
                     0,
                     line_bases,

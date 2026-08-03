@@ -257,7 +257,10 @@ fn runIndex(io: std.Io, environ: std.process.Environ, args: *std.process.Args.It
         printUsageAndExit();
     };
 
-    indexer.runIndex(io, environ, path, emit_fai, enable_dedup) catch |err| switch (err) {
+    indexer.runIndex(io, environ, path, .{
+        .emit_fai = emit_fai,
+        .enable_dedup = enable_dedup,
+    }) catch |err| switch (err) {
         error.FileNotFound => printErrorAndExit("error: file not found: {s}\n", .{path}),
         error.AccessDenied => printErrorAndExit("error: access denied: {s}\n", .{path}),
         error.SourceOpenFailed => printErrorAndExit("error: failed to open file: {s}\n", .{path}),
