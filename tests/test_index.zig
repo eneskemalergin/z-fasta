@@ -1857,10 +1857,16 @@ test "FAI uses a separate spool and cleans it after success" {
     var source_dir = try std.Io.Dir.cwd().openDir(io, source_dir_path, .{ .iterate = true });
     defer source_dir.close(io);
     const source_permissions = (try source_dir.stat(io)).permissions;
-    try source_dir.setPermissions(io, source_permissions.setReadOnly(true));
-    defer source_dir.setPermissions(io, source_permissions) catch {};
+    // A Windows directory's read-only attribute does not deny child creation.
+    // POSIX enforces the non-writable source-directory part of this integration test.
+    if (comptime builtin.os.tag != .windows) {
+        try source_dir.setPermissions(io, source_permissions.setReadOnly(true));
+    }
+    defer if (comptime builtin.os.tag != .windows) {
+        source_dir.setPermissions(io, source_permissions) catch {};
+    };
 
-    var env = std.process.Environ.Map.init(allocator);
+    var env = try std.testing.environ.createMap(allocator);
     defer env.deinit();
     try env.put("TMPDIR", spool_dir_path);
     const missing_fallback = try std.fmt.allocPrint(allocator, "{s}/missing", .{spool_dir_path});
@@ -1879,7 +1885,10 @@ test "FAI uses a separate spool and cleans it after success" {
     defer allocator.free(result.stderr);
 
     switch (result.term) {
-        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        .exited => |code| if (code != 0) {
+            std.debug.print("emit-fai subprocess exited {d}: {s}\n", .{ code, result.stderr });
+            return error.ChildProcessFailed;
+        },
         else => return error.ChildProcessFailed,
     }
     try std.testing.expectEqual(expected.written().len, result.stdout.len);
@@ -1908,7 +1917,7 @@ test "FAI failure leaves stdout and spool empty" {
         try std.Io.File.writeStreamingAll(fasta_file, io, ">mixed\nAAAA\nBBBBBB\nCC\n");
     }
 
-    var env = std.process.Environ.Map.init(allocator);
+    var env = try std.testing.environ.createMap(allocator);
     defer env.deinit();
     try env.put("TMPDIR", "zig-cache/test-artifacts/definitely-missing-spool");
     try env.put("TEMP", spool_dir_path);
