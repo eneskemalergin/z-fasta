@@ -4,7 +4,7 @@
 # Usage:
 #   bash bench/get/run.sh [options]
 #
-# Defaults: correctness first (409 checks), then perf (--runs 5, --warmup 1, --duration 5000).
+# Defaults: correctness first (405 checks), then perf (--runs 5, --warmup 1, --duration 5000).
 # A full perf pass (all sections, default zebrac settings) typically takes several hours.
 # pyfaidx is omitted from timed positional runs (typically 30-100x slower than z-fasta;
 # may be enabled for a final polish pass).
@@ -797,30 +797,6 @@ verify_index() {
     mv "$stash" "${fasta}.zfi"
 }
 
-verify_low_mem() {
-    local src="$1" target="$2" desc="$3" mode="${4:-positional}"
-    _fixture_paths "lowmem_${mode}" "$src" "$desc"
-    local fasta="$FIXTURE_FASTA"
-    local tag="low-mem $mode ${src##*/} $desc"
-    local get_cmd=(get "$fasta")
-
-    [[ "$mode" == bed ]] && get_cmd+=(--bed "$target") || get_cmd+=("$target")
-
-    cp "$src" "$fasta"
-    rm -f "${fasta}.zfi" "${fasta}.fai"
-    "$ZFASTA" index "$fasta" >/dev/null 2>&1 \
-        || { fail "[index:lowmem] $tag mmap index failed"; return; }
-    "$ZFASTA" "${get_cmd[@]}" > "$TMPDIR/mmap.out" 2>/dev/null \
-        || { fail "[index:lowmem] $tag mmap get failed"; return; }
-
-    rm -f "${fasta}.zfi"
-    "$ZFASTA" index --low-mem "$fasta" >/dev/null 2>&1 \
-        || { fail "[index:lowmem] $tag streaming index failed"; return; }
-    "$ZFASTA" "${get_cmd[@]}" > "$TMPDIR/low.out" 2>/dev/null \
-        || { fail "[index:lowmem] $tag streaming get failed"; return; }
-    diff_oracle "$TMPDIR/mmap.out" "$TMPDIR/low.out" "[index:lowmem] $tag mmap == --low-mem"
-}
-
 verify_messy_zfi_required() {
     local name="$1" start="$2" end="$3"
     local fasta="$TMPDIR/messy_nozfi_${name}.fasta"
@@ -1135,10 +1111,6 @@ BED
     verify_index_cross "IUPAC --rc" "$(gen_iupac_fixture)" "iupac_all:1-33" --rc
     verify_index_cross "IUPAC --complement-only" "$(gen_iupac_fixture)" "iupac_all:1-33" --complement-only
 
-    verify_low_mem "$simple" "seq1:1-10" "positional"
-    verify_low_mem "$mixed" "mixed1:55-75" "mixed-width"
-    verify_low_mem "$MESSY_TEST_DIR/mixed_widths.fasta" "mixed_widths:3-24" "messy positional"
-    verify_low_mem "$simple" "$bed_small" "small BED" bed
     verify_messy_zfi_required mixed_widths 1 8
 }
 

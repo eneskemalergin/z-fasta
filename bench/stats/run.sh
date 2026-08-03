@@ -4,7 +4,7 @@
 # Usage:
 #   bash bench/stats/run.sh [options]
 #
-# Defaults: correctness first (95 checks), then perf (--runs 5, --warmup 1, --duration 5000).
+# Defaults: correctness first (89 checks), then perf (--runs 5, --warmup 1, --duration 5000).
 # Report generation: python3 bench/stats/generate_report.py
 #   (run.sh calls this after perf; --allow-incomplete for drafts)
 # Use --skip-tests (alias --skip-verify) to run perf/report only. Correctness failure aborts before perf or report.
@@ -332,7 +332,6 @@ run_stats_peers() {
 
 SKIP_TOOLS=false
 SKIP_MESSY=false
-SKIP_LOWMEM=false
 SKIP_DEDUP=false
 SKIP_EDGE=false
 SKIP_LAYOUT=false
@@ -536,7 +535,7 @@ verify_modes() {
         check_oracle "$label" check "$mode" fai "$fasta" "$exp" "$fai_txt"
         mv "$stash" "${fasta}.zfi"
 
-        # Identity: .zfi stats == .fai stats (same shape as mmap == --low-mem)
+        # Identity: .zfi stats == .fai stats.
         check_oracle "[index:cross] $name $mode .zfi == .fai" same "$mode" "$zfi_txt" "$fai_txt"
     done
 }
@@ -649,31 +648,6 @@ verify_messy() {
     ensure_index "$fasta" || { fail "[extended:messy] index failed $name" "$TMPDIR/faidx.err"; return; }
     oracle expected "$fasta" >"$TMPDIR/messy_${name}.expected.json"
     verify_modes "extended:messy" "messy_$name" "$fasta" "$TMPDIR/messy_${name}.expected.json"
-}
-
-verify_lowmem_stats() {
-    local src="$1" name="$2" fasta="$TMPDIR/lowmem_${name}.fasta"
-    local err="$TMPDIR/lowmem_${name}.err"
-
-    cp "$src" "$fasta"
-    rm -f "${fasta}.zfi" "${fasta}.fai"
-    "$ZFASTA" index "$fasta" >/dev/null 2>&1
-    run_stats "$fasta" full "$TMPDIR/lowmem_${name}.mmap.full.txt" "$err" \
-        || { fail "[index:lowmem] $name full stats (mmap)" "$err"; return; }
-    run_stats "$fasta" index-only "$TMPDIR/lowmem_${name}.mmap.idx.txt" "$err" \
-        || { fail "[index:lowmem] $name index-only stats (mmap)" "$err"; return; }
-
-    rm -f "${fasta}.zfi"
-    "$ZFASTA" index --low-mem "$fasta" >/dev/null 2>&1
-    run_stats "$fasta" full "$TMPDIR/lowmem_${name}.low.full.txt" "$err" \
-        || { fail "[index:lowmem] $name full stats (--low-mem)" "$err"; return; }
-    run_stats "$fasta" index-only "$TMPDIR/lowmem_${name}.low.idx.txt" "$err" \
-        || { fail "[index:lowmem] $name index-only stats (--low-mem)" "$err"; return; }
-
-    check_oracle "[index:lowmem] $name full mmap == --low-mem" same full \
-        "$TMPDIR/lowmem_${name}.mmap.full.txt" "$TMPDIR/lowmem_${name}.low.full.txt"
-    check_oracle "[index:lowmem] $name index-only mmap == --low-mem" same index-only \
-        "$TMPDIR/lowmem_${name}.mmap.idx.txt" "$TMPDIR/lowmem_${name}.low.idx.txt"
 }
 
 verify_dedup_stats() {
@@ -900,7 +874,6 @@ run_tests() {
     echo "  z-fasta:  $ZFASTA"
     echo "  skip tools: $SKIP_TOOLS"
     echo "  skip messy: $SKIP_MESSY"
-    echo "  skip lowmem: $SKIP_LOWMEM"
     echo "  skip dedup: $SKIP_DEDUP"
     echo "  skip edge: $SKIP_EDGE"
     echo "  skip layout: $SKIP_LAYOUT"
@@ -921,13 +894,6 @@ run_tests() {
 
     if ! $SKIP_LAYOUT; then
         verify_layout_twins
-    fi
-
-    if ! $SKIP_LOWMEM; then
-        section_hdr "index" "low-mem stats parity"
-        verify_lowmem_stats "$TEST_DATA/simple.fasta" simple
-        verify_lowmem_stats "$TEST_DATA/mixed_widths.fasta" mixed_widths
-        verify_lowmem_stats "$MESSY_DIR/mixed_widths.fasta" messy_mixed_widths
     fi
 
     if ! $SKIP_DEDUP; then

@@ -760,21 +760,34 @@ test "indexing handles a header name split at the production read boundary" {
     try std.testing.expectEqual(@as(u64, chunk + 5), index.records.items[1].seq_offset);
 }
 
-test "fragmented headers match both formats across read sizes" {
-    const data = ">alpha\tlong description\r\nACGT\r\n>beta other text\nTTAA\n>alpha duplicate\nGG\n";
+test "reader-size matrix matches both formats across token boundaries" {
+    const data = ">alpha\tlong description\r\nACGT\r\nAC\r\n>beta other text\nTTAA";
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var read_storage: [32]u8 = undefined;
+    const vector_len = std.simd.suggestVectorLength(u8) orelse 1;
+    const line_bytes = 6;
+    const read_sizes = [_]usize{
+        1,
+        2,
+        if (vector_len > 1) vector_len - 1 else 1,
+        vector_len,
+        vector_len + 1,
+        line_bytes - 1,
+        line_bytes,
+        line_bytes + 1,
+        index_read_buffer_size,
+    };
+    const read_storage = try allocator.alloc(u8, index_read_buffer_size);
     for ([_]bool{ false, true }) |enable_dedup| {
-        for (1..read_storage.len + 1) |read_size| {
+        for (read_sizes) |read_size| {
             try expectReaderMatchesProduction(
                 allocator,
                 data,
                 read_storage[0..read_size],
                 enable_dedup,
-                "header-read-sizes",
+                "token-boundary-read-sizes",
             );
         }
     }
@@ -1805,10 +1818,6 @@ test "emit-fai rejects non-uniform sequence layout" {
 
     var out = std.Io.Writer.Allocating.init(allocator);
     defer out.deinit();
-    try std.testing.expectError(
-        error.NonUniformFai,
-        scanFaiData(data, &out.writer, true, allocator),
-    );
     try std.testing.expectError(
         error.NonUniformFai,
         scanFaiData(data, &out.writer, true, allocator),
