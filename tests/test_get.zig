@@ -1,6 +1,6 @@
 //! GET unit and CLI tests: region parsing, extraction, and failure-path subprocess checks.
 //!
-//! Includes low-mem vs mmap extract parity and exact-exit CLI failure contracts.
+//! Includes indexed extraction and exact-exit CLI failure contracts.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -351,27 +351,11 @@ fn writeFastaArtifact(allocator: std.mem.Allocator, stem: []const u8, data: []co
     return path;
 }
 
-fn writeMmapZfi(allocator: std.mem.Allocator, fasta_path: []const u8, data: []const u8) !void {
+fn writeZfi(allocator: std.mem.Allocator, fasta_path: []const u8, data: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    var index = try main.indexer.scanZfiIndex(data, true, arena.allocator());
-    defer index.deinit(arena.allocator());
-
-    const fasta_file = try std.Io.Dir.cwd().openFile(io, fasta_path, .{});
-    defer fasta_file.close(io);
-    const mtime_ns = main.index_format.timestampToNs((try fasta_file.stat(io)).mtime);
-
-    var zfi_path_buf: [4096]u8 = undefined;
-    const zfi_path = try std.fmt.bufPrint(&zfi_path_buf, "{s}.zfi", .{fasta_path});
-    try main.indexer.writeZfiIndexFile(io, zfi_path, &index, data.len, mtime_ns);
-}
-
-fn writeStreamingZfi(allocator: std.mem.Allocator, fasta_path: []const u8, data: []const u8) !void {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var index = try main.indexer.scanZfiIndexStreamingData(data, true, arena.allocator());
+    var index = try main.indexer.scanZfiData(data, true, arena.allocator());
     defer index.deinit(arena.allocator());
 
     const fasta_file = try std.Io.Dir.cwd().openFile(io, fasta_path, .{});
@@ -392,30 +376,7 @@ fn captureExtractRegion(allocator: std.mem.Allocator, fasta_path: []const u8, re
     return out.toOwnedSlice();
 }
 
-test "get on low-mem zfi matches mmap zfi for simple.fasta seq1:1-10" {
-    const data = @embedFile("data/simple.fasta");
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const mmap_path = try writeFastaArtifact(allocator, "get-mmap", data);
-    const low_path = try writeFastaArtifact(allocator, "get-low", data);
-    const mmap_zfi = try std.fmt.allocPrint(allocator, "{s}.zfi", .{mmap_path});
-    const low_zfi = try std.fmt.allocPrint(allocator, "{s}.zfi", .{low_path});
-    defer std.Io.Dir.cwd().deleteFile(io, mmap_path) catch {};
-    defer std.Io.Dir.cwd().deleteFile(io, mmap_zfi) catch {};
-    defer std.Io.Dir.cwd().deleteFile(io, low_path) catch {};
-    defer std.Io.Dir.cwd().deleteFile(io, low_zfi) catch {};
-
-    try writeMmapZfi(allocator, mmap_path, data);
-    try writeStreamingZfi(allocator, low_path, data);
-
-    const mmap_out = try captureExtractRegion(allocator, mmap_path, "seq1:1-10");
-    const low_out = try captureExtractRegion(allocator, low_path, "seq1:1-10");
-    try std.testing.expectEqualStrings(mmap_out, low_out);
-}
-
-test "get on low-mem zfi output for simple.fasta seq1:1-10" {
+test "get on zfi output for simple.fasta seq1:1-10" {
     const data = @embedFile("data/simple.fasta");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -426,7 +387,7 @@ test "get on low-mem zfi output for simple.fasta seq1:1-10" {
     defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
 
-    try writeStreamingZfi(allocator, path, data);
+    try writeZfi(allocator, path, data);
 
     const got = try captureExtractRegion(allocator, path, "seq1:1-10");
     const expected =
@@ -437,7 +398,7 @@ test "get on low-mem zfi output for simple.fasta seq1:1-10" {
     try std.testing.expectEqualStrings(expected, got);
 }
 
-test "get on messy mixed_widths after low-mem index" {
+test "get on messy mixed_widths after indexing" {
     const data =
         \\>mixed_widths internal line widths vary
         \\AAAACCCCGGGG
@@ -450,29 +411,22 @@ test "get on messy mixed_widths after low-mem index" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const mmap_path = try writeFastaArtifact(allocator, "get-messy-mmap", data);
-    const low_path = try writeFastaArtifact(allocator, "get-messy-low", data);
-    const mmap_zfi = try std.fmt.allocPrint(allocator, "{s}.zfi", .{mmap_path});
-    const low_zfi = try std.fmt.allocPrint(allocator, "{s}.zfi", .{low_path});
-    defer std.Io.Dir.cwd().deleteFile(io, mmap_path) catch {};
-    defer std.Io.Dir.cwd().deleteFile(io, mmap_zfi) catch {};
-    defer std.Io.Dir.cwd().deleteFile(io, low_path) catch {};
-    defer std.Io.Dir.cwd().deleteFile(io, low_zfi) catch {};
+    const path = try writeFastaArtifact(allocator, "get-messy", data);
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{path});
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
 
-    try writeMmapZfi(allocator, mmap_path, data);
-    try writeStreamingZfi(allocator, low_path, data);
+    try writeZfi(allocator, path, data);
 
     const region = "mixed_widths:3-24";
-    const mmap_out = try captureExtractRegion(allocator, mmap_path, region);
-    const low_out = try captureExtractRegion(allocator, low_path, region);
-    try std.testing.expectEqualStrings(mmap_out, low_out);
+    const output = try captureExtractRegion(allocator, path, region);
 
     const expected =
         \\>mixed_widths:3-24
         \\AACCCCGGGGTTTTAAAACCCC
         \\
     ;
-    try std.testing.expectEqualStrings(expected, low_out);
+    try std.testing.expectEqualStrings(expected, output);
 }
 
 /// Hard CLI failures: exact exit code, exact stderr, empty stdout (no partial success).
@@ -583,6 +537,7 @@ test "index rejects unknown options before and after FASTA path" {
     try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "index", unknown, fasta }, unknown);
     try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "index", fasta, unknown }, unknown);
     try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "index", "-z", fasta }, "-z");
+    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "index", "--low-mem", fasta }, "--low-mem");
 }
 
 test "get rejects unknown options before, between, and after positionals" {

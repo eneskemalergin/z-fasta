@@ -393,7 +393,7 @@ fn writeFastaArtifact(allocator: std.mem.Allocator, stem: []const u8, data: []co
 }
 
 fn scanZfi(allocator: std.mem.Allocator, data: []const u8) !main.indexer.ZfiIndex {
-    return main.indexer.scanZfiIndex(data, true, allocator);
+    return main.indexer.scanZfiData(data, true, allocator);
 }
 
 fn expectHasSideTable(index: *const main.indexer.ZfiIndex) !void {
@@ -721,20 +721,4 @@ test "validator and indexer agree on tests/data/validator_indexer_agreement.fast
     const long_name = zfiEmbeddedName(&index, 4);
     try std.testing.expect(long_name.len > 1024);
     try std.testing.expectEqual(@as(usize, 1025), long_name.len);
-
-    // Streaming indexer must match mmap on this shared fixture (full .zfi bytes).
-    try expectZfiStreamingMatchesMmapLocal(allocator, data);
-}
-
-fn expectZfiStreamingMatchesMmapLocal(allocator: std.mem.Allocator, data: []const u8) !void {
-    var mmap_index = try scanZfi(allocator, data);
-    defer mmap_index.deinit(allocator);
-    var stream_index = try main.indexer.scanZfiIndexStreamingData(data, true, allocator);
-    defer stream_index.deinit(allocator);
-
-    const mmap_bytes = try main.indexer.zfiIndexToBytes(&mmap_index, data.len, 0, allocator);
-    defer allocator.free(mmap_bytes);
-    const stream_bytes = try main.indexer.zfiIndexToBytes(&stream_index, data.len, 0, allocator);
-    defer allocator.free(stream_bytes);
-    try std.testing.expectEqualSlices(u8, mmap_bytes, stream_bytes);
 }

@@ -282,9 +282,8 @@ pub const large_catalog_record_threshold: u32 = 4096;
 ///   arena copies (`buildNameTable` / records-only names). The map never frees keys.
 /// - **`io`**: borrowed for destroy only; caller must keep it alive until `deinit`.
 ///
-/// GET and stats load through this type and only call `deinit(io)`. Validator's
-/// CLI path maps the FASTA with `platform.FileView` instead; it must not invent a
-/// second index-ownership model when it does load an index (tests use this API).
+/// GET and stats load through this type and only call `deinit(io)`. Validator maps
+/// the FASTA independently, but uses this ownership model when it loads an index.
 pub const LoadedIndex = struct {
     fasta_map: std.Io.File.MemoryMap,
     zfi_map: ?std.Io.File.MemoryMap = null,

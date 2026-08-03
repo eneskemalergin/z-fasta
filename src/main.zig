@@ -5,7 +5,6 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const platform = @import("platform.zig");
 
 // --- Module imports ---
 pub const index_format = @import("index_format.zig");
@@ -19,7 +18,6 @@ pub const IndexRecord = index_format.IndexRecord;
 pub const ZfiHeader = index_format.ZfiHeader;
 pub const ZFI_MAGIC = index_format.ZFI_MAGIC;
 pub const validateFasta = indexer.validateFasta;
-pub const scanHeaders = indexer.scanHeaders;
 
 const printErrorAndExit = index_format.printErrorAndExit;
 
@@ -50,7 +48,6 @@ const USAGE =
     \\               otherwise fails and directs you to default .zfi indexing
     \\  --no-dedup   Keep duplicate sequence names in the index (default: first wins
     \\               at index time). get resolves duplicate names to the last record.
-    \\  --low-mem    Stream input with bounded RAM; same outputs as default index
     \\
     \\Get usage:
     \\  z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt]
@@ -237,7 +234,6 @@ pub fn main(init: std.process.Init.Minimal) void {
 fn runIndex(io: std.Io, environ: std.process.Environ, args: *std.process.Args.Iterator) void {
     var emit_fai = false;
     var enable_dedup = true;
-    var low_mem = false;
     var fasta_path: ?[]const u8 = null;
 
     while (args.next()) |arg| {
@@ -251,8 +247,6 @@ fn runIndex(io: std.Io, environ: std.process.Environ, args: *std.process.Args.It
             enable_dedup = false;
         } else if (std.mem.eql(u8, arg, "--dedup")) {
             enable_dedup = true;
-        } else if (std.mem.eql(u8, arg, "--low-mem")) {
-            low_mem = true;
         } else {
             rejectUnknownOption(arg);
             fasta_path = arg;
@@ -263,150 +257,54 @@ fn runIndex(io: std.Io, environ: std.process.Environ, args: *std.process.Args.It
         printUsageAndExit();
     };
 
-    if (low_mem) {
-        indexer.runIndexLowMem(io, environ, path, emit_fai, enable_dedup) catch |err| switch (err) {
-            error.FileNotFound => printErrorAndExit("error: file not found: {s}\n", .{path}),
-            error.AccessDenied => printErrorAndExit("error: access denied: {s}\n", .{path}),
-            error.SourceOpenFailed => printErrorAndExit("error: failed to open file: {s}\n", .{path}),
-            error.SourceStatFailed => printErrorAndExit("error: failed to stat file: {s}\n", .{path}),
-            error.EmptyFile => printErrorAndExit("error: file is empty: {s}\n", .{path}),
-            error.NotFasta => printErrorAndExit("error: not a FASTA file: {s}\n", .{path}),
-            error.HeaderTooLong => printErrorAndExit(
-                "error: sequence name exceeds {d} bytes: {s}\n",
-                .{ indexer.max_index_name_len, path },
-            ),
-            error.NonUniformFai => printErrorAndExit(
-                "error: cannot emit .fai for non-uniform sequence layout; run 'z-fasta index' (default) to write .zfi\n",
-                .{},
-            ),
-            error.NoValidSequences => printErrorAndExit(
-                "error: no valid sequences found in: {s}\n",
-                .{path},
-            ),
-            error.SourceReadFailed => printErrorAndExit("error: failed to read file: {s}\n", .{path}),
-            error.NoUsableFaiSpool => printErrorAndExit(
-                "error: no usable temporary directory for FAI spool\n",
-                .{},
-            ),
-            error.FaiSpoolWriteFailed => printErrorAndExit(
-                "error: failed to write temporary FAI spool\n",
-                .{},
-            ),
-            error.FaiSpoolReadFailed => printErrorAndExit(
-                "error: failed to read temporary FAI spool\n",
-                .{},
-            ),
-            error.StdoutReplayFailed => printErrorAndExit("error: failed to replay FAI stdout\n", .{}),
-            error.StdoutFlushFailed => printErrorAndExit("error: failed to flush FAI stdout\n", .{}),
-            error.SourceChanged => printErrorAndExit(
-                "error: source changed while indexing: {s}\n",
-                .{path},
-            ),
-            error.OutputPathTooLong => printErrorAndExit("error: path too long\n", .{}),
-            error.ZfiWriteFailed => printErrorAndExit("error: write failed\n", .{}),
-            error.ZfiFinalizeFailed => printErrorAndExit(
-                "error: failed to finalize index: {s}.zfi\n",
-                .{path},
-            ),
-            error.ProcessingFailed => printErrorAndExit("error: processing failed\n", .{}),
-            error.OutOfMemory => printErrorAndExit("error: processing failed\n", .{}),
-            else => printErrorAndExit("error: processing failed\n", .{}),
-        };
-        return;
-    }
-
-    // Standard mmap mode
-    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| {
-        switch (err) {
-            error.FileNotFound => printErrorAndExit("error: file not found: {s}\n", .{path}),
-            error.AccessDenied => printErrorAndExit("error: access denied: {s}\n", .{path}),
-            else => printErrorAndExit("error: failed to open file: {s}\n", .{path}),
-        }
+    indexer.runIndex(io, environ, path, emit_fai, enable_dedup) catch |err| switch (err) {
+        error.FileNotFound => printErrorAndExit("error: file not found: {s}\n", .{path}),
+        error.AccessDenied => printErrorAndExit("error: access denied: {s}\n", .{path}),
+        error.SourceOpenFailed => printErrorAndExit("error: failed to open file: {s}\n", .{path}),
+        error.SourceStatFailed => printErrorAndExit("error: failed to stat file: {s}\n", .{path}),
+        error.EmptyFile => printErrorAndExit("error: file is empty: {s}\n", .{path}),
+        error.NotFasta => printErrorAndExit("error: not a FASTA file: {s}\n", .{path}),
+        error.HeaderTooLong => printErrorAndExit(
+            "error: sequence name exceeds {d} bytes: {s}\n",
+            .{ indexer.max_index_name_len, path },
+        ),
+        error.NonUniformFai => printErrorAndExit(
+            "error: cannot emit .fai for non-uniform sequence layout; run 'z-fasta index' (default) to write .zfi\n",
+            .{},
+        ),
+        error.NoValidSequences => printErrorAndExit(
+            "error: no valid sequences found in: {s}\n",
+            .{path},
+        ),
+        error.SourceReadFailed => printErrorAndExit("error: failed to read file: {s}\n", .{path}),
+        error.NoUsableFaiSpool => printErrorAndExit(
+            "error: no usable temporary directory for FAI spool\n",
+            .{},
+        ),
+        error.FaiSpoolWriteFailed => printErrorAndExit(
+            "error: failed to write temporary FAI spool\n",
+            .{},
+        ),
+        error.FaiSpoolReadFailed => printErrorAndExit(
+            "error: failed to read temporary FAI spool\n",
+            .{},
+        ),
+        error.StdoutReplayFailed => printErrorAndExit("error: failed to replay FAI stdout\n", .{}),
+        error.StdoutFlushFailed => printErrorAndExit("error: failed to flush FAI stdout\n", .{}),
+        error.SourceChanged => printErrorAndExit(
+            "error: source changed while indexing: {s}\n",
+            .{path},
+        ),
+        error.OutputPathTooLong => printErrorAndExit("error: path too long\n", .{}),
+        error.ZfiWriteFailed => printErrorAndExit("error: write failed\n", .{}),
+        error.ZfiFinalizeFailed => printErrorAndExit(
+            "error: failed to finalize index: {s}.zfi\n",
+            .{path},
+        ),
+        error.ProcessingFailed => printErrorAndExit("error: processing failed\n", .{}),
+        error.OutOfMemory => printErrorAndExit("error: processing failed\n", .{}),
+        else => printErrorAndExit("error: processing failed\n", .{}),
     };
-    defer file.close(io);
-
-    const stat = file.stat(io) catch {
-        printErrorAndExit("error: failed to stat file: {s}\n", .{path});
-    };
-
-    if (stat.size == 0) {
-        printErrorAndExit("error: file is empty: {s}\n", .{path});
-    }
-
-    var fasta_view = platform.FileView.mapFile(io, file, @intCast(stat.size)) catch {
-        printErrorAndExit("error: failed to mmap file: {s}\n", .{path});
-    };
-    defer fasta_view.destroy(io);
-    const data = fasta_view.bytes();
-
-    platform.advise(data, .sequential);
-
-    if (data.len == 0 or data[0] != '>') {
-        printErrorAndExit("error: not a FASTA file: {s}\n", .{path});
-    }
-
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-
-    if (emit_fai) {
-        var out_buf: [65536]u8 = undefined;
-        var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
-        // Buffer first so a mid-file NonUniformFai does not leave a partial `.fai` on stdout.
-        var fai_aw: std.Io.Writer.Allocating = .init(arena.allocator());
-        defer fai_aw.deinit();
-
-        const record_count = indexer.streamingScan(data, &fai_aw.writer, .fai, enable_dedup, arena.allocator()) catch |err| switch (err) {
-            error.HeaderTooLong => printErrorAndExit("error: sequence name exceeds {d} bytes: {s}\n", .{ indexer.max_index_name_len, path }),
-            error.NonUniformFai => printErrorAndExit(
-                "error: cannot emit .fai for non-uniform sequence layout; run 'z-fasta index' (default) to write .zfi\n",
-                .{},
-            ),
-            else => printErrorAndExit("error: failed to scan/write\n", .{}),
-        };
-
-        if (record_count == 0) {
-            printErrorAndExit("error: no valid sequences found in: {s}\n", .{path});
-        }
-        stdout_fw.interface.writeAll(fai_aw.written()) catch {
-            printErrorAndExit("error: write failed\n", .{});
-        };
-        stdout_fw.flush() catch {};
-    } else {
-        var zfi_path_buf: [4096]u8 = undefined;
-        const zfi_path = std.fmt.bufPrint(&zfi_path_buf, "{s}.zfi", .{path}) catch {
-            printErrorAndExit("error: path too long\n", .{});
-        };
-
-        var zfi_tmp_buf: [4096]u8 = undefined;
-        const zfi_tmp_path = std.fmt.bufPrint(&zfi_tmp_buf, "{s}.zfi.tmp", .{path}) catch {
-            printErrorAndExit("error: path too long\n", .{});
-        };
-
-        const cwd = std.Io.Dir.cwd();
-        cwd.deleteFile(io, zfi_tmp_path) catch {};
-
-        var zfi_index = indexer.scanZfiIndex(data, enable_dedup, arena.allocator()) catch |err| switch (err) {
-            error.HeaderTooLong => printErrorAndExit("error: sequence name exceeds {d} bytes: {s}\n", .{ indexer.max_index_name_len, path }),
-            else => printErrorAndExit("error: scan failed\n", .{}),
-        };
-        defer zfi_index.deinit(arena.allocator());
-
-        if (zfi_index.records.items.len == 0) {
-            printErrorAndExit("error: no valid sequences found in: {s}\n", .{path});
-        }
-
-        indexer.writeZfiIndexFile(io, zfi_tmp_path, &zfi_index, data.len, index_format.timestampToNs(stat.mtime)) catch {
-            cwd.deleteFile(io, zfi_tmp_path) catch {};
-            printErrorAndExit("error: write failed\n", .{});
-        };
-
-        cwd.rename(zfi_tmp_path, cwd, zfi_path, io) catch {
-            cwd.deleteFile(io, zfi_tmp_path) catch {};
-            printErrorAndExit("error: failed to finalize index: {s}\n", .{zfi_path});
-        };
-
-        std.debug.print("wrote {s} ({d} sequences)\n", .{ zfi_path, zfi_index.records.items.len });
-    }
 }
 
 // ============================================================================
