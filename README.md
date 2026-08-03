@@ -6,7 +6,7 @@
     SIMD-accelerated indexing, O(1) region extraction, validation, and assembly stats.<br/>
     samtools-compatible indexing and extraction, benchmarked against <code>seqkit</code>, <code>fastahack</code>, <code>pyfaidx</code>, and other peers.
   </p>
-  <p>Current development version: <strong>v0.3.1</strong></p>
+  <p>Current release: <strong>v0.3.1</strong></p>
   <br/>
   <a href="https://github.com/eneskemalergin/z-fasta/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/CI-passing-22c55e?style=for-the-badge" alt="CI" /></a>
   <a href="https://ziglang.org/download/0.16.0/"><img src="https://img.shields.io/badge/Zig-0.16.0-F7A41D?style=for-the-badge&logo=zig&logoColor=white" alt="Zig 0.16.0" /></a>
@@ -206,15 +206,17 @@ Duplicate _names_ are not the same as identical _sequence contents_. Default `in
 
 ## Performance & Correctness
 
-All timings below are on AMD Ryzen 9 3950X with warm cache and come from the checked-in August 1 suite reports. Those runs captured `z-fasta 0.3.0`; they are not relabeled as 0.3.1 measurements. Regenerating the reports with the final 0.3.1 ship binary remains a release gate.
+All timings below are on AMD Ryzen 9 3950X with warm cache. See the linked benchmark reports for the full methods and results.
 
 ### Index: SIMD-Accelerated Indexing
 
-| Dataset       | Size on disk | z-fasta (.fai) | samtools | fastahack | pyfaidx   | Speedup vs samtools |
-| ------------- | ------------ | -------------- | -------- | --------- | --------- | ------------------- |
-| Human Genome  | ~2.9 GiB     | 0.3805 s       | 9.1403 s | 21.8748 s | 27.6308 s | **24.0x**           |
-| Transcriptome | ~459 MiB     | 0.2555 s       | 1.8136 s | 5.7379 s  | 6.4614 s  | **7.1x**            |
-| Proteome      | ~13 MiB      | 0.0120 s       | 0.0579 s | 0.2732 s  | 0.3745 s  | **4.8x**            |
+| Dataset       | Size on disk | z-fasta (.fai) | noodles  | rust-bio | samtools | vs noodles | vs samtools |
+| ------------- | ------------ | -------------- | -------- | -------- | -------- | ---------- | ----------- |
+| Human Genome  | ~2.9 GiB     | 0.3714 s       | 1.3337 s | 3.6716 s | 9.0976 s | **3.6x**   | **24.5x**   |
+| Transcriptome | ~459 MiB     | 0.2124 s       | 0.3658 s | 0.6995 s | 1.8315 s | **1.72x**  | **8.6x**    |
+| Proteome      | ~13 MiB      | 0.0105 s       | 0.0174 s | 0.0255 s | 0.0598 s | **1.67x**  | **5.7x**    |
+
+See the [detailed index benchmark report](bench/index/REPORT.md) for tool definitions, methodology, memory, deduplication, and scaling results.
 
 ### Get: O(1) Region Extraction
 
@@ -307,7 +309,7 @@ Details: [bench/README.md](bench/README.md). Shared helpers live in `bench/share
 - [x] Zebrac benchmark suites for index, GET, and stats with verify gates
 - [x] Stripped ReleaseFast artifacts and ship-mode tests across the six-platform CI matrix
 
-**Deferred (not v0.3.1)**
+**Deferred (not v0.3.2)**
 
 - [ ] Compressed or BGZF FASTA
 - [ ] Parallel indexing

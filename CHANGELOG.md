@@ -4,6 +4,27 @@
 
 All notable changes to z-fasta will be documented in this file.
 
+## Unreleased
+
+Indexing performance and memory cleanup. No `.zfi` format change. **Re-index not required.** The `index --low-mem` flag is removed because bare `index` now provides the same low-memory behavior.
+
+### Changed
+
+- **Index**
+  - Default `.zfi` and compatible `.fai` output now share one buffered scanner with no FASTA mapping or second parser.
+  - Sequence payload memory stays fixed while record, name, deduplication, and side-table state grows only when the index requires it.
+  - `.fai` output uses temporary disk storage proportional to the emitted FAI before writing to stdout, preserving all-or-nothing output without a second memory mode.
+
+- **Benchmarks**
+  - The index report now compares the four product configurations directly: `.zfi` or `.fai`, each with deduplication on or off.
+  - Real-data and scaling results cover the single production index path and retain the existing peer comparisons.
+
+### Fixed
+
+- **Index**
+  - Indexing rejects a detected source size or modification-time change before publishing `.zfi` or replaying `.fai` output.
+  - `.fai` stdout write and flush failures return an error, and temporary output is cleaned after handled success or failure.
+
 ## [0.3.1] - 2026-08-02
 
 Release hardening and benchmark consolidation. No new commands or `.zfi` format changes. **Re-index not required.**
