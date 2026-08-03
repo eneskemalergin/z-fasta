@@ -17,7 +17,7 @@ jobs:
   # Single version gate so the six-way matrix does not re-parse tag/zon/VERSION.
   gate:
     name: Version gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       version: ${{ steps.ver.outputs.version }}
@@ -25,6 +25,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Check tag matches package versions
         id: ver
@@ -43,6 +44,12 @@ jobs:
             echo "version mismatch: tag=$version zon=$zon main=$main" >&2
             exit 1
           }
+          git fetch --no-tags origin main
+          main_sha=$(git rev-parse origin/main)
+          [[ "$GITHUB_SHA" == "$main_sha" ]] || {
+            echo "release tag must point at current main: tag=$GITHUB_SHA main=$main_sha" >&2
+            exit 1
+          }
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   build:
@@ -55,20 +62,25 @@ jobs:
       matrix:
         include:
           - system: linux_x86_64
-            os: ubuntu-latest
+            os: ubuntu-24.04
             exe: z-fasta
+            target_flag: ""
           - system: linux_arm64
             os: ubuntu-24.04-arm
             exe: z-fasta
+            target_flag: ""
           - system: macos_x86_64
             os: macos-15-intel
             exe: z-fasta
+            target_flag: ""
           - system: macos_arm64
-            os: macos-latest
+            os: macos-15
             exe: z-fasta
+            target_flag: ""
           - system: windows_x86_64
-            os: windows-latest
+            os: windows-2025
             exe: z-fasta.exe
+            target_flag: ""
           # Zig 0.16.0 aarch64-windows host segfaults; cross-build like ci.yml.
           - system: windows_arm64
             os: windows-11-arm
@@ -85,98 +97,24 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-          cache-key: release-${{ matrix.system }}
+          use-cache: false
 
       - name: Setup Zig (Windows arm64 host workaround)
         if: matrix.os == 'windows-11-arm'
         shell: bash
-        run: |
-          set -euo pipefail
-          curl -fsSL -o zig.zip "https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip"
-          unzip -q zig.zip -d zig-sdk
-          echo "$GITHUB_WORKSPACE/zig-sdk/zig-x86_64-windows-0.16.0" >> "$GITHUB_PATH"
+        run: .github/scripts/setup_zig_windows_arm.sh
 
       - name: Build ReleaseFast
         shell: bash
-        run: |
-          set -euo pipefail
-          version="${{ needs.gate.outputs.version }}"
-          zig build -Doptimize=ReleaseFast ${{ matrix.target_flag }}
-
-          bin="zig-out/bin/${{ matrix.exe }}"
-          [[ -f "$bin" ]] || { ls -la zig-out/bin; exit 1; }
-          got="$("$bin" --version)"
-          [[ "$got" == "z-fasta ${version}" ]] || {
-            echo "binary --version: got '$got'" >&2
-            exit 1
-          }
-
-          # Primary strip gate: size (works on ELF / Mach-O / PE).
-          # Unstripped RF is ~5 MiB; stripped RF is ~0.5–0.6 MiB on linux_x86_64.
-          size="$(wc -c < "$bin" | tr -d ' ')"
-          if [[ "$size" -gt 1048576 ]]; then
-            echo "release binary too large (${size} bytes); expected stripped ReleaseFast (<1 MiB)" >&2
-            exit 1
-          fi
-          # Tighter linux budget (~600 KiB target + headroom).
-          if [[ "${{ matrix.system }}" == linux_* && "$size" -gt 750000 ]]; then
-            echo "linux release binary too large (${size} bytes); expected <=750 KiB stripped RF" >&2
-            exit 1
-          fi
-          # file(1) "not stripped" / "with debug_info" is reliable on ELF only.
-          if [[ "${{ matrix.system }}" == linux_* ]] && command -v file >/dev/null 2>&1; then
-            info="$(file -b "$bin" || true)"
-            if echo "$info" | grep -qiE 'with debug_info|not stripped'; then
-              echo "linux release binary still has debug info: $info" >&2
-              exit 1
-            fi
-          fi
+        run: zig build -Doptimize=ReleaseFast ${{ matrix.target_flag }}
 
       - name: Package and smoke
         shell: bash
-        run: |
-          set -euo pipefail
-          version="${{ needs.gate.outputs.version }}"
-          system="${{ matrix.system }}"
-          exe="${{ matrix.exe }}"
-
-          mkdir -p dist release-out
-          cp "zig-out/bin/${exe}" "dist/${exe}"
-          cp LICENSE dist/LICENSE
-
-          if [[ "$exe" == *.exe ]]; then
-            archive="z-fasta_${version}_${system}.zip"
-            tar -C dist -a -cf "release-out/${archive}" "$exe" LICENSE
-          else
-            archive="z-fasta_${version}_${system}.tar.gz"
-            chmod +x "dist/${exe}"
-            tar -C dist -czf "release-out/${archive}" "$exe" LICENSE
-          fi
-
-          # Use a workspace-relative path: RUNNER_TEMP is Windows-style
-          # (C:\...) and MSYS tar treats backslashes as escapes.
-          smoke=".release-smoke"
-          rm -rf "$smoke" && mkdir -p "$smoke"
-          tar -xf "release-out/${archive}" -C "$smoke"
-          cd "$smoke"
-          if [[ "${RUNNER_OS}" == "Windows" ]]; then
-            export PATH="/usr/bin:/bin:${SYSTEMROOT}/System32"
-          else
-            export PATH="/usr/bin:/bin:/usr/local/bin"
-          fi
-          command -v zig >/dev/null 2>&1 && { echo "zig still on PATH" >&2; exit 1; }
-
-          printf '>seq1\nACGT\n>seq2\nGGGG\n' > test.fasta
-          "./${exe}" --help >/dev/null
-          "./${exe}" --version
-          "./${exe}" validate test.fasta >/dev/null
-          "./${exe}" index test.fasta
-          "./${exe}" index --emit-fai test.fasta > test.fai
-          test -s test.fai
-          "./${exe}" get test.fasta seq1:1-4 > get.out
-          test -s get.out
-          "./${exe}" stats test.fasta > stats.out
-          test -s stats.out
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+          SYSTEM: ${{ matrix.system }}
+          EXE: ${{ matrix.exe }}
+        run: .github/scripts/package_release.sh "$VERSION" "$SYSTEM" "$EXE"
 
       - name: Upload archive
         uses: actions/upload-artifact@v4
@@ -189,7 +127,7 @@ jobs:
   publish:
     name: Publish GitHub Release
     needs: [gate, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write
@@ -209,11 +147,12 @@ jobs:
       - name: Checksums, notes, release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.gate.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          version="${{ needs.gate.outputs.version }}"
+          version="$VERSION"
 
           count=$(find artifacts -maxdepth 1 -type f | wc -l)
           [[ "$count" -eq 6 ]] || {
@@ -221,6 +160,20 @@ jobs:
             ls -la artifacts || true
             exit 1
           }
+          expected=(
+            "z-fasta_${version}_linux_x86_64.tar.gz"
+            "z-fasta_${version}_linux_arm64.tar.gz"
+            "z-fasta_${version}_macos_x86_64.tar.gz"
+            "z-fasta_${version}_macos_arm64.tar.gz"
+            "z-fasta_${version}_windows_x86_64.zip"
+            "z-fasta_${version}_windows_arm64.zip"
+          )
+          for archive in "${expected[@]}"; do
+            [[ -f "artifacts/${archive}" ]] || {
+              echo "missing release archive: ${archive}" >&2
+              exit 1
+            }
+          done
 
           cd artifacts
           sha256sum z-fasta_"${version}"_* | sort -k2 > SHA256SUMS.txt

@@ -15,6 +15,42 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+          cache-key: hygiene
+
+      - name: Install Actionlint
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci-tools
+          GOBIN="$PWD/.ci-tools" go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+      - name: Check repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          zig fmt --check build.zig build.zig.zon src tests
+          while IFS= read -r -d '' script; do
+            bash -n "$script"
+          done < <(find .github bench -type f -name '*.sh' -print0)
+          shellcheck .github/scripts/*.sh
+          python3 -m compileall -q bench
+          .ci-tools/actionlint
+          .github/scripts/changelog_section.sh CHANGELOG.md 0.3.1 > /dev/null
+
   build:
     name: Build and test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
@@ -25,7 +61,7 @@ jobs:
       matrix:
         include:
           - name: Linux x86_64
-            os: ubuntu-latest
+            os: ubuntu-24.04
             binary: ./zig-out/bin/z-fasta
             target_flag: ""
           - name: Linux aarch64
@@ -33,7 +69,7 @@ jobs:
             binary: ./zig-out/bin/z-fasta
             target_flag: ""
           - name: Windows x86_64
-            os: windows-latest
+            os: windows-2025
             binary: ./zig-out/bin/z-fasta.exe
             target_flag: ""
           # Zig 0.16.0 aarch64-windows host binary segfaults (bootstrap poison).
@@ -45,7 +81,7 @@ jobs:
             binary: ./zig-out/bin/z-fasta.exe
             target_flag: "-Dtarget=aarch64-windows"
           - name: macOS aarch64
-            os: macos-latest
+            os: macos-15
             binary: ./zig-out/bin/z-fasta
             target_flag: ""
           - name: macOS x86_64
@@ -68,11 +104,7 @@ jobs:
       - name: Setup Zig (Windows aarch64 host workaround)
         if: matrix.os == 'windows-11-arm'
         shell: bash
-        run: |
-          set -euo pipefail
-          curl -fsSL -o zig.zip "https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip"
-          unzip -q zig.zip -d zig-sdk
-          echo "$GITHUB_WORKSPACE/zig-sdk/zig-x86_64-windows-0.16.0" >> "$GITHUB_PATH"
+        run: .github/scripts/setup_zig_windows_arm.sh
 
       - name: Runner diagnostics
         shell: bash
@@ -110,3 +142,39 @@ jobs:
           test -s .ci-smoke/get.out
           "${{ matrix.binary }}" stats .ci-smoke/test.fasta > .ci-smoke/stats.out
           test -s .ci-smoke/stats.out
+
+          printf '>crlf1\r\nACGT\r\n>crlf2\r\nGGGG\r\n' > .ci-smoke/crlf.fasta
+          "${{ matrix.binary }}" validate .ci-smoke/crlf.fasta > /dev/null
+          "${{ matrix.binary }}" index .ci-smoke/crlf.fasta
+          "${{ matrix.binary }}" index --emit-fai .ci-smoke/crlf.fasta > .ci-smoke/crlf.fai
+          printf 'crlf1\t4\t8\t4\t6\ncrlf2\t4\t22\t4\t6\n' > .ci-smoke/crlf.expected.fai
+          cmp .ci-smoke/crlf.expected.fai .ci-smoke/crlf.fai
+          "${{ matrix.binary }}" get .ci-smoke/crlf.fasta crlf1:1-4 > .ci-smoke/crlf.get
+          printf '>crlf1:1-4\nACGT\n' > .ci-smoke/crlf.expected.get
+          cmp .ci-smoke/crlf.expected.get .ci-smoke/crlf.get
+
+  package:
+    name: Release package check (Linux x86_64)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+          cache-key: package-check
+
+      - name: Build and check release package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^[[:space:]]*\.version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' build.zig.zon | head -n1)
+          [[ -n "$version" ]]
+          zig build -Doptimize=ReleaseFast
+          .github/scripts/package_release.sh "$version" linux_x86_64 z-fasta
