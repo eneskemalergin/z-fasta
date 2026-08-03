@@ -24,11 +24,11 @@ Quick links: [Supported Today](#supported-today) | [Installation](#installation)
 
 `get` accepts positional regions, BED files, BED from stdin, names files, strand-aware extraction, and orientation transforms (`--rc`, `--reverse-only`, `--complement-only`, `--annotate-rc`). FASTQ and compressed FASTA/BGZF remain out of scope.
 
-CI builds and smokes the binary on Linux, macOS, and Windows. File views go through a portable `MemoryMap` layer; POSIX memory advice is an optimization and a no-op on Windows.
+CI builds and smokes the binary on Linux, macOS, and Windows. Mapping-backed commands go through a portable `MemoryMap` layer; POSIX memory advice is an optimization and a no-op on Windows.
 
 ## Why z-fasta?
 
-Modern bioinformatics workflows are often bottlenecked by legacy text parsers. `z-fasta` keeps the hot paths close to the data: memory-mapped FASTA for the default indexer, SIMD header scanning, compact binary indexes, and a startup-conscious CLI for tiny commands.
+Modern bioinformatics workflows are often bottlenecked by legacy text parsers. `z-fasta` keeps the hot paths close to the data: bounded buffered indexing, SIMD scanning, compact binary indexes, and a startup-conscious CLI for tiny commands.
 
 - **samtools-compatible output:** `z-fasta index --emit-fai` (uniform FASTA only) and positional `z-fasta get` match `samtools faidx` on the verified cases. `--emit-fai` rejects non-uniform layouts and points you at default `.zfi` indexing.
 - **Single binary:** no runtime dependencies, no `conda` environments, no `glibc` version traps.
@@ -60,12 +60,11 @@ Options:
                 otherwise fails and directs you to default .zfi indexing
   --no-dedup    Keep duplicate sequence names in the index (default: first wins at
                 index time). get resolves duplicate names to the last record.
-  --low-mem     Stream input with bounded RAM; same on-disk outputs as default index
   --help        Show help message
   --version     Print version
 ```
 
-Default `index` and `--low-mem` both write `{file}.zfi` with matching bytes on the supported fixtures. `--low-mem` streams the FASTA instead of mapping it; use it when RSS must stay near a few megabytes. Sequence names longer than 65535 bytes are rejected (`HeaderTooLong`).
+`index` reads the FASTA through one bounded buffer and writes `{file}.zfi`. Sequence names longer than 65535 bytes are rejected (`HeaderTooLong`).
 
 ### Get (sequence extraction)
 
@@ -145,9 +144,6 @@ All commands share `stats.detectType` (IUPAC nucleotide alphabet; nucleotide if 
 # Create .zfi binary index (default)
 z-fasta index genome.fa
 
-# Bounded-RAM index (same .zfi bytes as default on supported fixtures)
-z-fasta index --low-mem genome.fa
-
 # Output .fai to stdout (uniform FASTA only)
 z-fasta index --emit-fai genome.fa > genome.fai
 
@@ -204,7 +200,7 @@ Duplicate _names_ are not the same as identical _sequence contents_. Default `in
 
 **Get / validate caps:** at most 1024 positional regions per `get` call. `--names` loads the whole file (max 512 MiB; `--chunk-size` does not stream it). BED defaults to 4096-row batches; `--chunk-size -1` loads the whole BED up to 512 MiB. `validate` stops after 10000 retained events.
 
-**Memory:** default index/get/stats/validate use mapped file views (RSS often near mapped FASTA size). `index --low-mem` streams with bounded RAM and the same `.zfi` bytes on supported inputs. `stats --index-only` skips the sequence scan. Dense BED releases mapped pages behind the cursor; sparse gets on large FASTAs prefer positional reads.
+**Memory:** index reads sequence payload through a bounded buffer. Get, stats, and validate retain mapped FASTA paths, so their RSS can approach the mapped file size. `stats --index-only` skips the sequence scan. Dense BED releases mapped pages behind the cursor; sparse gets on large FASTAs prefer positional reads.
 
 **Platforms:** Linux, macOS, and Windows share the same commands through portable mapping. Memory-advice hints are POSIX-only (unused on Windows). CI tests six native platform lanes: x86_64 and arm64 on all three operating systems. Tagged releases publish the same six archives; v0.3.0 was the first complete six-archive release.
 
@@ -219,10 +215,6 @@ All timings below are on AMD Ryzen 9 3950X with warm cache and come from the che
 | Human Genome  | ~2.9 GiB     | 0.3805 s       | 9.1403 s | 21.8748 s | 27.6308 s | **24.0x**           |
 | Transcriptome | ~459 MiB     | 0.2555 s       | 1.8136 s | 5.7379 s  | 6.4614 s  | **7.1x**            |
 | Proteome      | ~13 MiB      | 0.0120 s       | 0.0579 s | 0.2732 s  | 0.3745 s  | **4.8x**            |
-
-**Index modes** on Genome (warm cache; [bench/index/REPORT.md](bench/index/REPORT.md) run `20260801_084241`): default mmap `.zfi` 0.3705 s with 3005.9 MB peak RSS; streaming `.zfi` `--low-mem` 0.8324 s with 3.38 MB peak RSS and the same output bytes on supported inputs; mmap `.zfi --no-dedup` 0.3737 s; peer-comparable mmap `.fai` 0.3805 s.
-
-> Mapped modes show RSS close to the FASTA size because `/usr/bin/time -v` counts mapped pages, not only private heap. Full curves: [bench/index/REPORT.md](bench/index/REPORT.md).
 
 ### Get: O(1) Region Extraction
 
@@ -262,8 +254,8 @@ All timings below are on AMD Ryzen 9 3950X with warm cache and come from the che
 ### Correctness
 
 - **Index:** `bench/index/run.sh` edge cases **24/24 matching cases plus one `binary_data` review**; messy layouts from `python3 bench/shared/generate_messy.py` into `bench/shared/cache/messy_fixtures/` (correctness) and `messy_perf/` (proteome perf).
-- **Get:** `bench/get/run.sh` correctness **409/409** (positional, multi-region, BED, names, RC, messy, low-mem parity) against samtools, bedtools, and seqtk where applicable.
-- **Stats:** `bench/stats/run.sh` correctness **95/95** (BioPython oracle, index formats, layout twins, messy fixtures, duplicates policy, peer parity).
+- **Get:** `bench/get/run.sh` correctness **405/405** (positional, multi-region, BED, names, RC, messy) against samtools, bedtools, and seqtk where applicable.
+- **Stats:** `bench/stats/run.sh` correctness **89/89** (BioPython oracle, index formats, layout twins, messy fixtures, duplicates policy, peer parity).
 - **Unit tests:** `./zig build test` (index, get, stats, complement, BED parser, validator).
 - **Messy FASTA:** z-fasta indexes and extracts mixed-width and trailing-whitespace FASTA that samtools-style FAI tools reject. Details: [bench/index/REPORT.md](bench/index/REPORT.md).
 
@@ -305,12 +297,12 @@ Details: [bench/README.md](bench/README.md). Shared helpers live in `bench/share
 
 ## Roadmap
 
-**Delivered through v0.3.1**
+**Implemented on the v0.3.2 development branch**
 
 - [x] `index`, `get`, `stats`, and `validate`
 - [x] Preferred `.zfi` with side tables; `.fai` only for representable uniform records
 - [x] Messy FASTA GET via side tables; `validate --fix` for safe rewrites
-- [x] `index --low-mem` streaming path with mmap parity
+- [x] Bounded index reader shared by `.zfi` and `.fai` output
 - [x] Portable Linux / macOS / Windows mapping and CI smoke
 - [x] Zebrac benchmark suites for index, GET, and stats with verify gates
 - [x] Stripped ReleaseFast artifacts and ship-mode tests across the six-platform CI matrix
