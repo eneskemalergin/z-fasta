@@ -6,20 +6,20 @@
 #
 # Default (no options): run every section in order, then write REPORT.md.
 #
-# ── Defaults ────────────────────────────────────────────────────────
+# ── Defaults ──────────────────────────────────────────────────────────────────────
 #   --runs 5              zebrac measured samples (real + scaling benchmarks)
-#   --warmup 1            zebrac warmup samples before each measured sample
+#   --warmup 5            zebrac warmup samples before each measured sample
 #   --duration 5000       zebrac max ms per sample (override: ZEBRAC_DURATION_MS env)
 #
 #   Sections enabled: tests, benchmarks, messy zebrac, report (all true).
 #   Scaling fixtures: generated on demand under bench/shared/cache/scaling/ if missing.
 #
-# ── What --runs / --warmup apply to ─────────────────────────────────
+# ── What --runs / --warmup apply to ───────────────────────────────────────────────
 #   YES: zebrac performance (real datasets + all three scaling sweeps).
 #   NO:  correctness tests (single exit-code pass per tool per file).
 #   NO:  messy zebrac (fixed: 3 samples, 1 warmup, 1000 ms, --allow-failures).
 #
-# ── Common invocations ──────────────────────────────────────────────
+# ── Common invocations ────────────────────────────────────────────────────────────
 #   bash bench/index/run.sh
 #   bash bench/index/run.sh --runs 10 --warmup 2
 #   bash bench/index/run.sh --skip-report              # data only; report later
@@ -34,7 +34,7 @@
 #   bash bench/index/run.sh --clean-legacy             # drop old seqs_*.fasta + regen
 #   bash bench/index/run.sh --allow-incomplete         # report from partial runs
 #
-# ── Skip flags ──────────────────────────────────────────────────────
+# ── Skip flags ────────────────────────────────────────────────────────────────────
 # Canonical: --skip-tests --skip-benchmarks --skip-messy --skip-report
 # Deprecated aliases (one release cycle): --skip-verify --skip-perf
 # --skip-messy skips messy zebrac perf only (never skips messy cases inside run_tests).
@@ -44,7 +44,7 @@
 #   3. Messy zebrac  shared/cache/messy_perf/ → results/messy_<ts>/
 #   4. Report        generate_report.py → REPORT.md + results/figures/
 #
-# ── Scaling fixtures (bench/shared/cache/scaling/) ──────────────────
+# ── Scaling fixtures (bench/shared/cache/scaling/) ────────────────────────────────
 #   size_{N}mb.fasta         1–1000 MB, 100 sequences each
 #   seqs_budget_{N}.fasta    ~50 MiB total, N ∈ 1k 10k 100k 250k
 #   seqs_fixed_{N}.fasta     1024 bp/seq, N ∈ 100k 250k 500k 1M
@@ -53,16 +53,16 @@
 #   --scaling-only: skip real+size, regen seq fixtures, re-bench seq sweeps,
 #                   merge into --merge-base manifest (defaults to results/LATEST).
 #
-# ── Outputs ─────────────────────────────────────────────────────────
+# ── Outputs ───────────────────────────────────────────────────────────────────────
 #   results/LATEST           pointer to newest run_<timestamp>.json
 #   results/run_<ts>.json    manifest (sections, tool versions, skip flags)
 #   results/metadata_<ts>.jsonl
 #
-# ── Notes ───────────────────────────────────────────────────────────
+# ── Notes ─────────────────────────────────────────────────────────────────────────
 #   Partial runs overwrite LATEST; use --allow-incomplete for report drafts.
 #   generate_report.py refuses incomplete manifests unless --allow-incomplete.
-#   Headline scaling uses z-fasta (.fai) only (peer-comparable). Real data times all
-#   eight I/O x format x dedup lanes; Mode Comparison reports them.
+#   Headline scaling uses z-fasta (.fai) only (peer-comparable). Real data times the
+#   four format x dedup product lanes.
 #
 #   -h|--help  print this header
 
@@ -87,7 +87,7 @@ SEQ_FIXED_COUNTS=(100000 250000 500000 1000000)
 
 # ── Defaults ───────────────────────────────────────────────────────
 RUNS=5
-WARMUP=1
+WARMUP=5
 ZEBRAC_DURATION_MS="${ZEBRAC_DURATION_MS:-5000}"
 DO_TESTS=true
 DO_BENCHMARKS=true
@@ -101,6 +101,10 @@ REGENERATE_FIXTURES=false
 CLEAN_LEGACY=false
 MERGE_BASE=""
 ALLOW_INCOMPLETE=false
+INDEX_CORRECTNESS_STATUS="not_run"
+INDEX_CORRECTNESS_CHECKS=0
+INDEX_CORRECTNESS_REVIEWS=0
+INDEX_CORRECTNESS_ARTIFACT=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -166,13 +170,25 @@ ensure_scaling() {
 
 write_run_manifest() {
     local manifest="$1" timestamp="$2" metadata="$3"
+    local git_commit git_dirty zig_version zig_target optimize
+    git_commit="$(git -C "$PROJECT_ROOT" rev-parse HEAD)"
+    git_dirty=false
+    [[ -n "$(git -C "$PROJECT_ROOT" status --porcelain --untracked-files=normal)" ]] && git_dirty=true
+    zig_version="$("$PROJECT_ROOT/zig" version)"
+    zig_target="$("$PROJECT_ROOT/zig" env | sed -n 's/^[[:space:]]*\.target = "\([^"]*\)",/\1/p')"
+    optimize="${ZFASTA_BUILD_OPTIMIZE:-ReleaseFast}"
     python3 - "$manifest" "$timestamp" "$metadata" "$RUNS" "$WARMUP" "$ZEBRAC_DURATION_MS" \
-        "$SKIP_REAL" "$SKIP_SCALING" "$SKIP_SIZE" <<'PY'
+        "$SKIP_REAL" "$SKIP_SCALING" "$SKIP_SIZE" "$git_commit" "$git_dirty" \
+        "$zig_version" "$zig_target" "$optimize" "$ZFASTA" \
+        "$INDEX_CORRECTNESS_STATUS" "$INDEX_CORRECTNESS_CHECKS" \
+        "$INDEX_CORRECTNESS_REVIEWS" "$INDEX_CORRECTNESS_ARTIFACT" <<'PY'
 import json, os, sys
 from pathlib import Path
 
 manifest, ts, metadata, runs, warmup, duration = sys.argv[1:7]
 skip_real, skip_scaling, skip_size = (a == "true" for a in sys.argv[7:10])
+git_commit, git_dirty, zig_version, zig_target, optimize, binary_path = sys.argv[10:16]
+correctness_status, correctness_checks, correctness_reviews, correctness_artifact = sys.argv[16:20]
 
 sections = {}
 if not skip_real:
@@ -189,11 +205,62 @@ for key in ("seqkit", "fastahack", "pyfaidx", "noodles", "rustbio"):
     if val:
         tools[key] = val
 
+peer_ids = ["samtools"]
+for key, tool_id in (
+    ("seqkit", "seqkit"),
+    ("fastahack", "fastahack"),
+    ("pyfaidx", "pyfaidx"),
+    ("noodles", "noodles"),
+    ("rustbio", "rustbio-custom-index"),
+):
+    if tools.get(key):
+        peer_ids.append(tool_id)
+
+expected_cells = []
+def add_cells(section, workloads, tool_ids):
+    for workload in workloads:
+        for tool_id in tool_ids:
+            expected_cells.append({"section": section, "workload": workload, "tool": tool_id})
+
+if not skip_real:
+    add_cells(
+        "real",
+        ("Genome", "Transcriptome", "Proteome"),
+        (
+            "z-fasta-fai",
+            "z-fasta-fai-nodedup",
+            "z-fasta-zfi",
+            "z-fasta-zfi-nodedup",
+            *peer_ids,
+        ),
+    )
+if not skip_scaling:
+    headline_tools = ("z-fasta-fai", *peer_ids)
+    if not skip_size:
+        add_cells(
+            "scale_size",
+            (
+                "1mb",
+                "5mb",
+                "10mb",
+                "25mb",
+                "50mb",
+                "100mb",
+                "250mb",
+                "500mb",
+                "1000mb",
+            ),
+            headline_tools,
+        )
+    add_cells("scale_seqs_budget", ("1000", "10000", "100000", "250000"), headline_tools)
+    add_cells("scale_seqs_fixed", ("100000", "250000", "500000", "1000000"), headline_tools)
+
 out = {
-    "schema_version": "index-run.v1",
+    "schema_version": "index-run.v2",
     "timestamp": ts,
     "runner": "zebrac",
     "mode": "warm",
+    "cache_condition": "warm",
     "zebrac": os.environ["BENCH_VER_ZEBRAC"],
     "z_fasta": os.environ["BENCH_VER_ZFASTA"],
     "runs": int(runs),
@@ -205,6 +272,23 @@ out = {
     "metadata": metadata,
     "tools": tools,
     "sections": sections,
+    "source": {
+        "git_commit": git_commit,
+        "dirty": git_dirty == "true",
+    },
+    "build": {
+        "zig_version": zig_version,
+        "target": zig_target,
+        "optimize": optimize,
+        "binary_path": str(Path(binary_path).resolve()),
+    },
+    "correctness": {
+        "status": correctness_status,
+        "checks": int(correctness_checks),
+        "reviews": int(correctness_reviews),
+        "artifact": correctness_artifact or None,
+    },
+    "expected_cells": expected_cells,
 }
 Path(manifest).write_text(json.dumps(out, indent=2) + "\n")
 PY
@@ -229,6 +313,21 @@ new = json.loads(new_path.read_text()) if new_path.is_file() else {
     "z_fasta": base.get("z_fasta"),
     "tools": base.get("tools", {}),
 }
+if base.get("schema_version") != "index-run.v2" or new.get("schema_version") != "index-run.v2":
+    raise SystemExit("error: scaling merge requires two index-run.v2 manifests")
+for key in (
+    "source",
+    "build",
+    "tools",
+    "z_fasta",
+    "zebrac",
+    "cache_condition",
+    "runs",
+    "warmup",
+    "duration_ms",
+):
+    if base.get(key) != new.get(key):
+        raise SystemExit(f"error: scaling merge identity mismatch: {key}")
 sections = dict(base.get("sections") or {})
 sections.update(new.get("sections") or {})
 sections.pop("scale_seqs", None)
@@ -243,18 +342,29 @@ for name in (f"metadata_{base_ts}.jsonl", f"metadata_{new_ts}.jsonl"):
     if path.is_file():
         parts.append(path.read_text())
 merged_metadata.write_text("".join(parts))
+replaced_sections = set((new.get("sections") or {}).keys())
+expected_cells = [
+    cell for cell in (base.get("expected_cells") or [])
+    if cell.get("section") not in replaced_sections
+]
+expected_cells.extend(new.get("expected_cells") or [])
 merged = {
     **base,
     **new,
     "timestamp": new_ts,
     "base_run": base_ts,
     "seq_scaling_revision": "budget+fixed.v1",
-    "runs": new.get("runs", base.get("runs")),
-    "warmup": new.get("warmup", base.get("warmup")),
+    "runs": base["runs"],
+    "warmup": base["warmup"],
     "skip_real": bool(base.get("skip_real", False)),
     "skip_scaling": False,
+    "skip_size": bool(base.get("skip_size", False)),
     "metadata": merged_metadata.name,
     "sections": sections,
+    "source": base["source"],
+    "build": base["build"],
+    "correctness": base["correctness"],
+    "expected_cells": expected_cells,
 }
 new_path.write_text(json.dumps(merged, indent=2) + "\n")
 (results / "LATEST").write_text(new_ts + "\n")
@@ -322,23 +432,15 @@ bench_file() {
         bench_add_command "$section" "$workload" "z-fasta-fai" "z-fasta" "$json_out" \
             "$clean; $qz index --emit-fai $qf > /dev/null" "$nbytes"
     else
-        # Full 8-cell matrix: {mmap, --low-mem} x {.fai, .zfi} x {dedup, --no-dedup}.
+        # Product matrix: {.fai, .zfi} x {dedup, --no-dedup}.
         bench_add_command "$section" "$workload" "z-fasta-fai" "z-fasta" "$json_out" \
             "$clean; $qz index --emit-fai $qf > /dev/null" "$nbytes"
         bench_add_command "$section" "$workload" "z-fasta-fai-nodedup" "z-fasta" "$json_out" \
             "$clean; $qz index --emit-fai --no-dedup $qf > /dev/null" "$nbytes"
-        bench_add_command "$section" "$workload" "z-fasta-fai-lowmem" "z-fasta" "$json_out" \
-            "$clean; $qz index --low-mem --emit-fai $qf > /dev/null" "$nbytes"
-        bench_add_command "$section" "$workload" "z-fasta-fai-lowmem-nodedup" "z-fasta" "$json_out" \
-            "$clean; $qz index --low-mem --emit-fai --no-dedup $qf > /dev/null" "$nbytes"
         bench_add_command "$section" "$workload" "z-fasta-zfi" "z-fasta" "$json_out" \
             "$clean; $qz index $qf > /dev/null" "$nbytes"
         bench_add_command "$section" "$workload" "z-fasta-zfi-nodedup" "z-fasta" "$json_out" \
             "$clean; $qz index --no-dedup $qf > /dev/null" "$nbytes"
-        bench_add_command "$section" "$workload" "z-fasta-zfi-lowmem" "z-fasta" "$json_out" \
-            "$clean; $qz index --low-mem $qf > /dev/null" "$nbytes"
-        bench_add_command "$section" "$workload" "z-fasta-zfi-lowmem-nodedup" "z-fasta" "$json_out" \
-            "$clean; $qz index --low-mem --no-dedup $qf > /dev/null" "$nbytes"
     fi
 
     bench_add_command "$section" "$workload" "samtools" "samtools" "$json_out" \
@@ -564,6 +666,10 @@ PY
         echo "error: index run_tests failed ($fail diff)" >&2
         return 1
     fi
+    INDEX_CORRECTNESS_STATUS="pass"
+    INDEX_CORRECTNESS_CHECKS="$pass"
+    INDEX_CORRECTNESS_REVIEWS="$review"
+    INDEX_CORRECTNESS_ARTIFACT="$(basename "$csv")"
     return 0
 }
 
@@ -615,7 +721,7 @@ run_benchmarks() {
             for name in "${!DATASETS[@]}"; do
                 local file="${DATASETS[$name]}"
                 echo "  $name ($(du -h "$file" | cut -f1))"
-                bench_file "$file" "$perf_dir/${name}.json" "$METADATA_JSONL" index "$name" all
+                bench_file "$file" "$perf_dir/${name}.json" "$METADATA_JSONL" real "$name" all
             done
             preserve_real_index_sidecars
         fi
@@ -649,7 +755,7 @@ run_benchmarks() {
             for mb in "${SIZE_MBS[@]}"; do
                 echo "  ${mb}MB"
                 bench_file "$SCALING_DIR/size_${mb}mb.fasta" "$size_dir/${mb}mb.json" \
-                    "$METADATA_JSONL" index "${mb}mb" headline
+                    "$METADATA_JSONL" scale_size "${mb}mb" headline
             done
             echo ""
         fi
@@ -663,7 +769,8 @@ run_benchmarks() {
             local f="$SCALING_DIR/seqs_budget_${count}.fasta"
             [[ -f "$f" ]] || { echo "error: missing $f" >&2; exit 1; }
             echo "  budget $count ($(du -h "$f" | cut -f1))"
-            bench_file "$f" "$budget_dir/${count}.json" "$METADATA_JSONL" index "$count" headline
+            bench_file "$f" "$budget_dir/${count}.json" "$METADATA_JSONL" \
+                scale_seqs_budget "$count" headline
         done
         echo ""
 
@@ -676,7 +783,8 @@ run_benchmarks() {
             local f="$SCALING_DIR/seqs_fixed_${count}.fasta"
             [[ -f "$f" ]] || { echo "error: missing $f" >&2; exit 1; }
             echo "  fixed $count ($(du -h "$f" | cut -f1))"
-            bench_file "$f" "$fixed_dir/${count}.json" "$METADATA_JSONL" index "$count" headline
+            bench_file "$f" "$fixed_dir/${count}.json" "$METADATA_JSONL" \
+                scale_seqs_fixed "$count" headline
         done
         echo ""
     fi
