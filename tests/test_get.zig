@@ -646,9 +646,12 @@ test "CLI failures: get usage, conflicts, and missing sequence" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const fasta = "tests/data/simple.fasta";
 
-    // Ensure index exists so "sequence not found" is not a missing-index failure.
+    const fasta = try writeFastaArtifact(allocator, "get-cli-errors", @embedFile("data/simple.fasta"));
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+
     {
         var threaded = std.Io.Threaded.init(allocator, .{});
         defer threaded.deinit();

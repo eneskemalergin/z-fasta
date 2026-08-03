@@ -496,7 +496,7 @@ test "writeZfiIndexFile creates valid production layout" {
         .{ .name_offset = 1, .name_len = 4, .seq_offset = 10, .seq_len = 100, .line_bases = 80, .line_bytes = 81 },
     };
 
-    const path = "tests/data/test_write.zfi";
+    const path = try uniqueArtifactPath(allocator, "test-write", "zfi");
     defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
 
     try writeZfiFromRecords(path, &records, 1000, 0, allocator);
