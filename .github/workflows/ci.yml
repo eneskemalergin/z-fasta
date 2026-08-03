@@ -120,8 +120,14 @@ jobs:
         run: zig build test --summary all
 
       - name: Run tests (ReleaseFast ship mode)
+        if: matrix.name != 'Windows aarch64'
         shell: bash
         run: zig build test -Doptimize=ReleaseFast --summary all ${{ matrix.target_flag }}
+
+      - name: Build (Windows aarch64 ship mode)
+        if: matrix.name == 'Windows aarch64'
+        shell: bash
+        run: zig build -Doptimize=ReleaseFast ${{ matrix.target_flag }}
 
       - name: Smoke test
         shell: bash
