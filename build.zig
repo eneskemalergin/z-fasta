@@ -52,6 +52,8 @@ pub fn build(b: *std.Build) void {
     // Required for this suite on current Zig/OS (same as test_validate).
     test_index_module.link_libc = true;
     const run_test_index = b.addRunArtifact(b.addTest(.{ .root_module = test_index_module }));
+    // CLI subprocess tests spawn zig-out/bin/z-fasta; keep it current with this suite.
+    run_test_index.step.dependOn(b.getInstallStep());
 
     const run_test_get = b.addRunArtifact(b.addTest(.{
         .root_module = b.createModule(.{
@@ -122,6 +124,8 @@ pub fn build(b: *std.Build) void {
     // Required for this suite on current Zig/OS (same as test_index).
     test_validate_module.link_libc = true;
     const run_test_validate = b.addRunArtifact(b.addTest(.{ .root_module = test_validate_module }));
+    // CLI subprocess tests spawn zig-out/bin/z-fasta; keep it current with this suite.
+    run_test_validate.step.dependOn(b.getInstallStep());
 
     run_test_index.step.dependOn(&gen_messy_fixtures.step);
     run_test_validate.step.dependOn(&gen_messy_fixtures.step);
