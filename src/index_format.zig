@@ -264,10 +264,6 @@ pub const LoadMode = enum {
     stats_scan,
 };
 
-/// When a catalog exceeds this record count, multi-region GET (2..15) uses a by-record scan
-/// instead of building a name hash map at query time.
-pub const large_catalog_record_threshold: u32 = 4096;
-
 /// Loaded FASTA + index state (from `.zfi` or samtools-compatible `.fai`).
 ///
 /// Ownership (one owner each; `deinit(io)` is the only cleanup entry point):

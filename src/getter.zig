@@ -577,8 +577,7 @@ fn canEmitRegionViaPread(resolved: ResolvedRegion, fasta_len: usize) bool {
     return end_exclusive > start and (end_exclusive - start) <= max_pread_span_bytes;
 }
 
-/// Positional read into `file_buf`, then emit. Avoids faulting mmap pages on
-/// sparse large-FASTA batches (T3). Dense catalogs keep the mmap path.
+// Positional reads keep sparse large-FASTA requests from faulting mapped pages.
 fn emitRegionViaPread(
     resolved: ResolvedRegion,
     sparse: SparseFastaSource,
@@ -1322,9 +1321,8 @@ fn processParsedRequests(
         }
     else
         false;
-    // Sparse large-FASTA (Genome): do not sort. Sort+buffer was a wall regression
-    // vs T2 with no RSS win over request-order emit. Dense catalogs still sort
-    // via dense_sort for sequential page release.
+    // Sorting widely spaced requests adds buffering without reducing RSS.
+    // Eligible requests with small median gaps sort for sequential page release.
     const release_sorted = dense_sort;
 
     const use_sort_buffers = release_sorted and !already_in_offset_order and shouldUseSortBuffers(resolved);
@@ -1351,8 +1349,7 @@ fn processParsedRequests(
             emitRegionAndRelease(r, idx.fasta_data, writer);
         }
     } else if (!release_sorted) {
-        // Large sparse FASTA: positional reads so scattered regions never fault
-        // the mmap (T3). Small FASTAs: mmap (whole file is the RSS ceiling).
+        // Eligible scattered requests use positional reads; other requests keep the mapped path.
         var pread_buf: [max_pread_span_bytes]u8 = undefined;
         for (resolved) |r| {
             total_bases += r.num_bases;
@@ -1538,19 +1535,6 @@ fn processBedPathAllInMemory(
 // Public entry point
 // ============================================================================
 
-/// Run the get command: extract one or more regions from a FASTA file.
-///
-/// Regions are emitted in CLI argument order regardless of their position in
-/// the file.
-///
-/// For >= 16 regions the extractions may be sorted by file offset before reading
-/// to improve sequential page access. Output is buffered per-region and
-/// flushed in original CLI order. Any multi-region batch (N > 1) loads the name
-/// hash map; single-region stays on `.records_only`.
-pub fn runGet(io: std.Io, fasta_path: []const u8, region_strs: []const []const u8) void {
-    runGetWithOptions(io, fasta_path, .{ .region_strs = region_strs });
-}
-
 pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions) void {
     if (options.chunk_size == 0) {
         printErrorAndExit("error: --chunk-size must be >= 1\n", .{});
@@ -1572,8 +1556,8 @@ pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions
 
     const start_ns = if (options.summary) monotonicNs(io) else 0;
 
-    // N=1: skip hash map (positional startup). N>1 / BED / names: always map.
-    // Same rule on every catalog; no dataset-tuned threshold (plan/get-performance.md T1).
+    // Single positional requests skip the name map.
+    // Multi-request, names, and BED paths load it once.
     const load_mode: index_format.LoadMode = if (options.bed_path != null or options.names_path != null or requests.items.len > 1) .lookup_full_map else .records_only;
     var idx = index_format.loadIndexWithMode(io, fasta_path, load_mode);
     defer idx.deinit(io);
