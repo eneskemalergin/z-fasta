@@ -2759,10 +2759,16 @@ def md_run_provenance(manifest: dict | None, ir) -> str:
             "vendored pins in `bench/shared/tools.sh` / `tools/`):\n" + "\n".join(measured)
         )
 
-    lines.append(
-        "Indexes (`.zfi` / `.fai`) are built once in preload before timed GET commands. "
-        "Timed commands do not delete sidecars."
-    )
+    if manifest.get("sidecars") == "private single-format views":
+        lines.append(
+            "Private `.zfi` and `.fai` views are prepared before timed GET commands. "
+            "Timed commands do not create, remove, or replace shared sidecars."
+        )
+    else:
+        lines.append(
+            "Indexes (`.zfi` / `.fai`) are built once in preload before timed GET commands. "
+            "Timed commands do not delete sidecars."
+        )
     return "\n\n".join(lines)
 
 

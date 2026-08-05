@@ -4,7 +4,7 @@
 # Usage:
 #   bash bench/get/run.sh [options]
 #
-# Defaults: correctness first (418 checks), then perf (--runs 5, --warmup 1, --duration 5000).
+# Defaults: correctness first (418 checks), then perf (--runs 5, --warmup 5, --duration 5000).
 # A full perf pass (all sections, default zebrac settings) typically takes several hours.
 # pyfaidx is omitted from timed positional runs (typically 30-100x slower than z-fasta;
 # may be enabled for a final polish pass).
@@ -14,6 +14,7 @@
 # Use --skip-* for partial re-runs; resume with GET_RUN_TIMESTAMP=<ts> and GET_MULTI_COUNTS.
 # Use --skip-tests (alias --skip-verify) to run perf/report only. Correctness failure aborts before perf or report.
 # --skip-messy skips messy zebrac perf only (never skips messy cases inside run_tests).
+# --focused runs the complete development benchmark without regenerating the checked report.
 #
 # Canonical flags (index-aligned): --skip-tests --skip-benchmarks --skip-messy --skip-report
 # Deprecated aliases (one release cycle): --skip-verify --skip-perf
@@ -22,6 +23,7 @@
 #   bash bench/get/run.sh --skip-tests --skip-report   # perf only
 #   bash bench/get/run.sh --skip-verify --skip-perf    # same via aliases
 #   bash bench/get/run.sh --skip-messy --skip-bed
+#   bash bench/get/run.sh --focused --skip-tests --runs 5 --warmup 5
 #   bash bench/get/run.sh --regenerate-fixtures
 #   bash bench/get/run.sh --allow-incomplete
 #   bash bench/get/run.sh --skip-benchmarks --skip-report   # correctness only
@@ -46,11 +48,12 @@ MESSY_PERF_JSON="$SCRIPT_DIR/messy_perf.json"
 FIXTURE_DIR="$SCRIPT_DIR/data"
 REGIONS_DIR="$FIXTURE_DIR/regions"
 BED_DIR="$FIXTURE_DIR/bed"
+FOCUSED_DIR="$FIXTURE_DIR/focused"
 
 source "$BENCH_ROOT/shared/runner_common.sh"
 
 RUNS=5
-WARMUP=1
+WARMUP=5
 ZEBRAC_DURATION_MS="${ZEBRAC_DURATION_MS:-5000}"
 # Messy GET uses sub-millisecond timings on small slices; large proteome fixtures use
 # higher sampling. Override via GET_MESSY_* or --messy-runs etc.
@@ -67,6 +70,11 @@ DO_MESSY=true
 DO_REPORT=true
 REGENERATE_FIXTURES=false
 ALLOW_INCOMPLETE=false
+FOCUSED=false
+
+BENCH_VIEW_DIR=""
+declare -A ZFI_VIEWS=()
+declare -A FAI_VIEWS=()
 
 # Multi-region perf sweep (log-spaced). 15/16 boundary lives in run_tests, not timed here.
 MULTI_COUNTS=(1 10 100 1000)
@@ -155,6 +163,7 @@ while [[ $# -gt 0 ]]; do
         --skip-report) DO_REPORT=false; shift ;;
         --regenerate-fixtures) REGENERATE_FIXTURES=true; shift ;;
         --allow-incomplete) ALLOW_INCOMPLETE=true; shift ;;
+        --focused) FOCUSED=true; DO_MESSY=false; DO_REPORT=false; shift ;;
         -h|--help)
             sed -n '2,/^set -euo pipefail$/p' "$0" | head -n -1
             exit 0
@@ -163,11 +172,57 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if $FOCUSED && { ! $DO_POS || ! $DO_MULTI || ! $DO_BED || ! $DO_RC; }; then
+    echo "error: --focused cannot be combined with focused section skip flags" >&2
+    exit 1
+fi
+
 get_add_command() {
     local section="$1" workload="$2" tool="$3" family="$4"
     local json_out="$5" script="$6" input_bytes="$7" output_bases="${8:-}"
     zebrac_add_command "get" "$section" "$workload" "$tool" "$family" \
         "$input_bytes" "$output_bases" "$json_out" "$(shell_command "$script")"
+}
+
+cleanup_benchmark_views() {
+    if [[ -n "$BENCH_VIEW_DIR" && -d "$BENCH_VIEW_DIR" ]]; then
+        rm -rf -- "$BENCH_VIEW_DIR"
+    fi
+}
+
+prepare_benchmark_views() {
+    bench_require_tool z-fasta
+    bench_require_tool samtools
+
+    BENCH_VIEW_DIR="$SCRIPT_DIR/.bench_views_${TIMESTAMP}_$$"
+    mkdir -p "$BENCH_VIEW_DIR/zfi" "$BENCH_VIEW_DIR/fai"
+
+    local ds source name zfi_view fai_view
+    for ds in Genome Transcriptome Proteome; do
+        source="${REAL_DATASETS[$ds]:-}"
+        [[ -n "$source" ]] || continue
+        name="${source##*/}"
+        zfi_view="$BENCH_VIEW_DIR/zfi/$name"
+        fai_view="$BENCH_VIEW_DIR/fai/$name"
+
+        ln -s "$source" "$zfi_view"
+        ln -s "$source" "$fai_view"
+
+        "$ZFASTA" index "$zfi_view" > /dev/null
+        "$SAMTOOLS" faidx "$fai_view" > /dev/null 2>&1
+
+        [[ -f "${zfi_view}.zfi" && ! -e "${zfi_view}.fai" ]] || {
+            echo "error: invalid private .zfi benchmark view for $ds" >&2
+            return 1
+        }
+        [[ -f "${fai_view}.fai" && ! -e "${fai_view}.zfi" ]] || {
+            echo "error: invalid private .fai benchmark view for $ds" >&2
+            return 1
+        }
+
+        ZFI_VIEWS[$ds]="$zfi_view"
+        FAI_VIEWS[$ds]="$fai_view"
+    done
 }
 
 bed_to_regions() {
@@ -185,15 +240,19 @@ read_region_file() {
 }
 
 
-# Build one timed multi-region GET command without expanding regions on the zebrac argv
-# (avoids ARG_MAX when N is large). Regions are read inside bash at sample time.
-multi_positional_get_cmd() {
+multi_positional_get_core() {
     local tool_q="$1"
     local fa_q="$2"
     local regions_path="$3"
+    local extra="${4:-}"
     local qr
     qr="$(quote_arg "$regions_path")"
-    echo "mapfile -t _regs < ${qr}; ${tool_q} get ${fa_q} \"\${_regs[@]}\" > /dev/null"
+    echo "mapfile -t _regs < ${qr}; ${tool_q} get ${fa_q} \"\${_regs[@]}\"${extra}"
+}
+
+# Keep large request sets out of zebrac's argv. Bash reads them at sample time.
+multi_positional_get_cmd() {
+    echo "$(multi_positional_get_core "$1" "$2" "$3") > /dev/null"
 }
 
 
@@ -207,19 +266,24 @@ write_run_manifest() {
     local manifest="$1" timestamp="$2" metadata="$3"
     python3 - "$manifest" "$timestamp" "$metadata" "$RUNS" "$WARMUP" "$ZEBRAC_DURATION_MS" \
         "$DO_TESTS" "$DO_POS" "$DO_MULTI" "$DO_BED" "$DO_RC" "$DO_MESSY" \
-        "${SECTION_POS:-}" "${SECTION_MULTI:-}" "${SECTION_BED:-}" "${SECTION_RC:-}" "${SECTION_MESSY:-}" <<'PY'
+        "${SECTION_POS:-}" "${SECTION_MULTI:-}" "${SECTION_BED:-}" "${SECTION_RC:-}" "${SECTION_MESSY:-}" \
+        "$FOCUSED" "${SECTION_FOCUSED:-}" <<'PY'
 import json, os, sys
 from pathlib import Path
 
 manifest, ts, metadata, runs, warmup, duration = sys.argv[1:7]
 do_verify = sys.argv[7] == "true"
 section_vals = sys.argv[13:18]
+focused = sys.argv[18] == "true"
+focused_section = sys.argv[19]
 
 sections = {}
 keys = ("perf_pos", "perf_multi", "perf_bed", "perf_rc", "messy")
 for key, val in zip(keys, section_vals):
     if val:
         sections[key] = val
+if focused and focused_section:
+    sections = {"focused": focused_section}
 
 skip_pos = "perf_pos" not in sections
 skip_multi = "perf_multi" not in sections
@@ -238,6 +302,7 @@ out = {
     "timestamp": ts,
     "runner": "zebrac",
     "mode": "warm",
+    "profile": "focused" if focused else "publication",
     "zebrac": os.environ.get("BENCH_VER_ZEBRAC", ""),
     "z_fasta": os.environ.get("BENCH_VER_ZFASTA", ""),
     "runs": int(runs),
@@ -246,12 +311,13 @@ out = {
     "verify_skipped": not do_verify,
     "verify_pass": os.environ.get("BENCH_VERIFY_PASS"),
     "index_preload": True,
+    "sidecars": "private single-format views",
     "skip_pos": skip_pos,
     "skip_multi": skip_multi,
     "skip_bed": skip_bed,
     "skip_rc": skip_rc,
     "skip_messy": skip_messy,
-    "skip_names": True,
+    "skip_names": not focused,
     "metadata": metadata,
     "tools": tools,
     "sections": sections,
@@ -277,24 +343,16 @@ manifest_path.write_text(json.dumps(out, indent=2) + "\n")
 PY
 }
 
-ensure_fai() {
-    local fa="$1"
-    [[ -f "${fa}.fai" ]] || "$SAMTOOLS" faidx "$fa"
-}
-
 generate_get_fixtures() {
     local mode="${1:-all}"
-    mkdir -p "$REGIONS_DIR" "$BED_DIR"
-    local fa
-    for fa in "${REAL_DATASETS[@]}"; do
-        ensure_fai "$fa"
-    done
+    mkdir -p "$REGIONS_DIR" "$BED_DIR" "$FOCUSED_DIR"
     python3 - "$REGIONS_DIR" "$BED_DIR" "$mode" "$REGENERATE_FIXTURES" \
-        "${REAL_DATASETS[Genome]:-}" \
-        "${REAL_DATASETS[Transcriptome]:-}" \
-        "${REAL_DATASETS[Proteome]:-}" \
+        "${FAI_VIEWS[Genome]:-${REAL_DATASETS[Genome]:-}}" \
+        "${FAI_VIEWS[Transcriptome]:-${REAL_DATASETS[Transcriptome]:-}}" \
+        "${FAI_VIEWS[Proteome]:-${REAL_DATASETS[Proteome]:-}}" \
         "${BED_COUNTS[*]}" \
-        "${MULTI_COUNTS[*]}" <<'PY'
+        "${MULTI_COUNTS[*]}" \
+        "$FOCUSED_DIR" <<'PY'
 import random
 import sys
 from pathlib import Path
@@ -308,6 +366,7 @@ transcriptome_fa = sys.argv[6] or None
 proteome_fa = sys.argv[7] or None
 bed_counts = [int(x) for x in sys.argv[8].split()] if sys.argv[8] else []
 multi_counts = [int(x) for x in sys.argv[9].split()] if len(sys.argv) > 9 and sys.argv[9] else []
+focused_dir = Path(sys.argv[10])
 
 MULTI_COUNTS = tuple(multi_counts) if multi_counts else (1, 10, 100, 1000)
 POS_LABELS = (("100bp", 100), ("1kbp_mid", 1000), ("10kbp", 10000))
@@ -437,6 +496,52 @@ def bed_file(dataset: str, fasta: str, out_path: Path, rows: int, seed: int) -> 
                 handle.write(f"{name}\t{start}\t{end}\t{name}_{i}\t0\t{strand}\n")
 
 
+def focused_files(dataset: str, fasta: str) -> None:
+    rows = [(name, length) for name, length in read_fai(Path(fasta + ".fai")) if length > 0]
+    eligible = [(name, length) for name, length in rows if length >= SPAN]
+    if not eligible:
+        raise SystemExit(f"{dataset}: no focused records with length >= {SPAN}")
+
+    rng = random.Random(DATASET_SEEDS[dataset])
+    if dataset != "Genome":
+        name_pool = [row for row in rows if row[1] <= (20000 if dataset == "Transcriptome" else 5000)]
+        count = min(100, len(name_pool))
+        names = rng.sample(name_pool, count)
+        write_if_needed(
+            focused_dir / f"{dataset}_names_{count}.txt",
+            "".join(f"{name}\n" for name, _length in names),
+        )
+
+    longest_name, longest_len = max(eligible, key=lambda row: row[1])
+    clustered = []
+    start0 = max(0, longest_len // 2 - 2500)
+    for i in range(100):
+        start = min(start0 + i * 32, longest_len - SPAN)
+        clustered.append(f"{longest_name}:{start + 1}-{start + SPAN}")
+    write_if_needed(
+        focused_dir / f"{dataset}_locality_clustered.txt",
+        "\n".join(clustered) + "\n",
+    )
+
+    alternating_rows = sorted(eligible, key=lambda row: row[1], reverse=True)[:2]
+    if len(alternating_rows) == 2:
+        alternating = [region_span(*alternating_rows[i % 2], SPAN) for i in range(100)]
+        write_if_needed(
+            focused_dir / f"{dataset}_locality_alternating.txt",
+            "\n".join(alternating) + "\n",
+        )
+
+    bed_path = focused_dir / f"{dataset}_strand_100.bed"
+    if regenerate or not bed_path.is_file():
+        with bed_path.open("w", encoding="ascii") as handle:
+            handle.write(f"# focused BED {dataset}\n")
+            for i in range(100):
+                name, length = rng.choice(eligible)
+                start = rng.randint(0, length - SPAN)
+                strand = "+" if i % 2 == 0 else "-"
+                handle.write(f"{name}\t{start}\t{start + SPAN}\t.\t0\t{strand}\n")
+
+
 if mode in ("all", "pos"):
     for dataset, fasta in (
         ("Genome", genome_fa),
@@ -460,6 +565,13 @@ if mode in ("all", "bed"):
             continue
         for n in bed_counts:
             bed_file(dataset, fasta, bed_dir / f"{dataset}_{n}.bed", n, n + DATASET_SEEDS[dataset] % 1000)
+if mode == "focused":
+    focused_dir.mkdir(parents=True, exist_ok=True)
+    for dataset, fasta in dataset_fasta_pairs:
+        if fasta:
+            pos_regions(dataset, fasta)
+            multi_regions(dataset, fasta)
+            focused_files(dataset, fasta)
 PY
     if [[ "$mode" == "all" || "$mode" == "bed" ]]; then
         local ds n bed regions
@@ -1599,17 +1711,377 @@ run_tests() {
     return 0
 }
 
+focused_names_bases() {
+    python3 - "$1" "$2" <<'PY'
+import sys
+
+fai_path, names_path = sys.argv[1:]
+lengths = {}
+with open(fai_path + ".fai", encoding="ascii") as handle:
+    for line in handle:
+        name, length, *_rest = line.rstrip("\n").split("\t")
+        lengths.setdefault(name, int(length))
+
+total = 0
+with open(names_path, encoding="ascii") as handle:
+    for line in handle:
+        name = line.rstrip("\n").removesuffix("\r")
+        if not name or name.startswith("#"):
+            continue
+        total += lengths[name]
+print(total)
+PY
+}
+
+focused_record_cell() {
+    printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "${4:-}" >> "$FOCUSED_MATRIX"
+}
+
+focused_check_output() {
+    local workload="$1" expected_bases="$2"
+    shift 2
+    local reference="" command output actual_bases
+    local i=0
+    for command in "$@"; do
+        output="$BENCH_VIEW_DIR/focused_output_${i}.fa"
+        bash -c "$command" > "$output" || {
+            echo "error: focused output command failed: $workload" >&2
+            return 1
+        }
+        if [[ -z "$reference" ]]; then
+            reference="$output"
+            [[ -s "$reference" ]] || {
+                echo "error: focused output is empty: $workload" >&2
+                return 1
+            }
+        elif ! cmp -s "$reference" "$output"; then
+            echo "error: focused output differs: $workload" >&2
+            return 1
+        fi
+        i=$((i + 1))
+    done
+
+    actual_bases="$(awk '!/^>/{sub(/\r$/, ""); bases += length($0)} END{print bases + 0}' "$reference")"
+    [[ "$actual_bases" -eq "$expected_bases" ]] || {
+        echo "error: focused output base count differs: $workload ($actual_bases != $expected_bases)" >&2
+        return 1
+    }
+}
+
+focused_run_group() {
+    local workload="$1" file_id="$2" input_bytes="$3" output_bases="$4"
+    shift 4
+    [[ $# -gt 0 && $(( $# % 3 )) -eq 0 ]] || {
+        echo "error: invalid focused command group: $workload" >&2
+        return 1
+    }
+    local json="$FOCUSED_OUT/${file_id}.json"
+    local tool family command
+    local -a commands=()
+
+    zebrac_clear_commands
+    while [[ $# -gt 0 ]]; do
+        tool="$1"
+        family="$2"
+        command="$3"
+        shift 3
+        commands+=("$command")
+        get_add_command focused "$workload" "$tool" "$family" "$json" \
+            "$command > /dev/null" "$input_bytes" "$output_bases"
+        focused_record_cell "$workload" "$tool" run
+    done
+    focused_check_output "$workload" "$output_bases" "${commands[@]}"
+    bench_group "$json"
+    echo "  focused $workload"
+}
+
+validate_focused_matrix() {
+    python3 - "$FOCUSED_MATRIX" "$METADATA_JSONL" "$FOCUSED_OUT" "$RUNS" <<'PY'
+import csv
+import json
+import sys
+from pathlib import Path
+
+matrix_path, metadata_path, output_dir, runs = sys.argv[1:]
+output_dir = Path(output_dir).resolve()
+runs = int(runs)
+
+with open(matrix_path, newline="", encoding="utf-8") as handle:
+    rows = list(csv.DictReader(handle, delimiter="\t"))
+
+tools = {"z-fasta-default", "z-fasta-fai", "noodles"}
+matched = {
+    f"{dataset}/{feature}"
+    for dataset in ("Genome", "Transcriptome", "Proteome")
+    for feature in ("direct", "multi-scattered", "bed", "locality-clustered", "locality-alternating")
+}
+matched.update({
+    "Genome/transform-rc",
+    "Genome/bed-strand",
+    "Transcriptome/names",
+    "Transcriptome/transform-rc",
+    "Transcriptome/bed-strand",
+    "Proteome/names",
+})
+zf_only = {
+    "Transcriptome/names-stdin",
+    "Transcriptome/bed-stdin",
+    "Transcriptome/summary",
+    "Transcriptome/annotation",
+    "Transcriptome/composed-transform",
+}
+all_skipped = {"Genome/names", "Proteome/transform-rc", "Proteome/bed-strand"}
+
+required = {(workload, tool): "run" for workload in matched for tool in tools}
+required.update({
+    (workload, tool): "run" if tool != "noodles" else "skip"
+    for workload in zf_only
+    for tool in tools
+})
+required.update({(workload, tool): "skip" for workload in all_skipped for tool in tools})
+required.update({
+    ("Mixed/side-table", "z-fasta-default"): "run",
+    ("Mixed/side-table", "z-fasta-fai"): "skip",
+    ("Mixed/side-table", "noodles"): "skip",
+})
+
+declared = {(row["workload"], row["tool"]): row["state"] for row in rows}
+if len(declared) != len(rows):
+    raise SystemExit("duplicate focused matrix cell")
+if declared != required:
+    missing = sorted(required.keys() - declared.keys())
+    extra = sorted(declared.keys() - required.keys())
+    wrong = sorted(key for key in required.keys() & declared.keys() if required[key] != declared[key])
+    raise SystemExit(f"focused declaration mismatch: missing={missing}, extra={extra}, wrong_state={wrong}")
+
+expected = {key for key, state in required.items() if state == "run"}
+skipped = {key for key, state in required.items() if state == "skip"}
+if any(row["state"] == "skip" and not row["reason"] for row in rows):
+    raise SystemExit("focused matrix skip lacks a reason")
+
+metadata = []
+with open(metadata_path, encoding="utf-8") as handle:
+    for line in handle:
+        row = json.loads(line)
+        if row.get("section") != "focused":
+            raise SystemExit(f"unexpected metadata section: {row.get('section')}")
+        metadata.append(row)
+
+actual = {(row["workload"], row["tool"]) for row in metadata}
+if len(actual) != len(metadata):
+    raise SystemExit("duplicate focused metadata cell")
+if actual != expected:
+    missing = sorted(expected - actual)
+    extra = sorted(actual - expected)
+    raise SystemExit(f"focused matrix mismatch: missing={missing}, extra={extra}")
+
+by_json = {}
+for row in metadata:
+    expected_family = "noodles" if row["tool"] == "noodles" else "z-fasta"
+    if row.get("suite") != "get" or row.get("tool_family") != expected_family:
+        raise SystemExit(f"invalid suite or tool family: {row['workload']} {row['tool']}")
+    path = Path(row["raw_json"]).resolve()
+    if output_dir not in path.parents:
+        raise SystemExit(f"focused JSON outside output directory: {path}")
+    if not isinstance(row.get("output_bases"), int) or row["output_bases"] <= 0:
+        raise SystemExit(f"invalid output_bases: {row['workload']} {row['tool']}")
+    by_json.setdefault(path, {})[row["command"]] = row
+
+seen = set()
+for path, command_rows in by_json.items():
+    data = json.loads(path.read_text())
+    results = data.get("results", [])
+    if len(results) != len(command_rows):
+        raise SystemExit(f"command count mismatch: {path}")
+    for result in results:
+        command = result.get("command")
+        if command not in command_rows:
+            raise SystemExit(f"unrecorded command in {path}: {command}")
+        row = command_rows[command]
+        cell = (row["workload"], row["tool"])
+        seen.add(cell)
+        if result.get("sample_count") != runs or result.get("failed_sample_count") != 0:
+            raise SystemExit(f"invalid samples or failures: {cell}")
+        for metric in ("wall_time", "peak_rss", "minor_faults", "major_faults"):
+            if result.get(metric, {}).get("sample_count") != runs:
+                raise SystemExit(f"invalid {metric} samples: {cell}")
+
+if seen != expected:
+    raise SystemExit(f"focused result mismatch: missing={sorted(expected - seen)}")
+print(f"  focused benchmark: {len(expected)} timed cells, {len(skipped)} explicit skips, zero failures")
+PY
+}
+
+run_perf_focused() {
+    bench_require_tool noodles
+    local required
+    for required in Genome Transcriptome Proteome; do
+        [[ -n "${REAL_DATASETS[$required]:-}" ]] || {
+            echo "error: focused GET matrix requires $required" >&2
+            return 1
+        }
+    done
+    generate_get_fixtures focused
+
+    FOCUSED_OUT="$RESULTS_DIR/focused_${TIMESTAMP}"
+    FOCUSED_MATRIX="$FOCUSED_OUT/matrix.tsv"
+    SECTION_FOCUSED="focused_${TIMESTAMP}"
+    mkdir -p "$FOCUSED_OUT"
+    printf 'workload\ttool\tstate\treason\n' > "$FOCUSED_MATRIX"
+
+    local qz qn
+    qz="$(quote_arg "$ZFASTA")"
+    qn="$(quote_arg "$NOODLES")"
+
+    local ds fa zfi_fa fai_fa qzfi qfai nbytes spec region qrgn out_bases
+    local multi_count multi_path zfi_core fai_core noodles_core bed qbed names names_count
+    for ds in Genome Transcriptome Proteome; do
+        fa="${REAL_DATASETS[$ds]}"
+        zfi_fa="${ZFI_VIEWS[$ds]}"
+        fai_fa="${FAI_VIEWS[$ds]}"
+        qzfi="$(quote_arg "$zfi_fa")"
+        qfai="$(quote_arg "$fai_fa")"
+        nbytes="$(file_size_bytes "$fa")"
+
+        spec="$REGIONS_DIR/${ds}_1kbp_mid.txt"
+        [[ -f "$spec" ]] || spec="$REGIONS_DIR/${ds}_100bp.txt"
+        region="$(tr -d '\n' < "$spec")"
+        qrgn="$(quote_arg "$region")"
+        out_bases="$(region_bases "$region" "$fai_fa")"
+        focused_run_group "$ds/direct" "${ds}_direct" "$nbytes" "$out_bases" \
+            z-fasta-default z-fasta "$qz get $qzfi $qrgn" \
+            z-fasta-fai z-fasta "$qz get $qfai $qrgn" \
+            noodles noodles "$qn get $qfai $qrgn"
+
+        multi_count=100
+        [[ "$ds" == "Genome" ]] && multi_count=10
+        multi_path="$REGIONS_DIR/${ds}_regions_N${multi_count}.txt"
+        zfi_core="$(multi_positional_get_core "$qz" "$qzfi" "$multi_path")"
+        fai_core="$(multi_positional_get_core "$qz" "$qfai" "$multi_path")"
+        noodles_core="$(multi_positional_get_core "$qn" "$qfai" "$multi_path")"
+        focused_run_group "$ds/multi-scattered" "${ds}_multi_scattered" "$nbytes" "$((multi_count * 1000))" \
+            z-fasta-default z-fasta "$zfi_core" \
+            z-fasta-fai z-fasta "$fai_core" \
+            noodles noodles "$noodles_core"
+
+        if [[ "$ds" == "Genome" ]]; then
+            focused_record_cell "$ds/names" z-fasta-default skip "whole chromosome output is not a focused development cell"
+            focused_record_cell "$ds/names" z-fasta-fai skip "whole chromosome output is not a focused development cell"
+            focused_record_cell "$ds/names" noodles skip "whole chromosome output is not a focused development cell"
+        else
+            names_count=100
+            names="$FOCUSED_DIR/${ds}_names_${names_count}.txt"
+            out_bases="$(focused_names_bases "$fai_fa" "$names")"
+            focused_run_group "$ds/names" "${ds}_names" "$nbytes" "$out_bases" \
+                z-fasta-default z-fasta "$qz get $qzfi --names $(quote_arg "$names")" \
+                z-fasta-fai z-fasta "$qz get $qfai --names $(quote_arg "$names")" \
+                noodles noodles "$qn get $qfai --names $(quote_arg "$names")"
+        fi
+
+        bed="$FOCUSED_DIR/${ds}_strand_100.bed"
+        qbed="$(quote_arg "$bed")"
+        focused_run_group "$ds/bed" "${ds}_bed" "$nbytes" 100000 \
+            z-fasta-default z-fasta "$qz get $qzfi --bed $qbed" \
+            z-fasta-fai z-fasta "$qz get $qfai --bed $qbed" \
+            noodles noodles "$qn get $qfai --bed $qbed"
+
+        for locality in clustered alternating; do
+            multi_path="$FOCUSED_DIR/${ds}_locality_${locality}.txt"
+            zfi_core="$(multi_positional_get_core "$qz" "$qzfi" "$multi_path")"
+            fai_core="$(multi_positional_get_core "$qz" "$qfai" "$multi_path")"
+            noodles_core="$(multi_positional_get_core "$qn" "$qfai" "$multi_path")"
+            focused_run_group "$ds/locality-$locality" "${ds}_locality_${locality}" "$nbytes" 100000 \
+                z-fasta-default z-fasta "$zfi_core" \
+                z-fasta-fai z-fasta "$fai_core" \
+                noodles noodles "$noodles_core"
+        done
+
+        if [[ "$ds" == "Proteome" ]]; then
+            for tool in z-fasta-default z-fasta-fai noodles; do
+                focused_record_cell "$ds/transform-rc" "$tool" skip "complement transforms reject protein"
+                focused_record_cell "$ds/bed-strand" "$tool" skip "strand-aware complement rejects protein"
+            done
+        else
+            multi_path="$REGIONS_DIR/${ds}_regions_N${multi_count}.txt"
+            zfi_core="$(multi_positional_get_core "$qz" "$qzfi" "$multi_path" " --rc")"
+            fai_core="$(multi_positional_get_core "$qz" "$qfai" "$multi_path" " --rc")"
+            noodles_core="$(multi_positional_get_core "$qn" "$qfai" "$multi_path" " --rc")"
+            focused_run_group "$ds/transform-rc" "${ds}_transform_rc" "$nbytes" "$((multi_count * 1000))" \
+                z-fasta-default z-fasta "$zfi_core" \
+                z-fasta-fai z-fasta "$fai_core" \
+                noodles noodles "$noodles_core"
+            focused_run_group "$ds/bed-strand" "${ds}_bed_strand" "$nbytes" 100000 \
+                z-fasta-default z-fasta "$qz get $qzfi --bed $qbed --strand-aware" \
+                z-fasta-fai z-fasta "$qz get $qfai --bed $qbed --strand-aware" \
+                noodles noodles "$qn get $qfai --bed $qbed --rc --honor-strand"
+        fi
+    done
+
+    ds=Transcriptome
+    zfi_fa="${ZFI_VIEWS[$ds]}"
+    fai_fa="${FAI_VIEWS[$ds]}"
+    qzfi="$(quote_arg "$zfi_fa")"
+    qfai="$(quote_arg "$fai_fa")"
+    nbytes="$(file_size_bytes "${REAL_DATASETS[$ds]}")"
+    names="$FOCUSED_DIR/${ds}_names_100.txt"
+    out_bases="$(focused_names_bases "$fai_fa" "$names")"
+    focused_run_group "$ds/names-stdin" "${ds}_names_stdin" "$nbytes" "$out_bases" \
+        z-fasta-default z-fasta "cat $(quote_arg "$names") | $qz get $qzfi --names -" \
+        z-fasta-fai z-fasta "cat $(quote_arg "$names") | $qz get $qfai --names -"
+    focused_record_cell "$ds/names-stdin" noodles skip "Noodles wrapper has no names stdin mode"
+
+    bed="$FOCUSED_DIR/${ds}_strand_100.bed"
+    qbed="$(quote_arg "$bed")"
+    focused_run_group "$ds/bed-stdin" "${ds}_bed_stdin" "$nbytes" 100000 \
+        z-fasta-default z-fasta "cat $qbed | $qz get $qzfi --bed -" \
+        z-fasta-fai z-fasta "cat $qbed | $qz get $qfai --bed -"
+    focused_record_cell "$ds/bed-stdin" noodles skip "Noodles wrapper has no BED stdin mode"
+
+    spec="$REGIONS_DIR/${ds}_1kbp_mid.txt"
+    region="$(tr -d '\n' < "$spec")"
+    qrgn="$(quote_arg "$region")"
+    out_bases="$(region_bases "$region" "$fai_fa")"
+    focused_run_group "$ds/summary" "${ds}_summary" "$nbytes" "$out_bases" \
+        z-fasta-default z-fasta "$qz get $qzfi $qrgn --summary 2>/dev/null" \
+        z-fasta-fai z-fasta "$qz get $qfai $qrgn --summary 2>/dev/null"
+    focused_record_cell "$ds/summary" noodles skip "Summary text and timing are z-fasta-specific"
+    focused_run_group "$ds/annotation" "${ds}_annotation" "$nbytes" "$out_bases" \
+        z-fasta-default z-fasta "$qz get $qzfi $qrgn --rc --annotate-rc" \
+        z-fasta-fai z-fasta "$qz get $qfai $qrgn --rc --annotate-rc"
+    focused_record_cell "$ds/annotation" noodles skip "Transform annotations are z-fasta-specific"
+    focused_run_group "$ds/composed-transform" "${ds}_composed_transform" "$nbytes" 100000 \
+        z-fasta-default z-fasta "$qz get $qzfi --bed $qbed --strand-aware --rc --annotate-rc" \
+        z-fasta-fai z-fasta "$qz get $qfai --bed $qbed --strand-aware --rc --annotate-rc"
+    focused_record_cell "$ds/composed-transform" noodles skip "Composed transform annotations are z-fasta-specific"
+
+    bench_ensure_messy --fixtures
+    local messy_source="$MESSY_TEST_DIR/mixed_widths.fasta"
+    local messy_view="$BENCH_VIEW_DIR/zfi/focused_mixed_widths.fasta"
+    ln -s "$messy_source" "$messy_view"
+    "$ZFASTA" index "$messy_view" > /dev/null
+    focused_run_group "Mixed/side-table" "Mixed_side_table" \
+        "$(file_size_bytes "$messy_source")" 22 \
+        z-fasta-default z-fasta "$qz get $(quote_arg "$messy_view") mixed_widths:3-24"
+    focused_record_cell "Mixed/side-table" z-fasta-fai skip "Non-uniform side tables are available only in .zfi"
+    focused_record_cell "Mixed/side-table" noodles skip "Non-uniform side tables are available only in .zfi"
+
+    validate_focused_matrix
+}
+
 run_perf_pos() {
     local out_dir="$RESULTS_DIR/perf_pos_${TIMESTAMP}"
     mkdir -p "$out_dir"
     SECTION_POS="perf_pos_${TIMESTAMP}"
     generate_get_fixtures pos
 
-    local ds fa qf qz qs qn qr qh qt
+    local ds fa zfi_fa fai_fa qzfi qfai qz qs qn qr qh qt
     for ds in Genome Transcriptome Proteome; do
         fa="${REAL_DATASETS[$ds]:-}"
         [[ -n "$fa" ]] || continue
-        qf="$(quote_arg "$fa")"
+        zfi_fa="${ZFI_VIEWS[$ds]}"
+        fai_fa="${FAI_VIEWS[$ds]}"
+        qzfi="$(quote_arg "$zfi_fa")"
+        qfai="$(quote_arg "$fai_fa")"
         qz="$(quote_arg "$ZFASTA")"
         qs="$(quote_arg "$SAMTOOLS")"
         qn="$(quote_arg "$NOODLES")"
@@ -1623,52 +2095,32 @@ run_perf_pos() {
             [[ -f "$spec" ]] || continue
             local region; region="$(tr -d '\n' < "$spec")"
             local qrgn; qrgn="$(quote_arg "$region")"
-            local out_bases; out_bases="$(region_bases "$region" "$fa")"
+            local out_bases; out_bases="$(region_bases "$region" "$fai_fa")"
             local json="$out_dir/${ds}_${label}.json"
             local json_fai="$out_dir/${ds}_${label}_zfai.json"
             local workload="${ds}/${label}"
 
             zebrac_clear_commands
             get_add_command perf_pos "$workload" z-fasta-default z-fasta "$json" \
-                "$qz get $qf $qrgn > /dev/null" "$nbytes" "$out_bases"
+                "$qz get $qzfi $qrgn > /dev/null" "$nbytes" "$out_bases"
             bench_has_tool samtools && get_add_command perf_pos "$workload" samtools samtools "$json" \
-                "$qs faidx $qf $qrgn > /dev/null" "$nbytes" "$out_bases"
+                "$qs faidx $qfai $qrgn > /dev/null" "$nbytes" "$out_bases"
             bench_has_tool noodles && get_add_command perf_pos "$workload" noodles noodles "$json" \
-                "$qn get $qf $qrgn > /dev/null" "$nbytes" "$out_bases"
+                "$qn get $qfai $qrgn > /dev/null" "$nbytes" "$out_bases"
             bench_has_tool rustbio && get_add_command perf_pos "$workload" rustbio-custom-get rustbio "$json" \
-                "$qr get $qf $qrgn > /dev/null" "$nbytes" "$out_bases"
+                "$qr get $qfai $qrgn > /dev/null" "$nbytes" "$out_bases"
             bench_has_tool seqtk && get_add_command perf_pos "$workload" seqtk-reference seqtk "$json" \
-                "printf '%s\\n' $qrgn | $qt subseq $qf - > /dev/null" "$nbytes" "$out_bases"
+                "printf '%s\\n' $qrgn | $qt subseq $qfai - > /dev/null" "$nbytes" "$out_bases"
             if [[ "$label" == "full_seq" ]] && bench_has_tool fastahack; then
                 get_add_command perf_pos "$workload" fastahack fastahack "$json" \
-                    "$qh -r $qrgn $qf > /dev/null" "$nbytes" "$out_bases"
+                    "$qh -r $qrgn $qfai > /dev/null" "$nbytes" "$out_bases"
             fi
             bench_group "$json"
 
-            # .fai lane: stash .zfi outside zebrac so timed get does not include mv cost.
-            local zfi_stashed=false
-            if [[ -f "${fa}.zfi" ]]; then
-                mv -f "${fa}.zfi" "${fa}.zfi.stash" 2>/dev/null || {
-                    echo "error: failed to stash ${fa}.zfi for FAI lane" >&2
-                    return 1
-                }
-                zfi_stashed=true
-            fi
             zebrac_clear_commands
             get_add_command perf_pos "$workload" z-fasta-fai z-fasta "$json_fai" \
-                "$qz get $qf $qrgn > /dev/null" "$nbytes" "$out_bases"
-            if ! bench_group "$json_fai"; then
-                if $zfi_stashed; then
-                    mv -f "${fa}.zfi.stash" "${fa}.zfi" 2>/dev/null || true
-                fi
-                return 1
-            fi
-            if $zfi_stashed; then
-                mv -f "${fa}.zfi.stash" "${fa}.zfi" 2>/dev/null || {
-                    echo "error: failed to restore ${fa}.zfi after FAI lane" >&2
-                    return 1
-                }
-            fi
+                "$qz get $qfai $qrgn > /dev/null" "$nbytes" "$out_bases"
+            bench_group "$json_fai"
             echo "  perf_pos $workload"
         done
     done
@@ -1693,11 +2145,14 @@ run_perf_multi() {
         read -r -a multi_counts <<< "${GET_MULTI_COUNTS}"
     fi
 
-    local ds fa qf nbytes n path json workload total_bases
+    local ds fa zfi_fa fai_fa qzfi qfai nbytes n path json workload total_bases
     for ds in Genome Transcriptome Proteome; do
         fa="${REAL_DATASETS[$ds]:-}"
         [[ -n "$fa" ]] || continue
-        qf="$(quote_arg "$fa")"
+        zfi_fa="${ZFI_VIEWS[$ds]}"
+        fai_fa="${FAI_VIEWS[$ds]}"
+        qzfi="$(quote_arg "$zfi_fa")"
+        qfai="$(quote_arg "$fai_fa")"
         nbytes="$(file_size_bytes "$fa")"
 
         for n in "${multi_counts[@]}"; do
@@ -1708,10 +2163,10 @@ run_perf_multi() {
             total_bases=$((n * 1000))
 
             local zf_cmd nd_cmd rb_cmd st_cmd
-            zf_cmd="$(multi_positional_get_cmd "$qz" "$qf" "$path")"
-            nd_cmd="$(multi_positional_get_cmd "$qn" "$qf" "$path")"
-            rb_cmd="$(multi_positional_get_cmd "$qr" "$qf" "$path")"
-            st_cmd="$qs faidx -r $(quote_arg "$path") $qf > /dev/null"
+            zf_cmd="$(multi_positional_get_cmd "$qz" "$qzfi" "$path")"
+            nd_cmd="$(multi_positional_get_cmd "$qn" "$qfai" "$path")"
+            rb_cmd="$(multi_positional_get_cmd "$qr" "$qfai" "$path")"
+            st_cmd="$qs faidx -r $(quote_arg "$path") $qfai > /dev/null"
 
             zebrac_clear_commands
             get_add_command perf_multi "$workload" z-fasta-default z-fasta "$json" "$zf_cmd" "$nbytes" "$total_bases"
@@ -1719,8 +2174,8 @@ run_perf_multi() {
             bench_has_tool noodles && get_add_command perf_multi "$workload" noodles noodles "$json" "$nd_cmd" "$nbytes" "$total_bases"
             bench_has_tool rustbio && get_add_command perf_multi "$workload" rustbio-custom-get rustbio "$json" "$rb_cmd" "$nbytes" "$total_bases"
             if [[ "${GET_MULTI_REFERENCE:-}" == "1" ]]; then
-                local seqtk_loop="while IFS= read -r r; do printf '%s\\n' \"\$r\" | $qt subseq $qf - > /dev/null; done < $(quote_arg "$path")"
-                local fh_loop="while IFS= read -r r; do $qh -r \"\$r\" $qf > /dev/null; done < $(quote_arg "$path")"
+                local seqtk_loop="while IFS= read -r r; do printf '%s\\n' \"\$r\" | $qt subseq $qfai - > /dev/null; done < $(quote_arg "$path")"
+                local fh_loop="while IFS= read -r r; do $qh -r \"\$r\" $qfai > /dev/null; done < $(quote_arg "$path")"
                 bench_has_tool seqtk && get_add_command perf_multi "$workload" seqtk-reference seqtk "$json" "$seqtk_loop" "$nbytes" "$total_bases"
                 bench_has_tool fastahack && get_add_command perf_multi "$workload" fastahack-reference fastahack "$json" "$fh_loop" "$nbytes" "$total_bases"
             fi
@@ -1743,11 +2198,14 @@ run_perf_bed() {
     qn="$(quote_arg "$NOODLES")"
     qr="$(quote_arg "$RUSTBIO")"
 
-    local ds fa qf nbytes n bed regions json workload out_bases
+    local ds fa zfi_fa fai_fa qzfi qfai nbytes n bed regions json workload out_bases
     for ds in Genome Transcriptome Proteome; do
         fa="${REAL_DATASETS[$ds]:-}"
         [[ -n "$fa" ]] || continue
-        qf="$(quote_arg "$fa")"
+        zfi_fa="${ZFI_VIEWS[$ds]}"
+        fai_fa="${FAI_VIEWS[$ds]}"
+        qzfi="$(quote_arg "$zfi_fa")"
+        qfai="$(quote_arg "$fai_fa")"
         nbytes="$(file_size_bytes "$fa")"
 
         for n in "${BED_COUNTS[@]}"; do
@@ -1763,15 +2221,15 @@ run_perf_bed() {
 
             zebrac_clear_commands
             get_add_command perf_bed "$workload" z-fasta-default z-fasta "$json" \
-                "$qz get $qf --bed $qbed > /dev/null" "$nbytes" "$out_bases"
+                "$qz get $qzfi --bed $qbed > /dev/null" "$nbytes" "$out_bases"
             bench_has_tool bedtools && get_add_command perf_bed "$workload" bedtools bedtools "$json" \
-                "$qb getfasta -fi $qf -bed $qbed > /dev/null" "$nbytes" "$out_bases"
+                "$qb getfasta -fi $qfai -bed $qbed > /dev/null" "$nbytes" "$out_bases"
             bench_has_tool samtools && get_add_command perf_bed "$workload" samtools samtools "$json" \
-                "$qs faidx -r $qreg $qf > /dev/null" "$nbytes" "$out_bases"
+                "$qs faidx -r $qreg $qfai > /dev/null" "$nbytes" "$out_bases"
             bench_has_tool noodles && get_add_command perf_bed "$workload" noodles noodles "$json" \
-                "$qn get $qf --bed $qbed > /dev/null" "$nbytes" "$out_bases"
+                "$qn get $qfai --bed $qbed > /dev/null" "$nbytes" "$out_bases"
             bench_has_tool rustbio && get_add_command perf_bed "$workload" rustbio-custom-get rustbio "$json" \
-                "$qr get $qf --bed $qbed > /dev/null" "$nbytes" "$out_bases"
+                "$qr get $qfai --bed $qbed > /dev/null" "$nbytes" "$out_bases"
             bench_group "$json"
             echo "  perf_bed ${workload}"
 
@@ -1779,7 +2237,7 @@ run_perf_bed() {
                 json="$out_dir/${ds}_rows_${n}_stdin.json"
                 zebrac_clear_commands
                 get_add_command perf_bed "${workload}/stdin" z-fasta-default z-fasta "$json" \
-                    "cat $qbed | $qz get $qf --bed - > /dev/null" "$nbytes" "$out_bases"
+                    "cat $qbed | $qz get $qzfi --bed - > /dev/null" "$nbytes" "$out_bases"
                 bench_group "$json"
                 echo "  perf_bed ${workload}/stdin"
             fi
@@ -1800,7 +2258,7 @@ run_perf_rc() {
     qn="$(quote_arg "$NOODLES")"
     qr="$(quote_arg "$RUSTBIO")"
 
-    local ds fa region_file region workload json qf qrgn nbytes out_bases
+    local ds fa zfi_fa fai_fa region_file region workload json qzfi qfai qrgn nbytes out_bases
     # Nucleotide datasets only: Proteome omitted (--rc / complement N/A; reverse-only is trivial).
     for ds in Genome Transcriptome; do
         fa="${REAL_DATASETS[$ds]:-}"
@@ -1810,26 +2268,29 @@ run_perf_rc() {
         region="$(tr -d '\n' < "$region_file")"
         workload="${ds}/1kbp_mid"
         json="$out_dir/${ds}_1kbp_mid.json"
-        qf="$(quote_arg "$fa")"
+        zfi_fa="${ZFI_VIEWS[$ds]}"
+        fai_fa="${FAI_VIEWS[$ds]}"
+        qzfi="$(quote_arg "$zfi_fa")"
+        qfai="$(quote_arg "$fai_fa")"
         qrgn="$(quote_arg "$region")"
         nbytes="$(file_size_bytes "$fa")"
-        out_bases="$(region_bases "$region" "$fa")"
+        out_bases="$(region_bases "$region" "$fai_fa")"
 
         zebrac_clear_commands
         get_add_command perf_rc "$workload" z-fasta-default z-fasta "$json" \
-            "$qz get $qf $qrgn > /dev/null" "$nbytes" "$out_bases"
+            "$qz get $qzfi $qrgn > /dev/null" "$nbytes" "$out_bases"
         get_add_command perf_rc "$workload" z-fasta-rc z-fasta "$json" \
-            "$qz get $qf $qrgn --rc > /dev/null" "$nbytes" "$out_bases"
+            "$qz get $qzfi $qrgn --rc > /dev/null" "$nbytes" "$out_bases"
         get_add_command perf_rc "$workload" z-fasta-complement-only z-fasta "$json" \
-            "$qz get $qf $qrgn --complement-only > /dev/null" "$nbytes" "$out_bases"
+            "$qz get $qzfi $qrgn --complement-only > /dev/null" "$nbytes" "$out_bases"
         get_add_command perf_rc "$workload" z-fasta-reverse-only z-fasta "$json" \
-            "$qz get $qf $qrgn --reverse-only > /dev/null" "$nbytes" "$out_bases"
+            "$qz get $qzfi $qrgn --reverse-only > /dev/null" "$nbytes" "$out_bases"
         bench_has_tool seqtk && get_add_command perf_rc "$workload" seqtk-reference seqtk "$json" \
-            "printf '%s\\n' $qrgn | $qt subseq $qf - | $qt seq -r > /dev/null" "$nbytes" "$out_bases"
+            "printf '%s\\n' $qrgn | $qt subseq $qfai - | $qt seq -r > /dev/null" "$nbytes" "$out_bases"
         bench_has_tool noodles && get_add_command perf_rc "$workload" noodles-rc noodles "$json" \
-            "$qn get $qf $qrgn --rc > /dev/null" "$nbytes" "$out_bases"
+            "$qn get $qfai $qrgn --rc > /dev/null" "$nbytes" "$out_bases"
         bench_has_tool rustbio && get_add_command perf_rc "$workload" rustbio-custom-get-rc rustbio "$json" \
-            "$qr get $qf $qrgn --rc > /dev/null" "$nbytes" "$out_bases"
+            "$qr get $qfai $qrgn --rc > /dev/null" "$nbytes" "$out_bases"
         bench_group "$json"
         echo "  perf_rc ${workload}"
     done
@@ -1950,7 +2411,10 @@ run_perf() {
     bench_require_tool z-fasta
     METADATA_JSONL="$RESULTS_DIR/metadata_${TIMESTAMP}.jsonl"
     RUN_MANIFEST="$RESULTS_DIR/run_${TIMESTAMP}.json"
-    if [[ -n "${GET_RUN_TIMESTAMP:-}" ]] && [[ -f "$METADATA_JSONL" ]]; then
+    if $FOCUSED && { [[ -f "$METADATA_JSONL" ]] || [[ -d "$RESULTS_DIR/focused_${TIMESTAMP}" ]]; }; then
+        echo "error: focused GET result already exists for $TIMESTAMP" >&2
+        return 1
+    elif [[ -n "${GET_RUN_TIMESTAMP:-}" ]] && [[ -f "$METADATA_JSONL" ]]; then
         :
     else
         : > "$METADATA_JSONL"
@@ -1968,23 +2432,31 @@ run_perf() {
     echo ""
 
     ensure_real_data
-    preload_real_indexes
+    prepare_benchmark_views
 
-    $DO_POS && run_perf_pos
-    $DO_MULTI && run_perf_multi
-    $DO_BED && run_perf_bed
-    $DO_RC && run_perf_rc
-    $DO_MESSY && run_perf_messy
+    if $FOCUSED; then
+        run_perf_focused
+    else
+        $DO_POS && run_perf_pos
+        $DO_MULTI && run_perf_multi
+        $DO_BED && run_perf_bed
+        $DO_RC && run_perf_rc
+        $DO_MESSY && run_perf_messy
 
-    : "${SECTION_POS:=$(existing_section_dir perf_pos)}"
-    : "${SECTION_MULTI:=$(existing_section_dir perf_multi)}"
-    : "${SECTION_BED:=$(existing_section_dir perf_bed)}"
-    : "${SECTION_RC:=$(existing_section_dir perf_rc)}"
-    : "${SECTION_MESSY:=$(existing_section_dir messy)}"
+        : "${SECTION_POS:=$(existing_section_dir perf_pos)}"
+        : "${SECTION_MULTI:=$(existing_section_dir perf_multi)}"
+        : "${SECTION_BED:=$(existing_section_dir perf_bed)}"
+        : "${SECTION_RC:=$(existing_section_dir perf_rc)}"
+        : "${SECTION_MESSY:=$(existing_section_dir messy)}"
+    fi
 
     export_manifest_tool_versions
     write_run_manifest "$RUN_MANIFEST" "$TIMESTAMP" "$(basename "$METADATA_JSONL")"
-    printf '%s\n' "$TIMESTAMP" > "$RESULTS_DIR/LATEST"
+    if $FOCUSED; then
+        printf '%s\n' "$TIMESTAMP" > "$RESULTS_DIR/FOCUSED_LATEST"
+    else
+        printf '%s\n' "$TIMESTAMP" > "$RESULTS_DIR/LATEST"
+    fi
     echo "  manifest: $RUN_MANIFEST"
 }
 
@@ -2001,6 +2473,7 @@ run_report() {
 
 TIMESTAMP="${GET_RUN_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
 mkdir -p "$RESULTS_DIR"
+trap cleanup_benchmark_views EXIT
 
 if $DO_TESTS; then
     echo ""
