@@ -112,7 +112,7 @@ test "loadIndex - .zfi file" {
     var first_byte: [1]u8 = undefined;
     try std.testing.expectEqual(
         @as(usize, 1),
-        try std.Io.File.readPositionalAll(idx.fasta_map.file, io, &first_byte, 0),
+        try std.Io.File.readPositionalAll(idx.fasta_file, io, &first_byte, 0),
     );
     try std.testing.expectEqual(@as(u8, '>'), first_byte[0]);
 

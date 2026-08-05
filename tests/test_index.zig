@@ -1601,7 +1601,50 @@ test "loadIndexChecked retains FASTA descriptor for fai positional reads" {
     var first_byte: [1]u8 = undefined;
     try std.testing.expectEqual(
         @as(usize, 1),
-        try std.Io.File.readPositionalAll(idx.fasta_map.file, io, &first_byte, 0),
+        try std.Io.File.readPositionalAll(idx.fasta_file, io, &first_byte, 0),
+    );
+    try std.testing.expectEqual(@as(u8, '>'), first_byte[0]);
+}
+
+test "GET loader keeps FASTA readable without mapping it" {
+    var zfi_idx = main.index_format.loadIndexForGet(io, "tests/data/simple.fasta", .lookup_full_map);
+    defer zfi_idx.deinit(io);
+
+    try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.zfi, zfi_idx.source);
+    try std.testing.expectEqual(null, zfi_idx.fasta_map);
+    try std.testing.expectEqual(@as(usize, 0), zfi_idx.fasta_data.len);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "fai-get-source", "fa");
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    {
+        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+        defer fasta_file.close(io);
+        try std.Io.File.writeStreamingAll(fasta_file, io, ">seq\nACGT\n");
+    }
+    {
+        const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{});
+        defer fai_file.close(io);
+        try std.Io.File.writeStreamingAll(fai_file, io, "seq\t4\t5\t4\t5\n");
+    }
+
+    var fai_idx = main.index_format.loadIndexForGet(io, fasta_path, .lookup_full_map);
+    defer fai_idx.deinit(io);
+
+    try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.fai, fai_idx.source);
+    try std.testing.expectEqual(null, fai_idx.fasta_map);
+    try std.testing.expectEqual(@as(usize, 0), fai_idx.fasta_data.len);
+
+    var first_byte: [1]u8 = undefined;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try std.Io.File.readPositionalAll(fai_idx.fasta_file, io, &first_byte, 0),
     );
     try std.testing.expectEqual(@as(u8, '>'), first_byte[0]);
 }

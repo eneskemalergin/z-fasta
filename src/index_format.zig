@@ -266,9 +266,9 @@ pub const LoadMode = enum {
 /// Loaded FASTA + index state (from `.zfi` or samtools-compatible `.fai`).
 ///
 /// Ownership (one owner each; `deinit(io)` is the only cleanup entry point):
-/// - **FASTA file and maps**: `fasta_map.file` remains open for positional reads.
-///   `deinit` destroys `fasta_map`, optional `zfi_map` / `fai_map`, then closes the
-///   FASTA file. Byte slices and typed views borrow from those maps.
+/// - **FASTA file and maps**: `fasta_file` remains open until `deinit`.
+///   `deinit` destroys the optional FASTA map and optional sidecar maps, then closes
+///   the FASTA file. Byte slices and typed views borrow from those maps.
 /// - **Arena**: owns heap for `.fai` record arrays, `name_slices` string copies,
 ///   `sidecar_path`, `fai_line_offsets`, and `name_map` table storage. Reclaimed
 ///   only via `arena.deinit()` (do not `name_map.deinit()` on an arena-backed map).
@@ -279,7 +279,9 @@ pub const LoadMode = enum {
 /// GET and stats load through this type and only call `deinit(io)`. Validator maps
 /// the FASTA independently, but uses this ownership model when it loads an index.
 pub const LoadedIndex = struct {
-    fasta_map: std.Io.File.MemoryMap,
+    io: std.Io,
+    fasta_file: std.Io.File,
+    fasta_map: ?std.Io.File.MemoryMap,
     zfi_map: ?std.Io.File.MemoryMap = null,
     fai_map: ?std.Io.File.MemoryMap = null,
     records: []const IndexRecord,
@@ -290,9 +292,11 @@ pub const LoadedIndex = struct {
     /// Borrow into `zfi_map` when `.zfi` embeds a name blob.
     name_blob: ?[]const u8 = null,
     fai_data: ?platform.MappedBytes = null,
-    fasta_data: platform.MappedBytes,
+    fasta_data: []const u8,
     fasta_size: u64,
     zfi_data: ?platform.MappedBytes,
+    zfi_side_start: usize = 0,
+    zfi_side_end: usize = 0,
     source: IndexSource,
     /// Arena-owned `.fai` path for on-demand name reads (`stats_scan`).
     sidecar_path: ?[]const u8 = null,
@@ -340,15 +344,14 @@ pub const LoadedIndex = struct {
     }
 
     pub fn deinit(self: *LoadedIndex, io: std.Io) void {
-        const fasta_file = self.fasta_map.file;
-        self.fasta_map.destroy(io);
+        if (self.fasta_map) |*m| m.destroy(io);
         if (self.zfi_map) |*m| m.destroy(io);
         if (self.fai_map) |*m| m.destroy(io);
         // `name_map` table bytes and key copies are arena-owned. Do not call
         // `name_map.deinit()`: Zig 0.16 ArenaAllocator.free is not safe for the
         // HashMap's non-LIFO buffer free (crashes). `arena.deinit()` reclaims all.
         self.arena.deinit();
-        fasta_file.close(io);
+        self.fasta_file.close(io);
     }
 
     pub fn lookupName(self: *const LoadedIndex, name: []const u8) ?usize {
@@ -376,10 +379,21 @@ pub const LoadedIndex = struct {
     pub fn sideTableLines(self: *const LoadedIndex, rec: IndexRecord) []const SideTableLine {
         if (rec.isUniformWidth()) return &.{};
         const zfi = self.zfi_data orelse return &.{};
-        // Load-time validation must have accepted this table; re-check bounds so a
-        // corrupt in-memory record cannot create an out-of-range pointer.
-        const parsed = parseSideTable(zfi, rec, 0, zfi.len, std.math.maxInt(usize)) orelse return &.{};
-        return parsed.lines;
+        const offset = std.math.cast(usize, rec.sideTableOffset()) orelse return &.{};
+        if (offset < self.zfi_side_start or offset >= self.zfi_side_end) return &.{};
+        if (offset % @alignOf(u64) != 0) return &.{};
+        const count_end = std.math.add(usize, offset, @sizeOf(u64)) catch return &.{};
+        if (count_end > self.zfi_side_end) return &.{};
+        const count_ptr: *const u64 = @ptrCast(@alignCast(zfi[offset..].ptr));
+        const line_count = std.math.cast(usize, count_ptr.*) orelse return &.{};
+        const table_bytes = std.math.mul(usize, line_count, @sizeOf(SideTableLine)) catch return &.{};
+        const table_end = std.math.add(usize, count_end, table_bytes) catch return &.{};
+        if (line_count == 0 or table_end > self.zfi_side_end) return &.{};
+        if (count_end % @alignOf(SideTableLine) != 0) return &.{};
+        return @as(
+            [*]const SideTableLine,
+            @ptrCast(@alignCast(zfi[count_end..].ptr)),
+        )[0..line_count];
     }
 };
 
@@ -430,7 +444,18 @@ pub fn loadIndex(io: std.Io, fasta_path: []const u8) LoadedIndex {
 }
 
 pub fn loadIndexWithMode(io: std.Io, fasta_path: []const u8, mode: LoadMode) LoadedIndex {
-    return loadIndexCheckedWithMode(io, fasta_path, mode) catch |err| switch (err) {
+    return loadIndexWithAccess(io, fasta_path, mode, .mapped);
+}
+
+/// Keeps the FASTA open without retaining its contents in memory.
+pub fn loadIndexForGet(io: std.Io, fasta_path: []const u8, mode: LoadMode) LoadedIndex {
+    return loadIndexWithAccess(io, fasta_path, mode, .file_backed);
+}
+
+const FastaAccess = enum { mapped, file_backed };
+
+fn loadIndexWithAccess(io: std.Io, fasta_path: []const u8, mode: LoadMode, access: FastaAccess) LoadedIndex {
+    return loadIndexCheckedWithAccess(io, fasta_path, mode, access) catch |err| switch (err) {
         error.FileNotFound => printErrorAndExit("error: file not found: {s}\n", .{fasta_path}),
         error.AccessDenied => printErrorAndExit("error: access denied: {s}\n", .{fasta_path}),
         error.EmptyFile => printErrorAndExit("error: file is empty: {s}\n", .{fasta_path}),
@@ -453,6 +478,15 @@ pub fn loadIndexChecked(io: std.Io, fasta_path: []const u8) LoadIndexError!Loade
 }
 
 pub fn loadIndexCheckedWithMode(io: std.Io, fasta_path: []const u8, mode: LoadMode) LoadIndexError!LoadedIndex {
+    return loadIndexCheckedWithAccess(io, fasta_path, mode, .mapped);
+}
+
+fn loadIndexCheckedWithAccess(
+    io: std.Io,
+    fasta_path: []const u8,
+    mode: LoadMode,
+    access: FastaAccess,
+) LoadIndexError!LoadedIndex {
     // Open FASTA file
     const fasta_file = std.Io.Dir.cwd().openFile(io, fasta_path, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.FileNotFound,
@@ -468,14 +502,19 @@ pub fn loadIndexCheckedWithMode(io: std.Io, fasta_path: []const u8, mode: LoadMo
         return error.EmptyFile;
     }
 
-    var fasta_view = try platform.FileView.mapFile(io, fasta_file, @intCast(fasta_stat.size));
-    defer if (!fasta_transferred) fasta_view.destroy(io);
+    var fasta_view: ?platform.FileView = if (access == .mapped)
+        try platform.FileView.mapFile(io, fasta_file, @intCast(fasta_stat.size))
+    else
+        null;
+    defer if (!fasta_transferred) {
+        if (fasta_view) |*view| view.destroy(io);
+    };
 
     // A present `.zfi` is authoritative, including when it is invalid.
     var zfi_path_buf: [4096]u8 = undefined;
     const zfi_path = std.fmt.bufPrint(&zfi_path_buf, "{s}.zfi", .{fasta_path}) catch return error.PathTooLong;
 
-    switch (try tryLoadZfi(io, zfi_path, &fasta_view, fasta_stat, mode)) {
+    switch (try tryLoadZfi(io, zfi_path, fasta_file, &fasta_view, fasta_stat, mode)) {
         .loaded => |result| {
             fasta_transferred = true;
             return result;
@@ -489,7 +528,7 @@ pub fn loadIndexCheckedWithMode(io: std.Io, fasta_path: []const u8, mode: LoadMo
     var fai_path_buf: [4096]u8 = undefined;
     const fai_path = std.fmt.bufPrint(&fai_path_buf, "{s}.fai", .{fasta_path}) catch return error.PathTooLong;
 
-    switch (try tryLoadFai(io, fai_path, &fasta_view, fasta_stat, mode)) {
+    switch (try tryLoadFai(io, fai_path, fasta_file, &fasta_view, fasta_stat, mode)) {
         .loaded => |result| {
             fasta_transferred = true;
             return result;
@@ -579,7 +618,8 @@ pub fn dropFastaSpan(fasta_data: []const u8, start: usize, end_exclusive: usize)
 fn tryLoadZfi(
     io: std.Io,
     zfi_path: []const u8,
-    fasta_view: *platform.FileView,
+    fasta_file: std.Io.File,
+    fasta_view: *?platform.FileView,
     fasta_stat: std.Io.File.Stat,
     mode: LoadMode,
 ) LoadIndexError!LoadAttempt {
@@ -608,7 +648,7 @@ fn tryLoadZfi(
     var transferred = false;
     defer if (!transferred) zfi_view.destroy(io);
 
-    const fasta_data = fasta_view.bytes();
+    const fasta_data: []const u8 = if (fasta_view.*) |*view| view.bytes() else &.{};
     const zfi_data = zfi_view.bytes();
 
     // Validate minimum size for header
@@ -657,7 +697,7 @@ fn tryLoadZfi(
     const side_region_start = records_end;
     const side_region_end = name_layout.start;
 
-    if (!validateZfiRecords(records, fasta_data, zfi_data, name_blob, side_region_start, side_region_end)) {
+    if (!validateZfiRecords(records, fasta_stat.size, zfi_data, name_blob, side_region_start, side_region_end)) {
         return .corrupt;
     }
 
@@ -682,7 +722,9 @@ fn tryLoadZfi(
 
     transferred = true;
     return .{ .loaded = LoadedIndex{
-        .fasta_map = fasta_view.map,
+        .io = io,
+        .fasta_file = fasta_file,
+        .fasta_map = if (fasta_view.*) |view| view.map else null,
         .zfi_map = zfi_view.map,
         .records = records,
         .name_map = name_map,
@@ -692,6 +734,8 @@ fn tryLoadZfi(
         .fasta_data = fasta_data,
         .fasta_size = fasta_stat.size,
         .zfi_data = zfi_data,
+        .zfi_side_start = side_region_start,
+        .zfi_side_end = side_region_end,
         .source = .zfi,
         .arena = arena,
     } };
@@ -700,7 +744,8 @@ fn tryLoadZfi(
 fn tryLoadFai(
     io: std.Io,
     fai_path: []const u8,
-    fasta_view: *platform.FileView,
+    fasta_file: std.Io.File,
+    fasta_view: *?platform.FileView,
     fasta_stat: std.Io.File.Stat,
     mode: LoadMode,
 ) LoadIndexError!LoadAttempt {
@@ -723,13 +768,13 @@ fn tryLoadFai(
         return .corrupt;
     }
 
-    const fasta_data = fasta_view.bytes();
+    const fasta_data: []const u8 = if (fasta_view.*) |*view| view.bytes() else &.{};
 
     if (mode == .records_only) {
-        return loadFaiRecordsOnly(io, fai_file, fai_stat.size, fasta_view, fasta_stat, true, null);
+        return loadFaiRecordsOnly(io, fai_file, fai_stat.size, fasta_file, fasta_view, fasta_stat, true, null);
     }
     if (mode == .stats_scan) {
-        return loadFaiStatsScan(io, fai_file, fai_path, fai_stat.size, fasta_view, fasta_stat);
+        return loadFaiStatsScan(io, fai_file, fai_path, fai_stat.size, fasta_file, fasta_view, fasta_stat);
     }
 
     var fai_view = platform.FileView.mapFile(io, fai_file, @intCast(fai_stat.size)) catch return error.MmapFailed;
@@ -783,7 +828,7 @@ fn tryLoadFai(
             .line_bases = fields.line_bases,
             .line_bytes = fields.line_bytes,
         };
-        if (!isValidFaiRecordGeometry(rec, fasta_data.len)) return .corrupt;
+        if (!isValidFaiRecordGeometry(rec, fasta_stat.size)) return .corrupt;
 
         if (record_count >= records.len) return .corrupt;
         records[record_count] = rec;
@@ -799,7 +844,9 @@ fn tryLoadFai(
 
     transferred = true;
     return .{ .loaded = LoadedIndex{
-        .fasta_map = fasta_view.map,
+        .io = io,
+        .fasta_file = fasta_file,
+        .fasta_map = if (fasta_view.*) |view| view.map else null,
         .fai_map = fai_view.map,
         .records = loaded_records,
         .name_map = built.name_map,
@@ -818,12 +865,13 @@ fn loadFaiRecordsOnly(
     io: std.Io,
     fai_file: std.Io.File,
     fai_size: u64,
-    fasta_view: *platform.FileView,
+    fasta_file: std.Io.File,
+    fasta_view: *?platform.FileView,
     fasta_stat: std.Io.File.Stat,
     store_names: bool,
     sidecar_path: ?[]const u8,
 ) LoadIndexError!LoadAttempt {
-    const fasta_data = fasta_view.bytes();
+    const fasta_data: []const u8 = if (fasta_view.*) |*view| view.bytes() else &.{};
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     // Free arena on `.corrupt` / error until ownership moves into LoadedIndex.
     var transferred = false;
@@ -865,7 +913,7 @@ fn loadFaiRecordsOnly(
             .line_bases = fields.line_bases,
             .line_bytes = fields.line_bytes,
         };
-        if (!isValidFaiRecordGeometry(rec, fasta_data.len)) return .corrupt;
+        if (!isValidFaiRecordGeometry(rec, fasta_stat.size)) return .corrupt;
 
         if (store_names) {
             const name = allocator.dupe(u8, line[0..fields.name_end]) catch return error.OutOfMemory;
@@ -894,7 +942,9 @@ fn loadFaiRecordsOnly(
 
     transferred = true;
     return .{ .loaded = LoadedIndex{
-        .fasta_map = fasta_view.map,
+        .io = io,
+        .fasta_file = fasta_file,
+        .fasta_map = if (fasta_view.*) |view| view.map else null,
         .records = owned_records,
         .name_map = std.StringHashMap(usize).init(allocator),
         .has_name_map = false,
@@ -929,10 +979,11 @@ fn loadFaiStatsScan(
     fai_file: std.Io.File,
     fai_path: []const u8,
     fai_size: u64,
-    fasta_view: *platform.FileView,
+    fasta_file: std.Io.File,
+    fasta_view: *?platform.FileView,
     fasta_stat: std.Io.File.Stat,
 ) LoadIndexError!LoadAttempt {
-    return loadFaiRecordsOnly(io, fai_file, fai_size, fasta_view, fasta_stat, false, fai_path);
+    return loadFaiRecordsOnly(io, fai_file, fai_size, fasta_file, fasta_view, fasta_stat, false, fai_path);
 }
 
 fn readFaiNameLine(io: std.Io, allocator: std.mem.Allocator, fai_path: []const u8, rec_idx: usize) LoadIndexError![]const u8 {
@@ -1038,7 +1089,7 @@ fn parseFaiAsciiU32(text: []const u8) ?u32 {
 }
 
 // Samtools `.fai` is always uniform-width; dense `.zfi` records use the same layout.
-fn isValidFaiRecordGeometry(rec: IndexRecord, fasta_len: usize) bool {
+fn isValidFaiRecordGeometry(rec: IndexRecord, fasta_len: u64) bool {
     return isValidUniformSequenceGeometry(rec, fasta_len);
 }
 
@@ -1050,7 +1101,7 @@ fn isValidFaiRecordGeometry(rec: IndexRecord, fasta_len: usize) bool {
 // final line, so a full `full_lines * line_bytes` span would demand a phantom
 // trailing separator. Require the last base byte instead:
 // `seq_offset + ((seq_len - 1) / line_bases) * line_bytes + ((seq_len - 1) % line_bases)`.
-fn isValidUniformSequenceGeometry(rec: IndexRecord, fasta_len: usize) bool {
+fn isValidUniformSequenceGeometry(rec: IndexRecord, fasta_len: u64) bool {
     if (rec.seq_len == 0) return false;
     if (rec.seq_offset >= fasta_len) return false;
     if (rec.line_bases == 0 or rec.line_bytes == 0) return false;
@@ -1072,7 +1123,7 @@ fn rangeFitsUsize(offset: u64, len: u64, limit: usize) bool {
 
 fn isValidZfiRecordMetadata(
     rec: IndexRecord,
-    fasta_data: []const u8,
+    fasta_len: u64,
     zfi_data: platform.MappedBytes,
     name_blob: []const u8,
     side_region_start: usize,
@@ -1083,19 +1134,19 @@ fn isValidZfiRecordMetadata(
 
     if (!rec.isUniformWidth()) {
         if (rec.seq_len == 0) return false;
-        if (rec.seq_offset >= fasta_data.len) return false;
-        const parsed = parseSideTable(zfi_data, rec, side_region_start, side_region_end, fasta_data.len) orelse return false;
+        if (rec.seq_offset >= fasta_len) return false;
+        const parsed = parseSideTable(zfi_data, rec, side_region_start, side_region_end, fasta_len) orelse return false;
         if (parsed.start < prev_side_end.*) return false;
         prev_side_end.* = parsed.end;
         return true;
     }
 
-    return isValidUniformSequenceGeometry(rec, fasta_data.len);
+    return isValidUniformSequenceGeometry(rec, fasta_len);
 }
 
 fn validateZfiRecords(
     records: []const IndexRecord,
-    fasta_data: []const u8,
+    fasta_len: u64,
     zfi_data: platform.MappedBytes,
     name_blob: []const u8,
     side_region_start: usize,
@@ -1104,7 +1155,7 @@ fn validateZfiRecords(
     if (side_region_end < side_region_start) return false;
     var prev_side_end: usize = side_region_start;
     for (records) |rec| {
-        if (!isValidZfiRecordMetadata(rec, fasta_data, zfi_data, name_blob, side_region_start, side_region_end, &prev_side_end)) {
+        if (!isValidZfiRecordMetadata(rec, fasta_len, zfi_data, name_blob, side_region_start, side_region_end, &prev_side_end)) {
             return false;
         }
     }
@@ -1128,7 +1179,7 @@ fn parseSideTable(
     rec: IndexRecord,
     side_region_start: usize,
     side_region_end: usize,
-    fasta_len: usize,
+    fasta_len: u64,
 ) ?ParsedSideTable {
     const offset = std.math.cast(usize, rec.sideTableOffset()) orelse return null;
     if (offset < side_region_start or offset >= side_region_end) return null;
@@ -1159,7 +1210,7 @@ fn parseSideTable(
         if (line.base_start != expected_base_start) return null;
         if (line.line_bases == 0 or line.line_bytes == 0) return null;
         if (line.line_bytes < line.line_bases) return null;
-        if (!rangeFitsUsize(line.byte_offset, line.line_bytes, fasta_len)) return null;
+        if (line.byte_offset > fasta_len or line.line_bytes > fasta_len - line.byte_offset) return null;
         if (i == 0) {
             // Writer invariant: first base-bearing line begins at seq_offset.
             if (line.byte_offset != rec.seq_offset) return null;
