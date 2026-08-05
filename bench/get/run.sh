@@ -73,7 +73,7 @@ MULTI_COUNTS=(1 10 100 1000)
 BED_COUNTS=(10 100 1000 10000)
 POS_LABELS=(100bp 1kbp_mid 10kbp full_seq)
 
-# Mirror getter.parseRegion: scan colons from the right; suffix is START-END or START-.
+# Mirror getter.parseRegion: only the rightmost colon can start START-END or START-.
 region_span_bases() {
     local region="$1"
     local fasta="${2:-}"
@@ -110,7 +110,7 @@ def parse_suffix(suffix: str) -> tuple[int, int | None] | None:
 
 
 colon_pos = region.rfind(":")
-while colon_pos >= 0:
+if colon_pos >= 0:
     parsed = parse_suffix(region[colon_pos + 1 :])
     if parsed is not None:
         start, end = parsed
@@ -120,7 +120,6 @@ while colon_pos >= 0:
         else:
             print(end - start + 1)
         raise SystemExit(0)
-    colon_pos = region.rfind(":", 0, colon_pos)
 
 length = fai_length(region)
 if length is not None:
@@ -296,7 +295,6 @@ generate_get_fixtures() {
         "${REAL_DATASETS[Proteome]:-}" \
         "${BED_COUNTS[*]}" \
         "${MULTI_COUNTS[*]}" <<'PY'
-import hashlib
 import random
 import sys
 from pathlib import Path
@@ -318,11 +316,11 @@ MULTI_SEED = 42
 FULL_SEQ_GENOME_MAX = 1000
 FULL_SEQ_PROTEOME_MAX = 5000
 FULL_SEQ_TRANSCRIPTOME_MAX = 20000
-
-
-def stable_u32(text: str) -> int:
-    """Process/platform-stable u32 from text. Do not use Python hash() (salted per process)."""
-    return int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:4], "little")
+DATASET_SEEDS = {
+    "Genome": 1665052211,
+    "Transcriptome": 3571123842,
+    "Proteome": 3098860823,
+}
 
 
 def full_seq_region(dataset: str, rows: list[tuple[str, int]]) -> str | None:
@@ -411,7 +409,7 @@ def multi_regions(dataset: str, fasta: str) -> None:
     if not rows:
         raise SystemExit(f"{dataset}: no sequences with length >= {SPAN}")
     eligible = len(rows)
-    rng = random.Random(MULTI_SEED + stable_u32(dataset) % 10000)
+    rng = random.Random(MULTI_SEED + DATASET_SEEDS[dataset] % 10000)
     for n in MULTI_COUNTS:
         if n > eligible:
             continue
@@ -461,7 +459,7 @@ if mode in ("all", "bed"):
         if not fasta:
             continue
         for n in bed_counts:
-            bed_file(dataset, fasta, bed_dir / f"{dataset}_{n}.bed", n, n + stable_u32(dataset) % 1000)
+            bed_file(dataset, fasta, bed_dir / f"{dataset}_{n}.bed", n, n + DATASET_SEEDS[dataset] % 1000)
 PY
     if [[ "$mode" == "all" || "$mode" == "bed" ]]; then
         local ds n bed regions

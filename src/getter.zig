@@ -112,11 +112,8 @@ pub fn parseRegion(input: []const u8) Region {
         printErrorAndExit("error: empty region string\n", .{});
     }
 
-    // Try to find a region suffix by scanning from the right.
-    // Look for the last '-' that separates two valid integers (or START-),
-    // then the ':' immediately before the START integer.
-
-    // Find the last ':' in the string
+    // Only the rightmost colon can start a coordinate suffix. Any earlier suffix
+    // contains that colon, so its coordinate fields cannot both be integers.
     var colon_pos: ?usize = null;
     {
         var i: usize = input.len;
@@ -132,7 +129,6 @@ pub fn parseRegion(input: []const u8) Region {
     if (colon_pos) |cp| {
         const suffix = input[cp + 1 ..];
 
-        // Try to parse as START-END or START-
         if (parseRangeSuffix(suffix)) |range| {
             return Region{
                 .name = input[0..cp],
@@ -140,36 +136,6 @@ pub fn parseRegion(input: []const u8) Region {
                 .end = range.end,
                 .is_full = false,
             };
-        }
-
-        // If the suffix didn't parse as a valid range, the ':' is part of the name.
-        // But there might be other colons further left; keep trying.
-        var search_end = cp;
-        while (search_end > 0) {
-            var i: usize = search_end;
-            var found_colon: ?usize = null;
-            while (i > 0) {
-                i -= 1;
-                if (input[i] == ':') {
-                    found_colon = i;
-                    break;
-                }
-            }
-
-            if (found_colon) |cp2| {
-                const suffix2 = input[cp2 + 1 ..];
-                if (parseRangeSuffix(suffix2)) |range| {
-                    return Region{
-                        .name = input[0..cp2],
-                        .start = range.start,
-                        .end = range.end,
-                        .is_full = false,
-                    };
-                }
-                search_end = cp2;
-            } else {
-                break;
-            }
         }
     }
 
@@ -376,11 +342,6 @@ fn resolveParsedRequestsByRecordScan(
     }
 }
 
-fn findRecordIndex(idx: *const LoadedIndex, name: []const u8) ?usize {
-    if (idx.lookupName(name)) |rec_idx| return rec_idx;
-    return null;
-}
-
 /// Classify a record as nucleotide or protein from a short sequence prefix.
 /// Uses `stats.get_type_sample_bases` (not full-file): protein vs IUPAC nucleotide
 /// is clear within a few hundred bases, and sampling up to 100k on every `--rc`
@@ -414,11 +375,11 @@ fn ensureComplementAllowed(idx: *const LoadedIndex, requests: []const ParsedRequ
             if (std.mem.eql(u8, name, request.region.name))
                 last_rec_idx
             else
-                findRecordIndex(idx, request.region.name) orelse {
+                idx.lookupName(request.region.name) orelse {
                     printErrorAndExit("error: sequence not found: {s}\n", .{request.region.name});
                 }
         else
-            findRecordIndex(idx, request.region.name) orelse {
+            idx.lookupName(request.region.name) orelse {
                 printErrorAndExit("error: sequence not found: {s}\n", .{request.region.name});
             };
 
@@ -1682,6 +1643,79 @@ test "processBedReaderChunked preserves duplicate chrom cache across chunk bound
     try std.testing.expectEqual(batch.region_count, chunked.region_count);
     try std.testing.expectEqual(batch.total_bases, chunked.total_bases);
     try std.testing.expectEqualStrings(batch_writer.written(), chunk_writer.written());
+}
+
+test "parseRegion matches exhaustive backward-scan reference" {
+    const Reference = struct {
+        fn findLastColon(input: []const u8, end: usize) ?usize {
+            var i = end;
+            while (i > 0) {
+                i -= 1;
+                if (input[i] == ':') return i;
+            }
+            return null;
+        }
+
+        fn parse(input: []const u8) Region {
+            var search_end = input.len;
+            while (findLastColon(input, search_end)) |colon_pos| {
+                if (parseRangeSuffix(input[colon_pos + 1 ..])) |range| {
+                    return .{
+                        .name = input[0..colon_pos],
+                        .start = range.start,
+                        .end = range.end,
+                        .is_full = false,
+                    };
+                }
+                search_end = colon_pos;
+            }
+            return .{ .name = input, .start = 1, .end = null, .is_full = true };
+        }
+    };
+
+    const alphabet = "a:0-1";
+    var input: [7]u8 = undefined;
+    var combinations: usize = 1;
+    var tested: usize = 0;
+    for (1..input.len + 1) |length| {
+        combinations *= alphabet.len;
+        for (0..combinations) |encoded| {
+            var value = encoded;
+            for (input[0..length]) |*byte| {
+                byte.* = alphabet[value % alphabet.len];
+                value /= alphabet.len;
+            }
+
+            const expected = Reference.parse(input[0..length]);
+            const actual = parseRegion(input[0..length]);
+            try std.testing.expectEqualStrings(expected.name, actual.name);
+            try std.testing.expectEqual(expected.start, actual.start);
+            try std.testing.expectEqual(expected.end, actual.end);
+            try std.testing.expectEqual(expected.is_full, actual.is_full);
+            tested += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 97_655), tested);
+}
+
+test "parseRegion handles coordinate overflow at the rightmost colon" {
+    const max = parseRegion("name:18446744073709551615-18446744073709551615");
+    try std.testing.expectEqualStrings("name", max.name);
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), max.start);
+    try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), max.end);
+    try std.testing.expect(!max.is_full);
+
+    const full_names = [_][]const u8{
+        "name:18446744073709551616-1",
+        "name:1-18446744073709551616",
+        "name:1-2:bad",
+        "name:1-2:18446744073709551616-1",
+    };
+    for (full_names) |name| {
+        const region = parseRegion(name);
+        try std.testing.expectEqualStrings(name, region.name);
+        try std.testing.expect(region.is_full);
+    }
 }
 
 test "orientation compose behaves like transform composition" {

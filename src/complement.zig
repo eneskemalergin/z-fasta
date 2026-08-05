@@ -57,34 +57,6 @@ pub fn complementInto(dst: []u8, src: []const u8) void {
     }
 }
 
-/// Write the reverse complement of `src` into `dst`.
-/// Caller must provide a same-length destination buffer.
-pub fn reverseComplementInto(dst: []u8, src: []const u8) void {
-    std.debug.assert(dst.len == src.len);
-
-    for (src, 0..) |byte, i| {
-        dst[src.len - 1 - i] = complement(byte);
-    }
-}
-
-/// Read exactly `len` bytes, reverse-complement them, and write the result.
-/// Allocation-backed helper for generic readers that cannot seek backward.
-///
-/// Not used by the shipped `get` command. Production RC/reverse paths walk the
-/// mmapped FASTA backward in `getter.zig` (zero extra copy of the region span).
-/// See `bench/get/RC_STRATEGY.md`. Kept exported for tests and future streaming callers.
-pub fn reverseComplementStream(allocator: std.mem.Allocator, reader: anytype, writer: anytype, len: usize) !void {
-    const src = try allocator.alloc(u8, len);
-    defer allocator.free(src);
-
-    const dst = try allocator.alloc(u8, len);
-    defer allocator.free(dst);
-
-    try reader.readSliceAll(src);
-    reverseComplementInto(dst, src);
-    try writer.writeAll(dst);
-}
-
 test "complement handles standard bases" {
     try std.testing.expectEqual(@as(u8, 'T'), complement('A'));
     try std.testing.expectEqual(@as(u8, 'A'), complement('T'));
@@ -127,20 +99,4 @@ test "complement leaves unknown bytes unchanged" {
     try std.testing.expectEqual(@as(u8, '-'), complement('-'));
     try std.testing.expectEqual(@as(u8, 'X'), complement('X'));
     try std.testing.expectEqual(@as(u8, 'x'), complement('x'));
-}
-
-test "reverseComplementInto handles mixed case and ambiguity" {
-    var dst: [8]u8 = undefined;
-    reverseComplementInto(&dst, "AaCGnRyU");
-    try std.testing.expectEqualStrings("ArYnCGtT", &dst);
-}
-
-test "reverseComplementStream reads exact length and writes reversed complement" {
-    var reader = std.Io.Reader.fixed("ACGTN");
-    var out_buf: [5]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&out_buf);
-
-    try reverseComplementStream(std.testing.allocator, &reader, &writer, 5);
-
-    try std.testing.expectEqualStrings("NACGT", writer.buffered());
 }
