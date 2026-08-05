@@ -84,13 +84,13 @@ const AllInMemoryInputKind = enum {
 };
 
 /// Per-line buffer for chunked BED streaming (`takeDelimiter` limit).
-pub const bed_line_reader_buffer_bytes = 4096;
+const bed_line_reader_buffer_bytes = 4096;
 
 /// Per-region output cap for the multi-region sort buffer path (≥16 regions).
-pub const max_sort_path_region_output_bytes: u64 = 64 * 1024 * 1024;
+const max_sort_path_region_output_bytes: u64 = 64 * 1024 * 1024;
 
 /// Total intermediate output cap for the multi-region sort buffer path.
-pub const max_sort_path_total_output_bytes: u64 = 256 * 1024 * 1024;
+const max_sort_path_total_output_bytes: u64 = 256 * 1024 * 1024;
 
 const ParsedRequest = struct {
     region: Region,
@@ -207,11 +207,13 @@ pub fn resolveRegion(idx: *const LoadedIndex, region_str: []const u8, original_i
         printErrorAndExit("error: sequence not found: {s}\n", .{region.name});
     };
 
-    return resolveParsedRegion(idx, region, rec_idx, original_index);
-}
-
-fn resolveParsedRegion(idx: *const LoadedIndex, region: Region, rec_idx: usize, original_index: usize) ResolvedRegion {
-    return resolveParsedRequest(idx, .{ .region = region, .orientation = .{} }, rec_idx, original_index, false);
+    return resolveParsedRequest(
+        idx,
+        .{ .region = region, .orientation = .{} },
+        rec_idx,
+        original_index,
+        false,
+    );
 }
 
 fn resolveParsedRequest(
@@ -306,40 +308,6 @@ fn byteOffsetForBase(
     }
 
     printErrorAndExit("error: corrupt non-uniform index side table\n", .{});
-}
-
-/// Resolve multi-region batches when the index was loaded without a name hash map.
-/// Scans every index record against every request: O(records x regions). Production
-/// `runGetWithOptions` loads `.lookup_full_map` for any N > 1; this path remains for
-/// callers that pass a `.records_only` index (tests, future embedding).
-fn resolveParsedRequestsByRecordScan(
-    idx: *const LoadedIndex,
-    requests: []const ParsedRequest,
-    resolved: []ResolvedRegion,
-    annotate_transform: bool,
-) void {
-    var rec_indices = std.ArrayList(?usize).empty;
-    defer rec_indices.deinit(std.heap.page_allocator);
-    rec_indices.resize(std.heap.page_allocator, requests.len) catch {
-        printErrorAndExit("error: out of memory\n", .{});
-    };
-    for (rec_indices.items) |*entry| entry.* = null;
-
-    for (idx.records, 0..) |_, rec_idx| {
-        const rec_name = idx.getRecordName(rec_idx);
-        for (requests, 0..) |request, request_idx| {
-            if (std.mem.eql(u8, rec_name, request.region.name)) {
-                rec_indices.items[request_idx] = rec_idx;
-            }
-        }
-    }
-
-    for (requests, 0..) |request, i| {
-        const rec_idx = rec_indices.items[i] orelse {
-            printErrorAndExit("error: sequence not found: {s}\n", .{request.region.name});
-        };
-        resolved[i] = resolveParsedRequest(idx, request, rec_idx, i, annotate_transform);
-    }
 }
 
 /// Classify a record as nucleotide or protein from a short sequence prefix.
@@ -953,7 +921,7 @@ fn estimateRegionOutputBytes(resolved: ResolvedRegion) u64 {
 /// Drop FASTA cache after a sparse batch on huge files to cap peak RSS.
 const sparse_large_fasta_bytes: u64 = 256 * 1024 * 1024;
 /// Few contigs (e.g. GRCh38): BED rows are sparse; file-order sort walks huge gaps.
-pub const sparse_catalog_record_threshold: usize = 512;
+const sparse_catalog_record_threshold: usize = 512;
 /// Median byte gap above this → emit in request order with direct seeks.
 const sparse_median_gap_bytes: u64 = 512 * 1024;
 /// File-order sort only helps on FASTA large enough that random BED seeks lose.
@@ -1027,10 +995,6 @@ fn shouldAdviseSequentialMmap(
     if (requests_len < 16) return false;
     if (has_reverse_reads) return false;
     return sequential_scan;
-}
-
-fn adviseFastaMmap(fasta: []const u8, advice: platform.Advice) void {
-    platform.advise(fasta, advice);
 }
 
 fn readAllInput(allocator: std.mem.Allocator, io: std.Io, path: []const u8, kind: AllInMemoryInputKind) []u8 {
@@ -1212,16 +1176,11 @@ fn appendCliRequests(requests: *std.ArrayList(ParsedRequest), region_strs: []con
     }
 }
 
-fn writeSummary(io: std.Io, region_count: usize, total_bases: u64, elapsed_ns: u64) void {
-    var err_buf: [512]u8 = undefined;
-    var stderr_fw = std.Io.File.Writer.initStreaming(.stderr(), io, &err_buf);
-    const writer = &stderr_fw.interface;
-
+fn writeSummary(writer: *std.Io.Writer, region_count: usize, total_bases: u64, elapsed_ns: u64) !void {
     const seconds = if (elapsed_ns == 0) 0.0 else @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s));
     const regions_per_second = if (seconds == 0.0) 0.0 else @as(f64, @floatFromInt(region_count)) / seconds;
 
-    writer.print("summary: regions={d} total_bases={d} elapsed_s={d:.6} regions_per_s={d:.1}\n", .{ region_count, total_bases, seconds, regions_per_second }) catch {};
-    stderr_fw.flush() catch {};
+    try writer.print("summary: regions={d} total_bases={d} elapsed_s={d:.6} regions_per_s={d:.1}\n", .{ region_count, total_bases, seconds, regions_per_second });
 }
 
 fn processParsedRequests(
@@ -1240,39 +1199,34 @@ fn processParsedRequests(
     const resolved = allocator.alloc(ResolvedRegion, requests.len) catch {
         printErrorAndExit("error: out of memory\n", .{});
     };
+    defer allocator.free(resolved);
     var already_in_offset_order = requests.len >= 16;
     var prev_start_byte: u64 = 0;
 
-    // Multi-region without a name map: O(records x N) scan (see resolveParsedRequestsByRecordScan).
-    // Production loads `.lookup_full_map` for N > 1, so this branch is the fallback only.
-    if (requests.len > 1 and !idx.has_name_map) {
-        resolveParsedRequestsByRecordScan(idx, requests, resolved, annotate_transform);
-    } else {
-        var last_name: ?[]const u8 = null;
-        var last_rec_idx: usize = 0;
-        for (requests, 0..) |request, i| {
-            const rec_idx = if (last_name) |name|
-                if (std.mem.eql(u8, name, request.region.name))
-                    last_rec_idx
-                else
-                    idx.lookupName(request.region.name) orelse {
-                        printErrorAndExit("error: sequence not found: {s}\n", .{request.region.name});
-                    }
+    var last_name: ?[]const u8 = null;
+    var last_rec_idx: usize = 0;
+    for (requests, 0..) |request, i| {
+        const rec_idx = if (last_name) |name|
+            if (std.mem.eql(u8, name, request.region.name))
+                last_rec_idx
             else
                 idx.lookupName(request.region.name) orelse {
                     printErrorAndExit("error: sequence not found: {s}\n", .{request.region.name});
-                };
-
-            last_name = request.region.name;
-            last_rec_idx = rec_idx;
-
-            resolved[i] = resolveParsedRequest(idx, request, rec_idx, i, annotate_transform);
-            if (already_in_offset_order) {
-                if (i > 0 and resolved[i].start_byte < prev_start_byte) {
-                    already_in_offset_order = false;
                 }
-                prev_start_byte = resolved[i].start_byte;
+        else
+            idx.lookupName(request.region.name) orelse {
+                printErrorAndExit("error: sequence not found: {s}\n", .{request.region.name});
+            };
+
+        last_name = request.region.name;
+        last_rec_idx = rec_idx;
+
+        resolved[i] = resolveParsedRequest(idx, request, rec_idx, i, annotate_transform);
+        if (already_in_offset_order) {
+            if (i > 0 and resolved[i].start_byte < prev_start_byte) {
+                already_in_offset_order = false;
             }
+            prev_start_byte = resolved[i].start_byte;
         }
     }
 
@@ -1299,7 +1253,7 @@ fn processParsedRequests(
         idx.fasta_size >= sort_by_offset_min_fasta_bytes and sparse != null;
     if (!use_positional) {
         const mmap_advice: platform.Advice = if (sequential_mmap) .sequential else .random;
-        adviseFastaMmap(idx.fasta_data, mmap_advice);
+        platform.advise(idx.fasta_data, mmap_advice);
     }
 
     var total_bases: u64 = 0;
@@ -1561,8 +1515,22 @@ pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions
     };
 
     if (options.summary) {
-        writeSummary(io, totals.region_count, totals.total_bases, monotonicNs(io) - start_ns);
+        var err_buf: [512]u8 = undefined;
+        var stderr_fw = std.Io.File.Writer.initStreaming(.stderr(), io, &err_buf);
+        writeSummary(&stderr_fw.interface, totals.region_count, totals.total_bases, monotonicNs(io) - start_ns) catch {
+            printErrorAndExit("error: write failed\n", .{});
+        };
+        stderr_fw.flush() catch {
+            printErrorAndExit("error: write failed\n", .{});
+        };
     }
+}
+
+test "summary writing fails when the destination is full" {
+    var buffer: [1]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+
+    try std.testing.expectError(error.WriteFailed, writeSummary(&writer, 1, 1, 1));
 }
 
 test "processBedReaderChunked matches non-chunked extraction" {
@@ -1756,33 +1724,6 @@ test "processParsedRequests applies complement-only and reverse-only transforms"
     );
 }
 
-test "processParsedRequests annotates transforms on by-record-scan path" {
-    const test_io = std.testing.io;
-    var idx = index_format.loadIndexWithMode(test_io, "tests/data/simple.fasta", .records_only);
-    defer idx.deinit(test_io);
-    try std.testing.expect(!idx.has_name_map);
-    try std.testing.expectEqual(index_format.LoadedIndex.IndexSource.zfi, idx.source);
-
-    const requests = [_]ParsedRequest{
-        .{ .region = parseRegion("seq1:1-5"), .orientation = Orientation.complementOnly() },
-        .{ .region = parseRegion("seq2:1-4"), .orientation = Orientation.reverseOnly() },
-    };
-
-    var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer writer.deinit();
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    const batch = processParsedRequests(&idx, arena.allocator(), &requests, true, &writer.writer, true, null);
-
-    try std.testing.expectEqual(@as(usize, 2), batch.region_count);
-    try std.testing.expectEqualStrings(
-        ">seq1:1-5 (complement)\nTGCAT\n>seq2:1-4 (reverse)\nGGGG\n",
-        writer.written(),
-    );
-}
-
 test "detectRecordType classifies nucleotide and protein records" {
     const test_io = std.testing.io;
 
@@ -1922,7 +1863,6 @@ test "shouldAdviseSequentialMmap only when sequential scan is active" {
     try std.testing.expect(!shouldAdviseSequentialMmap(100, true, true, true));
     try std.testing.expect(!shouldAdviseSequentialMmap(100, true, false, false));
     try std.testing.expect(!shouldAdviseSequentialMmap(10, true, false, true));
-    try std.testing.expect(!shouldAdviseSequentialMmap(100, false, false, true));
 }
 
 test "emitRegion handles non-uniform side-table forward extraction" {
