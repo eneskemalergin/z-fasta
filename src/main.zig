@@ -49,18 +49,18 @@ const USAGE =
     \\               at index time). get resolves duplicate names to the first record.
     \\
     \\Get usage:
-    \\  z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt]
-    \\               [--strand-aware] [--summary] [--rc|--complement-only|--reverse-only]
-    \\               [--annotate-rc] <region> [region ...]
+    \\  z-fasta get <file.fasta> [options] <region> [region ...]
+    \\  z-fasta get <file.fasta> [options] --names file.txt|-
+    \\  z-fasta get <file.fasta> [options] --bed file.bed|- [--strand-aware]
+    \\  Choose exactly one request source: positional regions, --names, or --bed.
     \\  Region formats: NAME, NAME:START-END, NAME:START-
-    \\  --strand-aware  Respect BED column 6; '-' emits reverse-complement output
+    \\  --strand-aware  With --bed, respect column 6; '-' emits reverse-complement output
     \\                  (alias: --honor-strand)
     \\  --rc            Reverse-complement extracted sequence output
     \\  --complement-only  Complement extracted sequence output without reversing
     \\  --reverse-only  Reverse extracted sequence output without complementing
-    \\  --annotate-rc   Annotate transformed headers (for example: reverse complement)
-    \\  Positional regions: max 1024 per invocation. --names loads the whole file
-    \\  up to 512 MiB. BED input streams.
+    \\  --annotate-rc   Annotate the final output orientation when it is transformed
+    \\  Positional regions: max 1024 per invocation. Names and BED input stream.
     \\
     \\Stats options:
     \\  --index-only   Only show index-derived stats (no composition scan)
@@ -92,6 +92,9 @@ const USAGE =
     \\  z-fasta validate --json --summary genome.fa
     \\
 ;
+
+const GET_USAGE_ERROR =
+    "error: usage: z-fasta get <file.fasta> (<region>... | --names file.txt|- | --bed file.bed|-)\n";
 
 const ParseTransformFlagsError = error{ConflictingTransformFlags};
 
@@ -311,10 +314,16 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printHelpAndExit(io);
         } else if (std.mem.eql(u8, arg, "--bed")) {
+            if (bed_path != null) {
+                printErrorAndExit("error: --bed may be specified only once\n", .{});
+            }
             bed_path = args.next() orelse {
                 printErrorAndExit("error: --bed requires a path or '-'\n", .{});
             };
         } else if (std.mem.eql(u8, arg, "--names")) {
+            if (names_path != null) {
+                printErrorAndExit("error: --names may be specified only once\n", .{});
+            }
             names_path = args.next() orelse {
                 printErrorAndExit("error: --names requires a path\n", .{});
             };
@@ -344,23 +353,37 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     }
 
     const path = fasta_path orelse {
-        printErrorAndExit("error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--strand-aware] [--summary] [--rc|--complement-only|--reverse-only] [--annotate-rc] <region> [region ...]\n", .{});
+        printErrorAndExit(GET_USAGE_ERROR, .{});
     };
-    if (region_count == 0 and bed_path == null and names_path == null) {
-        printErrorAndExit("error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--strand-aware] [--summary] [--rc|--complement-only|--reverse-only] [--annotate-rc] <region> [region ...]\n", .{});
+    const source_count = @as(usize, @intFromBool(region_count > 0)) +
+        @as(usize, @intFromBool(bed_path != null)) +
+        @as(usize, @intFromBool(names_path != null));
+    if (source_count == 0) {
+        printErrorAndExit(GET_USAGE_ERROR, .{});
+    }
+    if (source_count > 1) {
+        printErrorAndExit("error: choose one request source: positional regions, --names, or --bed\n", .{});
+    }
+    if (honor_strand and bed_path == null) {
+        printErrorAndExit("error: --strand-aware requires --bed\n", .{});
     }
 
     const transform = parseTransformFlags(rc, complement_only, reverse_only, annotate_transform) catch {
         printErrorAndExit("error: --rc, --complement-only, and --reverse-only are mutually exclusive\n", .{});
     };
-    if (transform.annotate_transform and transform.orientation.isIdentity()) {
-        printErrorAndExit("error: --annotate-rc requires --rc, --complement-only, or --reverse-only\n", .{});
+    if (transform.annotate_transform and transform.orientation.isIdentity() and !honor_strand) {
+        printErrorAndExit("error: --annotate-rc requires a transform or --strand-aware BED input\n", .{});
     }
 
+    const source: getter.RequestSource = if (bed_path) |bed|
+        .{ .bed = bed }
+    else if (names_path) |names|
+        .{ .names = names }
+    else
+        .{ .positional = region_buf[0..region_count] };
+
     getter.runGetWithOptions(io, path, .{
-        .region_strs = region_buf[0..region_count],
-        .bed_path = bed_path,
-        .names_path = names_path,
+        .source = source,
         .honor_strand = honor_strand,
         .summary = summary,
         .orientation = transform.orientation,

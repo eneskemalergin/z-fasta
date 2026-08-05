@@ -4,7 +4,7 @@
 # Usage:
 #   bash bench/get/run.sh [options]
 #
-# Defaults: correctness first (409 checks), then perf (--runs 5, --warmup 1, --duration 5000).
+# Defaults: correctness first (418 checks), then perf (--runs 5, --warmup 1, --duration 5000).
 # A full perf pass (all sections, default zebrac settings) typically takes several hours.
 # pyfaidx is omitted from timed positional runs (typically 30-100x slower than z-fasta;
 # may be enabled for a final polish pass).
@@ -1263,6 +1263,41 @@ section3() {
         && "$SAMTOOLS" faidx -r "$TMPDIR/st_names.txt" "$simple" > "$TMPDIR/expected.tmp" 2>/dev/null \
         && diff_oracle "$TMPDIR/expected.tmp" "$TMPDIR/got.tmp" "[parity:samtools] names file" \
         || fail "[parity:samtools] names file"
+    cat "$NAMES" | "$ZFASTA" get "$simple" --names - > "$TMPDIR/got.tmp" 2>/dev/null \
+        && diff_oracle "$TMPDIR/expected.tmp" "$TMPDIR/got.tmp" "[parity:samtools] names stdin" \
+        || fail "[parity:samtools] names stdin"
+
+    printf '# names file\r\nseq2\r\n\r\nseq1' > "$TMPDIR/names_crlf.txt"
+    printf 'seq2\nseq1\n' > "$TMPDIR/st_names_crlf.txt"
+    "$ZFASTA" get "$simple" --names "$TMPDIR/names_crlf.txt" > "$TMPDIR/got.tmp" 2>/dev/null \
+        && "$SAMTOOLS" faidx -r "$TMPDIR/st_names_crlf.txt" "$simple" > "$TMPDIR/expected.tmp" 2>/dev/null \
+        && diff_oracle "$TMPDIR/expected.tmp" "$TMPDIR/got.tmp" "[parity:samtools] names CRLF and final line" \
+        || fail "[parity:samtools] names CRLF and final line"
+
+    names_to_regions "$NAMES" > "$TMPDIR/st_names.txt"
+    "$SAMTOOLS" faidx -r "$TMPDIR/st_names.txt" "$simple" > "$TMPDIR/expected.tmp" 2>/dev/null
+    "$ZFASTA" get "$simple" --names "$NAMES" --summary > "$TMPDIR/got.tmp" 2>"$TMPDIR/summary.err" \
+        && grep -Eq '^summary: regions=3 total_bases=48 elapsed_s=' "$TMPDIR/summary.err" \
+        && diff_oracle "$TMPDIR/expected.tmp" "$TMPDIR/got.tmp" "[extended:summary] names output and summary" \
+        || fail "[extended:summary] names output and summary"
+
+    "$ZFASTA" get "$simple" --bed "$BED_SMALL" --summary > "$TMPDIR/got.tmp" 2>"$TMPDIR/summary.err" \
+        && grep -Eq '^summary: regions=10 total_bases=[0-9]+ elapsed_s=' "$TMPDIR/summary.err" \
+        && pass "[extended:summary] BED output and summary" \
+        || fail "[extended:summary] BED output and summary"
+
+    cat > "$TMPDIR/annotate.bed" <<'BED'
+seq1	0	5	plus	0	+
+seq1	0	5	minus	0	-
+BED
+    printf '>seq1:1-5\nACGTA\n>seq1:1-5 (reverse complement)\nTACGT\n' > "$TMPDIR/annotate_expected.fa"
+    "$ZFASTA" get "$simple" --bed "$TMPDIR/annotate.bed" --strand-aware --annotate-rc > "$TMPDIR/got.tmp" 2>/dev/null \
+        && diff_oracle "$TMPDIR/annotate_expected.fa" "$TMPDIR/got.tmp" "[extended:header] BED final orientation annotation" \
+        || fail "[extended:header] BED final orientation annotation"
+    printf '>seq1:1-5 (reverse complement)\nTACGT\n>seq1:1-5\nACGTA\n' > "$TMPDIR/annotate_expected.fa"
+    "$ZFASTA" get "$simple" --bed "$TMPDIR/annotate.bed" --strand-aware --rc --annotate-rc > "$TMPDIR/got.tmp" 2>/dev/null \
+        && diff_oracle "$TMPDIR/annotate_expected.fa" "$TMPDIR/got.tmp" "[extended:header] BED composed identity annotation" \
+        || fail "[extended:header] BED composed identity annotation"
 
     local mx="$TMPDIR/mx.fasta" mx_bed="$TMPDIR/mx.bed"
     cp "$PROJECT_ROOT/tests/data/mixed_widths.fasta" "$mx"
@@ -1519,6 +1554,9 @@ section5() {
     expect_fail "mutually exclusive --rc and --reverse-only" "$ZFASTA" get "$E/simple.fasta" seq1:1-5 --rc --reverse-only
     expect_fail "mutually exclusive --complement-only and --reverse-only" "$ZFASTA" get "$E/simple.fasta" seq1:1-5 --complement-only --reverse-only
     expect_fail "--annotate-rc without transform" "$ZFASTA" get "$E/simple.fasta" seq1:1-5 --annotate-rc
+    expect_fail "mixed positional and names sources" "$ZFASTA" get "$E/simple.fasta" seq1 --names "$TMPDIR/blank_names.txt"
+    expect_fail "repeated BED source" "$ZFASTA" get "$E/simple.fasta" --bed "$TMPDIR/empty_chrom.bed" --bed "$TMPDIR/empty_chrom.bed"
+    expect_fail "strand handling without BED" "$ZFASTA" get "$E/simple.fasta" seq1 --strand-aware
 }
 
 # --- run_tests ---

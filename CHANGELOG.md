@@ -17,6 +17,8 @@ Indexing and GET performance and memory cleanup. No `.zfi` format change. **Re-i
 
 - **Get**
   - BED input uses one streaming path. The `--chunk-size` option and its all-memory `-1` mode are removed.
+  - Names and BED requests use reusable active storage instead of retaining complete inputs or command-lifetime BED names.
+  - Each invocation accepts one request source. Summary timing includes index loading and streamed request acquisition, and annotations describe the final composed orientation.
 
 - **Benchmarks**
   - The index report now compares the four product configurations directly: `.zfi` or `.fai`, each with deduplication on or off.

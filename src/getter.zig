@@ -54,27 +54,24 @@ pub const Orientation = struct {
 };
 
 pub const GetOptions = struct {
-    region_strs: []const []const u8,
-    bed_path: ?[]const u8 = null,
-    names_path: ?[]const u8 = null,
+    source: RequestSource,
     honor_strand: bool = false,
     summary: bool = false,
     orientation: Orientation = .{},
     annotate_transform: bool = false,
 };
 
-/// Maximum size for names input loaded fully into memory.
-pub const max_input_file_mib: usize = 512;
-pub const max_input_file_bytes: usize = max_input_file_mib * 1024 * 1024;
+pub const RequestSource = union(enum) {
+    positional: []const []const u8,
+    names: []const u8,
+    bed: []const u8,
+};
 
-comptime {
-    // Keep get help / README "512 MiB" wording synchronized with this constant.
-    if (max_input_file_mib != 512) {
-        @compileError("update get help and README for max_input_file_mib");
-    }
-}
-
-const BED_LINE_READER_BUFFER_BYTES = 4096;
+const MAX_REQUEST_NAME_BYTES = std.math.maxInt(u16);
+const REQUEST_LINE_READER_BUFFER_BYTES = MAX_REQUEST_NAME_BYTES + 4096;
+const ACTIVE_NAME_BYTES = 4 * 1024 * 1024;
+const MAX_ACTIVE_NAME_BYTES = ACTIVE_NAME_BYTES + MAX_REQUEST_NAME_BYTES;
+const NAMES_REQUEST_BATCH_SIZE = 65536;
 const BED_REQUEST_BATCH_SIZE = 4096;
 
 /// Per-region output cap for the multi-region sort buffer path (≥16 regions).
@@ -86,6 +83,55 @@ const max_sort_path_total_output_bytes: u64 = 256 * 1024 * 1024;
 const ParsedRequest = struct {
     region: Region,
     orientation: Orientation,
+
+    fn parsed(self: ParsedRequest, _: []const u8) ParsedRequest {
+        return self;
+    }
+};
+
+const OwnedRequest = struct {
+    name_offset: u32,
+    name_len: u16,
+    start: u64,
+    end: u64,
+    is_full: bool,
+    orientation: Orientation,
+
+    fn parsed(self: OwnedRequest, names: []const u8) ParsedRequest {
+        const name_offset: usize = self.name_offset;
+        const name_end = name_offset + self.name_len;
+        return .{
+            .region = .{
+                .name = names[name_offset..name_end],
+                .start = self.start,
+                .end = if (self.end == 0) null else self.end,
+                .is_full = self.is_full,
+            },
+            .orientation = self.orientation,
+        };
+    }
+};
+
+const RequestWorkspace = struct {
+    names: std.ArrayList(u8) = .empty,
+    requests: std.ArrayList(OwnedRequest) = .empty,
+    scratch: std.heap.ArenaAllocator,
+
+    fn init(allocator: std.mem.Allocator) RequestWorkspace {
+        return .{ .scratch = std.heap.ArenaAllocator.init(allocator) };
+    }
+
+    fn deinit(self: *RequestWorkspace, allocator: std.mem.Allocator) void {
+        self.names.deinit(allocator);
+        self.requests.deinit(allocator);
+        self.scratch.deinit();
+    }
+
+    fn clearRetainingCapacity(self: *RequestWorkspace) void {
+        self.names.clearRetainingCapacity();
+        self.requests.clearRetainingCapacity();
+        _ = self.scratch.reset(.retain_capacity);
+    }
 };
 
 const BatchStats = struct {
@@ -317,13 +363,14 @@ fn detectRecordType(rec: IndexRecord, fasta: []const u8) stats.SequenceType {
     return stats.detectType(&counts, total);
 }
 
-fn ensureComplementAllowed(idx: *const LoadedIndex, requests: []const ParsedRequest) void {
+fn ensureComplementAllowed(idx: *const LoadedIndex, request_entries: anytype, active_names: []const u8) void {
     var last_name: ?[]const u8 = null;
     var last_rec_idx: usize = 0;
     var last_checked_rec_idx: ?usize = null;
     var last_checked_type: stats.SequenceType = undefined;
 
-    for (requests) |request| {
+    for (request_entries) |entry| {
+        const request = entry.parsed(active_names);
         if (!request.orientation.complement) continue;
 
         const rec_idx = if (last_name) |name|
@@ -983,100 +1030,66 @@ fn shouldAdviseSequentialMmap(
     return sequential_scan;
 }
 
-fn readNamesInput(allocator: std.mem.Allocator, io: std.Io, path: []const u8) []u8 {
-    if (std.mem.eql(u8, path, "-")) {
-        var stdin_buf: [4096]u8 = undefined;
-        var reader = std.Io.File.stdin().reader(io, &stdin_buf);
-        return reader.interface.allocRemaining(allocator, .limited(max_input_file_bytes)) catch |err| switch (err) {
-            error.StreamTooLong => printErrorAndExit(
-                "error: --names stdin exceeds {d} MiB limit\n",
-                .{max_input_file_mib},
-            ),
-            else => printErrorAndExit("error: failed to read stdin\n", .{}),
-        };
-    }
+const OwnedName = struct {
+    offset: u32,
+    len: u16,
+};
 
-    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
-        error.FileNotFound => printErrorAndExit("error: file not found: {s}\n", .{path}),
-        error.AccessDenied => printErrorAndExit("error: access denied: {s}\n", .{path}),
-        else => printErrorAndExit("error: failed to open file: {s}\n", .{path}),
-    };
-    defer file.close(io);
-
-    const stat = file.stat(io) catch {
-        printErrorAndExit("error: failed to stat file: {s}\n", .{path});
-    };
-
-    if (stat.size > max_input_file_bytes) {
-        printErrorAndExit(
-            "error: names file exceeds {d} MiB limit: {s}\n",
-            .{ max_input_file_mib, path },
-        );
-    }
-
-    const bytes = allocator.alloc(u8, stat.size) catch {
-        printErrorAndExit("error: out of memory\n", .{});
-    };
-
-    var file_buf: [4096]u8 = undefined;
-    var reader = file.reader(io, &file_buf);
-    reader.interface.readSliceAll(bytes) catch {
-        printErrorAndExit("error: failed to read file: {s}\n", .{path});
-    };
-    return bytes;
-}
-
-fn appendBedRegionRequest(
-    requests: *std.ArrayList(ParsedRequest),
-    region: bed_parser.BedRegion,
-    honor_strand: bool,
-    global_orientation: Orientation,
+fn ownRequestName(
     allocator: std.mem.Allocator,
-    name_allocator: std.mem.Allocator,
-    duplicate_name: bool,
-    last_duplicated_name: ?*?[]const u8,
-) void {
-    if (honor_strand and region.strand == .invalid) {
-        printErrorAndExit("error: invalid BED line {d}: invalid strand\n", .{region.line_number});
+    workspace: *RequestWorkspace,
+    name: []const u8,
+) OwnedName {
+    if (workspace.requests.getLastOrNull()) |last| {
+        const offset: usize = last.name_offset;
+        const end = offset + last.name_len;
+        if (std.mem.eql(u8, workspace.names.items[offset..end], name)) {
+            return .{ .offset = last.name_offset, .len = last.name_len };
+        }
     }
 
-    const name = if (duplicate_name) blk: {
-        if (last_duplicated_name) |cached_name| {
-            if (cached_name.*) |existing| {
-                if (std.mem.eql(u8, existing, region.chrom)) break :blk existing;
-            }
-        }
-
-        const duplicated = name_allocator.dupe(u8, region.chrom) catch {
+    const offset = workspace.names.items.len;
+    const required_capacity = offset + name.len;
+    if (required_capacity > workspace.names.capacity) {
+        const doubled = @max(workspace.names.capacity, 4096) * 2;
+        const new_capacity = @min(MAX_ACTIVE_NAME_BYTES, @max(required_capacity, doubled));
+        workspace.names.ensureTotalCapacityPrecise(allocator, new_capacity) catch {
             printErrorAndExit("error: out of memory\n", .{});
         };
-        if (last_duplicated_name) |cached_name| cached_name.* = duplicated;
-        break :blk duplicated;
-    } else region.chrom;
+    }
+    workspace.names.appendSliceAssumeCapacity(name);
+    return .{ .offset = @intCast(offset), .len = @intCast(name.len) };
+}
 
-    requests.append(allocator, .{
-        .region = .{
-            .name = name,
-            .start = region.start1Based(),
-            .end = region.end1BasedInclusive(),
-            .is_full = false,
-        },
-        .orientation = (if (honor_strand and region.strand == .minus) Orientation.reverseComplement() else Orientation{}).compose(global_orientation),
+fn appendOwnedRequest(
+    allocator: std.mem.Allocator,
+    workspace: *RequestWorkspace,
+    name: []const u8,
+    start: u64,
+    end: u64,
+    is_full: bool,
+    orientation: Orientation,
+) void {
+    const owned_name = ownRequestName(allocator, workspace, name);
+    workspace.requests.append(allocator, .{
+        .name_offset = owned_name.offset,
+        .name_len = owned_name.len,
+        .start = start,
+        .end = end,
+        .is_full = is_full,
+        .orientation = orientation,
     }) catch {
         printErrorAndExit("error: out of memory\n", .{});
     };
 }
 
 fn appendBedLineRequest(
-    requests: *std.ArrayList(ParsedRequest),
+    allocator: std.mem.Allocator,
+    workspace: *RequestWorkspace,
     line: []const u8,
     line_number: usize,
     honor_strand: bool,
     global_orientation: Orientation,
-    allocator: std.mem.Allocator,
-    name_allocator: std.mem.Allocator,
-    duplicate_name: bool,
-    last_duplicated_name: ?*?[]const u8,
 ) void {
     const parsed = bed_parser.parseBedLine(line, line_number) catch |err| switch (err) {
         error.MissingChrom => printErrorAndExit("error: invalid BED line {d}: missing chrom\n", .{line_number}),
@@ -1089,28 +1102,45 @@ fn appendBedLineRequest(
 
     switch (parsed) {
         .skip => {},
-        .region => |region| appendBedRegionRequest(requests, region, honor_strand, global_orientation, allocator, name_allocator, duplicate_name, last_duplicated_name),
+        .region => |region| {
+            if (honor_strand and region.strand == .invalid) {
+                printErrorAndExit("error: invalid BED line {d}: invalid strand\n", .{line_number});
+            }
+            if (region.chrom.len > MAX_REQUEST_NAME_BYTES) {
+                printErrorAndExit(
+                    "error: invalid BED line {d}: chrom exceeds {d} bytes\n",
+                    .{ line_number, MAX_REQUEST_NAME_BYTES },
+                );
+            }
+            appendOwnedRequest(
+                allocator,
+                workspace,
+                region.chrom,
+                region.start1Based(),
+                region.end1BasedInclusive(),
+                false,
+                (if (honor_strand and region.strand == .minus) Orientation.reverseComplement() else Orientation{}).compose(global_orientation),
+            );
+        },
     }
 }
 
-fn appendNamesRequests(requests: *std.ArrayList(ParsedRequest), names_data: []const u8, orientation: Orientation, allocator: std.mem.Allocator) void {
-    var lines = std.mem.splitScalar(u8, names_data, '\n');
-    while (lines.next()) |line| {
-        const trimmed = if (line.len > 0 and line[line.len - 1] == '\r') line[0 .. line.len - 1] else line;
-        if (trimmed.len == 0 or trimmed[0] == '#') continue;
-
-        requests.append(allocator, .{
-            .region = .{
-                .name = trimmed,
-                .start = 1,
-                .end = null,
-                .is_full = true,
-            },
-            .orientation = orientation,
-        }) catch {
-            printErrorAndExit("error: out of memory\n", .{});
-        };
+fn appendNamesLine(
+    allocator: std.mem.Allocator,
+    workspace: *RequestWorkspace,
+    line: []const u8,
+    line_number: usize,
+    orientation: Orientation,
+) void {
+    const name = if (line.len > 0 and line[line.len - 1] == '\r') line[0 .. line.len - 1] else line;
+    if (name.len == 0 or name[0] == '#') return;
+    if (name.len > MAX_REQUEST_NAME_BYTES) {
+        printErrorAndExit(
+            "error: name at line {d} exceeds {d} bytes\n",
+            .{ line_number, MAX_REQUEST_NAME_BYTES },
+        );
     }
+    appendOwnedRequest(allocator, workspace, name, 1, 0, true, orientation);
 }
 
 fn appendCliRequests(requests: *std.ArrayList(ParsedRequest), region_strs: []const []const u8, orientation: Orientation, allocator: std.mem.Allocator) void {
@@ -1134,26 +1164,28 @@ fn writeSummary(writer: *std.Io.Writer, region_count: usize, total_bases: u64, e
 fn processParsedRequests(
     idx: *index_format.LoadedIndex,
     allocator: std.mem.Allocator,
-    requests: []const ParsedRequest,
+    request_entries: anytype,
+    active_names: []const u8,
     annotate_transform: bool,
     writer: anytype,
     allow_sequential_madvise: bool,
     sparse: ?SparseFastaSource,
 ) BatchStats {
-    if (requests.len == 0) return .{};
+    if (request_entries.len == 0) return .{};
 
-    ensureComplementAllowed(idx, requests);
+    ensureComplementAllowed(idx, request_entries, active_names);
 
-    const resolved = allocator.alloc(ResolvedRegion, requests.len) catch {
+    const resolved = allocator.alloc(ResolvedRegion, request_entries.len) catch {
         printErrorAndExit("error: out of memory\n", .{});
     };
     defer allocator.free(resolved);
-    var already_in_offset_order = requests.len >= 16;
+    var already_in_offset_order = request_entries.len >= 16;
     var prev_start_byte: u64 = 0;
 
     var last_name: ?[]const u8 = null;
     var last_rec_idx: usize = 0;
-    for (requests, 0..) |request, i| {
+    for (request_entries, 0..) |entry, i| {
+        const request = entry.parsed(active_names);
         const rec_idx = if (last_name) |name|
             if (std.mem.eql(u8, name, request.region.name))
                 last_rec_idx
@@ -1178,7 +1210,7 @@ fn processParsedRequests(
         }
     }
 
-    const dense_sort = if (requests.len >= 16)
+    const dense_sort = if (request_entries.len >= 16)
         shouldSortByFileOffset(idx, allocator, resolved) catch {
             printErrorAndExit("error: out of memory\n", .{});
         }
@@ -1191,13 +1223,13 @@ fn processParsedRequests(
     const use_sort_buffers = release_sorted and !already_in_offset_order and shouldUseSortBuffers(resolved);
     const sequential_scan = dense_sort and (already_in_offset_order or use_sort_buffers);
     const sequential_mmap = shouldAdviseSequentialMmap(
-        requests.len,
+        request_entries.len,
         sequential_scan,
         batchHasReverseReads(resolved),
         allow_sequential_madvise,
     );
     // Sparse large-FASTA uses positional reads below; MADV on a 3 GiB map is wasted.
-    const use_positional = !release_sorted and requests.len >= 16 and
+    const use_positional = !release_sorted and request_entries.len >= 16 and
         idx.fasta_size >= sort_by_offset_min_fasta_bytes and sparse != null;
     if (!use_positional) {
         const mmap_advice: platform.Advice = if (sequential_mmap) .sequential else .random;
@@ -1206,7 +1238,7 @@ fn processParsedRequests(
 
     var total_bases: u64 = 0;
 
-    if (requests.len < 16) {
+    if (request_entries.len < 16) {
         for (resolved) |r| {
             total_bases += r.num_bases;
             emitRegionAndRelease(r, idx.fasta_data, writer);
@@ -1257,10 +1289,10 @@ fn processParsedRequests(
         storage.ensureTotalCapacity(total_out) catch {
             printErrorAndExit("error: out of memory\n", .{});
         };
-        const starts = sort_allocator.alloc(usize, requests.len) catch {
+        const starts = sort_allocator.alloc(usize, request_entries.len) catch {
             printErrorAndExit("error: out of memory\n", .{});
         };
-        const lens = sort_allocator.alloc(usize, requests.len) catch {
+        const lens = sort_allocator.alloc(usize, request_entries.len) catch {
             printErrorAndExit("error: out of memory\n", .{});
         };
 
@@ -1282,16 +1314,25 @@ fn processParsedRequests(
     }
 
     return .{
-        .region_count = requests.len,
+        .region_count = request_entries.len,
         .total_bases = total_bases,
     };
 }
 
-fn processBedReader(
+const StreamRequestSource = union(enum) {
+    names: Orientation,
+    bed: struct {
+        honor_strand: bool,
+        global_orientation: Orientation,
+    },
+};
+
+fn processRequestReader(
+    allocator: std.mem.Allocator,
     idx: *LoadedIndex,
     reader: *std.Io.Reader,
-    honor_strand: bool,
-    global_orientation: Orientation,
+    source: StreamRequestSource,
+    name_reservation: usize,
     annotate_transform: bool,
     writer: anytype,
     sparse: ?SparseFastaSource,
@@ -1299,24 +1340,39 @@ fn processBedReader(
     var total = BatchStats{};
     var line_number: usize = 0;
     var reached_end = false;
-    var name_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer name_arena.deinit();
-    var last_duplicated_name: ?[]const u8 = null;
-    var request_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer request_arena.deinit();
+    var workspace = RequestWorkspace.init(allocator);
+    defer workspace.deinit(allocator);
+
+    const request_limit: usize = switch (source) {
+        .names => NAMES_REQUEST_BATCH_SIZE,
+        .bed => BED_REQUEST_BATCH_SIZE,
+    };
+    workspace.requests.ensureTotalCapacityPrecise(allocator, request_limit) catch {
+        printErrorAndExit("error: out of memory\n", .{});
+    };
+    if (name_reservation > 0) {
+        workspace.names.ensureTotalCapacityPrecise(allocator, name_reservation) catch {
+            printErrorAndExit("error: out of memory\n", .{});
+        };
+    }
 
     while (true) {
-        const request_allocator = request_arena.allocator();
-
-        var requests = std.ArrayList(ParsedRequest).empty;
-
-        while (requests.items.len < BED_REQUEST_BATCH_SIZE) {
+        while (workspace.requests.items.len < request_limit and workspace.names.items.len < ACTIVE_NAME_BYTES) {
             const maybe_line = reader.takeDelimiter('\n') catch |err| switch (err) {
-                error.ReadFailed => printErrorAndExit("error: failed to read BED input\n", .{}),
-                error.StreamTooLong => printErrorAndExit(
-                    "error: BED line {d} exceeds {d}-byte reader buffer (no newline within limit)\n",
-                    .{ line_number + 1, BED_LINE_READER_BUFFER_BYTES },
-                ),
+                error.ReadFailed => switch (source) {
+                    .names => printErrorAndExit("error: failed to read names input\n", .{}),
+                    .bed => printErrorAndExit("error: failed to read BED input\n", .{}),
+                },
+                error.StreamTooLong => switch (source) {
+                    .names => printErrorAndExit(
+                        "error: name at line {d} exceeds {d} bytes\n",
+                        .{ line_number + 1, MAX_REQUEST_NAME_BYTES },
+                    ),
+                    .bed => printErrorAndExit(
+                        "error: BED line {d} exceeds {d}-byte reader buffer (no newline within limit)\n",
+                        .{ line_number + 1, REQUEST_LINE_READER_BUFFER_BYTES },
+                    ),
+                },
             };
 
             const line = maybe_line orelse {
@@ -1325,45 +1381,55 @@ fn processBedReader(
             };
 
             line_number += 1;
-            appendBedLineRequest(&requests, line, line_number, honor_strand, global_orientation, request_allocator, name_arena.allocator(), true, &last_duplicated_name);
+            switch (source) {
+                .names => |orientation| appendNamesLine(allocator, &workspace, line, line_number, orientation),
+                .bed => |bed| appendBedLineRequest(allocator, &workspace, line, line_number, bed.honor_strand, bed.global_orientation),
+            }
         }
 
-        if (requests.items.len == 0) {
-            break;
-        }
+        if (workspace.requests.items.len == 0) break;
 
-        const batch = processParsedRequests(idx, request_allocator, requests.items, annotate_transform, writer, false, sparse);
+        const batch = processParsedRequests(
+            idx,
+            workspace.scratch.allocator(),
+            workspace.requests.items,
+            workspace.names.items,
+            annotate_transform,
+            writer,
+            source == .names,
+            sparse,
+        );
         total.region_count += batch.region_count;
         total.total_bases += batch.total_bases;
 
-        _ = request_arena.reset(.retain_capacity);
+        workspace.clearRetainingCapacity();
 
         if (reached_end) break;
     }
 
     // Full-map DONTNEED only when the mmap was the read path. Positional sparse
     // BED never faulted those pages; a 3 GiB madvise is pure wall cost.
-    if (idx.fasta_size > sparse_large_fasta_bytes and sparse == null) {
+    if (source == .bed and idx.fasta_size > sparse_large_fasta_bytes and sparse == null) {
         index_format.dropFastaSpan(idx.fasta_data, 0, idx.fasta_data.len);
     }
 
     return total;
 }
 
-fn processBedPath(
+fn processRequestPath(
+    allocator: std.mem.Allocator,
     io: std.Io,
     idx: *LoadedIndex,
     path: []const u8,
-    honor_strand: bool,
-    global_orientation: Orientation,
+    source: StreamRequestSource,
     annotate_transform: bool,
     writer: anytype,
     sparse: ?SparseFastaSource,
 ) BatchStats {
     if (std.mem.eql(u8, path, "-")) {
-        var stdin_buf: [BED_LINE_READER_BUFFER_BYTES]u8 = undefined;
+        var stdin_buf: [REQUEST_LINE_READER_BUFFER_BYTES]u8 = undefined;
         var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buf);
-        return processBedReader(idx, &stdin_reader.interface, honor_strand, global_orientation, annotate_transform, writer, sparse);
+        return processRequestReader(allocator, idx, &stdin_reader.interface, source, 0, annotate_transform, writer, sparse);
     }
 
     const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
@@ -1373,9 +1439,17 @@ fn processBedPath(
     };
     defer file.close(io);
 
-    var file_buf: [BED_LINE_READER_BUFFER_BYTES]u8 = undefined;
+    const name_reservation: usize = switch (source) {
+        .names => blk: {
+            const stat = file.stat(io) catch break :blk 0;
+            break :blk @intCast(@min(stat.size, MAX_ACTIVE_NAME_BYTES));
+        },
+        .bed => 0,
+    };
+
+    var file_buf: [REQUEST_LINE_READER_BUFFER_BYTES]u8 = undefined;
     var file_reader = file.reader(io, &file_buf);
-    return processBedReader(idx, &file_reader.interface, honor_strand, global_orientation, annotate_transform, writer, sparse);
+    return processRequestReader(allocator, idx, &file_reader.interface, source, name_reservation, annotate_transform, writer, sparse);
 }
 
 // ============================================================================
@@ -1383,6 +1457,8 @@ fn processBedPath(
 // ============================================================================
 
 pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions) void {
+    const start_ns = if (options.summary) monotonicNs(io) else 0;
+
     var input_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer input_arena.deinit();
     const allocator = input_arena.allocator();
@@ -1390,18 +1466,12 @@ pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions
     var requests = std.ArrayList(ParsedRequest).empty;
     defer requests.deinit(allocator);
 
-    if (options.names_path) |names_path| {
-        const names_data = readNamesInput(allocator, io, names_path);
-        appendNamesRequests(&requests, names_data, options.orientation, allocator);
-    }
-
-    appendCliRequests(&requests, options.region_strs, options.orientation, allocator);
-
-    const start_ns = if (options.summary) monotonicNs(io) else 0;
-
     // Single positional requests skip the name map.
     // Multi-request, names, and BED paths load it once.
-    const load_mode: index_format.LoadMode = if (options.bed_path != null or options.names_path != null or requests.items.len > 1) .lookup_full_map else .records_only;
+    const load_mode: index_format.LoadMode = switch (options.source) {
+        .positional => |region_strs| if (region_strs.len > 1) .lookup_full_map else .records_only,
+        .names, .bed => .lookup_full_map,
+    };
     var idx = index_format.loadIndexWithMode(io, fasta_path, load_mode);
     defer idx.deinit(io);
 
@@ -1416,16 +1486,44 @@ pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions
 
     var totals = BatchStats{};
 
-    if (options.bed_path) |bed_path| {
-        const batch = processBedPath(io, &idx, bed_path, options.honor_strand, options.orientation, options.annotate_transform, writer, sparse);
-        totals.region_count += batch.region_count;
-        totals.total_bases += batch.total_bases;
-    }
-
-    if (requests.items.len > 0) {
-        const batch = processParsedRequests(&idx, allocator, requests.items, options.annotate_transform, writer, true, sparse);
-        totals.region_count += batch.region_count;
-        totals.total_bases += batch.total_bases;
+    switch (options.source) {
+        .positional => |region_strs| {
+            appendCliRequests(&requests, region_strs, options.orientation, allocator);
+            const batch = processParsedRequests(&idx, allocator, requests.items, &.{}, options.annotate_transform, writer, true, sparse);
+            totals.region_count += batch.region_count;
+            totals.total_bases += batch.total_bases;
+        },
+        .names => |path| {
+            const batch = processRequestPath(
+                std.heap.page_allocator,
+                io,
+                &idx,
+                path,
+                .{ .names = options.orientation },
+                options.annotate_transform,
+                writer,
+                sparse,
+            );
+            totals.region_count += batch.region_count;
+            totals.total_bases += batch.total_bases;
+        },
+        .bed => |path| {
+            const batch = processRequestPath(
+                std.heap.page_allocator,
+                io,
+                &idx,
+                path,
+                .{ .bed = .{
+                    .honor_strand = options.honor_strand,
+                    .global_orientation = options.orientation,
+                } },
+                options.annotate_transform,
+                writer,
+                sparse,
+            );
+            totals.region_count += batch.region_count;
+            totals.total_bases += batch.total_bases;
+        },
     }
 
     if (totals.region_count == 0) {
@@ -1455,22 +1553,125 @@ test "summary writing fails when the destination is full" {
     try std.testing.expectError(error.WriteFailed, writeSummary(&writer, 1, 1, 1));
 }
 
-test "processBedReader streams BED rows in source order" {
+test "request workspace reuses consecutive names" {
+    var workspace = RequestWorkspace.init(std.testing.allocator);
+    defer workspace.deinit(std.testing.allocator);
+
+    appendNamesLine(std.testing.allocator, &workspace, "seq1", 1, .{});
+    appendNamesLine(std.testing.allocator, &workspace, "seq1", 2, .{});
+    appendNamesLine(std.testing.allocator, &workspace, "seq2", 3, .{});
+
+    try std.testing.expectEqualStrings("seq1seq2", workspace.names.items);
+    try std.testing.expectEqual(@as(usize, 3), workspace.requests.items.len);
+    try std.testing.expectEqualStrings("seq1", workspace.requests.items[0].parsed(workspace.names.items).region.name);
+    try std.testing.expectEqualStrings("seq1", workspace.requests.items[1].parsed(workspace.names.items).region.name);
+    try std.testing.expectEqualStrings("seq2", workspace.requests.items[2].parsed(workspace.names.items).region.name);
+}
+
+test "request workspace includes the name that crosses its byte target" {
+    var workspace = RequestWorkspace.init(std.testing.allocator);
+    defer workspace.deinit(std.testing.allocator);
+    const name = try std.testing.allocator.alloc(u8, MAX_REQUEST_NAME_BYTES);
+    defer std.testing.allocator.free(name);
+    @memset(name, 'A');
+
+    for (0..64) |i| {
+        name[0] = if (i % 2 == 0) 'A' else 'B';
+        appendNamesLine(std.testing.allocator, &workspace, name, i + 1, .{});
+    }
+    try std.testing.expect(workspace.names.items.len < ACTIVE_NAME_BYTES);
+
+    name[0] = 'A';
+    appendNamesLine(std.testing.allocator, &workspace, name, 65, .{});
+
+    try std.testing.expect(workspace.names.items.len >= ACTIVE_NAME_BYTES);
+    try std.testing.expect(workspace.names.items.len <= MAX_ACTIVE_NAME_BYTES);
+    try std.testing.expect(workspace.names.capacity <= MAX_ACTIVE_NAME_BYTES);
+}
+
+test "processRequestReader handles names line endings and final line" {
+    const test_io = std.testing.io;
+    var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
+    defer idx.deinit(test_io);
+    var reader = std.Io.Reader.fixed("# comment\r\n\r\nseq2\r\nseq1\nseq2");
+    var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer writer.deinit();
+
+    const result = processRequestReader(
+        std.testing.allocator,
+        &idx,
+        &reader,
+        .{ .names = .{} },
+        0,
+        false,
+        &writer.writer,
+        null,
+    );
+
+    try std.testing.expectEqual(@as(usize, 3), result.region_count);
+    try std.testing.expectEqual(@as(u64, 60), result.total_bases);
+    try std.testing.expectEqualStrings(
+        ">seq2\nGGGGCCCCAAAA\n>seq1\nACGTACGTACGTACGTACGTACGT\n>seq2\nGGGGCCCCAAAA\n",
+        writer.written(),
+    );
+}
+
+test "processRequestReader resets names at the request-count boundary" {
+    const test_io = std.testing.io;
+    var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
+    defer idx.deinit(test_io);
+    var names = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer names.deinit();
+    const request_count = NAMES_REQUEST_BATCH_SIZE + 1;
+    for (0..request_count) |_| try names.writer.writeAll("seq1\n");
+    var reader = std.Io.Reader.fixed(names.written());
+    var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer writer.deinit();
+
+    const result = processRequestReader(
+        std.testing.allocator,
+        &idx,
+        &reader,
+        .{ .names = .{} },
+        0,
+        false,
+        &writer.writer,
+        null,
+    );
+
+    const one_output = ">seq1\nACGTACGTACGTACGTACGTACGT\n";
+    try std.testing.expectEqual(request_count, result.region_count);
+    try std.testing.expectEqual(@as(u64, request_count * 24), result.total_bases);
+    try std.testing.expectEqual(one_output.len * request_count, writer.written().len);
+    try std.testing.expectEqualStrings(one_output, writer.written()[0..one_output.len]);
+    try std.testing.expectEqualStrings(one_output, writer.written()[writer.written().len - one_output.len ..]);
+}
+
+test "processRequestReader streams BED rows in source order" {
     const test_io = std.testing.io;
     var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
     defer idx.deinit(test_io);
 
     const bed_data =
-        "# comment\n" ++
-        "seq2\t0\t4\n" ++
+        "# comment\r\n" ++
+        "seq2\t0\t4\r\n" ++
         "seq1\t0\t4\n" ++
-        "seq1\t4\t8\n";
+        "seq1\t4\t8";
 
     var reader = std.Io.Reader.fixed(bed_data);
     var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer writer.deinit();
 
-    const result = processBedReader(&idx, &reader, false, .{}, false, &writer.writer, null);
+    const result = processRequestReader(
+        std.testing.allocator,
+        &idx,
+        &reader,
+        .{ .bed = .{ .honor_strand = false, .global_orientation = .{} } },
+        0,
+        false,
+        &writer.writer,
+        null,
+    );
 
     try std.testing.expectEqual(@as(usize, 3), result.region_count);
     try std.testing.expectEqual(@as(u64, 12), result.total_bases);
@@ -1480,7 +1681,7 @@ test "processBedReader streams BED rows in source order" {
     );
 }
 
-test "processBedReader preserves output at request workspace boundaries" {
+test "processRequestReader preserves output at BED request boundaries" {
     const test_io = std.testing.io;
     var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
     defer idx.deinit(test_io);
@@ -1509,7 +1710,16 @@ test "processBedReader preserves output at request workspace boundaries" {
         var reader = std.Io.Reader.fixed(bed.written());
         var output = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer output.deinit();
-        const result = processBedReader(&idx, &reader, true, .{}, false, &output.writer, null);
+        const result = processRequestReader(
+            std.testing.allocator,
+            &idx,
+            &reader,
+            .{ .bed = .{ .honor_strand = true, .global_orientation = .{} } },
+            0,
+            false,
+            &output.writer,
+            null,
+        );
 
         const expected_bases: u64 = count + @as(usize, @intFromBool(count > BED_REQUEST_BATCH_SIZE)) * 4;
         try std.testing.expectEqual(count, result.region_count);
@@ -1620,7 +1830,7 @@ test "processParsedRequests applies complement-only and reverse-only transforms"
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const batch = processParsedRequests(&idx, arena.allocator(), &requests, true, &writer.writer, true, null);
+    const batch = processParsedRequests(&idx, arena.allocator(), &requests, &.{}, true, &writer.writer, true, null);
 
     try std.testing.expectEqual(@as(usize, 2), batch.region_count);
     try std.testing.expectEqualStrings(

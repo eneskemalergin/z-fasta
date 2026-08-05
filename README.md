@@ -69,13 +69,12 @@ Options:
 ### Get (sequence extraction)
 
 ```bash
-z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt]
-            [--strand-aware] [--summary]
-            [--rc|--complement-only|--reverse-only] [--annotate-rc]
-            <region> [region ...]
+z-fasta get <file.fasta> [options] <region> [region ...]
+z-fasta get <file.fasta> [options] --names file.txt|-
+z-fasta get <file.fasta> [options] --bed file.bed|- [--strand-aware]
 ```
 
-Extract one or more sequences or sub-regions from an indexed FASTA. Positional output is **byte-identical** to `samtools faidx` on the verified path. BED and names flows are checked against `bedtools getfasta` and `samtools faidx -r`. Multiple regions load the index once and stream in CLI order. BED rows and names-file entries are appended in source order ahead of later positional arguments.
+Extract one or more sequences or sub-regions from an indexed FASTA. Choose exactly one request source: positional regions, `--names`, or `--bed`. Positional output is **byte-identical** to `samtools faidx` on the verified path. BED and names flows are checked against `bedtools getfasta` and `samtools faidx -r`. Every source preserves its request order.
 
 Requires an index. A present `.zfi` is authoritative, including when it is invalid. `.fai` is used only when `.zfi` is absent. Messy (non-uniform) records need a side-table `.zfi`; a plain `.fai` cannot describe them.
 
@@ -84,16 +83,15 @@ Requires an index. A present `.zfi` is authoritative, including when it is inval
 **GET flags:**
 
 - **`--bed file.bed`** / **`--bed -`**: BED regions from a file or stdin. Coordinates are 0-based half-open; z-fasta converts to 1-based inclusive internally.
-- **`--names file.txt`**: one full-sequence name per line for long batch lists.
-- **`--strand-aware`** (alias **`--honor-strand`**): read BED column 6; `-` applies reverse-complement before any global orientation flag.
+- **`--names file.txt`** / **`--names -`**: one literal full-sequence name per line from a file or stdin. Blank and comment lines are skipped.
+- **`--strand-aware`** (alias **`--honor-strand`**): BED only. Read column 6; `-` applies reverse-complement before any global orientation flag.
 - **`--rc`**: reverse-complement output. Verified against `samtools faidx -i --mark-strand no`. Mutually exclusive with **`--complement-only`** and **`--reverse-only`**.
 - **`--complement-only`**: complement without reverse. Nucleotide records only.
 - **`--reverse-only`**: reverse without complement.
-- **`--annotate-rc`**: append a transform suffix to headers (for example `(reverse complement)`). Default output stays samtools-style.
-- **`--summary`**: print region count, total bases, elapsed time, and regions/sec to stderr.
-- **`--names`**: always loads the whole names file into memory, capped at 512 MiB.
+- **`--annotate-rc`**: append the final composed orientation to transformed headers. It requires a global transform or strand-aware BED input. Identity output has no suffix.
+- **`--summary`**: print region count, total bases, elapsed time, and regions/sec to stderr after successful output. Timing includes index loading and request acquisition.
 
-Positional CLI regions are capped at **1024** per invocation (`error: too many regions`). BED input has no row-count or whole-input size cap. **`--names`** line count is not capped, but the input remains limited to 512 MiB.
+Positional CLI regions are capped at **1024** per invocation (`error: too many regions`). Names and BED input have no row-count or whole-input size cap. Both stream through reusable request storage instead of retaining the complete input.
 
 Complement-based transforms error on protein FASTA so **`--rc`** and **`--complement-only`** stay nucleotide-only. That guard samples up to the first **256** bases of each requested record.
 
@@ -197,7 +195,7 @@ Duplicate _names_ are not the same as identical _sequence contents_. Default `in
 
 **Names:** index hard-rejects sequence names longer than 65535 bytes. Empty identifiers are valid but difficult to address and should be avoided. An explicit empty positional argument retrieves one; blank names-file lines stay skipped and BED requires a non-empty chromosome. `validate --max-header-len` warns above N bytes (default 1024) and does not raise that index limit.
 
-**Get / validate caps:** at most 1024 positional regions per `get` call. `--names` loads the whole file (max 512 MiB). BED streams without a row-count cap. `validate` stops after 10000 retained events.
+**Get / validate caps:** at most 1024 positional regions per `get` call. Names and BED request names may be at most 65535 bytes. Streaming request storage retains up to 4 MiB of unique name bytes plus one final name per batch; names batches hold at most 65536 requests and BED batches at most 4096. `validate` stops after 10000 retained events.
 
 **Memory:** index reads sequence payload through a bounded buffer. Get, stats, and validate retain mapped FASTA paths, so their RSS can approach the mapped file size. `stats --index-only` skips the sequence scan. Dense BED releases mapped pages behind the cursor; sparse gets on large FASTAs prefer positional reads.
 
@@ -255,7 +253,7 @@ See the [detailed index benchmark report](bench/index/REPORT.md) for tool defini
 ### Correctness
 
 - **Index:** `bench/index/run.sh` edge cases **24/24 matching cases plus one `binary_data` review**; messy layouts from `python3 bench/shared/generate_messy.py` into `bench/shared/cache/messy_fixtures/` (correctness) and `messy_perf/` (proteome perf).
-- **Get:** `bench/get/run.sh` correctness **409/409** (positional, multi-region, BED, names, RC, messy) against samtools, bedtools, and seqtk where applicable.
+- **Get:** `bench/get/run.sh` correctness **418/418** (positional, multi-region, BED, names, RC, messy) against samtools, bedtools, and seqtk where applicable.
 - **Stats:** `bench/stats/run.sh` correctness **89/89** (BioPython oracle, index formats, layout twins, messy fixtures, duplicates policy, peer parity).
 - **Unit tests:** `./zig build test` (index, get, stats, complement, BED parser, validator).
 - **Messy FASTA:** z-fasta indexes and extracts mixed-width and trailing-whitespace FASTA that samtools-style FAI tools reject. Details: [bench/index/REPORT.md](bench/index/REPORT.md).

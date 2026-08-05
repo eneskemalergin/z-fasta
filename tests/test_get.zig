@@ -500,7 +500,7 @@ fn expectCliSuccess(allocator: std.mem.Allocator, argv: []const []const u8, expe
 
     const result = try std.process.run(allocator, threaded.io(), .{
         .argv = argv,
-        .stdout_limit = .limited(64 * 1024),
+        .stdout_limit = .limited(128 * 1024),
         .stderr_limit = .limited(64 * 1024),
     });
     defer allocator.free(result.stdout);
@@ -555,7 +555,7 @@ fn expectUnknownOptionRejected(allocator: std.mem.Allocator, argv: []const []con
     try expectCliFailure(allocator, argv, 1, expected);
 }
 
-test "get help describes the single BED path" {
+test "get help describes the request source contract" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -576,38 +576,14 @@ test "get help describes the single BED path" {
     }
     try std.testing.expectEqual(@as(usize, 0), result.stderr.len);
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "--chunk-size") == null);
-    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "BED input streams.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Choose exactly one request source") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Names and BED input stream.") != null);
 }
 
 const get_usage_stderr =
-    \\error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--strand-aware] [--summary] [--rc|--complement-only|--reverse-only] [--annotate-rc] <region> [region ...]
+    \\error: usage: z-fasta get <file.fasta> (<region>... | --names file.txt|- | --bed file.bed|-)
     \\
 ;
-
-test "--names rejects file over max_input_file_bytes with clear error" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const names_path = try uniqueArtifactPath(allocator, "names-oversize", "txt");
-    defer std.Io.Dir.cwd().deleteFile(io, names_path) catch {};
-
-    const names_file = try std.Io.Dir.cwd().createFile(io, names_path, .{});
-    try names_file.setLength(io, main.getter.max_input_file_bytes + 1);
-    names_file.close(io);
-
-    const expected = try std.fmt.allocPrint(
-        allocator,
-        "error: names file exceeds {d} MiB limit: {s}\n",
-        .{ main.getter.max_input_file_mib, names_path },
-    );
-    try expectCliFailure(
-        allocator,
-        &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", names_path },
-        1,
-        expected,
-    );
-}
 
 test "index rejects unknown options before and after FASTA path" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -634,6 +610,119 @@ test "get rejects unknown options before, between, and after positionals" {
     try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "get", fasta, "seq1", unknown }, unknown);
     try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "get", fasta, "--chunk-size", "1", "seq1" }, "--chunk-size");
     try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "get", fasta, "--bed", "tests/data/simple.bed", "--chunk-size=-1" }, "--chunk-size=-1");
+}
+
+test "get rejects repeated request source flags" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const fasta = "tests/data/simple.fasta";
+
+    try expectCliFailure(
+        allocator,
+        &.{ ZFASTA_BIN, "get", fasta, "--bed", "first.bed", "--bed", "second.bed" },
+        1,
+        "error: --bed may be specified only once\n",
+    );
+    try expectCliFailure(
+        allocator,
+        &.{ ZFASTA_BIN, "get", fasta, "--names", "first.txt", "--names", "second.txt" },
+        1,
+        "error: --names may be specified only once\n",
+    );
+}
+
+test "get rejects mixed request source families" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const fasta = "tests/data/simple.fasta";
+    const expected = "error: choose one request source: positional regions, --names, or --bed\n";
+
+    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", fasta, "seq1", "--names", "ids.txt" }, 1, expected);
+    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", fasta, "seq1", "--bed", "regions.bed" }, 1, expected);
+    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", fasta, "--names", "ids.txt", "--bed", "regions.bed" }, 1, expected);
+}
+
+test "get rejects strand handling outside BED input" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const fasta = "tests/data/simple.fasta";
+    const expected = "error: --strand-aware requires --bed\n";
+
+    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", fasta, "seq1", "--strand-aware" }, 1, expected);
+    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", fasta, "--names", "ids.txt", "--honor-strand" }, 1, expected);
+}
+
+test "names accepts the index name-length boundary in both formats" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const name = try allocator.alloc(u8, main.indexer.max_index_name_len);
+    @memset(name, 'A');
+    var fasta = std.ArrayList(u8).empty;
+    try fasta.ensureTotalCapacity(allocator, name.len + 4);
+    try fasta.append(allocator, '>');
+    try fasta.appendSlice(allocator, name);
+    try fasta.appendSlice(allocator, "\nA\n");
+    const names_path = try uniqueArtifactPath(allocator, "names-max", "txt");
+    defer std.Io.Dir.cwd().deleteFile(io, names_path) catch {};
+    {
+        const names_file = try std.Io.Dir.cwd().createFile(io, names_path, .{});
+        defer names_file.close(io);
+        try std.Io.File.writeStreamingAll(names_file, io, name);
+        try std.Io.File.writeStreamingAll(names_file, io, "\r\n");
+    }
+    var expected = std.ArrayList(u8).empty;
+    try expected.ensureTotalCapacity(allocator, name.len + 5);
+    try expected.append(allocator, '>');
+    try expected.appendSlice(allocator, name);
+    try expected.appendSlice(allocator, "\nA\n");
+
+    const zfi_fasta = try writeFastaArtifact(allocator, "names-max-zfi", fasta.items);
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{zfi_fasta});
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_fasta) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+    try writeZfi(allocator, zfi_fasta, fasta.items, true);
+
+    const fai_fasta = try writeFastaArtifact(allocator, "names-max-fai", fasta.items);
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fai_fasta});
+    defer std.Io.Dir.cwd().deleteFile(io, fai_fasta) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+    {
+        const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{});
+        defer fai_file.close(io);
+        var buf: [128]u8 = undefined;
+        const fields = try std.fmt.bufPrint(&buf, "\t1\t{d}\t1\t2\n", .{name.len + 2});
+        try std.Io.File.writeStreamingAll(fai_file, io, name);
+        try std.Io.File.writeStreamingAll(fai_file, io, fields);
+    }
+
+    try expectCliSuccess(allocator, &.{ ZFASTA_BIN, "get", zfi_fasta, "--names", names_path }, expected.items);
+    try expectCliSuccess(allocator, &.{ ZFASTA_BIN, "get", fai_fasta, "--names", names_path }, expected.items);
+}
+
+test "names rejects a request name above the index limit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const names_path = try uniqueArtifactPath(allocator, "names-too-long", "txt");
+    defer std.Io.Dir.cwd().deleteFile(io, names_path) catch {};
+    const names_file = try std.Io.Dir.cwd().createFile(io, names_path, .{});
+    const name = try allocator.alloc(u8, main.indexer.max_index_name_len + 1);
+    @memset(name, 'A');
+    try std.Io.File.writeStreamingAll(names_file, io, name);
+    names_file.close(io);
+
+    try expectCliFailure(
+        allocator,
+        &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", names_path },
+        1,
+        "error: name at line 1 exceeds 65535 bytes\n",
+    );
 }
 
 test "stats rejects unknown options before and after FASTA path" {
@@ -681,6 +770,25 @@ test "CLI failures: missing FASTA path is exit 1 with exact stderr" {
     try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", missing, "seq1" }, 1, expected);
 }
 
+test "get validates FASTA and sidecar before opening a request source" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try expectCliFailure(
+        allocator,
+        &.{ ZFASTA_BIN, "get", "tests/data/definitely-missing-source-order.fasta", "--names", "also-missing.txt" },
+        1,
+        "error: file not found: tests/data/definitely-missing-source-order.fasta\n",
+    );
+    try expectCliFailure(
+        allocator,
+        &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", "tests/data/also-missing.txt" },
+        1,
+        "error: file not found: tests/data/also-missing.txt\n",
+    );
+}
+
 test "CLI failures: invalid present zfi blocks valid fai for get and stats" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -706,7 +814,61 @@ test "CLI failures: invalid present zfi blocks valid fai for get and stats" {
 
     const expected = try std.fmt.allocPrint(allocator, "error: corrupt index file for: {s}\n", .{fasta});
     try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", fasta, "seq" }, 1, expected);
+    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", fasta, "--names", "missing.txt" }, 1, expected);
     try expectCliFailure(allocator, &.{ ZFASTA_BIN, "stats", "--index-only", fasta }, 1, expected);
+}
+
+test "streamed names failures suppress summary and expose only valid output prefixes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const early_path = try uniqueArtifactPath(allocator, "names-early-failure", "txt");
+    const late_path = try uniqueArtifactPath(allocator, "names-late-failure", "txt");
+    defer std.Io.Dir.cwd().deleteFile(io, early_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, late_path) catch {};
+    {
+        const file = try std.Io.Dir.cwd().createFile(io, early_path, .{});
+        defer file.close(io);
+        try std.Io.File.writeStreamingAll(file, io, "missing\nseq1\n");
+    }
+    var late_names = std.ArrayList(u8).empty;
+    try late_names.ensureTotalCapacity(allocator, 5 * (65536 + 1) + 3);
+    for (0..65536) |_| try late_names.appendSlice(allocator, "seq1\n");
+    try late_names.appendSlice(allocator, "missing\n");
+    {
+        const file = try std.Io.Dir.cwd().createFile(io, late_path, .{});
+        defer file.close(io);
+        try std.Io.File.writeStreamingAll(file, io, late_names.items);
+    }
+
+    try expectCliFailure(
+        allocator,
+        &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", early_path, "--summary" },
+        1,
+        "error: sequence not found: missing\n",
+    );
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const result = try std.process.run(allocator, threaded.io(), .{
+        .argv = &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", late_path, "--summary" },
+        .stdout_limit = .limited(4 * 1024 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 1), code),
+        else => return error.ChildProcessFailed,
+    }
+    try std.testing.expect(result.stdout.len > 0);
+    try std.testing.expectEqualStrings("error: sequence not found: missing\n", result.stderr);
+    const one_output = ">seq1\nACGTACGTACGTACGTACGTACGT\n";
+    for (result.stdout, 0..) |byte, i| {
+        try std.testing.expectEqual(one_output[i % one_output.len], byte);
+    }
 }
 
 test "CLI failures: get usage, conflicts, and missing sequence" {
@@ -747,13 +909,40 @@ test "CLI failures: get usage, conflicts, and missing sequence" {
         allocator,
         &.{ ZFASTA_BIN, "get", fasta, "seq1", "--annotate-rc" },
         1,
-        "error: --annotate-rc requires --rc, --complement-only, or --reverse-only\n",
+        "error: --annotate-rc requires a transform or --strand-aware BED input\n",
     );
     try expectCliFailure(
         allocator,
         &.{ ZFASTA_BIN, "get", fasta, "--rc", "--complement-only", "seq1" },
         1,
         "error: --rc, --complement-only, and --reverse-only are mutually exclusive\n",
+    );
+}
+
+test "BED annotations describe final composed orientation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const bed_path = try uniqueArtifactPath(allocator, "bed-annotation", "bed");
+    defer std.Io.Dir.cwd().deleteFile(io, bed_path) catch {};
+    const bed_file = try std.Io.Dir.cwd().createFile(io, bed_path, .{});
+    try std.Io.File.writeStreamingAll(
+        bed_file,
+        io,
+        "seq1\t0\t5\tplus\t0\t+\nseq1\t0\t5\tminus\t0\t-\n",
+    );
+    bed_file.close(io);
+
+    try expectCliSuccess(
+        allocator,
+        &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--bed", bed_path, "--strand-aware", "--annotate-rc" },
+        ">seq1:1-5\nACGTA\n>seq1:1-5 (reverse complement)\nTACGT\n",
+    );
+    try expectCliSuccess(
+        allocator,
+        &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--bed", bed_path, "--strand-aware", "--rc", "--annotate-rc" },
+        ">seq1:1-5 (reverse complement)\nTACGT\n>seq1:1-5\nACGTA\n",
     );
 }
 
