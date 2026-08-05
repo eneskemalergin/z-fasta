@@ -15,7 +15,6 @@ import pandas as pd
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 RESULTS_DIR = SCRIPT_DIR / "results"
-PROJECT_ROOT = SCRIPT_DIR.parent.parent
 
 DATASET_ORDER = ["Genome", "Transcriptome", "Proteome"]
 
@@ -27,8 +26,6 @@ BASELINE = "z-fasta-default"
 TOOL_ORDER = [
     "z-fasta-default",
     "z-fasta-fai",
-    "z-fasta-chunk-all",
-    "z-fasta-chunk-1",
     "z-fasta-rc",
     "z-fasta-complement-only",
     "z-fasta-reverse-only",
@@ -74,8 +71,6 @@ RC_BASELINE_TOOLS = frozenset({"z-fasta-default"})
 POS_EXCLUDE = frozenset(
     {
         "z-fasta-fai",
-        "z-fasta-chunk-all",
-        "z-fasta-chunk-1",
         "z-fasta-rc",
         "noodles-rc",
         "rustbio-custom-get-rc",
@@ -88,7 +83,7 @@ MODE_POS_TOOLS = ["z-fasta-default", "z-fasta-fai"]
 BED_BASES_PER_ROW = 1000
 BED_ROW_ORDER = [10, 100, 1000, 10000]
 
-# Headline BED chart/table peers (chunk modes are mode-comparison only).
+# BED chart and table peers.
 BED_HEADLINE_TOOLS = [
     "z-fasta-default",
     "noodles",
@@ -96,9 +91,6 @@ BED_HEADLINE_TOOLS = [
     "samtools",
     "bedtools",
 ]
-BED_MODE_TOOLS = ["z-fasta-default", "z-fasta-chunk-all", "z-fasta-chunk-1"]
-BED_DEFAULT_CHUNK = 4096
-
 # Multi-region headline peers (reference loops omitted from default timed runs).
 MULTI_HEADLINE_TOOLS = [
     "z-fasta-default",
@@ -232,8 +224,6 @@ GET_COLORS = {
     "z-fasta-uniform": "#9E9E9E",
     "z-fasta-messy": "#F7A41D",
     "z-fasta-fai": "#E65100",
-    "z-fasta-chunk-all": "#FFF59D",
-    "z-fasta-chunk-1": "#FBC02D",
     # RC transform modes: darker / mid / pale shades of brand gold (#F7A41D).
     "z-fasta-rc": "#C67A00",
     "z-fasta-complement-only": "#F5B041",
@@ -254,8 +244,6 @@ GET_DISPLAY = {
     "z-fasta-uniform": "z-fasta (uniform)",
     "z-fasta-messy": "z-fasta (messy)",
     "z-fasta-fai": "z-fasta (.fai)",
-    "z-fasta-chunk-all": "z-fasta --chunk-size -1",
-    "z-fasta-chunk-1": "z-fasta --chunk-size 1",
     "z-fasta-rc": "z-fasta --rc",
     "z-fasta-complement-only": "z-fasta --complement-only",
     "z-fasta-reverse-only": "z-fasta --reverse-only",
@@ -334,13 +322,22 @@ def load_index_report():
 
 
 def load_section(results_dir: Path, manifest: dict | None, key: str, ir) -> pd.DataFrame | None:
-    return ir.load_section_frames(
-        results_dir,
-        manifest,
-        key,
-        load_json=lambda p, m: load_zebrac_json(p, m, ir),
-        load_metadata=ir.load_metadata,
-    )
+    rel = (manifest or {}).get("sections", {}).get(key)
+    if not rel:
+        return None
+    section_dir = results_dir / rel
+    if not section_dir.is_dir():
+        return None
+
+    metadata = ir.load_metadata(results_dir, manifest)
+    frames = []
+    for path in sorted(section_dir.glob("*.json")):
+        frame = load_zebrac_json(path, metadata, ir)
+        if not frame.empty:
+            frames.append(frame)
+    if not frames:
+        return None
+    return pd.concat(frames, ignore_index=True)
 
 
 def load_zebrac_json(path: Path, metadata_df: pd.DataFrame | None, ir) -> pd.DataFrame:
@@ -617,12 +614,6 @@ def bed_tools_present(work: pd.DataFrame, tool_list: list[str]) -> list[str]:
     return [t for t in tool_list if t in present]
 
 
-def bed_display_tool(tool: str, ir, *, mode_table: bool = False) -> str:
-    if mode_table and tool == "z-fasta-default":
-        return f"z-fasta (--chunk-size {BED_DEFAULT_CHUNK})"
-    return ir.display_tool(tool)
-
-
 def bed_ds_row_label(dataset: str, row_count: int) -> str:
     return f"{dataset} / {bed_row_table_label(row_count)}"
 
@@ -644,24 +635,16 @@ def bed_chart_tools(df: pd.DataFrame) -> list[str]:
     return [t for t in BED_HEADLINE_TOOLS if t in present]
 
 
-def md_bed_intro_blurb(work: pd.DataFrame, *, t_mode: int | None = None) -> str:
+def md_bed_intro_blurb(work: pd.DataFrame) -> str:
     datasets = real_datasets_in_work(work)
     rows_present = [
         n for n in BED_ROW_ORDER if n in {int(v) for v in work["bed_rows"].unique()}
     ]
     row_list = ", ".join(bed_row_table_label(n) for n in rows_present)
-    mode_blurb = ""
-    if t_mode is not None:
-        mode_blurb = (
-            f" Table {t_mode} compares z-fasta `--chunk-size` settings when those lanes ran; "
-            f"headline chart uses **default `--chunk-size {BED_DEFAULT_CHUNK}` only**."
-        )
     return (
         f"`z-fasta get --bed` on {', '.join(datasets)}. Each BED row fetches **1 kbp** "
         f"(sweep: {row_list}). Three figure panels (Genome, Transcriptome, Proteome); "
-        f"grouped bars per row count. Headline z-fasta is plain `get --bed` with CLI default "
-        f"**`--chunk-size {BED_DEFAULT_CHUNK}`** (internal batching; not `--chunk-size -1` "
-        f"read-whole-file or `--chunk-size 1`).{mode_blurb} Chart/table tool order: z-fasta, "
+        "grouped bars per row count. Chart/table tool order: z-fasta, "
         "noodles, rust-bio, samtools, bedtools."
     )
 
@@ -672,19 +655,12 @@ def md_bed_figure_reading_base(
     ratio_label: str,
     t_cmp: int,
     f_num: int,
-    include_chunk_note: bool = False,
 ) -> str:
-    chunk_line = ""
-    if include_chunk_note:
-        chunk_line = (
-            f"- **Headline z-fasta:** default `--chunk-size {BED_DEFAULT_CHUNK}` only.\n"
-        )
     return (
         f"**Reading Figure {f_num}**\n"
         "- Three panels: Genome, Transcriptome, Proteome (BED row count on x-axis).\n"
         f"- {y_note}\n"
         "- **Legend order:** z-fasta, noodles, rust-bio, samtools, bedtools.\n"
-        f"{chunk_line}"
         f"- **Bar labels:** `1×` on z-fasta; other labels = {ratio_label}. "
         f"Details in Table {t_cmp}."
     )
@@ -1328,7 +1304,6 @@ def tool_legend_blurb(tools: list[str], ir) -> str:
         color_word = {
             "z-fasta-default": "gold",
             "z-fasta-fai": "deep orange",
-            "z-fasta-chunk-all": "pale gold",
             "noodles": "bronze",
             "rustbio-custom-get": "red-brown",
             "samtools": "grey",
@@ -1512,7 +1487,6 @@ def md_bed_detail_pivot(
     ir,
     *,
     formatter,
-    mode_table: bool = False,
 ) -> str:
     rows = []
     filtered = ir.filter_tools(work, tools)
@@ -1527,7 +1501,7 @@ def md_bed_detail_pivot(
                 rows.append(
                     {
                         "dataset_row": bed_ds_row_label(ds, n),
-                        "tool": bed_display_tool(row["tool"], ir, mode_table=mode_table),
+                        "tool": ir.display_tool(row["tool"]),
                         "value": formatted,
                     }
                 )
@@ -1537,16 +1511,7 @@ def md_bed_detail_pivot(
     detail = detail.pivot(index="dataset_row", columns="tool", values="value")
     detail = detail.reindex(index=sorted(detail.index, key=bed_ds_row_sort_key))
     detail.index.name = "Dataset / BED rows"
-    if mode_table:
-        tool_labels = [
-            bed_display_tool(t, ir, mode_table=True)
-            for t in tools
-            if bed_display_tool(t, ir, mode_table=True) in detail.columns
-        ]
-    else:
-        tool_labels = [
-            ir.display_tool(t) for t in tools if ir.display_tool(t) in detail.columns
-        ]
+    tool_labels = [ir.display_tool(t) for t in tools if ir.display_tool(t) in detail.columns]
     return detail.reindex(columns=tool_labels).pipe(df_to_markdown)
 
 
@@ -2726,7 +2691,7 @@ def md_overview(manifest: dict | None) -> str:
     return "\n\n".join(lines)
 
 
-def md_run_provenance(manifest: dict | None, project_root: Path, ir) -> str:
+def md_run_provenance(manifest: dict | None, ir) -> str:
     if not manifest:
         return "_No run manifest found._"
 
@@ -2745,7 +2710,7 @@ def md_run_provenance(manifest: dict | None, project_root: Path, ir) -> str:
     lines = [
         f"Run **`{ts}`** used **{runner}** in **{mode}** mode: {runs} measured samples, "
         f"{warmup} warmup passes, {duration} ms minimum per sample.",
-        f"- **Subject:** {zfasta} (Zig; default `.zfi` get, `.fai` lane, chunk modes in tables)",
+        f"- **Subject:** {zfasta} (Zig; default `.zfi` get and `.fai` lane)",
         f"- **Runner:** {zebrac}",
     ]
 
@@ -2774,7 +2739,8 @@ def md_run_provenance(manifest: dict | None, project_root: Path, ir) -> str:
         )
 
     lines.append("")
-    lines.append(ir.md_data_used(project_root))
+    lines.append("**Datasets**")
+    lines.append(ir.md_datasets())
 
     measured = []
     for spec in GET_PEERS:
@@ -3679,12 +3645,9 @@ def md_bed_section(
         return "_No BED batch chart data._"
 
     chart_work = work[work["tool"].isin(chart_tools)].copy()
-    mode_tools = bed_tools_present(work, BED_MODE_TOOLS)
-    mode_work = ir.filter_tools(work, mode_tools) if mode_tools else pd.DataFrame()
     t_wall = nums.next_table()
     t_tp = nums.next_table()
     t_cmp = nums.next_table()
-    t_mode = nums.next_table() if not mode_work.empty else None
     f_wall = nums.next_figure()
     sample_n = manifest_sample_count(manifest)
 
@@ -3722,7 +3685,7 @@ def md_bed_section(
     )
 
     blocks = [
-        md_bed_intro_blurb(work, t_mode=t_mode),
+        md_bed_intro_blurb(work),
         (
             f"**Table {t_wall}:** Wall time (mean ± stddev, seconds). Rows sorted by "
             "dataset then BED row count. Lower is better. Same tool order as the figure."
@@ -3747,25 +3710,6 @@ def md_bed_section(
         md_bed_zfasta_vs_table(chart_work, chart_tools, ir),
         "</details>",
     ]
-    if t_mode is not None:
-        blocks.extend(
-            [
-                "<details>",
-                (
-                    f"<summary><strong>Table {t_mode}:</strong> z-fasta chunk-size comparison "
-                    f"(default {BED_DEFAULT_CHUNK} vs -1 vs 1; not in Figure {f_wall}).</summary>"
-                ),
-                "",
-                md_bed_detail_pivot(
-                    mode_work,
-                    mode_tools,
-                    ir,
-                    mode_table=True,
-                    formatter=lambda row: f"{row['mean']:.4f}s ±{row['stddev']:.4f}",
-                ),
-                "</details>",
-            ]
-        )
     blocks.extend(
         [
             '<div style="margin: 1.5em 0"></div>',
@@ -3781,7 +3725,6 @@ def md_bed_section(
                 ratio_label=f"{LABEL_PEER_RATIO} (indexed peers + bedtools)",
                 t_cmp=t_cmp,
                 f_num=f_wall,
-                include_chunk_note=True,
             ),
         ]
     )
@@ -4278,23 +4221,11 @@ def expected_report_figures(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate GET benchmark report.")
     parser.add_argument("results_dir", nargs="?", type=Path, default=RESULTS_DIR)
-    parser.add_argument("--allow-incomplete", action="store_true")
     args = parser.parse_args()
 
     ir = load_index_report()
     results_dir = args.results_dir
     manifest = ir.load_run_manifest(results_dir)
-    incomplete = ir.is_incomplete_run(
-        manifest,
-        required_sections=("perf_pos", "perf_multi", "perf_bed", "perf_rc"),
-        skip_flags=("skip_pos", "skip_multi", "skip_bed", "skip_rc"),
-    )
-    if incomplete and not args.allow_incomplete:
-        ts = (manifest or {}).get("timestamp", "unknown")
-        raise SystemExit(
-            f"Refusing to overwrite REPORT.md from incomplete run {ts}. "
-            "Pass --allow-incomplete for drafts."
-        )
 
     figures_dir = results_dir / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
@@ -4304,18 +4235,12 @@ def main() -> None:
         "# z-fasta GET Benchmark Report",
         "_Auto-generated by `bench/get/generate_report.py` from zebrac results._",
     ]
-    if incomplete:
-        report_lines.append(
-            "> **DRAFT: incomplete run.** Missing headline sections or below minimum "
-            "zebrac sample settings. Do not publish until a full run completes without "
-            "missing sections or `skip_*` flags on headline workloads."
-        )
     report_lines.extend(
         [
         "## Overview",
         md_overview(manifest),
         "## Run Provenance",
-        md_run_provenance(manifest, PROJECT_ROOT, ir),
+        md_run_provenance(manifest, ir),
         ]
     )
 

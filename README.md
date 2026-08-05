@@ -72,7 +72,7 @@ Options:
 z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt]
             [--strand-aware] [--summary]
             [--rc|--complement-only|--reverse-only] [--annotate-rc]
-            [--chunk-size N|-1] <region> [region ...]
+            <region> [region ...]
 ```
 
 Extract one or more sequences or sub-regions from an indexed FASTA. Positional output is **byte-identical** to `samtools faidx` on the verified path. BED and names flows are checked against `bedtools getfasta` and `samtools faidx -r`. Multiple regions load the index once and stream in CLI order. BED rows and names-file entries are appended in source order ahead of later positional arguments.
@@ -91,10 +91,9 @@ Requires an index. A present `.zfi` is authoritative, including when it is inval
 - **`--reverse-only`**: reverse without complement.
 - **`--annotate-rc`**: append a transform suffix to headers (for example `(reverse complement)`). Default output stays samtools-style.
 - **`--summary`**: print region count, total bases, elapsed time, and regions/sec to stderr.
-- **`--chunk-size N`**: BED batch size (default `4096`). Use `1` only for debugging. **`--chunk-size -1`**: load all BED rows in one batch when memory allows (BED inputs over 512 MiB are rejected with `-1`).
-- **`--names`**: always loads the whole names file into memory, capped at 512 MiB. `--chunk-size` does not stream `--names`.
+- **`--names`**: always loads the whole names file into memory, capped at 512 MiB.
 
-Positional CLI regions are capped at **1024** per invocation (`error: too many regions`). BED row count and **`--names`** line count are not subject to that cap (size limits above still apply).
+Positional CLI regions are capped at **1024** per invocation (`error: too many regions`). BED input has no row-count or whole-input size cap. **`--names`** line count is not capped, but the input remains limited to 512 MiB.
 
 Complement-based transforms error on protein FASTA so **`--rc`** and **`--complement-only`** stay nucleotide-only. That guard samples up to the first **256** bases of each requested record.
 
@@ -198,7 +197,7 @@ Duplicate _names_ are not the same as identical _sequence contents_. Default `in
 
 **Names:** index hard-rejects sequence names longer than 65535 bytes. Empty identifiers are valid but difficult to address and should be avoided. An explicit empty positional argument retrieves one; blank names-file lines stay skipped and BED requires a non-empty chromosome. `validate --max-header-len` warns above N bytes (default 1024) and does not raise that index limit.
 
-**Get / validate caps:** at most 1024 positional regions per `get` call. `--names` loads the whole file (max 512 MiB; `--chunk-size` does not stream it). BED defaults to 4096-row batches; `--chunk-size -1` loads the whole BED up to 512 MiB. `validate` stops after 10000 retained events.
+**Get / validate caps:** at most 1024 positional regions per `get` call. `--names` loads the whole file (max 512 MiB). BED streams without a row-count cap. `validate` stops after 10000 retained events.
 
 **Memory:** index reads sequence payload through a bounded buffer. Get, stats, and validate retain mapped FASTA paths, so their RSS can approach the mapped file size. `stats --index-only` skips the sequence scan. Dense BED releases mapped pages behind the cursor; sparse gets on large FASTAs prefer positional reads.
 
@@ -256,7 +255,7 @@ See the [detailed index benchmark report](bench/index/REPORT.md) for tool defini
 ### Correctness
 
 - **Index:** `bench/index/run.sh` edge cases **24/24 matching cases plus one `binary_data` review**; messy layouts from `python3 bench/shared/generate_messy.py` into `bench/shared/cache/messy_fixtures/` (correctness) and `messy_perf/` (proteome perf).
-- **Get:** `bench/get/run.sh` correctness **415/415** (positional, multi-region, BED, names, RC, messy) against samtools, bedtools, and seqtk where applicable.
+- **Get:** `bench/get/run.sh` correctness **409/409** (positional, multi-region, BED, names, RC, messy) against samtools, bedtools, and seqtk where applicable.
 - **Stats:** `bench/stats/run.sh` correctness **89/89** (BioPython oracle, index formats, layout twins, messy fixtures, duplicates policy, peer parity).
 - **Unit tests:** `./zig build test` (index, get, stats, complement, BED parser, validator).
 - **Messy FASTA:** z-fasta indexes and extracts mixed-width and trailing-whitespace FASTA that samtools-style FAI tools reject. Details: [bench/index/REPORT.md](bench/index/REPORT.md).

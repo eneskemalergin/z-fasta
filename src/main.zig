@@ -22,7 +22,6 @@ pub const validateFasta = indexer.validateFasta;
 const printErrorAndExit = index_format.printErrorAndExit;
 
 const VERSION = "0.3.1";
-const CHUNK_SIZE_FLAG = "--chunk-size";
 const STRAND_AWARE_FLAG = "--strand-aware";
 const STRAND_AWARE_ALIAS = "--honor-strand";
 const RC_FLAG = "--rc";
@@ -52,7 +51,7 @@ const USAGE =
     \\Get usage:
     \\  z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt]
     \\               [--strand-aware] [--summary] [--rc|--complement-only|--reverse-only]
-    \\               [--annotate-rc] [--chunk-size N|-1] <region> [region ...]
+    \\               [--annotate-rc] <region> [region ...]
     \\  Region formats: NAME, NAME:START-END, NAME:START-
     \\  --strand-aware  Respect BED column 6; '-' emits reverse-complement output
     \\                  (alias: --honor-strand)
@@ -60,11 +59,8 @@ const USAGE =
     \\  --complement-only  Complement extracted sequence output without reversing
     \\  --reverse-only  Reverse extracted sequence output without complementing
     \\  --annotate-rc   Annotate transformed headers (for example: reverse complement)
-    \\  --chunk-size N  Process BED rows in batches of N (default: 4096). Use 1 only
-    \\                  for debugging: one row per batch, high per-row arena overhead.
-    \\  --chunk-size -1 Process all BED rows in one batch (512 MiB cap)
     \\  Positional regions: max 1024 per invocation. --names loads the whole file
-    \\  up to 512 MiB (--chunk-size does not stream --names). BED streams by default.
+    \\  up to 512 MiB. BED input streams.
     \\
     \\Stats options:
     \\  --index-only   Only show index-derived stats (no composition scan)
@@ -97,29 +93,12 @@ const USAGE =
     \\
 ;
 
-const ParseChunkSizeError = error{InvalidChunkSize};
 const ParseTransformFlagsError = error{ConflictingTransformFlags};
 
 const ParsedTransformFlags = struct {
     orientation: getter.Orientation,
     annotate_transform: bool,
 };
-
-fn parseChunkSizeValue(raw: []const u8) ParseChunkSizeError!usize {
-    if (std.mem.eql(u8, raw, "-1")) return getter.chunk_size_all;
-
-    const parsed = std.fmt.parseInt(usize, raw, 10) catch {
-        return error.InvalidChunkSize;
-    };
-    if (parsed == 0) return error.InvalidChunkSize;
-    return parsed;
-}
-
-fn chunkSizeEqualsValue(arg: []const u8) ?[]const u8 {
-    const prefix = CHUNK_SIZE_FLAG ++ "=";
-    if (!std.mem.startsWith(u8, arg, prefix)) return null;
-    return arg[prefix.len..];
-}
 
 fn parseTransformFlags(rc: bool, complement_only: bool, reverse_only: bool, annotate_transform: bool) ParseTransformFlagsError!ParsedTransformFlags {
     var selected: usize = 0;
@@ -320,7 +299,6 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     var names_path: ?[]const u8 = null;
     var honor_strand = false;
     var summary = false;
-    var chunk_size: usize = 4_096;
     var rc = false;
     var complement_only = false;
     var reverse_only = false;
@@ -352,17 +330,6 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
             reverse_only = true;
         } else if (std.mem.eql(u8, arg, ANNOTATE_RC_FLAG)) {
             annotate_transform = true;
-        } else if (std.mem.eql(u8, arg, CHUNK_SIZE_FLAG)) {
-            const raw = args.next() orelse {
-                printErrorAndExit("error: --chunk-size requires a positive integer or -1\n", .{});
-            };
-            chunk_size = parseChunkSizeValue(raw) catch {
-                printErrorAndExit("error: --chunk-size requires a positive integer or -1\n", .{});
-            };
-        } else if (chunkSizeEqualsValue(arg)) |raw| {
-            chunk_size = parseChunkSizeValue(raw) catch {
-                printErrorAndExit("error: --chunk-size requires a positive integer or -1\n", .{});
-            };
         } else if (fasta_path == null) {
             rejectUnknownOption(arg);
             fasta_path = arg;
@@ -377,10 +344,10 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     }
 
     const path = fasta_path orelse {
-        printErrorAndExit("error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--strand-aware] [--summary] [--rc|--complement-only|--reverse-only] [--annotate-rc] [--chunk-size N|-1] <region> [region ...]\n", .{});
+        printErrorAndExit("error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--strand-aware] [--summary] [--rc|--complement-only|--reverse-only] [--annotate-rc] <region> [region ...]\n", .{});
     };
     if (region_count == 0 and bed_path == null and names_path == null) {
-        printErrorAndExit("error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--strand-aware] [--summary] [--rc|--complement-only|--reverse-only] [--annotate-rc] [--chunk-size N|-1] <region> [region ...]\n", .{});
+        printErrorAndExit("error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--strand-aware] [--summary] [--rc|--complement-only|--reverse-only] [--annotate-rc] <region> [region ...]\n", .{});
     }
 
     const transform = parseTransformFlags(rc, complement_only, reverse_only, annotate_transform) catch {
@@ -396,25 +363,9 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
         .names_path = names_path,
         .honor_strand = honor_strand,
         .summary = summary,
-        .chunk_size = chunk_size,
         .orientation = transform.orientation,
         .annotate_transform = transform.annotate_transform,
     });
-}
-
-test "parseChunkSizeValue accepts positive sizes and all sentinel" {
-    try std.testing.expectEqual(@as(usize, 4096), try parseChunkSizeValue("4096"));
-    try std.testing.expectEqual(getter.chunk_size_all, try parseChunkSizeValue("-1"));
-}
-
-test "parseChunkSizeValue rejects zero and invalid input" {
-    try std.testing.expectError(error.InvalidChunkSize, parseChunkSizeValue("0"));
-    try std.testing.expectError(error.InvalidChunkSize, parseChunkSizeValue("abc"));
-}
-
-test "chunkSizeEqualsValue parses inline assignment syntax" {
-    try std.testing.expectEqualStrings("-1", chunkSizeEqualsValue("--chunk-size=-1").?);
-    try std.testing.expect(chunkSizeEqualsValue("--chunk-size") == null);
 }
 
 test "parseTransformFlags returns requested orientation" {

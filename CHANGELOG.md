@@ -6,7 +6,7 @@ All notable changes to z-fasta will be documented in this file.
 
 ## Unreleased
 
-Indexing performance and memory cleanup. No `.zfi` format change. **Re-index not required.** The `index --low-mem` flag is removed because bare `index` now provides the same low-memory behavior.
+Indexing and GET performance and memory cleanup. No `.zfi` format change. **Re-index not required.** The `index --low-mem` flag is removed because bare `index` now provides the same low-memory behavior.
 
 ### Changed
 
@@ -15,9 +15,13 @@ Indexing performance and memory cleanup. No `.zfi` format change. **Re-index not
   - Sequence payload memory stays fixed while record, name, deduplication, and side-table state grows only when the index requires it.
   - `.fai` output uses temporary disk storage proportional to the emitted FAI before writing to stdout, preserving all-or-nothing output without a second memory mode.
 
+- **Get**
+  - BED input uses one streaming path. The `--chunk-size` option and its all-memory `-1` mode are removed.
+
 - **Benchmarks**
   - The index report now compares the four product configurations directly: `.zfi` or `.fai`, each with deduplication on or off.
   - Real-data and scaling results cover the single production index path and retain the existing peer comparisons.
+  - GET correctness and performance use the single supported BED path without obsolete chunk-mode lanes.
 
 ### Fixed
 

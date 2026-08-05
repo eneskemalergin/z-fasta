@@ -32,7 +32,7 @@ _Messy GET used higher zebrac sampling (50 runs, 10 warmup, 30000 ms) because ti
 
 Run **`20260801_093130`** used **zebrac** in **warm** mode: 5 measured samples, 5 warmup passes, 5000 ms minimum per sample.
 
-- **Subject:** z-fasta 0.3.0 (Zig; default `.zfi` get, `.fai` lane, chunk modes in tables)
+- **Subject:** z-fasta 0.3.0 (Zig; default `.zfi` get and `.fai` lane)
 
 - **Runner:** zebrac 0.6.0
 
@@ -40,10 +40,11 @@ Run **`20260801_093130`** used **zebrac** in **warm** mode: 5 measured samples, 
 
 - **Messy GET zebrac:** 50 samples, 10 warmup, 30000 ms (headline sections use 5/5/5000 ms).
 
-**Data used** (human reference files in `bench/shared/data/`; fetch with `bench/shared/download_data.sh`):
-- **Genome** (`REAL_Genome.fa`): Homo sapiens GRCh38 primary assembly (Ensembl release 113). 194 sequences, 3.10 Gbp total, 2.93 GiB on disk.
-- **Transcriptome** (`REAL_Transcriptome.fa`): Homo sapiens GENCODE v46 transcript sequences. 254,070 transcripts, 444 Mbp total, 458.7 MiB on disk.
-- **Proteome** (`REAL_Proteome.fasta`): Homo sapiens UniProt reference proteome UP000005640. 20,652 proteins, 11.5 M residues total, 13.1 MiB on disk.
+**Datasets**
+
+- **Genome:** Homo sapiens GRCh38 primary assembly (Ensembl release 113).
+- **Transcriptome:** Homo sapiens GENCODE v46 transcript sequences.
+- **Proteome:** Homo sapiens UniProt reference proteome UP000005640.
 
 **Peers in this run** (same GET task; versions captured at benchmark time; vendored pins in `bench/shared/tools.sh` / `tools/`):
 - **samtools** (C): samtools 1.13 via `samtools faidx region` (from `samtools --version`)
@@ -103,57 +104,57 @@ Positional GET on preloaded indexes. Three panels (Genome, Transcriptome, Proteo
 
 | Dataset / region         | z-fasta vs   | z-fasta   | Peer    | Speedup   |
 |:-------------------------|:-------------|:----------|:--------|:----------|
-| Genome / 1 kbp           | noodles      | 0.0021s   | 0.0025s | 1.19×     |
-| Genome / 1 kbp           | rust-bio     | 0.0021s   | 0.0025s | 1.19×     |
-| Genome / 1 kbp           | samtools     | 0.0021s   | 0.0032s | 1.57×     |
-| Genome / 1 kbp           | seqtk (ref)  | 0.0021s   | 1.3343s | 647×      |
-| Genome / 10 kbp          | noodles      | 0.0021s   | 0.0024s | 1.15×     |
-| Genome / 10 kbp          | rust-bio     | 0.0021s   | 0.0026s | 1.21×     |
-| Genome / 10 kbp          | samtools     | 0.0021s   | 0.0031s | 1.47×     |
-| Genome / 10 kbp          | seqtk (ref)  | 0.0021s   | 1.3360s | 630×      |
-| Genome / 100 bp          | noodles      | 0.0021s   | 0.0024s | 1.18×     |
-| Genome / 100 bp          | rust-bio     | 0.0021s   | 0.0025s | 1.19×     |
-| Genome / 100 bp          | samtools     | 0.0021s   | 0.0032s | 1.53×     |
-| Genome / 100 bp          | seqtk (ref)  | 0.0021s   | 1.3213s | 641×      |
-| Genome / full seq        | noodles      | 0.0021s   | 0.0024s | 1.18×     |
-| Genome / full seq        | rust-bio     | 0.0021s   | 0.0026s | 1.25×     |
-| Genome / full seq        | samtools     | 0.0021s   | 0.0030s | 1.46×     |
-| Genome / full seq        | fastahack    | 0.0021s   | 0.0029s | 1.42×     |
-| Genome / full seq        | seqtk (ref)  | 0.0021s   | 1.3252s | 640×      |
-| Proteome / 1 kbp         | noodles      | 0.0023s   | 0.0067s | 2.9×      |
-| Proteome / 1 kbp         | rust-bio     | 0.0023s   | 0.0198s | 8.7×      |
-| Proteome / 1 kbp         | samtools     | 0.0023s   | 0.0127s | 5.6×      |
-| Proteome / 1 kbp         | seqtk (ref)  | 0.0023s   | 0.0095s | 4.2×      |
-| Proteome / 10 kbp        | noodles      | 0.0022s   | 0.0067s | 3.0×      |
-| Proteome / 10 kbp        | rust-bio     | 0.0022s   | 0.0197s | 8.8×      |
-| Proteome / 10 kbp        | samtools     | 0.0022s   | 0.0129s | 5.7×      |
-| Proteome / 10 kbp        | seqtk (ref)  | 0.0022s   | 0.0093s | 4.1×      |
-| Proteome / 100 bp        | noodles      | 0.0023s   | 0.0067s | 3.0×      |
-| Proteome / 100 bp        | rust-bio     | 0.0023s   | 0.0196s | 8.7×      |
-| Proteome / 100 bp        | samtools     | 0.0023s   | 0.0127s | 5.6×      |
-| Proteome / 100 bp        | seqtk (ref)  | 0.0023s   | 0.0092s | 4.1×      |
-| Proteome / full seq      | noodles      | 0.0024s   | 0.0067s | 2.9×      |
-| Proteome / full seq      | rust-bio     | 0.0024s   | 0.0202s | 8.5×      |
-| Proteome / full seq      | samtools     | 0.0024s   | 0.0129s | 5.4×      |
-| Proteome / full seq      | fastahack    | 0.0024s   | 0.0350s | 14.8×     |
-| Proteome / full seq      | seqtk (ref)  | 0.0024s   | 0.0092s | 3.9×      |
-| Transcriptome / 1 kbp    | noodles      | 0.0044s   | 0.0876s | 19.9×     |
-| Transcriptome / 1 kbp    | rust-bio     | 0.0044s   | 0.5441s | 124×      |
-| Transcriptome / 1 kbp    | samtools     | 0.0044s   | 0.2893s | 65.9×     |
-| Transcriptome / 1 kbp    | seqtk (ref)  | 0.0044s   | 0.2239s | 51.0×     |
-| Transcriptome / 10 kbp   | noodles      | 0.0048s   | 0.0878s | 18.2×     |
-| Transcriptome / 10 kbp   | rust-bio     | 0.0048s   | 0.5458s | 113×      |
-| Transcriptome / 10 kbp   | samtools     | 0.0048s   | 0.2909s | 60.3×     |
-| Transcriptome / 10 kbp   | seqtk (ref)  | 0.0048s   | 0.2282s | 47.3×     |
-| Transcriptome / 100 bp   | noodles      | 0.0042s   | 0.0887s | 20.9×     |
-| Transcriptome / 100 bp   | rust-bio     | 0.0042s   | 0.5489s | 129×      |
-| Transcriptome / 100 bp   | samtools     | 0.0042s   | 0.2992s | 70.4×     |
-| Transcriptome / 100 bp   | seqtk (ref)  | 0.0042s   | 0.2287s | 53.8×     |
-| Transcriptome / full seq | noodles      | 0.0059s   | 0.0890s | 15.0×     |
-| Transcriptome / full seq | rust-bio     | 0.0059s   | 0.5418s | 91.4×     |
-| Transcriptome / full seq | samtools     | 0.0059s   | 0.2935s | 49.5×     |
-| Transcriptome / full seq | fastahack    | 0.0059s   | 0.6258s | 106×      |
-| Transcriptome / full seq | seqtk (ref)  | 0.0059s   | 0.2220s | 37.5×     |
+| Genome / 1 kbp           | noodles      | 0.0021s   | 0.0025s | 1.19x     |
+| Genome / 1 kbp           | rust-bio     | 0.0021s   | 0.0025s | 1.19x     |
+| Genome / 1 kbp           | samtools     | 0.0021s   | 0.0032s | 1.57x     |
+| Genome / 1 kbp           | seqtk (ref)  | 0.0021s   | 1.3343s | 647x      |
+| Genome / 10 kbp          | noodles      | 0.0021s   | 0.0024s | 1.15x     |
+| Genome / 10 kbp          | rust-bio     | 0.0021s   | 0.0026s | 1.21x     |
+| Genome / 10 kbp          | samtools     | 0.0021s   | 0.0031s | 1.47x     |
+| Genome / 10 kbp          | seqtk (ref)  | 0.0021s   | 1.3360s | 630x      |
+| Genome / 100 bp          | noodles      | 0.0021s   | 0.0024s | 1.18x     |
+| Genome / 100 bp          | rust-bio     | 0.0021s   | 0.0025s | 1.19x     |
+| Genome / 100 bp          | samtools     | 0.0021s   | 0.0032s | 1.53x     |
+| Genome / 100 bp          | seqtk (ref)  | 0.0021s   | 1.3213s | 641x      |
+| Genome / full seq        | noodles      | 0.0021s   | 0.0024s | 1.18x     |
+| Genome / full seq        | rust-bio     | 0.0021s   | 0.0026s | 1.25x     |
+| Genome / full seq        | samtools     | 0.0021s   | 0.0030s | 1.46x     |
+| Genome / full seq        | fastahack    | 0.0021s   | 0.0029s | 1.42x     |
+| Genome / full seq        | seqtk (ref)  | 0.0021s   | 1.3252s | 640x      |
+| Proteome / 1 kbp         | noodles      | 0.0023s   | 0.0067s | 2.9x      |
+| Proteome / 1 kbp         | rust-bio     | 0.0023s   | 0.0198s | 8.7x      |
+| Proteome / 1 kbp         | samtools     | 0.0023s   | 0.0127s | 5.6x      |
+| Proteome / 1 kbp         | seqtk (ref)  | 0.0023s   | 0.0095s | 4.2x      |
+| Proteome / 10 kbp        | noodles      | 0.0022s   | 0.0067s | 3.0x      |
+| Proteome / 10 kbp        | rust-bio     | 0.0022s   | 0.0197s | 8.8x      |
+| Proteome / 10 kbp        | samtools     | 0.0022s   | 0.0129s | 5.7x      |
+| Proteome / 10 kbp        | seqtk (ref)  | 0.0022s   | 0.0093s | 4.1x      |
+| Proteome / 100 bp        | noodles      | 0.0023s   | 0.0067s | 3.0x      |
+| Proteome / 100 bp        | rust-bio     | 0.0023s   | 0.0196s | 8.7x      |
+| Proteome / 100 bp        | samtools     | 0.0023s   | 0.0127s | 5.6x      |
+| Proteome / 100 bp        | seqtk (ref)  | 0.0023s   | 0.0092s | 4.1x      |
+| Proteome / full seq      | noodles      | 0.0024s   | 0.0067s | 2.9x      |
+| Proteome / full seq      | rust-bio     | 0.0024s   | 0.0202s | 8.5x      |
+| Proteome / full seq      | samtools     | 0.0024s   | 0.0129s | 5.4x      |
+| Proteome / full seq      | fastahack    | 0.0024s   | 0.0350s | 14.8x     |
+| Proteome / full seq      | seqtk (ref)  | 0.0024s   | 0.0092s | 3.9x      |
+| Transcriptome / 1 kbp    | noodles      | 0.0044s   | 0.0876s | 19.9x     |
+| Transcriptome / 1 kbp    | rust-bio     | 0.0044s   | 0.5441s | 124x      |
+| Transcriptome / 1 kbp    | samtools     | 0.0044s   | 0.2893s | 65.9x     |
+| Transcriptome / 1 kbp    | seqtk (ref)  | 0.0044s   | 0.2239s | 51.0x     |
+| Transcriptome / 10 kbp   | noodles      | 0.0048s   | 0.0878s | 18.2x     |
+| Transcriptome / 10 kbp   | rust-bio     | 0.0048s   | 0.5458s | 113x      |
+| Transcriptome / 10 kbp   | samtools     | 0.0048s   | 0.2909s | 60.3x     |
+| Transcriptome / 10 kbp   | seqtk (ref)  | 0.0048s   | 0.2282s | 47.3x     |
+| Transcriptome / 100 bp   | noodles      | 0.0042s   | 0.0887s | 20.9x     |
+| Transcriptome / 100 bp   | rust-bio     | 0.0042s   | 0.5489s | 129x      |
+| Transcriptome / 100 bp   | samtools     | 0.0042s   | 0.2992s | 70.4x     |
+| Transcriptome / 100 bp   | seqtk (ref)  | 0.0042s   | 0.2287s | 53.8x     |
+| Transcriptome / full seq | noodles      | 0.0059s   | 0.0890s | 15.0x     |
+| Transcriptome / full seq | rust-bio     | 0.0059s   | 0.5418s | 91.4x     |
+| Transcriptome / full seq | samtools     | 0.0059s   | 0.2935s | 49.5x     |
+| Transcriptome / full seq | fastahack    | 0.0059s   | 0.6258s | 106x      |
+| Transcriptome / full seq | seqtk (ref)  | 0.0059s   | 0.2220s | 37.5x     |
 
 </details>
 
@@ -202,57 +203,57 @@ zebrac starts a new process for each sample and records peak RSS when it exits (
 
 | Dataset / region         | z-fasta vs   | z-fasta   | Peer      | RSS ×   |
 |:-------------------------|:-------------|:----------|:----------|:--------|
-| Genome / 1 kbp           | noodles      | 3.39 MB   | 3.38 MB   | 1.00×   |
-| Genome / 1 kbp           | rust-bio     | 3.39 MB   | 3.40 MB   | 1.01×   |
-| Genome / 1 kbp           | samtools     | 3.39 MB   | 3.40 MB   | 1.00×   |
-| Genome / 1 kbp           | seqtk (ref)  | 3.39 MB   | 239.41 MB | 70.7×   |
-| Genome / 10 kbp          | noodles      | 3.37 MB   | 3.40 MB   | 1.01×   |
-| Genome / 10 kbp          | rust-bio     | 3.37 MB   | 3.42 MB   | 1.02×   |
-| Genome / 10 kbp          | samtools     | 3.37 MB   | 3.38 MB   | 1.01×   |
-| Genome / 10 kbp          | seqtk (ref)  | 3.37 MB   | 239.42 MB | 71.1×   |
-| Genome / 100 bp          | noodles      | 3.41 MB   | 3.36 MB   | 0.99×   |
-| Genome / 100 bp          | rust-bio     | 3.41 MB   | 3.38 MB   | 0.99×   |
-| Genome / 100 bp          | samtools     | 3.41 MB   | 3.33 MB   | 0.98×   |
-| Genome / 100 bp          | seqtk (ref)  | 3.41 MB   | 239.37 MB | 70.2×   |
-| Genome / full seq        | noodles      | 3.37 MB   | 3.40 MB   | 1.01×   |
-| Genome / full seq        | rust-bio     | 3.37 MB   | 3.39 MB   | 1.01×   |
-| Genome / full seq        | samtools     | 3.37 MB   | 3.35 MB   | 1.00×   |
-| Genome / full seq        | fastahack    | 3.37 MB   | 3.58 MB   | 1.06×   |
-| Genome / full seq        | seqtk (ref)  | 3.37 MB   | 239.39 MB | 71.0×   |
-| Proteome / 1 kbp         | noodles      | 3.34 MB   | 3.63 MB   | 1.09×   |
-| Proteome / 1 kbp         | rust-bio     | 3.34 MB   | 7.30 MB   | 2.2×    |
-| Proteome / 1 kbp         | samtools     | 3.34 MB   | 5.30 MB   | 1.59×   |
-| Proteome / 1 kbp         | seqtk (ref)  | 3.34 MB   | 3.37 MB   | 1.01×   |
-| Proteome / 10 kbp        | noodles      | 3.40 MB   | 3.66 MB   | 1.08×   |
-| Proteome / 10 kbp        | rust-bio     | 3.40 MB   | 7.31 MB   | 2.1×    |
-| Proteome / 10 kbp        | samtools     | 3.40 MB   | 5.28 MB   | 1.55×   |
-| Proteome / 10 kbp        | seqtk (ref)  | 3.40 MB   | 3.44 MB   | 1.01×   |
-| Proteome / 100 bp        | noodles      | 3.38 MB   | 3.67 MB   | 1.09×   |
-| Proteome / 100 bp        | rust-bio     | 3.38 MB   | 7.31 MB   | 2.2×    |
-| Proteome / 100 bp        | samtools     | 3.38 MB   | 5.28 MB   | 1.56×   |
-| Proteome / 100 bp        | seqtk (ref)  | 3.38 MB   | 3.38 MB   | 1.00×   |
-| Proteome / full seq      | noodles      | 3.36 MB   | 3.67 MB   | 1.09×   |
-| Proteome / full seq      | rust-bio     | 3.36 MB   | 7.28 MB   | 2.2×    |
-| Proteome / full seq      | samtools     | 3.36 MB   | 5.28 MB   | 1.57×   |
-| Proteome / full seq      | fastahack    | 3.36 MB   | 8.32 MB   | 2.5×    |
-| Proteome / full seq      | seqtk (ref)  | 3.36 MB   | 3.39 MB   | 1.01×   |
-| Transcriptome / 1 kbp    | noodles      | 38.36 MB  | 46.93 MB  | 1.22×   |
-| Transcriptome / 1 kbp    | rust-bio     | 38.36 MB  | 145.12 MB | 3.8×    |
-| Transcriptome / 1 kbp    | samtools     | 38.36 MB  | 60.51 MB  | 1.58×   |
-| Transcriptome / 1 kbp    | seqtk (ref)  | 38.36 MB  | 3.36 MB   | 0.088×  |
-| Transcriptome / 10 kbp   | noodles      | 38.36 MB  | 46.92 MB  | 1.22×   |
-| Transcriptome / 10 kbp   | rust-bio     | 38.36 MB  | 145.18 MB | 3.8×    |
-| Transcriptome / 10 kbp   | samtools     | 38.36 MB  | 60.55 MB  | 1.58×   |
-| Transcriptome / 10 kbp   | seqtk (ref)  | 38.36 MB  | 3.36 MB   | 0.088×  |
-| Transcriptome / 100 bp   | noodles      | 38.36 MB  | 46.90 MB  | 1.22×   |
-| Transcriptome / 100 bp   | rust-bio     | 38.36 MB  | 145.06 MB | 3.8×    |
-| Transcriptome / 100 bp   | samtools     | 38.36 MB  | 60.47 MB  | 1.58×   |
-| Transcriptome / 100 bp   | seqtk (ref)  | 38.36 MB  | 3.38 MB   | 0.088×  |
-| Transcriptome / full seq | noodles      | 38.36 MB  | 46.91 MB  | 1.22×   |
-| Transcriptome / full seq | rust-bio     | 38.36 MB  | 145.05 MB | 3.8×    |
-| Transcriptome / full seq | samtools     | 38.36 MB  | 60.54 MB  | 1.58×   |
-| Transcriptome / full seq | fastahack    | 38.36 MB  | 136.37 MB | 3.6×    |
-| Transcriptome / full seq | seqtk (ref)  | 38.36 MB  | 3.36 MB   | 0.088×  |
+| Genome / 1 kbp           | noodles      | 3.39 MB   | 3.38 MB   | 1.00x   |
+| Genome / 1 kbp           | rust-bio     | 3.39 MB   | 3.40 MB   | 1.01x   |
+| Genome / 1 kbp           | samtools     | 3.39 MB   | 3.40 MB   | 1.00x   |
+| Genome / 1 kbp           | seqtk (ref)  | 3.39 MB   | 239.41 MB | 70.7x   |
+| Genome / 10 kbp          | noodles      | 3.37 MB   | 3.40 MB   | 1.01x   |
+| Genome / 10 kbp          | rust-bio     | 3.37 MB   | 3.42 MB   | 1.02x   |
+| Genome / 10 kbp          | samtools     | 3.37 MB   | 3.38 MB   | 1.01x   |
+| Genome / 10 kbp          | seqtk (ref)  | 3.37 MB   | 239.42 MB | 71.1x   |
+| Genome / 100 bp          | noodles      | 3.41 MB   | 3.36 MB   | 0.99x   |
+| Genome / 100 bp          | rust-bio     | 3.41 MB   | 3.38 MB   | 0.99x   |
+| Genome / 100 bp          | samtools     | 3.41 MB   | 3.33 MB   | 0.98x   |
+| Genome / 100 bp          | seqtk (ref)  | 3.41 MB   | 239.37 MB | 70.2x   |
+| Genome / full seq        | noodles      | 3.37 MB   | 3.40 MB   | 1.01x   |
+| Genome / full seq        | rust-bio     | 3.37 MB   | 3.39 MB   | 1.01x   |
+| Genome / full seq        | samtools     | 3.37 MB   | 3.35 MB   | 1.00x   |
+| Genome / full seq        | fastahack    | 3.37 MB   | 3.58 MB   | 1.06x   |
+| Genome / full seq        | seqtk (ref)  | 3.37 MB   | 239.39 MB | 71.0x   |
+| Proteome / 1 kbp         | noodles      | 3.34 MB   | 3.63 MB   | 1.09x   |
+| Proteome / 1 kbp         | rust-bio     | 3.34 MB   | 7.30 MB   | 2.2x    |
+| Proteome / 1 kbp         | samtools     | 3.34 MB   | 5.30 MB   | 1.59x   |
+| Proteome / 1 kbp         | seqtk (ref)  | 3.34 MB   | 3.37 MB   | 1.01x   |
+| Proteome / 10 kbp        | noodles      | 3.40 MB   | 3.66 MB   | 1.08x   |
+| Proteome / 10 kbp        | rust-bio     | 3.40 MB   | 7.31 MB   | 2.1x    |
+| Proteome / 10 kbp        | samtools     | 3.40 MB   | 5.28 MB   | 1.55x   |
+| Proteome / 10 kbp        | seqtk (ref)  | 3.40 MB   | 3.44 MB   | 1.01x   |
+| Proteome / 100 bp        | noodles      | 3.38 MB   | 3.67 MB   | 1.09x   |
+| Proteome / 100 bp        | rust-bio     | 3.38 MB   | 7.31 MB   | 2.2x    |
+| Proteome / 100 bp        | samtools     | 3.38 MB   | 5.28 MB   | 1.56x   |
+| Proteome / 100 bp        | seqtk (ref)  | 3.38 MB   | 3.38 MB   | 1.00x   |
+| Proteome / full seq      | noodles      | 3.36 MB   | 3.67 MB   | 1.09x   |
+| Proteome / full seq      | rust-bio     | 3.36 MB   | 7.28 MB   | 2.2x    |
+| Proteome / full seq      | samtools     | 3.36 MB   | 5.28 MB   | 1.57x   |
+| Proteome / full seq      | fastahack    | 3.36 MB   | 8.32 MB   | 2.5x    |
+| Proteome / full seq      | seqtk (ref)  | 3.36 MB   | 3.39 MB   | 1.01x   |
+| Transcriptome / 1 kbp    | noodles      | 38.36 MB  | 46.93 MB  | 1.22x   |
+| Transcriptome / 1 kbp    | rust-bio     | 38.36 MB  | 145.12 MB | 3.8x    |
+| Transcriptome / 1 kbp    | samtools     | 38.36 MB  | 60.51 MB  | 1.58x   |
+| Transcriptome / 1 kbp    | seqtk (ref)  | 38.36 MB  | 3.36 MB   | 0.088x  |
+| Transcriptome / 10 kbp   | noodles      | 38.36 MB  | 46.92 MB  | 1.22x   |
+| Transcriptome / 10 kbp   | rust-bio     | 38.36 MB  | 145.18 MB | 3.8x    |
+| Transcriptome / 10 kbp   | samtools     | 38.36 MB  | 60.55 MB  | 1.58x   |
+| Transcriptome / 10 kbp   | seqtk (ref)  | 38.36 MB  | 3.36 MB   | 0.088x  |
+| Transcriptome / 100 bp   | noodles      | 38.36 MB  | 46.90 MB  | 1.22x   |
+| Transcriptome / 100 bp   | rust-bio     | 38.36 MB  | 145.06 MB | 3.8x    |
+| Transcriptome / 100 bp   | samtools     | 38.36 MB  | 60.47 MB  | 1.58x   |
+| Transcriptome / 100 bp   | seqtk (ref)  | 38.36 MB  | 3.38 MB   | 0.088x  |
+| Transcriptome / full seq | noodles      | 38.36 MB  | 46.91 MB  | 1.22x   |
+| Transcriptome / full seq | rust-bio     | 38.36 MB  | 145.05 MB | 3.8x    |
+| Transcriptome / full seq | samtools     | 38.36 MB  | 60.54 MB  | 1.58x   |
+| Transcriptome / full seq | fastahack    | 38.36 MB  | 136.37 MB | 3.6x    |
+| Transcriptome / full seq | seqtk (ref)  | 38.36 MB  | 3.36 MB   | 0.088x  |
 
 </details>
 
@@ -298,57 +299,57 @@ A **minor** fault maps a page without reading disk. A **major** fault reads from
 
 | Dataset / region         | z-fasta vs   |   z-fasta |   Peer | Faults ×   |
 |:-------------------------|:-------------|----------:|-------:|:-----------|
-| Genome / 1 kbp           | noodles      |       302 |    299 | 0.99×      |
-| Genome / 1 kbp           | rust-bio     |       302 |    309 | 1.02×      |
-| Genome / 1 kbp           | samtools     |       302 |    391 | 1.29×      |
-| Genome / 1 kbp           | seqtk (ref)  |       302 | 61,176 | 202×       |
-| Genome / 10 kbp          | noodles      |       306 |    305 | 0.99×      |
-| Genome / 10 kbp          | rust-bio     |       306 |    313 | 1.02×      |
-| Genome / 10 kbp          | samtools     |       306 |    393 | 1.28×      |
-| Genome / 10 kbp          | seqtk (ref)  |       306 | 61,175 | 199×       |
-| Genome / 100 bp          | noodles      |       304 |    300 | 0.99×      |
-| Genome / 100 bp          | rust-bio     |       304 |    309 | 1.01×      |
-| Genome / 100 bp          | samtools     |       304 |    396 | 1.30×      |
-| Genome / 100 bp          | seqtk (ref)  |       304 | 61,171 | 201×       |
-| Genome / full seq        | noodles      |       303 |    300 | 0.99×      |
-| Genome / full seq        | rust-bio     |       303 |    312 | 1.03×      |
-| Genome / full seq        | samtools     |       303 |    378 | 1.25×      |
-| Genome / full seq        | fastahack    |       303 |    356 | 1.18×      |
-| Genome / full seq        | seqtk (ref)  |       303 | 61,177 | 202×       |
-| Proteome / 1 kbp         | noodles      |       310 |    743 | 2.4×       |
-| Proteome / 1 kbp         | rust-bio     |       310 |  2,065 | 6.6×       |
-| Proteome / 1 kbp         | samtools     |       310 |    982 | 3.2×       |
-| Proteome / 1 kbp         | seqtk (ref)  |       310 |    389 | 1.25×      |
-| Proteome / 10 kbp        | noodles      |       312 |    747 | 2.4×       |
-| Proteome / 10 kbp        | rust-bio     |       312 |  2,068 | 6.6×       |
-| Proteome / 10 kbp        | samtools     |       312 |    984 | 3.1×       |
-| Proteome / 10 kbp        | seqtk (ref)  |       312 |    387 | 1.24×      |
-| Proteome / 100 bp        | noodles      |       310 |    741 | 2.4×       |
-| Proteome / 100 bp        | rust-bio     |       310 |  2,065 | 6.7×       |
-| Proteome / 100 bp        | samtools     |       310 |    982 | 3.2×       |
-| Proteome / 100 bp        | seqtk (ref)  |       310 |    388 | 1.25×      |
-| Proteome / full seq      | noodles      |       309 |    739 | 2.4×       |
-| Proteome / full seq      | rust-bio     |       309 |  2,065 | 6.7×       |
-| Proteome / full seq      | samtools     |       309 |    983 | 3.2×       |
-| Proteome / full seq      | fastahack    |       309 |  1,875 | 6.1×       |
-| Proteome / full seq      | seqtk (ref)  |       309 |    389 | 1.26×      |
-| Transcriptome / 1 kbp    | noodles      |       331 | 11,803 | 35.7×      |
-| Transcriptome / 1 kbp    | rust-bio     |       331 | 41,141 | 124×       |
-| Transcriptome / 1 kbp    | samtools     |       331 | 15,123 | 45.7×      |
-| Transcriptome / 1 kbp    | seqtk (ref)  |       331 |    482 | 1.46×      |
-| Transcriptome / 10 kbp   | noodles      |       336 | 11,807 | 35.1×      |
-| Transcriptome / 10 kbp   | rust-bio     |       336 | 41,140 | 122×       |
-| Transcriptome / 10 kbp   | samtools     |       336 | 15,126 | 44.9×      |
-| Transcriptome / 10 kbp   | seqtk (ref)  |       336 |    482 | 1.43×      |
-| Transcriptome / 100 bp   | noodles      |       332 | 11,800 | 35.5×      |
-| Transcriptome / 100 bp   | rust-bio     |       332 | 41,138 | 124×       |
-| Transcriptome / 100 bp   | samtools     |       332 | 15,123 | 45.6×      |
-| Transcriptome / 100 bp   | seqtk (ref)  |       332 |    484 | 1.46×      |
-| Transcriptome / full seq | noodles      |       329 | 11,801 | 35.8×      |
-| Transcriptome / full seq | rust-bio     |       329 | 41,139 | 125×       |
-| Transcriptome / full seq | samtools     |       329 | 15,123 | 45.9×      |
-| Transcriptome / full seq | fastahack    |       329 | 36,476 | 111×       |
-| Transcriptome / full seq | seqtk (ref)  |       329 |    481 | 1.46×      |
+| Genome / 1 kbp           | noodles      |       302 |    299 | 0.99x      |
+| Genome / 1 kbp           | rust-bio     |       302 |    309 | 1.02x      |
+| Genome / 1 kbp           | samtools     |       302 |    391 | 1.29x      |
+| Genome / 1 kbp           | seqtk (ref)  |       302 | 61,176 | 202x       |
+| Genome / 10 kbp          | noodles      |       306 |    305 | 0.99x      |
+| Genome / 10 kbp          | rust-bio     |       306 |    313 | 1.02x      |
+| Genome / 10 kbp          | samtools     |       306 |    393 | 1.28x      |
+| Genome / 10 kbp          | seqtk (ref)  |       306 | 61,175 | 199x       |
+| Genome / 100 bp          | noodles      |       304 |    300 | 0.99x      |
+| Genome / 100 bp          | rust-bio     |       304 |    309 | 1.01x      |
+| Genome / 100 bp          | samtools     |       304 |    396 | 1.30x      |
+| Genome / 100 bp          | seqtk (ref)  |       304 | 61,171 | 201x       |
+| Genome / full seq        | noodles      |       303 |    300 | 0.99x      |
+| Genome / full seq        | rust-bio     |       303 |    312 | 1.03x      |
+| Genome / full seq        | samtools     |       303 |    378 | 1.25x      |
+| Genome / full seq        | fastahack    |       303 |    356 | 1.18x      |
+| Genome / full seq        | seqtk (ref)  |       303 | 61,177 | 202x       |
+| Proteome / 1 kbp         | noodles      |       310 |    743 | 2.4x       |
+| Proteome / 1 kbp         | rust-bio     |       310 |  2,065 | 6.6x       |
+| Proteome / 1 kbp         | samtools     |       310 |    982 | 3.2x       |
+| Proteome / 1 kbp         | seqtk (ref)  |       310 |    389 | 1.25x      |
+| Proteome / 10 kbp        | noodles      |       312 |    747 | 2.4x       |
+| Proteome / 10 kbp        | rust-bio     |       312 |  2,068 | 6.6x       |
+| Proteome / 10 kbp        | samtools     |       312 |    984 | 3.1x       |
+| Proteome / 10 kbp        | seqtk (ref)  |       312 |    387 | 1.24x      |
+| Proteome / 100 bp        | noodles      |       310 |    741 | 2.4x       |
+| Proteome / 100 bp        | rust-bio     |       310 |  2,065 | 6.7x       |
+| Proteome / 100 bp        | samtools     |       310 |    982 | 3.2x       |
+| Proteome / 100 bp        | seqtk (ref)  |       310 |    388 | 1.25x      |
+| Proteome / full seq      | noodles      |       309 |    739 | 2.4x       |
+| Proteome / full seq      | rust-bio     |       309 |  2,065 | 6.7x       |
+| Proteome / full seq      | samtools     |       309 |    983 | 3.2x       |
+| Proteome / full seq      | fastahack    |       309 |  1,875 | 6.1x       |
+| Proteome / full seq      | seqtk (ref)  |       309 |    389 | 1.26x      |
+| Transcriptome / 1 kbp    | noodles      |       331 | 11,803 | 35.7x      |
+| Transcriptome / 1 kbp    | rust-bio     |       331 | 41,141 | 124x       |
+| Transcriptome / 1 kbp    | samtools     |       331 | 15,123 | 45.7x      |
+| Transcriptome / 1 kbp    | seqtk (ref)  |       331 |    482 | 1.46x      |
+| Transcriptome / 10 kbp   | noodles      |       336 | 11,807 | 35.1x      |
+| Transcriptome / 10 kbp   | rust-bio     |       336 | 41,140 | 122x       |
+| Transcriptome / 10 kbp   | samtools     |       336 | 15,126 | 44.9x      |
+| Transcriptome / 10 kbp   | seqtk (ref)  |       336 |    482 | 1.43x      |
+| Transcriptome / 100 bp   | noodles      |       332 | 11,800 | 35.5x      |
+| Transcriptome / 100 bp   | rust-bio     |       332 | 41,138 | 124x       |
+| Transcriptome / 100 bp   | samtools     |       332 | 15,123 | 45.6x      |
+| Transcriptome / 100 bp   | seqtk (ref)  |       332 |    484 | 1.46x      |
+| Transcriptome / full seq | noodles      |       329 | 11,801 | 35.8x      |
+| Transcriptome / full seq | rust-bio     |       329 | 41,139 | 125x       |
+| Transcriptome / full seq | samtools     |       329 | 15,123 | 45.9x      |
+| Transcriptome / full seq | fastahack    |       329 | 36,476 | 111x       |
+| Transcriptome / full seq | seqtk (ref)  |       329 |    481 | 1.46x      |
 
 </details>
 
@@ -430,39 +431,39 @@ One `get` invocation fetches **N regions × 1 kbp each** (e.g. N=100 → 100 kbp
 
 | Dataset / N             | z-fasta vs   | z-fasta   | Peer    | Speedup   |
 |:------------------------|:-------------|:----------|:--------|:----------|
-| Genome / N=1            | noodles      | 0.0021s   | 0.0025s | 1.18×     |
-| Genome / N=1            | rust-bio     | 0.0021s   | 0.0027s | 1.30×     |
-| Genome / N=1            | samtools     | 0.0021s   | 0.0031s | 1.48×     |
-| Genome / N=10           | noodles      | 0.0022s   | 0.0025s | 1.10×     |
-| Genome / N=10           | rust-bio     | 0.0022s   | 0.0026s | 1.17×     |
-| Genome / N=10           | samtools     | 0.0022s   | 0.0032s | 1.41×     |
-| Genome / N=100          | noodles      | 0.0024s   | 0.0028s | 1.16×     |
-| Genome / N=100          | rust-bio     | 0.0024s   | 0.0029s | 1.20×     |
-| Genome / N=100          | samtools     | 0.0024s   | 0.0039s | 1.62×     |
-| Transcriptome / N=1     | noodles      | 0.0055s   | 0.0881s | 15.9×     |
-| Transcriptome / N=1     | rust-bio     | 0.0055s   | 0.5413s | 97.7×     |
-| Transcriptome / N=1     | samtools     | 0.0055s   | 0.2942s | 53.1×     |
-| Transcriptome / N=10    | noodles      | 0.0283s   | 0.0916s | 3.2×      |
-| Transcriptome / N=10    | rust-bio     | 0.0283s   | 0.5534s | 19.6×     |
-| Transcriptome / N=10    | samtools     | 0.0283s   | 0.2943s | 10.4×     |
-| Transcriptome / N=100   | noodles      | 0.0282s   | 0.1290s | 4.6×      |
-| Transcriptome / N=100   | rust-bio     | 0.0282s   | 0.5371s | 19.1×     |
-| Transcriptome / N=100   | samtools     | 0.0282s   | 0.2983s | 10.6×     |
-| Transcriptome / N=1,000 | noodles      | 0.0372s   | 0.4620s | 12.4×     |
-| Transcriptome / N=1,000 | rust-bio     | 0.0372s   | 0.5391s | 14.5×     |
-| Transcriptome / N=1,000 | samtools     | 0.0372s   | 0.2970s | 8.0×      |
-| Proteome / N=1          | noodles      | 0.0024s   | 0.0066s | 2.8×      |
-| Proteome / N=1          | rust-bio     | 0.0024s   | 0.0194s | 8.2×      |
-| Proteome / N=1          | samtools     | 0.0024s   | 0.0127s | 5.4×      |
-| Proteome / N=10         | noodles      | 0.0032s   | 0.0073s | 2.3×      |
-| Proteome / N=10         | rust-bio     | 0.0032s   | 0.0199s | 6.2×      |
-| Proteome / N=10         | samtools     | 0.0032s   | 0.0128s | 4.0×      |
-| Proteome / N=100        | noodles      | 0.0037s   | 0.0109s | 2.9×      |
-| Proteome / N=100        | rust-bio     | 0.0037s   | 0.0198s | 5.3×      |
-| Proteome / N=100        | samtools     | 0.0037s   | 0.0137s | 3.7×      |
-| Proteome / N=1,000      | noodles      | 0.0059s   | 0.0468s | 7.9×      |
-| Proteome / N=1,000      | rust-bio     | 0.0059s   | 0.0236s | 4.0×      |
-| Proteome / N=1,000      | samtools     | 0.0059s   | 0.0228s | 3.9×      |
+| Genome / N=1            | noodles      | 0.0021s   | 0.0025s | 1.18x     |
+| Genome / N=1            | rust-bio     | 0.0021s   | 0.0027s | 1.30x     |
+| Genome / N=1            | samtools     | 0.0021s   | 0.0031s | 1.48x     |
+| Genome / N=10           | noodles      | 0.0022s   | 0.0025s | 1.10x     |
+| Genome / N=10           | rust-bio     | 0.0022s   | 0.0026s | 1.17x     |
+| Genome / N=10           | samtools     | 0.0022s   | 0.0032s | 1.41x     |
+| Genome / N=100          | noodles      | 0.0024s   | 0.0028s | 1.16x     |
+| Genome / N=100          | rust-bio     | 0.0024s   | 0.0029s | 1.20x     |
+| Genome / N=100          | samtools     | 0.0024s   | 0.0039s | 1.62x     |
+| Transcriptome / N=1     | noodles      | 0.0055s   | 0.0881s | 15.9x     |
+| Transcriptome / N=1     | rust-bio     | 0.0055s   | 0.5413s | 97.7x     |
+| Transcriptome / N=1     | samtools     | 0.0055s   | 0.2942s | 53.1x     |
+| Transcriptome / N=10    | noodles      | 0.0283s   | 0.0916s | 3.2x      |
+| Transcriptome / N=10    | rust-bio     | 0.0283s   | 0.5534s | 19.6x     |
+| Transcriptome / N=10    | samtools     | 0.0283s   | 0.2943s | 10.4x     |
+| Transcriptome / N=100   | noodles      | 0.0282s   | 0.1290s | 4.6x      |
+| Transcriptome / N=100   | rust-bio     | 0.0282s   | 0.5371s | 19.1x     |
+| Transcriptome / N=100   | samtools     | 0.0282s   | 0.2983s | 10.6x     |
+| Transcriptome / N=1,000 | noodles      | 0.0372s   | 0.4620s | 12.4x     |
+| Transcriptome / N=1,000 | rust-bio     | 0.0372s   | 0.5391s | 14.5x     |
+| Transcriptome / N=1,000 | samtools     | 0.0372s   | 0.2970s | 8.0x      |
+| Proteome / N=1          | noodles      | 0.0024s   | 0.0066s | 2.8x      |
+| Proteome / N=1          | rust-bio     | 0.0024s   | 0.0194s | 8.2x      |
+| Proteome / N=1          | samtools     | 0.0024s   | 0.0127s | 5.4x      |
+| Proteome / N=10         | noodles      | 0.0032s   | 0.0073s | 2.3x      |
+| Proteome / N=10         | rust-bio     | 0.0032s   | 0.0199s | 6.2x      |
+| Proteome / N=10         | samtools     | 0.0032s   | 0.0128s | 4.0x      |
+| Proteome / N=100        | noodles      | 0.0037s   | 0.0109s | 2.9x      |
+| Proteome / N=100        | rust-bio     | 0.0037s   | 0.0198s | 5.3x      |
+| Proteome / N=100        | samtools     | 0.0037s   | 0.0137s | 3.7x      |
+| Proteome / N=1,000      | noodles      | 0.0059s   | 0.0468s | 7.9x      |
+| Proteome / N=1,000      | rust-bio     | 0.0059s   | 0.0236s | 4.0x      |
+| Proteome / N=1,000      | samtools     | 0.0059s   | 0.0228s | 3.9x      |
 
 </details>
 
@@ -508,39 +509,39 @@ zebrac starts a new process for each sample and records peak RSS when it exits (
 
 | Dataset / N             | z-fasta vs   | z-fasta   | Peer      | RSS ×   |
 |:------------------------|:-------------|:----------|:----------|:--------|
-| Genome / N=1            | noodles      | 3.34 MB   | 3.40 MB   | 1.02×   |
-| Genome / N=1            | rust-bio     | 3.34 MB   | 3.41 MB   | 1.02×   |
-| Genome / N=1            | samtools     | 3.34 MB   | 3.41 MB   | 1.02×   |
-| Genome / N=10           | noodles      | 3.36 MB   | 3.42 MB   | 1.02×   |
-| Genome / N=10           | rust-bio     | 3.36 MB   | 3.41 MB   | 1.02×   |
-| Genome / N=10           | samtools     | 3.36 MB   | 3.37 MB   | 1.00×   |
-| Genome / N=100          | noodles      | 3.41 MB   | 3.41 MB   | 1.00×   |
-| Genome / N=100          | rust-bio     | 3.41 MB   | 3.38 MB   | 0.99×   |
-| Genome / N=100          | samtools     | 3.41 MB   | 3.44 MB   | 1.01×   |
-| Transcriptome / N=1     | noodles      | 38.36 MB  | 46.92 MB  | 1.22×   |
-| Transcriptome / N=1     | rust-bio     | 38.36 MB  | 145.16 MB | 3.8×    |
-| Transcriptome / N=1     | samtools     | 38.36 MB  | 60.54 MB  | 1.58×   |
-| Transcriptome / N=10    | noodles      | 51.93 MB  | 46.90 MB  | 0.90×   |
-| Transcriptome / N=10    | rust-bio     | 51.93 MB  | 145.12 MB | 2.8×    |
-| Transcriptome / N=10    | samtools     | 51.93 MB  | 60.48 MB  | 1.16×   |
-| Transcriptome / N=100   | noodles      | 50.55 MB  | 46.92 MB  | 0.93×   |
-| Transcriptome / N=100   | rust-bio     | 50.55 MB  | 145.11 MB | 2.9×    |
-| Transcriptome / N=100   | samtools     | 50.55 MB  | 60.47 MB  | 1.20×   |
-| Transcriptome / N=1,000 | noodles      | 57.82 MB  | 47.15 MB  | 0.82×   |
-| Transcriptome / N=1,000 | rust-bio     | 57.82 MB  | 145.32 MB | 2.5×    |
-| Transcriptome / N=1,000 | samtools     | 57.82 MB  | 60.52 MB  | 1.05×   |
-| Proteome / N=1          | noodles      | 3.37 MB   | 3.63 MB   | 1.08×   |
-| Proteome / N=1          | rust-bio     | 3.37 MB   | 7.25 MB   | 2.1×    |
-| Proteome / N=1          | samtools     | 3.37 MB   | 5.27 MB   | 1.56×   |
-| Proteome / N=10         | noodles      | 3.52 MB   | 3.66 MB   | 1.04×   |
-| Proteome / N=10         | rust-bio     | 3.52 MB   | 7.33 MB   | 2.1×    |
-| Proteome / N=10         | samtools     | 3.52 MB   | 5.31 MB   | 1.51×   |
-| Proteome / N=100        | noodles      | 10.67 MB  | 3.63 MB   | 0.34×   |
-| Proteome / N=100        | rust-bio     | 10.67 MB  | 7.33 MB   | 0.69×   |
-| Proteome / N=100        | samtools     | 10.67 MB  | 5.30 MB   | 0.50×   |
-| Proteome / N=1,000      | noodles      | 16.08 MB  | 3.92 MB   | 0.24×   |
-| Proteome / N=1,000      | rust-bio     | 16.08 MB  | 7.44 MB   | 0.46×   |
-| Proteome / N=1,000      | samtools     | 16.08 MB  | 5.29 MB   | 0.33×   |
+| Genome / N=1            | noodles      | 3.34 MB   | 3.40 MB   | 1.02x   |
+| Genome / N=1            | rust-bio     | 3.34 MB   | 3.41 MB   | 1.02x   |
+| Genome / N=1            | samtools     | 3.34 MB   | 3.41 MB   | 1.02x   |
+| Genome / N=10           | noodles      | 3.36 MB   | 3.42 MB   | 1.02x   |
+| Genome / N=10           | rust-bio     | 3.36 MB   | 3.41 MB   | 1.02x   |
+| Genome / N=10           | samtools     | 3.36 MB   | 3.37 MB   | 1.00x   |
+| Genome / N=100          | noodles      | 3.41 MB   | 3.41 MB   | 1.00x   |
+| Genome / N=100          | rust-bio     | 3.41 MB   | 3.38 MB   | 0.99x   |
+| Genome / N=100          | samtools     | 3.41 MB   | 3.44 MB   | 1.01x   |
+| Transcriptome / N=1     | noodles      | 38.36 MB  | 46.92 MB  | 1.22x   |
+| Transcriptome / N=1     | rust-bio     | 38.36 MB  | 145.16 MB | 3.8x    |
+| Transcriptome / N=1     | samtools     | 38.36 MB  | 60.54 MB  | 1.58x   |
+| Transcriptome / N=10    | noodles      | 51.93 MB  | 46.90 MB  | 0.90x   |
+| Transcriptome / N=10    | rust-bio     | 51.93 MB  | 145.12 MB | 2.8x    |
+| Transcriptome / N=10    | samtools     | 51.93 MB  | 60.48 MB  | 1.16x   |
+| Transcriptome / N=100   | noodles      | 50.55 MB  | 46.92 MB  | 0.93x   |
+| Transcriptome / N=100   | rust-bio     | 50.55 MB  | 145.11 MB | 2.9x    |
+| Transcriptome / N=100   | samtools     | 50.55 MB  | 60.47 MB  | 1.20x   |
+| Transcriptome / N=1,000 | noodles      | 57.82 MB  | 47.15 MB  | 0.82x   |
+| Transcriptome / N=1,000 | rust-bio     | 57.82 MB  | 145.32 MB | 2.5x    |
+| Transcriptome / N=1,000 | samtools     | 57.82 MB  | 60.52 MB  | 1.05x   |
+| Proteome / N=1          | noodles      | 3.37 MB   | 3.63 MB   | 1.08x   |
+| Proteome / N=1          | rust-bio     | 3.37 MB   | 7.25 MB   | 2.1x    |
+| Proteome / N=1          | samtools     | 3.37 MB   | 5.27 MB   | 1.56x   |
+| Proteome / N=10         | noodles      | 3.52 MB   | 3.66 MB   | 1.04x   |
+| Proteome / N=10         | rust-bio     | 3.52 MB   | 7.33 MB   | 2.1x    |
+| Proteome / N=10         | samtools     | 3.52 MB   | 5.31 MB   | 1.51x   |
+| Proteome / N=100        | noodles      | 10.67 MB  | 3.63 MB   | 0.34x   |
+| Proteome / N=100        | rust-bio     | 10.67 MB  | 7.33 MB   | 0.69x   |
+| Proteome / N=100        | samtools     | 10.67 MB  | 5.30 MB   | 0.50x   |
+| Proteome / N=1,000      | noodles      | 16.08 MB  | 3.92 MB   | 0.24x   |
+| Proteome / N=1,000      | rust-bio     | 16.08 MB  | 7.44 MB   | 0.46x   |
+| Proteome / N=1,000      | samtools     | 16.08 MB  | 5.29 MB   | 0.33x   |
 
 </details>
 
@@ -586,39 +587,39 @@ A **minor** fault maps a page without reading disk. A **major** fault reads from
 
 | Dataset / N             | z-fasta vs   |   z-fasta |   Peer | Faults ×   |
 |:------------------------|:-------------|----------:|-------:|:-----------|
-| Genome / N=1            | noodles      |       307 |    304 | 0.99×      |
-| Genome / N=1            | rust-bio     |       307 |    313 | 1.02×      |
-| Genome / N=1            | samtools     |       307 |    397 | 1.29×      |
-| Genome / N=10           | noodles      |       319 |    310 | 0.97×      |
-| Genome / N=10           | rust-bio     |       319 |    317 | 1.00×      |
-| Genome / N=10           | samtools     |       319 |    392 | 1.23×      |
-| Genome / N=100          | noodles      |       342 |    322 | 0.94×      |
-| Genome / N=100          | rust-bio     |       342 |    334 | 0.98×      |
-| Genome / N=100          | samtools     |       342 |    394 | 1.15×      |
-| Transcriptome / N=1     | noodles      |       332 | 11,801 | 35.5×      |
-| Transcriptome / N=1     | rust-bio     |       332 | 41,143 | 124×       |
-| Transcriptome / N=1     | samtools     |       332 | 15,124 | 45.5×      |
-| Transcriptome / N=10    | noodles      |     3,551 | 11,811 | 3.3×       |
-| Transcriptome / N=10    | rust-bio     |     3,551 | 41,147 | 11.6×      |
-| Transcriptome / N=10    | samtools     |     3,551 | 15,124 | 4.3×       |
-| Transcriptome / N=100   | noodles      |     3,608 | 11,864 | 3.3×       |
-| Transcriptome / N=100   | rust-bio     |     3,608 | 41,200 | 11.4×      |
-| Transcriptome / N=100   | samtools     |     3,608 | 15,123 | 4.2×       |
-| Transcriptome / N=1,000 | noodles      |     5,386 | 12,424 | 2.3×       |
-| Transcriptome / N=1,000 | rust-bio     |     5,386 | 41,756 | 7.8×       |
-| Transcriptome / N=1,000 | samtools     |     5,386 | 15,124 | 2.8×       |
-| Proteome / N=1          | noodles      |       312 |    746 | 2.4×       |
-| Proteome / N=1          | rust-bio     |       312 |  2,069 | 6.6×       |
-| Proteome / N=1          | samtools     |       312 |    981 | 3.1×       |
-| Proteome / N=10         | noodles      |       531 |    752 | 1.42×      |
-| Proteome / N=10         | rust-bio     |       531 |  2,072 | 3.9×       |
-| Proteome / N=10         | samtools     |       531 |    983 | 1.85×      |
-| Proteome / N=100        | noodles      |       622 |    774 | 1.25×      |
-| Proteome / N=100        | rust-bio     |       622 |  2,097 | 3.4×       |
-| Proteome / N=100        | samtools     |       622 |    982 | 1.58×      |
-| Proteome / N=1,000      | noodles      |       847 |    941 | 1.11×      |
-| Proteome / N=1,000      | rust-bio     |       847 |  2,250 | 2.7×       |
-| Proteome / N=1,000      | samtools     |       847 |    982 | 1.16×      |
+| Genome / N=1            | noodles      |       307 |    304 | 0.99x      |
+| Genome / N=1            | rust-bio     |       307 |    313 | 1.02x      |
+| Genome / N=1            | samtools     |       307 |    397 | 1.29x      |
+| Genome / N=10           | noodles      |       319 |    310 | 0.97x      |
+| Genome / N=10           | rust-bio     |       319 |    317 | 1.00x      |
+| Genome / N=10           | samtools     |       319 |    392 | 1.23x      |
+| Genome / N=100          | noodles      |       342 |    322 | 0.94x      |
+| Genome / N=100          | rust-bio     |       342 |    334 | 0.98x      |
+| Genome / N=100          | samtools     |       342 |    394 | 1.15x      |
+| Transcriptome / N=1     | noodles      |       332 | 11,801 | 35.5x      |
+| Transcriptome / N=1     | rust-bio     |       332 | 41,143 | 124x       |
+| Transcriptome / N=1     | samtools     |       332 | 15,124 | 45.5x      |
+| Transcriptome / N=10    | noodles      |     3,551 | 11,811 | 3.3x       |
+| Transcriptome / N=10    | rust-bio     |     3,551 | 41,147 | 11.6x      |
+| Transcriptome / N=10    | samtools     |     3,551 | 15,124 | 4.3x       |
+| Transcriptome / N=100   | noodles      |     3,608 | 11,864 | 3.3x       |
+| Transcriptome / N=100   | rust-bio     |     3,608 | 41,200 | 11.4x      |
+| Transcriptome / N=100   | samtools     |     3,608 | 15,123 | 4.2x       |
+| Transcriptome / N=1,000 | noodles      |     5,386 | 12,424 | 2.3x       |
+| Transcriptome / N=1,000 | rust-bio     |     5,386 | 41,756 | 7.8x       |
+| Transcriptome / N=1,000 | samtools     |     5,386 | 15,124 | 2.8x       |
+| Proteome / N=1          | noodles      |       312 |    746 | 2.4x       |
+| Proteome / N=1          | rust-bio     |       312 |  2,069 | 6.6x       |
+| Proteome / N=1          | samtools     |       312 |    981 | 3.1x       |
+| Proteome / N=10         | noodles      |       531 |    752 | 1.42x      |
+| Proteome / N=10         | rust-bio     |       531 |  2,072 | 3.9x       |
+| Proteome / N=10         | samtools     |       531 |    983 | 1.85x      |
+| Proteome / N=100        | noodles      |       622 |    774 | 1.25x      |
+| Proteome / N=100        | rust-bio     |       622 |  2,097 | 3.4x       |
+| Proteome / N=100        | samtools     |       622 |    982 | 1.58x      |
+| Proteome / N=1,000      | noodles      |       847 |    941 | 1.11x      |
+| Proteome / N=1,000      | rust-bio     |       847 |  2,250 | 2.7x       |
+| Proteome / N=1,000      | samtools     |       847 |    982 | 1.16x      |
 
 </details>
 
@@ -656,7 +657,7 @@ A **minor** fault maps a page without reading disk. A **major** fault reads from
 
 ## Performance: BED batch
 
-`z-fasta get --bed` on Genome, Transcriptome, Proteome. Each BED row fetches **1 kbp** (sweep: 10 rows (0.01 Mb), 100 rows (0.10 Mb), 1,000 rows (1.0 Mb), 10,000 rows (10 Mb)). Three figure panels (Genome, Transcriptome, Proteome); grouped bars per row count. Headline z-fasta is plain `get --bed` with CLI default **`--chunk-size 4096`** (internal batching; not `--chunk-size -1` read-whole-file or `--chunk-size 1`). Table 20 compares z-fasta `--chunk-size` settings when those lanes ran; headline chart uses **default `--chunk-size 4096` only**. Chart/table tool order: z-fasta, noodles, rust-bio, samtools, bedtools.
+`z-fasta get --bed` on Genome, Transcriptome, Proteome. Each BED row fetches **1 kbp** (sweep: 10 rows (0.01 Mb), 100 rows (0.10 Mb), 1,000 rows (1.0 Mb), 10,000 rows (10 Mb)). Three figure panels (Genome, Transcriptome, Proteome); grouped bars per row count. Chart/table tool order: z-fasta, noodles, rust-bio, samtools, bedtools.
 
 **Table 17:** Wall time (mean ± stddev, seconds). Rows sorted by dataset then BED row count. Lower is better. Same tool order as the figure.
 
@@ -702,75 +703,54 @@ A **minor** fault maps a page without reading disk. A **major** fault reads from
 
 | Dataset / BED rows                  | z-fasta vs   | z-fasta   | Peer    | Speedup   |
 |:------------------------------------|:-------------|:----------|:--------|:----------|
-| Genome / 10 rows (0.01 Mb)          | noodles      | 0.0023s   | 0.0025s | 1.10×     |
-| Genome / 10 rows (0.01 Mb)          | rust-bio     | 0.0023s   | 0.0025s | 1.12×     |
-| Genome / 10 rows (0.01 Mb)          | samtools     | 0.0023s   | 0.0031s | 1.39×     |
-| Genome / 10 rows (0.01 Mb)          | bedtools     | 0.0023s   | 0.0035s | 1.55×     |
-| Genome / 100 rows (0.10 Mb)         | noodles      | 0.0024s   | 0.0028s | 1.18×     |
-| Genome / 100 rows (0.10 Mb)         | rust-bio     | 0.0024s   | 0.0027s | 1.14×     |
-| Genome / 100 rows (0.10 Mb)         | samtools     | 0.0024s   | 0.0040s | 1.69×     |
-| Genome / 100 rows (0.10 Mb)         | bedtools     | 0.0024s   | 0.0040s | 1.69×     |
-| Genome / 1,000 rows (1.0 Mb)        | noodles      | 0.0038s   | 0.0058s | 1.53×     |
-| Genome / 1,000 rows (1.0 Mb)        | rust-bio     | 0.0038s   | 0.0050s | 1.31×     |
-| Genome / 1,000 rows (1.0 Mb)        | samtools     | 0.0038s   | 0.0129s | 3.4×      |
-| Genome / 1,000 rows (1.0 Mb)        | bedtools     | 0.0038s   | 0.0078s | 2.0×      |
-| Genome / 10,000 rows (10 Mb)        | noodles      | 0.0169s   | 0.0359s | 2.1×      |
-| Genome / 10,000 rows (10 Mb)        | rust-bio     | 0.0169s   | 0.0247s | 1.46×     |
-| Genome / 10,000 rows (10 Mb)        | samtools     | 0.0169s   | 0.0983s | 5.8×      |
-| Genome / 10,000 rows (10 Mb)        | bedtools     | 0.0169s   | 0.0436s | 2.6×      |
-| Transcriptome / 10 rows (0.01 Mb)   | noodles      | 0.0291s   | 0.0939s | 3.2×      |
-| Transcriptome / 10 rows (0.01 Mb)   | rust-bio     | 0.0291s   | 0.2865s | 9.8×      |
-| Transcriptome / 10 rows (0.01 Mb)   | samtools     | 0.0291s   | 0.2845s | 9.8×      |
-| Transcriptome / 10 rows (0.01 Mb)   | bedtools     | 0.0291s   | 0.5690s | 19.5×     |
-| Transcriptome / 100 rows (0.10 Mb)  | noodles      | 0.0281s   | 0.1214s | 4.3×      |
-| Transcriptome / 100 rows (0.10 Mb)  | rust-bio     | 0.0281s   | 0.2802s | 10.0×     |
-| Transcriptome / 100 rows (0.10 Mb)  | samtools     | 0.0281s   | 0.2887s | 10.3×     |
-| Transcriptome / 100 rows (0.10 Mb)  | bedtools     | 0.0281s   | 0.5748s | 20.4×     |
-| Transcriptome / 1,000 rows (1.0 Mb) | noodles      | 0.0322s   | 0.4086s | 12.7×     |
-| Transcriptome / 1,000 rows (1.0 Mb) | rust-bio     | 0.0322s   | 0.2799s | 8.7×      |
-| Transcriptome / 1,000 rows (1.0 Mb) | samtools     | 0.0322s   | 0.2890s | 9.0×      |
-| Transcriptome / 1,000 rows (1.0 Mb) | bedtools     | 0.0322s   | 0.5638s | 17.5×     |
-| Transcriptome / 10,000 rows (10 Mb) | noodles      | 0.0717s   | 3.4634s | 48.3×     |
-| Transcriptome / 10,000 rows (10 Mb) | rust-bio     | 0.0717s   | 0.3085s | 4.3×      |
-| Transcriptome / 10,000 rows (10 Mb) | samtools     | 0.0717s   | 0.3915s | 5.5×      |
-| Transcriptome / 10,000 rows (10 Mb) | bedtools     | 0.0717s   | 0.6374s | 8.9×      |
-| Proteome / 10 rows (0.01 Mb)        | noodles      | 0.0032s   | 0.0072s | 2.2×      |
-| Proteome / 10 rows (0.01 Mb)        | rust-bio     | 0.0032s   | 0.0114s | 3.5×      |
-| Proteome / 10 rows (0.01 Mb)        | samtools     | 0.0032s   | 0.0130s | 4.0×      |
-| Proteome / 10 rows (0.01 Mb)        | bedtools     | 0.0032s   | 0.0362s | 11.2×     |
-| Proteome / 100 rows (0.10 Mb)       | noodles      | 0.0036s   | 0.0108s | 3.0×      |
-| Proteome / 100 rows (0.10 Mb)       | rust-bio     | 0.0036s   | 0.0117s | 3.3×      |
-| Proteome / 100 rows (0.10 Mb)       | samtools     | 0.0036s   | 0.0141s | 3.9×      |
-| Proteome / 100 rows (0.10 Mb)       | bedtools     | 0.0036s   | 0.0372s | 10.4×     |
-| Proteome / 1,000 rows (1.0 Mb)      | noodles      | 0.0041s   | 0.0476s | 11.6×     |
-| Proteome / 1,000 rows (1.0 Mb)      | rust-bio     | 0.0041s   | 0.0137s | 3.3×      |
-| Proteome / 1,000 rows (1.0 Mb)      | samtools     | 0.0041s   | 0.0236s | 5.7×      |
-| Proteome / 1,000 rows (1.0 Mb)      | bedtools     | 0.0041s   | 0.0410s | 10.0×     |
-| Proteome / 10,000 rows (10 Mb)      | noodles      | 0.0099s   | 0.4017s | 40.7×     |
-| Proteome / 10,000 rows (10 Mb)      | rust-bio     | 0.0099s   | 0.0345s | 3.5×      |
-| Proteome / 10,000 rows (10 Mb)      | samtools     | 0.0099s   | 0.1183s | 12.0×     |
-| Proteome / 10,000 rows (10 Mb)      | bedtools     | 0.0099s   | 0.0768s | 7.8×      |
-
-</details>
-
-<details>
-
-<summary><strong>Table 20:</strong> z-fasta chunk-size comparison (default 4096 vs -1 vs 1; not in Figure 7).</summary>
-
-| Dataset / BED rows                  | z-fasta (--chunk-size 4096)   | z-fasta --chunk-size -1   | z-fasta --chunk-size 1   |
-|:------------------------------------|:------------------------------|:--------------------------|:-------------------------|
-| Genome / 10 rows (0.01 Mb)          | 0.0023s ±0.0001               | 0.0022s ±0.0000           | 0.0023s ±0.0001          |
-| Genome / 100 rows (0.10 Mb)         | 0.0024s ±0.0001               | 0.0024s ±0.0000           | 0.0033s ±0.0000          |
-| Genome / 1,000 rows (1.0 Mb)        | 0.0038s ±0.0002               | 0.0036s ±0.0001           | nan                      |
-| Genome / 10,000 rows (10 Mb)        | 0.0169s ±0.0003               | 0.0137s ±0.0002           | nan                      |
-| Transcriptome / 10 rows (0.01 Mb)   | 0.0291s ±0.0012               | 0.0291s ±0.0015           | 0.0287s ±0.0015          |
-| Transcriptome / 100 rows (0.10 Mb)  | 0.0281s ±0.0011               | 0.0277s ±0.0005           | 0.0297s ±0.0018          |
-| Transcriptome / 1,000 rows (1.0 Mb) | 0.0322s ±0.0002               | 0.0322s ±0.0002           | nan                      |
-| Transcriptome / 10,000 rows (10 Mb) | 0.0717s ±0.0009               | 0.0669s ±0.0011           | nan                      |
-| Proteome / 10 rows (0.01 Mb)        | 0.0032s ±0.0001               | 0.0032s ±0.0001           | 0.0032s ±0.0001          |
-| Proteome / 100 rows (0.10 Mb)       | 0.0036s ±0.0001               | 0.0034s ±0.0001           | 0.0043s ±0.0001          |
-| Proteome / 1,000 rows (1.0 Mb)      | 0.0041s ±0.0000               | 0.0042s ±0.0001           | nan                      |
-| Proteome / 10,000 rows (10 Mb)      | 0.0099s ±0.0006               | 0.0109s ±0.0006           | nan                      |
+| Genome / 10 rows (0.01 Mb)          | noodles      | 0.0023s   | 0.0025s | 1.10x     |
+| Genome / 10 rows (0.01 Mb)          | rust-bio     | 0.0023s   | 0.0025s | 1.12x     |
+| Genome / 10 rows (0.01 Mb)          | samtools     | 0.0023s   | 0.0031s | 1.39x     |
+| Genome / 10 rows (0.01 Mb)          | bedtools     | 0.0023s   | 0.0035s | 1.55x     |
+| Genome / 100 rows (0.10 Mb)         | noodles      | 0.0024s   | 0.0028s | 1.18x     |
+| Genome / 100 rows (0.10 Mb)         | rust-bio     | 0.0024s   | 0.0027s | 1.14x     |
+| Genome / 100 rows (0.10 Mb)         | samtools     | 0.0024s   | 0.0040s | 1.69x     |
+| Genome / 100 rows (0.10 Mb)         | bedtools     | 0.0024s   | 0.0040s | 1.69x     |
+| Genome / 1,000 rows (1.0 Mb)        | noodles      | 0.0038s   | 0.0058s | 1.53x     |
+| Genome / 1,000 rows (1.0 Mb)        | rust-bio     | 0.0038s   | 0.0050s | 1.31x     |
+| Genome / 1,000 rows (1.0 Mb)        | samtools     | 0.0038s   | 0.0129s | 3.4x      |
+| Genome / 1,000 rows (1.0 Mb)        | bedtools     | 0.0038s   | 0.0078s | 2.0x      |
+| Genome / 10,000 rows (10 Mb)        | noodles      | 0.0169s   | 0.0359s | 2.1x      |
+| Genome / 10,000 rows (10 Mb)        | rust-bio     | 0.0169s   | 0.0247s | 1.46x     |
+| Genome / 10,000 rows (10 Mb)        | samtools     | 0.0169s   | 0.0983s | 5.8x      |
+| Genome / 10,000 rows (10 Mb)        | bedtools     | 0.0169s   | 0.0436s | 2.6x      |
+| Transcriptome / 10 rows (0.01 Mb)   | noodles      | 0.0291s   | 0.0939s | 3.2x      |
+| Transcriptome / 10 rows (0.01 Mb)   | rust-bio     | 0.0291s   | 0.2865s | 9.8x      |
+| Transcriptome / 10 rows (0.01 Mb)   | samtools     | 0.0291s   | 0.2845s | 9.8x      |
+| Transcriptome / 10 rows (0.01 Mb)   | bedtools     | 0.0291s   | 0.5690s | 19.5x     |
+| Transcriptome / 100 rows (0.10 Mb)  | noodles      | 0.0281s   | 0.1214s | 4.3x      |
+| Transcriptome / 100 rows (0.10 Mb)  | rust-bio     | 0.0281s   | 0.2802s | 10.0x     |
+| Transcriptome / 100 rows (0.10 Mb)  | samtools     | 0.0281s   | 0.2887s | 10.3x     |
+| Transcriptome / 100 rows (0.10 Mb)  | bedtools     | 0.0281s   | 0.5748s | 20.4x     |
+| Transcriptome / 1,000 rows (1.0 Mb) | noodles      | 0.0322s   | 0.4086s | 12.7x     |
+| Transcriptome / 1,000 rows (1.0 Mb) | rust-bio     | 0.0322s   | 0.2799s | 8.7x      |
+| Transcriptome / 1,000 rows (1.0 Mb) | samtools     | 0.0322s   | 0.2890s | 9.0x      |
+| Transcriptome / 1,000 rows (1.0 Mb) | bedtools     | 0.0322s   | 0.5638s | 17.5x     |
+| Transcriptome / 10,000 rows (10 Mb) | noodles      | 0.0717s   | 3.4634s | 48.3x     |
+| Transcriptome / 10,000 rows (10 Mb) | rust-bio     | 0.0717s   | 0.3085s | 4.3x      |
+| Transcriptome / 10,000 rows (10 Mb) | samtools     | 0.0717s   | 0.3915s | 5.5x      |
+| Transcriptome / 10,000 rows (10 Mb) | bedtools     | 0.0717s   | 0.6374s | 8.9x      |
+| Proteome / 10 rows (0.01 Mb)        | noodles      | 0.0032s   | 0.0072s | 2.2x      |
+| Proteome / 10 rows (0.01 Mb)        | rust-bio     | 0.0032s   | 0.0114s | 3.5x      |
+| Proteome / 10 rows (0.01 Mb)        | samtools     | 0.0032s   | 0.0130s | 4.0x      |
+| Proteome / 10 rows (0.01 Mb)        | bedtools     | 0.0032s   | 0.0362s | 11.2x     |
+| Proteome / 100 rows (0.10 Mb)       | noodles      | 0.0036s   | 0.0108s | 3.0x      |
+| Proteome / 100 rows (0.10 Mb)       | rust-bio     | 0.0036s   | 0.0117s | 3.3x      |
+| Proteome / 100 rows (0.10 Mb)       | samtools     | 0.0036s   | 0.0141s | 3.9x      |
+| Proteome / 100 rows (0.10 Mb)       | bedtools     | 0.0036s   | 0.0372s | 10.4x     |
+| Proteome / 1,000 rows (1.0 Mb)      | noodles      | 0.0041s   | 0.0476s | 11.6x     |
+| Proteome / 1,000 rows (1.0 Mb)      | rust-bio     | 0.0041s   | 0.0137s | 3.3x      |
+| Proteome / 1,000 rows (1.0 Mb)      | samtools     | 0.0041s   | 0.0236s | 5.7x      |
+| Proteome / 1,000 rows (1.0 Mb)      | bedtools     | 0.0041s   | 0.0410s | 10.0x     |
+| Proteome / 10,000 rows (10 Mb)      | noodles      | 0.0099s   | 0.4017s | 40.7x     |
+| Proteome / 10,000 rows (10 Mb)      | rust-bio     | 0.0099s   | 0.0345s | 3.5x      |
+| Proteome / 10,000 rows (10 Mb)      | samtools     | 0.0099s   | 0.1183s | 12.0x     |
+| Proteome / 10,000 rows (10 Mb)      | bedtools     | 0.0099s   | 0.0768s | 7.8x      |
 
 </details>
 
@@ -784,7 +764,6 @@ A **minor** fault maps a page without reading disk. A **major** fault reads from
 - Three panels: Genome, Transcriptome, Proteome (BED row count on x-axis).
 - **Bars:** zebrac mean wall time. Error bars = one standard deviation.
 - **Legend order:** z-fasta, noodles, rust-bio, samtools, bedtools.
-- **Headline z-fasta:** default `--chunk-size 4096` only.
 - **Bar labels:** `1×` on z-fasta; other labels = peer / z-fasta (indexed peers + bedtools). Details in Table 19.
 
 ## Memory Usage: BED batch
@@ -795,7 +774,7 @@ Same zebrac samples as **Performance: BED batch**.
 
 zebrac starts a new process for each sample and records peak RSS when it exits (`ru_maxrss`). Table and figure show the mean across samples.
 
-**Table 21:** Peak RSS (MB, zebrac mean). Same tool order as Performance.
+**Table 20:** Peak RSS (MB, zebrac mean). Same tool order as Performance.
 
 | Dataset / BED rows                  | z-fasta   | noodles   | rust-bio   | samtools   | bedtools   |
 |:------------------------------------|:----------|:----------|:-----------|:-----------|:-----------|
@@ -814,64 +793,64 @@ zebrac starts a new process for each sample and records peak RSS when it exits (
 
 <details>
 
-<summary><strong>Table 22:</strong> z-fasta vs each peer. RSS × = peer peak RSS ÷ z-fasta peak RSS. Same ratios as bar labels on Figure 8.</summary>
+<summary><strong>Table 21:</strong> z-fasta vs each peer. RSS × = peer peak RSS ÷ z-fasta peak RSS. Same ratios as bar labels on Figure 8.</summary>
 
 | Dataset / BED rows                  | z-fasta vs   | z-fasta   | Peer      | RSS ×   |
 |:------------------------------------|:-------------|:----------|:----------|:--------|
-| Genome / 10 rows (0.01 Mb)          | noodles      | 3.40 MB   | 3.38 MB   | 0.99×   |
-| Genome / 10 rows (0.01 Mb)          | rust-bio     | 3.40 MB   | 3.43 MB   | 1.01×   |
-| Genome / 10 rows (0.01 Mb)          | samtools     | 3.40 MB   | 3.38 MB   | 0.99×   |
-| Genome / 10 rows (0.01 Mb)          | bedtools     | 3.40 MB   | 5.59 MB   | 1.64×   |
-| Genome / 100 rows (0.10 Mb)         | noodles      | 3.35 MB   | 3.37 MB   | 1.00×   |
-| Genome / 100 rows (0.10 Mb)         | rust-bio     | 3.35 MB   | 3.34 MB   | 1.00×   |
-| Genome / 100 rows (0.10 Mb)         | samtools     | 3.35 MB   | 3.41 MB   | 1.02×   |
-| Genome / 100 rows (0.10 Mb)         | bedtools     | 3.35 MB   | 10.95 MB  | 3.3×    |
-| Genome / 1,000 rows (1.0 Mb)        | noodles      | 3.38 MB   | 3.38 MB   | 1.00×   |
-| Genome / 1,000 rows (1.0 Mb)        | rust-bio     | 3.38 MB   | 3.36 MB   | 1.00×   |
-| Genome / 1,000 rows (1.0 Mb)        | samtools     | 3.38 MB   | 3.37 MB   | 1.00×   |
-| Genome / 1,000 rows (1.0 Mb)        | bedtools     | 3.38 MB   | 31.52 MB  | 9.3×    |
-| Genome / 10,000 rows (10 Mb)        | noodles      | 3.35 MB   | 3.40 MB   | 1.01×   |
-| Genome / 10,000 rows (10 Mb)        | rust-bio     | 3.35 MB   | 3.38 MB   | 1.01×   |
-| Genome / 10,000 rows (10 Mb)        | samtools     | 3.35 MB   | 3.39 MB   | 1.01×   |
-| Genome / 10,000 rows (10 Mb)        | bedtools     | 3.35 MB   | 170.96 MB | 51.0×   |
-| Transcriptome / 10 rows (0.01 Mb)   | noodles      | 51.82 MB  | 46.91 MB  | 0.91×   |
-| Transcriptome / 10 rows (0.01 Mb)   | rust-bio     | 51.82 MB  | 95.70 MB  | 1.85×   |
-| Transcriptome / 10 rows (0.01 Mb)   | samtools     | 51.82 MB  | 60.50 MB  | 1.17×   |
-| Transcriptome / 10 rows (0.01 Mb)   | bedtools     | 51.82 MB  | 142.82 MB | 2.8×    |
-| Transcriptome / 100 rows (0.10 Mb)  | noodles      | 50.73 MB  | 46.90 MB  | 0.92×   |
-| Transcriptome / 100 rows (0.10 Mb)  | rust-bio     | 50.73 MB  | 95.75 MB  | 1.89×   |
-| Transcriptome / 100 rows (0.10 Mb)  | samtools     | 50.73 MB  | 60.52 MB  | 1.19×   |
-| Transcriptome / 100 rows (0.10 Mb)  | bedtools     | 50.73 MB  | 154.04 MB | 3.0×    |
-| Transcriptome / 1,000 rows (1.0 Mb) | noodles      | 57.32 MB  | 46.91 MB  | 0.82×   |
-| Transcriptome / 1,000 rows (1.0 Mb) | rust-bio     | 57.32 MB  | 95.75 MB  | 1.67×   |
-| Transcriptome / 1,000 rows (1.0 Mb) | samtools     | 57.32 MB  | 60.55 MB  | 1.06×   |
-| Transcriptome / 1,000 rows (1.0 Mb) | bedtools     | 57.32 MB  | 250.64 MB | 4.4×    |
-| Transcriptome / 10,000 rows (10 Mb) | noodles      | 66.13 MB  | 46.90 MB  | 0.71×   |
-| Transcriptome / 10,000 rows (10 Mb) | rust-bio     | 66.13 MB  | 95.74 MB  | 1.45×   |
-| Transcriptome / 10,000 rows (10 Mb) | samtools     | 66.13 MB  | 60.49 MB  | 0.91×   |
-| Transcriptome / 10,000 rows (10 Mb) | bedtools     | 66.13 MB  | 560.29 MB | 8.5×    |
-| Proteome / 10 rows (0.01 Mb)        | noodles      | 3.94 MB   | 3.66 MB   | 0.93×   |
-| Proteome / 10 rows (0.01 Mb)        | rust-bio     | 3.94 MB   | 5.31 MB   | 1.35×   |
-| Proteome / 10 rows (0.01 Mb)        | samtools     | 3.94 MB   | 5.28 MB   | 1.34×   |
-| Proteome / 10 rows (0.01 Mb)        | bedtools     | 3.94 MB   | 11.28 MB  | 2.9×    |
-| Proteome / 100 rows (0.10 Mb)       | noodles      | 10.26 MB  | 3.64 MB   | 0.35×   |
-| Proteome / 100 rows (0.10 Mb)       | rust-bio     | 10.26 MB  | 5.53 MB   | 0.54×   |
-| Proteome / 100 rows (0.10 Mb)       | samtools     | 10.26 MB  | 5.26 MB   | 0.51×   |
-| Proteome / 100 rows (0.10 Mb)       | bedtools     | 10.26 MB  | 17.60 MB  | 1.72×   |
-| Proteome / 1,000 rows (1.0 Mb)      | noodles      | 15.92 MB  | 3.67 MB   | 0.23×   |
-| Proteome / 1,000 rows (1.0 Mb)      | rust-bio     | 15.92 MB  | 5.56 MB   | 0.35×   |
-| Proteome / 1,000 rows (1.0 Mb)      | samtools     | 15.92 MB  | 5.30 MB   | 0.33×   |
-| Proteome / 1,000 rows (1.0 Mb)      | bedtools     | 15.92 MB  | 23.04 MB  | 1.45×   |
-| Proteome / 10,000 rows (10 Mb)      | noodles      | 16.56 MB  | 3.66 MB   | 0.22×   |
-| Proteome / 10,000 rows (10 Mb)      | rust-bio     | 16.56 MB  | 5.50 MB   | 0.33×   |
-| Proteome / 10,000 rows (10 Mb)      | samtools     | 16.56 MB  | 5.26 MB   | 0.32×   |
-| Proteome / 10,000 rows (10 Mb)      | bedtools     | 16.56 MB  | 23.06 MB  | 1.39×   |
+| Genome / 10 rows (0.01 Mb)          | noodles      | 3.40 MB   | 3.38 MB   | 0.99x   |
+| Genome / 10 rows (0.01 Mb)          | rust-bio     | 3.40 MB   | 3.43 MB   | 1.01x   |
+| Genome / 10 rows (0.01 Mb)          | samtools     | 3.40 MB   | 3.38 MB   | 0.99x   |
+| Genome / 10 rows (0.01 Mb)          | bedtools     | 3.40 MB   | 5.59 MB   | 1.64x   |
+| Genome / 100 rows (0.10 Mb)         | noodles      | 3.35 MB   | 3.37 MB   | 1.00x   |
+| Genome / 100 rows (0.10 Mb)         | rust-bio     | 3.35 MB   | 3.34 MB   | 1.00x   |
+| Genome / 100 rows (0.10 Mb)         | samtools     | 3.35 MB   | 3.41 MB   | 1.02x   |
+| Genome / 100 rows (0.10 Mb)         | bedtools     | 3.35 MB   | 10.95 MB  | 3.3x    |
+| Genome / 1,000 rows (1.0 Mb)        | noodles      | 3.38 MB   | 3.38 MB   | 1.00x   |
+| Genome / 1,000 rows (1.0 Mb)        | rust-bio     | 3.38 MB   | 3.36 MB   | 1.00x   |
+| Genome / 1,000 rows (1.0 Mb)        | samtools     | 3.38 MB   | 3.37 MB   | 1.00x   |
+| Genome / 1,000 rows (1.0 Mb)        | bedtools     | 3.38 MB   | 31.52 MB  | 9.3x    |
+| Genome / 10,000 rows (10 Mb)        | noodles      | 3.35 MB   | 3.40 MB   | 1.01x   |
+| Genome / 10,000 rows (10 Mb)        | rust-bio     | 3.35 MB   | 3.38 MB   | 1.01x   |
+| Genome / 10,000 rows (10 Mb)        | samtools     | 3.35 MB   | 3.39 MB   | 1.01x   |
+| Genome / 10,000 rows (10 Mb)        | bedtools     | 3.35 MB   | 170.96 MB | 51.0x   |
+| Transcriptome / 10 rows (0.01 Mb)   | noodles      | 51.82 MB  | 46.91 MB  | 0.91x   |
+| Transcriptome / 10 rows (0.01 Mb)   | rust-bio     | 51.82 MB  | 95.70 MB  | 1.85x   |
+| Transcriptome / 10 rows (0.01 Mb)   | samtools     | 51.82 MB  | 60.50 MB  | 1.17x   |
+| Transcriptome / 10 rows (0.01 Mb)   | bedtools     | 51.82 MB  | 142.82 MB | 2.8x    |
+| Transcriptome / 100 rows (0.10 Mb)  | noodles      | 50.73 MB  | 46.90 MB  | 0.92x   |
+| Transcriptome / 100 rows (0.10 Mb)  | rust-bio     | 50.73 MB  | 95.75 MB  | 1.89x   |
+| Transcriptome / 100 rows (0.10 Mb)  | samtools     | 50.73 MB  | 60.52 MB  | 1.19x   |
+| Transcriptome / 100 rows (0.10 Mb)  | bedtools     | 50.73 MB  | 154.04 MB | 3.0x    |
+| Transcriptome / 1,000 rows (1.0 Mb) | noodles      | 57.32 MB  | 46.91 MB  | 0.82x   |
+| Transcriptome / 1,000 rows (1.0 Mb) | rust-bio     | 57.32 MB  | 95.75 MB  | 1.67x   |
+| Transcriptome / 1,000 rows (1.0 Mb) | samtools     | 57.32 MB  | 60.55 MB  | 1.06x   |
+| Transcriptome / 1,000 rows (1.0 Mb) | bedtools     | 57.32 MB  | 250.64 MB | 4.4x    |
+| Transcriptome / 10,000 rows (10 Mb) | noodles      | 66.13 MB  | 46.90 MB  | 0.71x   |
+| Transcriptome / 10,000 rows (10 Mb) | rust-bio     | 66.13 MB  | 95.74 MB  | 1.45x   |
+| Transcriptome / 10,000 rows (10 Mb) | samtools     | 66.13 MB  | 60.49 MB  | 0.91x   |
+| Transcriptome / 10,000 rows (10 Mb) | bedtools     | 66.13 MB  | 560.29 MB | 8.5x    |
+| Proteome / 10 rows (0.01 Mb)        | noodles      | 3.94 MB   | 3.66 MB   | 0.93x   |
+| Proteome / 10 rows (0.01 Mb)        | rust-bio     | 3.94 MB   | 5.31 MB   | 1.35x   |
+| Proteome / 10 rows (0.01 Mb)        | samtools     | 3.94 MB   | 5.28 MB   | 1.34x   |
+| Proteome / 10 rows (0.01 Mb)        | bedtools     | 3.94 MB   | 11.28 MB  | 2.9x    |
+| Proteome / 100 rows (0.10 Mb)       | noodles      | 10.26 MB  | 3.64 MB   | 0.35x   |
+| Proteome / 100 rows (0.10 Mb)       | rust-bio     | 10.26 MB  | 5.53 MB   | 0.54x   |
+| Proteome / 100 rows (0.10 Mb)       | samtools     | 10.26 MB  | 5.26 MB   | 0.51x   |
+| Proteome / 100 rows (0.10 Mb)       | bedtools     | 10.26 MB  | 17.60 MB  | 1.72x   |
+| Proteome / 1,000 rows (1.0 Mb)      | noodles      | 15.92 MB  | 3.67 MB   | 0.23x   |
+| Proteome / 1,000 rows (1.0 Mb)      | rust-bio     | 15.92 MB  | 5.56 MB   | 0.35x   |
+| Proteome / 1,000 rows (1.0 Mb)      | samtools     | 15.92 MB  | 5.30 MB   | 0.33x   |
+| Proteome / 1,000 rows (1.0 Mb)      | bedtools     | 15.92 MB  | 23.04 MB  | 1.45x   |
+| Proteome / 10,000 rows (10 Mb)      | noodles      | 16.56 MB  | 3.66 MB   | 0.22x   |
+| Proteome / 10,000 rows (10 Mb)      | rust-bio     | 16.56 MB  | 5.50 MB   | 0.33x   |
+| Proteome / 10,000 rows (10 Mb)      | samtools     | 16.56 MB  | 5.26 MB   | 0.32x   |
+| Proteome / 10,000 rows (10 Mb)      | bedtools     | 16.56 MB  | 23.06 MB  | 1.39x   |
 
 </details>
 
 <div style="margin: 1.5em 0"></div>
 
-**Figure 8:** Table 21 as grouped bars (linear y, MB). Bar labels = RSS × (see Table 22).
+**Figure 8:** Table 20 as grouped bars (linear y, MB). Bar labels = RSS × (see Table 21).
 
 ![bed batch RSS](results/figures/perf_bed_rss.png)
 
@@ -879,7 +858,7 @@ zebrac starts a new process for each sample and records peak RSS when it exits (
 - Three panels: Genome, Transcriptome, Proteome (BED row count on x-axis).
 - **Bars:** zebrac mean peak RSS. Error bars when stddev is non-zero. Linear y-axis (MB).
 - **Legend order:** z-fasta, noodles, rust-bio, samtools, bedtools.
-- **Bar labels:** `1×` on z-fasta; other labels = RSS × (peer peak RSS ÷ z-fasta peak RSS). Details in Table 22.
+- **Bar labels:** `1×` on z-fasta; other labels = RSS × (peer peak RSS ÷ z-fasta peak RSS). Details in Table 21.
 
 ## Page Faults: BED batch
 
@@ -889,7 +868,7 @@ Same zebrac samples as **Performance: BED batch**.
 
 A **minor** fault maps a page without reading disk. A **major** fault reads from disk. zebrac reports both per run, like wall time.
 
-**Table 23:** Minor page faults (zebrac mean). Same tool order as Performance.
+**Table 22:** Minor page faults (zebrac mean). Same tool order as Performance.
 
 | Dataset / BED rows                  |   z-fasta |   noodles |   rust-bio |   samtools |   bedtools |
 |:------------------------------------|----------:|----------:|-----------:|-----------:|-----------:|
@@ -908,64 +887,64 @@ A **minor** fault maps a page without reading disk. A **major** fault reads from
 
 <details>
 
-<summary><strong>Table 24:</strong> z-fasta vs each peer. Faults × = peer minor faults ÷ z-fasta minor faults. Same ratios as bar labels on Figure 9.</summary>
+<summary><strong>Table 23:</strong> z-fasta vs each peer. Faults × = peer minor faults ÷ z-fasta minor faults. Same ratios as bar labels on Figure 9.</summary>
 
 | Dataset / BED rows                  | z-fasta vs   |   z-fasta |   Peer | Faults ×   |
 |:------------------------------------|:-------------|----------:|-------:|:-----------|
-| Genome / 10 rows (0.01 Mb)          | noodles      |       319 |    306 | 0.96×      |
-| Genome / 10 rows (0.01 Mb)          | rust-bio     |       319 |    311 | 0.97×      |
-| Genome / 10 rows (0.01 Mb)          | samtools     |       319 |    396 | 1.24×      |
-| Genome / 10 rows (0.01 Mb)          | bedtools     |       319 |    415 | 1.30×      |
-| Genome / 100 rows (0.10 Mb)         | noodles      |       325 |    306 | 0.94×      |
-| Genome / 100 rows (0.10 Mb)         | rust-bio     |       325 |    313 | 0.97×      |
-| Genome / 100 rows (0.10 Mb)         | samtools     |       325 |    393 | 1.21×      |
-| Genome / 100 rows (0.10 Mb)         | bedtools     |       325 |    459 | 1.41×      |
-| Genome / 1,000 rows (1.0 Mb)        | noodles      |       367 |    312 | 0.85×      |
-| Genome / 1,000 rows (1.0 Mb)        | rust-bio     |       367 |    311 | 0.85×      |
-| Genome / 1,000 rows (1.0 Mb)        | samtools     |       367 |    395 | 1.08×      |
-| Genome / 1,000 rows (1.0 Mb)        | bedtools     |       367 |    625 | 1.70×      |
-| Genome / 10,000 rows (10 Mb)        | noodles      |       793 |    311 | 0.39×      |
-| Genome / 10,000 rows (10 Mb)        | rust-bio     |       793 |    313 | 0.40×      |
-| Genome / 10,000 rows (10 Mb)        | samtools     |       793 |    393 | 0.50×      |
-| Genome / 10,000 rows (10 Mb)        | bedtools     |       793 |  1,737 | 2.2×       |
-| Transcriptome / 10 rows (0.01 Mb)   | noodles      |     3,545 | 11,803 | 3.3×       |
-| Transcriptome / 10 rows (0.01 Mb)   | rust-bio     |     3,545 | 28,258 | 8.0×       |
-| Transcriptome / 10 rows (0.01 Mb)   | samtools     |     3,545 | 15,126 | 4.3×       |
-| Transcriptome / 10 rows (0.01 Mb)   | bedtools     |     3,545 | 37,530 | 10.6×      |
-| Transcriptome / 100 rows (0.10 Mb)  | noodles      |     3,554 | 11,811 | 3.3×       |
-| Transcriptome / 100 rows (0.10 Mb)  | rust-bio     |     3,554 | 28,264 | 8.0×       |
-| Transcriptome / 100 rows (0.10 Mb)  | samtools     |     3,554 | 15,126 | 4.3×       |
-| Transcriptome / 100 rows (0.10 Mb)  | bedtools     |     3,554 | 37,620 | 10.6×      |
-| Transcriptome / 1,000 rows (1.0 Mb) | noodles      |     4,821 | 11,816 | 2.5×       |
-| Transcriptome / 1,000 rows (1.0 Mb) | rust-bio     |     4,821 | 28,264 | 5.9×       |
-| Transcriptome / 1,000 rows (1.0 Mb) | samtools     |     4,821 | 15,121 | 3.1×       |
-| Transcriptome / 1,000 rows (1.0 Mb) | bedtools     |     4,821 | 38,396 | 8.0×       |
-| Transcriptome / 10,000 rows (10 Mb) | noodles      |    13,684 | 11,822 | 0.86×      |
-| Transcriptome / 10,000 rows (10 Mb) | rust-bio     |    13,684 | 28,271 | 2.1×       |
-| Transcriptome / 10,000 rows (10 Mb) | samtools     |    13,684 | 15,122 | 1.11×      |
-| Transcriptome / 10,000 rows (10 Mb) | bedtools     |    13,684 | 40,876 | 3.0×       |
-| Proteome / 10 rows (0.01 Mb)        | noodles      |       527 |    746 | 1.42×      |
-| Proteome / 10 rows (0.01 Mb)        | rust-bio     |       527 |  1,413 | 2.7×       |
-| Proteome / 10 rows (0.01 Mb)        | samtools     |       527 |    984 | 1.87×      |
-| Proteome / 10 rows (0.01 Mb)        | bedtools     |       527 |  2,017 | 3.8×       |
-| Proteome / 100 rows (0.10 Mb)       | noodles      |       600 |    751 | 1.25×      |
-| Proteome / 100 rows (0.10 Mb)       | rust-bio     |       600 |  1,413 | 2.4×       |
-| Proteome / 100 rows (0.10 Mb)       | samtools     |       600 |    985 | 1.64×      |
-| Proteome / 100 rows (0.10 Mb)       | bedtools     |       600 |  2,069 | 3.4×       |
-| Proteome / 1,000 rows (1.0 Mb)      | noodles      |       684 |    752 | 1.10×      |
-| Proteome / 1,000 rows (1.0 Mb)      | rust-bio     |       684 |  1,414 | 2.1×       |
-| Proteome / 1,000 rows (1.0 Mb)      | samtools     |       684 |    984 | 1.44×      |
-| Proteome / 1,000 rows (1.0 Mb)      | bedtools     |       684 |  2,117 | 3.1×       |
-| Proteome / 10,000 rows (10 Mb)      | noodles      |     1,141 |    753 | 0.66×      |
-| Proteome / 10,000 rows (10 Mb)      | rust-bio     |     1,141 |  1,414 | 1.24×      |
-| Proteome / 10,000 rows (10 Mb)      | samtools     |     1,141 |    983 | 0.86×      |
-| Proteome / 10,000 rows (10 Mb)      | bedtools     |     1,141 |  2,116 | 1.85×      |
+| Genome / 10 rows (0.01 Mb)          | noodles      |       319 |    306 | 0.96x      |
+| Genome / 10 rows (0.01 Mb)          | rust-bio     |       319 |    311 | 0.97x      |
+| Genome / 10 rows (0.01 Mb)          | samtools     |       319 |    396 | 1.24x      |
+| Genome / 10 rows (0.01 Mb)          | bedtools     |       319 |    415 | 1.30x      |
+| Genome / 100 rows (0.10 Mb)         | noodles      |       325 |    306 | 0.94x      |
+| Genome / 100 rows (0.10 Mb)         | rust-bio     |       325 |    313 | 0.97x      |
+| Genome / 100 rows (0.10 Mb)         | samtools     |       325 |    393 | 1.21x      |
+| Genome / 100 rows (0.10 Mb)         | bedtools     |       325 |    459 | 1.41x      |
+| Genome / 1,000 rows (1.0 Mb)        | noodles      |       367 |    312 | 0.85x      |
+| Genome / 1,000 rows (1.0 Mb)        | rust-bio     |       367 |    311 | 0.85x      |
+| Genome / 1,000 rows (1.0 Mb)        | samtools     |       367 |    395 | 1.08x      |
+| Genome / 1,000 rows (1.0 Mb)        | bedtools     |       367 |    625 | 1.70x      |
+| Genome / 10,000 rows (10 Mb)        | noodles      |       793 |    311 | 0.39x      |
+| Genome / 10,000 rows (10 Mb)        | rust-bio     |       793 |    313 | 0.40x      |
+| Genome / 10,000 rows (10 Mb)        | samtools     |       793 |    393 | 0.50x      |
+| Genome / 10,000 rows (10 Mb)        | bedtools     |       793 |  1,737 | 2.2x       |
+| Transcriptome / 10 rows (0.01 Mb)   | noodles      |     3,545 | 11,803 | 3.3x       |
+| Transcriptome / 10 rows (0.01 Mb)   | rust-bio     |     3,545 | 28,258 | 8.0x       |
+| Transcriptome / 10 rows (0.01 Mb)   | samtools     |     3,545 | 15,126 | 4.3x       |
+| Transcriptome / 10 rows (0.01 Mb)   | bedtools     |     3,545 | 37,530 | 10.6x      |
+| Transcriptome / 100 rows (0.10 Mb)  | noodles      |     3,554 | 11,811 | 3.3x       |
+| Transcriptome / 100 rows (0.10 Mb)  | rust-bio     |     3,554 | 28,264 | 8.0x       |
+| Transcriptome / 100 rows (0.10 Mb)  | samtools     |     3,554 | 15,126 | 4.3x       |
+| Transcriptome / 100 rows (0.10 Mb)  | bedtools     |     3,554 | 37,620 | 10.6x      |
+| Transcriptome / 1,000 rows (1.0 Mb) | noodles      |     4,821 | 11,816 | 2.5x       |
+| Transcriptome / 1,000 rows (1.0 Mb) | rust-bio     |     4,821 | 28,264 | 5.9x       |
+| Transcriptome / 1,000 rows (1.0 Mb) | samtools     |     4,821 | 15,121 | 3.1x       |
+| Transcriptome / 1,000 rows (1.0 Mb) | bedtools     |     4,821 | 38,396 | 8.0x       |
+| Transcriptome / 10,000 rows (10 Mb) | noodles      |    13,684 | 11,822 | 0.86x      |
+| Transcriptome / 10,000 rows (10 Mb) | rust-bio     |    13,684 | 28,271 | 2.1x       |
+| Transcriptome / 10,000 rows (10 Mb) | samtools     |    13,684 | 15,122 | 1.11x      |
+| Transcriptome / 10,000 rows (10 Mb) | bedtools     |    13,684 | 40,876 | 3.0x       |
+| Proteome / 10 rows (0.01 Mb)        | noodles      |       527 |    746 | 1.42x      |
+| Proteome / 10 rows (0.01 Mb)        | rust-bio     |       527 |  1,413 | 2.7x       |
+| Proteome / 10 rows (0.01 Mb)        | samtools     |       527 |    984 | 1.87x      |
+| Proteome / 10 rows (0.01 Mb)        | bedtools     |       527 |  2,017 | 3.8x       |
+| Proteome / 100 rows (0.10 Mb)       | noodles      |       600 |    751 | 1.25x      |
+| Proteome / 100 rows (0.10 Mb)       | rust-bio     |       600 |  1,413 | 2.4x       |
+| Proteome / 100 rows (0.10 Mb)       | samtools     |       600 |    985 | 1.64x      |
+| Proteome / 100 rows (0.10 Mb)       | bedtools     |       600 |  2,069 | 3.4x       |
+| Proteome / 1,000 rows (1.0 Mb)      | noodles      |       684 |    752 | 1.10x      |
+| Proteome / 1,000 rows (1.0 Mb)      | rust-bio     |       684 |  1,414 | 2.1x       |
+| Proteome / 1,000 rows (1.0 Mb)      | samtools     |       684 |    984 | 1.44x      |
+| Proteome / 1,000 rows (1.0 Mb)      | bedtools     |       684 |  2,117 | 3.1x       |
+| Proteome / 10,000 rows (10 Mb)      | noodles      |     1,141 |    753 | 0.66x      |
+| Proteome / 10,000 rows (10 Mb)      | rust-bio     |     1,141 |  1,414 | 1.24x      |
+| Proteome / 10,000 rows (10 Mb)      | samtools     |     1,141 |    983 | 0.86x      |
+| Proteome / 10,000 rows (10 Mb)      | bedtools     |     1,141 |  2,116 | 1.85x      |
 
 </details>
 
 <details>
 
-<summary><strong>Table 25:</strong> Major page faults (all zero for this run).</summary>
+<summary><strong>Table 24:</strong> Major page faults (all zero for this run).</summary>
 
 | Dataset / BED rows                  |   z-fasta |   noodles |   rust-bio |   samtools |   bedtools |
 |:------------------------------------|----------:|----------:|-----------:|-----------:|-----------:|
@@ -986,7 +965,7 @@ A **minor** fault maps a page without reading disk. A **major** fault reads from
 
 <div style="margin: 1.5em 0"></div>
 
-**Figure 9:** Table 23 as grouped bars (log y). Bar labels = Faults × (see Table 24).
+**Figure 9:** Table 22 as grouped bars (log y). Bar labels = Faults × (see Table 23).
 
 ![bed batch page faults](results/figures/perf_bed_faults.png)
 
@@ -994,27 +973,27 @@ A **minor** fault maps a page without reading disk. A **major** fault reads from
 - Three panels: Genome, Transcriptome, Proteome (BED row count on x-axis).
 - **Bars:** zebrac mean minor page faults. Log y-axis.
 - **Legend order:** z-fasta, noodles, rust-bio, samtools, bedtools.
-- **Bar labels:** `1×` on z-fasta; other labels = Faults × (peer minor faults ÷ z-fasta minor faults). Details in Table 24.
+- **Bar labels:** `1×` on z-fasta; other labels = Faults × (peer minor faults ÷ z-fasta minor faults). Details in Table 23.
 
 ## RC overhead
 
 Orientation transforms on a fixed **1 kbp** mid slice (`1kbp_mid`) on **Genome, Transcriptome** only. **Proteome is excluded:** protein records have no reverse-complement semantics, so `--rc` and `--complement-only` do not apply; `--reverse-only` only permutes amino-acid characters and adds negligible overhead vs plain GET, so it is not a meaningful benchmark axis. **X-axis = dataset** (Genome, Transcriptome); **bar color = tool/lane** (same layout as z-fasta mode comparison). Figure facets are wall time, peak RSS, and minor page faults. Primary comparison: z-fasta plain vs `--rc`. RC-capable peers use native `--rc`; seqtk (ref) uses `subseq` + `seq -r` (no index).
 
-**Table 26:** Wall time (mean ± stddev, seconds).
+**Table 25:** Wall time (mean ± stddev, seconds).
 
 | dataset       | z-fasta         | z-fasta --rc    | z-fasta --complement-only   | z-fasta --reverse-only   | noodles --rc    | rust-bio --rc   | seqtk (ref)     |
 |:--------------|:----------------|:----------------|:----------------------------|:-------------------------|:----------------|:----------------|:----------------|
 | Genome        | 0.0022s ±0.0001 | 0.0022s ±0.0000 | 0.0022s ±0.0001             | 0.0021s ±0.0002          | 0.0024s ±0.0001 | 0.0025s ±0.0000 | 1.3186s ±0.0139 |
 | Transcriptome | 0.0042s ±0.0001 | 0.0047s ±0.0002 | 0.0047s ±0.0002             | 0.0046s ±0.0002          | 0.0885s ±0.0009 | 0.5202s ±0.0053 | 0.2205s ±0.0008 |
 
-**Table 27:** Peak RSS (MB).
+**Table 26:** Peak RSS (MB).
 
 | dataset       | z-fasta   | z-fasta --rc   | z-fasta --complement-only   | z-fasta --reverse-only   | noodles --rc   | rust-bio --rc   | seqtk (ref)   |
 |:--------------|:----------|:---------------|:----------------------------|:-------------------------|:---------------|:----------------|:--------------|
 | Genome        | 3.36 MB   | 3.38 MB        | 3.38 MB                     | 3.40 MB                  | 3.38 MB        | 3.34 MB         | 239.39 MB     |
 | Transcriptome | 38.36 MB  | 38.36 MB       | 38.36 MB                    | 38.36 MB                 | 46.90 MB       | 145.14 MB       | 3.37 MB       |
 
-**Table 28:** Minor page faults.
+**Table 27:** Minor page faults.
 
 | dataset       |   z-fasta |   z-fasta --rc |   z-fasta --complement-only |   z-fasta --reverse-only |   noodles --rc |   rust-bio --rc |   seqtk (ref) |
 |:--------------|----------:|---------------:|----------------------------:|-------------------------:|---------------:|----------------:|--------------:|
@@ -1023,7 +1002,7 @@ Orientation transforms on a fixed **1 kbp** mid slice (`1kbp_mid`) on **Genome, 
 
 <details>
 
-<summary><strong>Table 29:</strong> Output throughput (Mbp/s).</summary>
+<summary><strong>Table 28:</strong> Output throughput (Mbp/s).</summary>
 
 | dataset       | z-fasta    | z-fasta --rc   | z-fasta --complement-only   | z-fasta --reverse-only   | noodles --rc   | rust-bio --rc   | seqtk (ref)   |
 |:--------------|:-----------|:---------------|:----------------------------|:-------------------------|:---------------|:----------------|:--------------|
@@ -1032,7 +1011,7 @@ Orientation transforms on a fixed **1 kbp** mid slice (`1kbp_mid`) on **Genome, 
 
 </details>
 
-**Table 30:** z-fasta RC self-overhead (`--rc` / plain).
+**Table 29:** z-fasta RC self-overhead (`--rc` / plain).
 
 | dataset       | z-fasta --rc / plain   |
 |:--------------|:-----------------------|
@@ -1041,20 +1020,20 @@ Orientation transforms on a fixed **1 kbp** mid slice (`1kbp_mid`) on **Genome, 
 
 <details>
 
-<summary><strong>Table 31:</strong> RC peers vs z-fasta --rc. Ratio = peer wall time ÷ z-fasta wall time (baseline = z-fasta --rc).</summary>
+<summary><strong>Table 30:</strong> RC peers vs z-fasta --rc. Ratio = peer wall time ÷ z-fasta wall time (baseline = z-fasta --rc).</summary>
 
 | Dataset       | z-fasta vs    | z-fasta --rc   | Peer    | Time ×   |
 |:--------------|:--------------|:---------------|:--------|:---------|
-| Genome        | noodles --rc  | 0.0022s        | 0.0024s | 1.09×    |
-| Genome        | rust-bio --rc | 0.0022s        | 0.0025s | 1.15×    |
-| Transcriptome | noodles --rc  | 0.0047s        | 0.0885s | 18.7×    |
-| Transcriptome | rust-bio --rc | 0.0047s        | 0.5202s | 110×     |
+| Genome        | noodles --rc  | 0.0022s        | 0.0024s | 1.09x    |
+| Genome        | rust-bio --rc | 0.0022s        | 0.0025s | 1.15x    |
+| Transcriptome | noodles --rc  | 0.0047s        | 0.0885s | 18.7x    |
+| Transcriptome | rust-bio --rc | 0.0047s        | 0.5202s | 110x     |
 
 </details>
 
 <div style="margin: 1.5em 0"></div>
 
-**Figure 10:** Tables 26, 27, and 28 as grouped bars (datasets on x-axis; tool color from legend).
+**Figure 10:** Tables 25, 26, and 27 as grouped bars (datasets on x-axis; tool color from legend).
 
 ![RC overhead](results/figures/perf_rc.png)
 
@@ -1069,7 +1048,7 @@ Orientation transforms on a fixed **1 kbp** mid slice (`1kbp_mid`) on **Genome, 
 
 z-fasta default (`.zfi`) vs `.fai` lane on **1kbp_mid**. The `.fai` lane stashes `.zfi` once per region outside the zebrac sample (see `run.sh`); native `.fai` tools do not pay that cost. Transcriptome **~7.6×** is mostly **index load**, not the 1 kbp fetch: the `.fai` path parses **~254k** tab-separated lines and mmaps a **~33 MiB** `.fai` on every zebrac sample, while `.zfi` mmaps a **~9.7 MiB** binary index with no line parsing. Genome (**194** seqs) and Proteome (**~21k**) pay far less parse overhead. Single-region GET uses `records_only` (no hash map); lookup is O(n) on both paths, so startup parse cost dominates on large catalogs.
 
-**Table 32:** Wall time per dataset (Genome, Transcriptome, Proteome).
+**Table 31:** Wall time per dataset (Genome, Transcriptome, Proteome).
 
 | dataset       | z-fasta         | z-fasta (.fai)   |
 |:--------------|:----------------|:-----------------|
@@ -1079,25 +1058,25 @@ z-fasta default (`.zfi`) vs `.fai` lane on **1kbp_mid**. The `.fai` lane stashes
 
 <details>
 
-<summary><strong>Table 33:</strong> default vs `.fai` lane.</summary>
+<summary><strong>Table 32:</strong> default vs `.fai` lane.</summary>
 
 | Dataset       | z-fasta vs     | z-fasta   | z-fasta (.fai)   | Time ×   |
 |:--------------|:---------------|:----------|:-----------------|:---------|
-| Genome        | z-fasta (.fai) | 0.0021s   | 0.0022s          | 1.06×    |
-| Transcriptome | z-fasta (.fai) | 0.0044s   | 0.0801s          | 18.2×    |
-| Proteome      | z-fasta (.fai) | 0.0023s   | 0.0067s          | 3.0×     |
+| Genome        | z-fasta (.fai) | 0.0021s   | 0.0022s          | 1.06x    |
+| Transcriptome | z-fasta (.fai) | 0.0044s   | 0.0801s          | 18.2x    |
+| Proteome      | z-fasta (.fai) | 0.0023s   | 0.0067s          | 3.0x     |
 
 </details>
 
 <div style="margin: 1.5em 0"></div>
 
-**Figure 11:** Wall time for Table 32.
+**Figure 11:** Wall time for Table 31.
 
 ![Figure 11: z-fasta mode comparison](results/figures/mode_pos.png)
 
 **Reading Figure 11**
 - Grouped bars: wall time per dataset.
-- Bar labels match Table 33 (`.fai` lane / default).
+- Bar labels match Table 32 (`.fai` lane / default).
 
 ## Messy FASTA GET (z-fasta only)
 
@@ -1105,7 +1084,7 @@ Paired `get` on proteome-derived messy fixtures in `bench/shared/cache/messy_per
 
 **Why ratio charts:** Figures plot **messy / uniform**; dashed line = parity (1.0×). Figure 12 quotes the headline span `titin_mid`. Figure 13 summarizes all spans (median bar, min-max whiskers, `titin_mid` diamond) to show overhead tracks layout type, not extraction length. Collapsible Table below has per-span microseconds and ratios.
 
-**Table 34:** Perf spans × variants (16 timed pairs).
+**Table 33:** Perf spans × variants (16 timed pairs).
 
 | variant             | span      | region                                      |   bases | purpose                                                | headline   |
 |:--------------------|:----------|:--------------------------------------------|--------:|:-------------------------------------------------------|:-----------|
@@ -1126,12 +1105,12 @@ Paired `get` on proteome-derived messy fixtures in `bench/shared/cache/messy_per
 | all_messy           | titin_mid | sp&#124;Q8WZ42&#124;TITIN_HUMAN:500-2500    |    2001 | 2 kbp interior slice (headline side-table stress)      | yes        |
 | all_messy           | titin_40k | sp&#124;Q8WZ42&#124;TITIN_HUMAN:10000-30000 |   20001 | 20 kbp mid-protein slice (within current TITIN length) |            |
 
-**Reading Table 34**
+**Reading Table 33**
 - **span** = short id from `messy_perf.json`.
 - **region** = full `z-fasta get` region argument (`&#124;` = `|` in UniProt ids).
 - **headline** = `titin_mid` (same slice on every variant file).
 
-**Table 35:** Headline span `titin_mid` messy / uniform.
+**Table 34:** Headline span `titin_mid` messy / uniform.
 
 | variant             | span      | metric         | uniform   | messy     | messy / uniform   |
 |:--------------------|:----------|:---------------|:----------|:----------|:------------------|
@@ -1150,7 +1129,7 @@ Paired `get` on proteome-derived messy fixtures in `bench/shared/cache/messy_per
 
 <div style="margin: 1.5em 0"></div>
 
-**Figure 12:** Headline span `titin_mid` ratios (Table 35).
+**Figure 12:** Headline span `titin_mid` ratios (Table 34).
 
 ![messy ratio headline](results/figures/messy_ratio_headline.png)
 
@@ -1158,7 +1137,7 @@ Paired `get` on proteome-derived messy fixtures in `bench/shared/cache/messy_per
 - Three panels: wall time, peak RSS, minor page faults (messy / uniform).
 - One bar per layout variant at the headline slice `titin_mid`.
 
-**Figure 13:** Layout overhead stable across spans (see Table 36).
+**Figure 13:** Layout overhead stable across spans (see Table 35).
 
 ![messy ratio summary](results/figures/messy_ratio_summary.png)
 
@@ -1169,7 +1148,7 @@ Paired `get` on proteome-derived messy fixtures in `bench/shared/cache/messy_per
 
 <details>
 
-<summary><strong>Table 36:</strong> All spans: wall (µs), RSS ×, faults × (per-span drill-down).</summary>
+<summary><strong>Table 35:</strong> All spans: wall (µs), RSS ×, faults × (per-span drill-down).</summary>
 
 | variant             | span      | region                                      |   bases | uniform wall    | messy wall       | wall ×   | RSS ×   | faults ×   |
 |:--------------------|:----------|:--------------------------------------------|--------:|:----------------|:-----------------|:---------|:--------|:-----------|

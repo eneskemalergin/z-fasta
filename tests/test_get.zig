@@ -555,8 +555,32 @@ fn expectUnknownOptionRejected(allocator: std.mem.Allocator, argv: []const []con
     try expectCliFailure(allocator, argv, 1, expected);
 }
 
+test "get help describes the single BED path" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+
+    const result = try std.process.run(allocator, threaded.io(), .{
+        .argv = &.{ ZFASTA_BIN, "get", "--help" },
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        else => return error.ChildProcessFailed,
+    }
+    try std.testing.expectEqual(@as(usize, 0), result.stderr.len);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "--chunk-size") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "BED input streams.") != null);
+}
+
 const get_usage_stderr =
-    \\error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--strand-aware] [--summary] [--rc|--complement-only|--reverse-only] [--annotate-rc] [--chunk-size N|-1] <region> [region ...]
+    \\error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--strand-aware] [--summary] [--rc|--complement-only|--reverse-only] [--annotate-rc] <region> [region ...]
     \\
 ;
 
@@ -574,7 +598,7 @@ test "--names rejects file over max_input_file_bytes with clear error" {
 
     const expected = try std.fmt.allocPrint(
         allocator,
-        "error: names file exceeds {d} MiB limit: {s} (--chunk-size does not stream --names)\n",
+        "error: names file exceeds {d} MiB limit: {s}\n",
         .{ main.getter.max_input_file_mib, names_path },
     );
     try expectCliFailure(
@@ -608,6 +632,8 @@ test "get rejects unknown options before, between, and after positionals" {
     try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "get", unknown, fasta, "seq1" }, unknown);
     try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "get", fasta, unknown, "seq1" }, unknown);
     try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "get", fasta, "seq1", unknown }, unknown);
+    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "get", fasta, "--chunk-size", "1", "seq1" }, "--chunk-size");
+    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "get", fasta, "--bed", "tests/data/simple.bed", "--chunk-size=-1" }, "--chunk-size=-1");
 }
 
 test "stats rejects unknown options before and after FASTA path" {

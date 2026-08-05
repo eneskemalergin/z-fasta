@@ -59,15 +59,11 @@ pub const GetOptions = struct {
     names_path: ?[]const u8 = null,
     honor_strand: bool = false,
     summary: bool = false,
-    chunk_size: usize = 4_096,
     orientation: Orientation = .{},
     annotate_transform: bool = false,
 };
 
-pub const chunk_size_all = std.math.maxInt(usize);
-
-/// Maximum size for inputs loaded fully into memory: `--names` (always) and
-/// BED with `--chunk-size -1`. Default BED chunking is not size-capped here.
+/// Maximum size for names input loaded fully into memory.
 pub const max_input_file_mib: usize = 512;
 pub const max_input_file_bytes: usize = max_input_file_mib * 1024 * 1024;
 
@@ -78,13 +74,8 @@ comptime {
     }
 }
 
-const AllInMemoryInputKind = enum {
-    names_file,
-    bed_all_in_memory,
-};
-
-/// Per-line buffer for chunked BED streaming (`takeDelimiter` limit).
-const bed_line_reader_buffer_bytes = 4096;
+const BED_LINE_READER_BUFFER_BYTES = 4096;
+const BED_REQUEST_BATCH_SIZE = 4096;
 
 /// Per-region output cap for the multi-region sort buffer path (≥16 regions).
 const max_sort_path_region_output_bytes: u64 = 64 * 1024 * 1024;
@@ -992,21 +983,15 @@ fn shouldAdviseSequentialMmap(
     return sequential_scan;
 }
 
-fn readAllInput(allocator: std.mem.Allocator, io: std.Io, path: []const u8, kind: AllInMemoryInputKind) []u8 {
+fn readNamesInput(allocator: std.mem.Allocator, io: std.Io, path: []const u8) []u8 {
     if (std.mem.eql(u8, path, "-")) {
         var stdin_buf: [4096]u8 = undefined;
         var reader = std.Io.File.stdin().reader(io, &stdin_buf);
         return reader.interface.allocRemaining(allocator, .limited(max_input_file_bytes)) catch |err| switch (err) {
-            error.StreamTooLong => switch (kind) {
-                .names_file => printErrorAndExit(
-                    "error: --names stdin exceeds {d} MiB limit (--chunk-size does not stream --names)\n",
-                    .{max_input_file_mib},
-                ),
-                .bed_all_in_memory => printErrorAndExit(
-                    "error: BED stdin exceeds {d} MiB limit for --chunk-size -1; use default --chunk-size\n",
-                    .{max_input_file_mib},
-                ),
-            },
+            error.StreamTooLong => printErrorAndExit(
+                "error: --names stdin exceeds {d} MiB limit\n",
+                .{max_input_file_mib},
+            ),
             else => printErrorAndExit("error: failed to read stdin\n", .{}),
         };
     }
@@ -1023,16 +1008,10 @@ fn readAllInput(allocator: std.mem.Allocator, io: std.Io, path: []const u8, kind
     };
 
     if (stat.size > max_input_file_bytes) {
-        switch (kind) {
-            .names_file => printErrorAndExit(
-                "error: names file exceeds {d} MiB limit: {s} (--chunk-size does not stream --names)\n",
-                .{ max_input_file_mib, path },
-            ),
-            .bed_all_in_memory => printErrorAndExit(
-                "error: BED file exceeds {d} MiB limit for --chunk-size -1: {s}; use default --chunk-size\n",
-                .{ max_input_file_mib, path },
-            ),
-        }
+        printErrorAndExit(
+            "error: names file exceeds {d} MiB limit: {s}\n",
+            .{ max_input_file_mib, path },
+        );
     }
 
     const bytes = allocator.alloc(u8, stat.size) catch {
@@ -1112,32 +1091,6 @@ fn appendBedLineRequest(
         .skip => {},
         .region => |region| appendBedRegionRequest(requests, region, honor_strand, global_orientation, allocator, name_allocator, duplicate_name, last_duplicated_name),
     }
-}
-
-fn appendBedRequests(requests: *std.ArrayList(ParsedRequest), bed_data: []const u8, honor_strand: bool, global_orientation: Orientation, allocator: std.mem.Allocator) void {
-    var lines = std.mem.splitScalar(u8, bed_data, '\n');
-    var line_number: usize = 0;
-
-    while (lines.next()) |line| {
-        line_number += 1;
-        appendBedLineRequest(requests, line, line_number, honor_strand, global_orientation, allocator, allocator, false, null);
-    }
-}
-
-fn processBedData(
-    idx: *LoadedIndex,
-    allocator: std.mem.Allocator,
-    bed_data: []const u8,
-    honor_strand: bool,
-    global_orientation: Orientation,
-    annotate_transform: bool,
-    writer: anytype,
-) BatchStats {
-    var requests = std.ArrayList(ParsedRequest).empty;
-    defer requests.deinit(allocator);
-
-    appendBedRequests(&requests, bed_data, honor_strand, global_orientation, allocator);
-    return processParsedRequests(idx, allocator, requests.items, annotate_transform, writer, false, null);
 }
 
 fn appendNamesRequests(requests: *std.ArrayList(ParsedRequest), names_data: []const u8, orientation: Orientation, allocator: std.mem.Allocator) void {
@@ -1334,12 +1287,11 @@ fn processParsedRequests(
     };
 }
 
-fn processBedReaderChunked(
+fn processBedReader(
     idx: *LoadedIndex,
     reader: *std.Io.Reader,
     honor_strand: bool,
     global_orientation: Orientation,
-    chunk_size: usize,
     annotate_transform: bool,
     writer: anytype,
     sparse: ?SparseFastaSource,
@@ -1350,19 +1302,20 @@ fn processBedReaderChunked(
     var name_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer name_arena.deinit();
     var last_duplicated_name: ?[]const u8 = null;
+    var request_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer request_arena.deinit();
 
     while (true) {
-        var chunk_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        const chunk_allocator = chunk_arena.allocator();
+        const request_allocator = request_arena.allocator();
 
         var requests = std.ArrayList(ParsedRequest).empty;
 
-        while (requests.items.len < chunk_size) {
+        while (requests.items.len < BED_REQUEST_BATCH_SIZE) {
             const maybe_line = reader.takeDelimiter('\n') catch |err| switch (err) {
                 error.ReadFailed => printErrorAndExit("error: failed to read BED input\n", .{}),
                 error.StreamTooLong => printErrorAndExit(
                     "error: BED line {d} exceeds {d}-byte reader buffer (no newline within limit)\n",
-                    .{ line_number + 1, bed_line_reader_buffer_bytes },
+                    .{ line_number + 1, BED_LINE_READER_BUFFER_BYTES },
                 ),
             };
 
@@ -1372,19 +1325,18 @@ fn processBedReaderChunked(
             };
 
             line_number += 1;
-            appendBedLineRequest(&requests, line, line_number, honor_strand, global_orientation, chunk_allocator, name_arena.allocator(), true, &last_duplicated_name);
+            appendBedLineRequest(&requests, line, line_number, honor_strand, global_orientation, request_allocator, name_arena.allocator(), true, &last_duplicated_name);
         }
 
         if (requests.items.len == 0) {
-            chunk_arena.deinit();
             break;
         }
 
-        const batch = processParsedRequests(idx, chunk_allocator, requests.items, annotate_transform, writer, false, sparse);
+        const batch = processParsedRequests(idx, request_allocator, requests.items, annotate_transform, writer, false, sparse);
         total.region_count += batch.region_count;
         total.total_bases += batch.total_bases;
 
-        chunk_arena.deinit();
+        _ = request_arena.reset(.retain_capacity);
 
         if (reached_end) break;
     }
@@ -1398,21 +1350,20 @@ fn processBedReaderChunked(
     return total;
 }
 
-fn processBedPathChunked(
+fn processBedPath(
     io: std.Io,
     idx: *LoadedIndex,
     path: []const u8,
     honor_strand: bool,
     global_orientation: Orientation,
-    chunk_size: usize,
     annotate_transform: bool,
     writer: anytype,
     sparse: ?SparseFastaSource,
 ) BatchStats {
     if (std.mem.eql(u8, path, "-")) {
-        var stdin_buf: [bed_line_reader_buffer_bytes]u8 = undefined;
+        var stdin_buf: [BED_LINE_READER_BUFFER_BYTES]u8 = undefined;
         var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buf);
-        return processBedReaderChunked(idx, &stdin_reader.interface, honor_strand, global_orientation, chunk_size, annotate_transform, writer, sparse);
+        return processBedReader(idx, &stdin_reader.interface, honor_strand, global_orientation, annotate_transform, writer, sparse);
     }
 
     const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
@@ -1422,23 +1373,9 @@ fn processBedPathChunked(
     };
     defer file.close(io);
 
-    var file_buf: [bed_line_reader_buffer_bytes]u8 = undefined;
+    var file_buf: [BED_LINE_READER_BUFFER_BYTES]u8 = undefined;
     var file_reader = file.reader(io, &file_buf);
-    return processBedReaderChunked(idx, &file_reader.interface, honor_strand, global_orientation, chunk_size, annotate_transform, writer, sparse);
-}
-
-fn processBedPathAllInMemory(
-    io: std.Io,
-    idx: *LoadedIndex,
-    allocator: std.mem.Allocator,
-    path: []const u8,
-    honor_strand: bool,
-    global_orientation: Orientation,
-    annotate_transform: bool,
-    writer: anytype,
-) BatchStats {
-    const bed_data = readAllInput(allocator, io, path, .bed_all_in_memory);
-    return processBedData(idx, allocator, bed_data, honor_strand, global_orientation, annotate_transform, writer);
+    return processBedReader(idx, &file_reader.interface, honor_strand, global_orientation, annotate_transform, writer, sparse);
 }
 
 // ============================================================================
@@ -1446,10 +1383,6 @@ fn processBedPathAllInMemory(
 // ============================================================================
 
 pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions) void {
-    if (options.chunk_size == 0) {
-        printErrorAndExit("error: --chunk-size must be >= 1\n", .{});
-    }
-
     var input_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer input_arena.deinit();
     const allocator = input_arena.allocator();
@@ -1458,7 +1391,7 @@ pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions
     defer requests.deinit(allocator);
 
     if (options.names_path) |names_path| {
-        const names_data = readAllInput(allocator, io, names_path, .names_file);
+        const names_data = readNamesInput(allocator, io, names_path);
         appendNamesRequests(&requests, names_data, options.orientation, allocator);
     }
 
@@ -1484,10 +1417,7 @@ pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions
     var totals = BatchStats{};
 
     if (options.bed_path) |bed_path| {
-        const batch = if (options.chunk_size == chunk_size_all)
-            processBedPathAllInMemory(io, &idx, allocator, bed_path, options.honor_strand, options.orientation, options.annotate_transform, writer)
-        else
-            processBedPathChunked(io, &idx, bed_path, options.honor_strand, options.orientation, options.chunk_size, options.annotate_transform, writer, sparse);
+        const batch = processBedPath(io, &idx, bed_path, options.honor_strand, options.orientation, options.annotate_transform, writer, sparse);
         totals.region_count += batch.region_count;
         totals.total_bases += batch.total_bases;
     }
@@ -1525,7 +1455,7 @@ test "summary writing fails when the destination is full" {
     try std.testing.expectError(error.WriteFailed, writeSummary(&writer, 1, 1, 1));
 }
 
-test "processBedReaderChunked matches non-chunked extraction" {
+test "processBedReader streams BED rows in source order" {
     const test_io = std.testing.io;
     var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
     defer idx.deinit(test_io);
@@ -1536,73 +1466,56 @@ test "processBedReaderChunked matches non-chunked extraction" {
         "seq1\t0\t4\n" ++
         "seq1\t4\t8\n";
 
-    var chunk_reader = std.Io.Reader.fixed(bed_data);
-    var chunk_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer chunk_writer.deinit();
+    var reader = std.Io.Reader.fixed(bed_data);
+    var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer writer.deinit();
 
-    const chunked = processBedReaderChunked(&idx, &chunk_reader, false, .{}, 2, false, &chunk_writer.writer, null);
+    const result = processBedReader(&idx, &reader, false, .{}, false, &writer.writer, null);
 
-    var batch_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer batch_writer.deinit();
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const batch = processBedData(&idx, arena.allocator(), bed_data, false, .{}, false, &batch_writer.writer);
-
-    try std.testing.expectEqual(batch.region_count, chunked.region_count);
-    try std.testing.expectEqual(batch.total_bases, chunked.total_bases);
-    try std.testing.expectEqualStrings(batch_writer.written(), chunk_writer.written());
-}
-
-test "processBedReaderChunked preserves strand handling across chunk boundaries" {
-    const test_io = std.testing.io;
-    var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
-    defer idx.deinit(test_io);
-
-    const bed_data =
-        "seq1\t0\t5\tname\t0\t-\n" ++
-        "seq2\t0\t4\tname\t0\t+\n";
-
-    var chunk_reader = std.Io.Reader.fixed(bed_data);
-    var chunk_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer chunk_writer.deinit();
-
-    const chunked = processBedReaderChunked(&idx, &chunk_reader, true, .{}, 1, false, &chunk_writer.writer, null);
-
-    try std.testing.expectEqual(@as(usize, 2), chunked.region_count);
-    try std.testing.expectEqual(@as(u64, 9), chunked.total_bases);
+    try std.testing.expectEqual(@as(usize, 3), result.region_count);
+    try std.testing.expectEqual(@as(u64, 12), result.total_bases);
     try std.testing.expectEqualStrings(
-        ">seq1:1-5\nTACGT\n>seq2:1-4\nGGGG\n",
-        chunk_writer.written(),
+        ">seq2:1-4\nGGGG\n>seq1:1-4\nACGT\n>seq1:5-8\nACGT\n",
+        writer.written(),
     );
 }
 
-test "processBedReaderChunked preserves duplicate chrom cache across chunk boundaries" {
+test "processBedReader preserves output at request workspace boundaries" {
     const test_io = std.testing.io;
     var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
     defer idx.deinit(test_io);
 
-    const bed_data =
-        "seq1\t0\t4\n" ++
-        "seq1\t4\t8\n" ++
-        "seq2\t0\t4\n";
+    const counts = [_]usize{
+        BED_REQUEST_BATCH_SIZE - 1,
+        BED_REQUEST_BATCH_SIZE,
+        BED_REQUEST_BATCH_SIZE + 1,
+    };
+    for (counts) |count| {
+        var bed = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer bed.deinit();
+        var expected = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer expected.deinit();
 
-    var chunk_reader = std.Io.Reader.fixed(bed_data);
-    var chunk_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer chunk_writer.deinit();
+        for (0..count) |i| {
+            if (count > BED_REQUEST_BATCH_SIZE and i + 1 == count) {
+                try bed.writer.writeAll("seq1\t0\t5\tname\t0\t-\n");
+                try expected.writer.writeAll(">seq1:1-5\nTACGT\n");
+            } else {
+                try bed.writer.writeAll("seq1\t0\t1\tname\t0\t+\n");
+                try expected.writer.writeAll(">seq1:1-1\nA\n");
+            }
+        }
 
-    const chunked = processBedReaderChunked(&idx, &chunk_reader, false, .{}, 1, false, &chunk_writer.writer, null);
+        var reader = std.Io.Reader.fixed(bed.written());
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        const result = processBedReader(&idx, &reader, true, .{}, false, &output.writer, null);
 
-    var batch_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer batch_writer.deinit();
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const batch = processBedData(&idx, arena.allocator(), bed_data, false, .{}, false, &batch_writer.writer);
-
-    try std.testing.expectEqual(batch.region_count, chunked.region_count);
-    try std.testing.expectEqual(batch.total_bases, chunked.total_bases);
-    try std.testing.expectEqualStrings(batch_writer.written(), chunk_writer.written());
+        const expected_bases: u64 = count + @as(usize, @intFromBool(count > BED_REQUEST_BATCH_SIZE)) * 4;
+        try std.testing.expectEqual(count, result.region_count);
+        try std.testing.expectEqual(expected_bases, result.total_bases);
+        try std.testing.expectEqualStrings(expected.written(), output.written());
+    }
 }
 
 test "parseRegion matches exhaustive backward-scan reference" {

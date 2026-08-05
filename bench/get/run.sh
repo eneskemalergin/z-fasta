@@ -4,7 +4,7 @@
 # Usage:
 #   bash bench/get/run.sh [options]
 #
-# Defaults: correctness first (415 checks), then perf (--runs 5, --warmup 1, --duration 5000).
+# Defaults: correctness first (409 checks), then perf (--runs 5, --warmup 1, --duration 5000).
 # A full perf pass (all sections, default zebrac settings) typically takes several hours.
 # pyfaidx is omitted from timed positional runs (typically 30-100x slower than z-fasta;
 # may be enabled for a final polish pass).
@@ -831,10 +831,10 @@ verify_expected_bed() {
 # --- parity: bedtools ---
 parity_bedtools() {
     local label="[parity:bedtools] $1" bed="$2" honor_strand="$3" fasta="$4"
-    local chunk="${5:-4096}" stdin="${6:-0}" strand_flag="${7:---strand-aware}"
+    local stdin="${5:-0}" strand_flag="${6:---strand-aware}"
     local bt=("$BEDTOOLS" getfasta -fi "$fasta" -bed "$bed")
     [[ "$honor_strand" == "1" ]] && bt+=(-s)
-    local zf=(get "$fasta" --bed "$bed" --chunk-size "$chunk")
+    local zf=(get "$fasta" --bed "$bed")
     [[ "$honor_strand" == "1" ]] && zf+=("$strand_flag")
     if [[ "$stdin" == "1" ]]; then
         zf[2]="--bed"
@@ -852,8 +852,8 @@ parity_bedtools() {
 
 parity_bed_samtools() {
     local label="[parity:samtools] $1" bed="$2" fasta="$3"
-    local chunk="${4:-4096}" stdin="${5:-0}"
-    local zf=(get "$fasta" --chunk-size "$chunk")
+    local stdin="${4:-0}"
+    local zf=(get "$fasta")
     bed_to_regions "$bed" > "$TMPDIR/st_regions.txt"
     if [[ "$stdin" == "1" ]]; then
         zf+=(--bed -)
@@ -869,8 +869,8 @@ parity_bed_samtools() {
 
 parity_bed_rc_composed() {
     local label="[parity:bedtools] $1" fasta="$2" bed="$3"
-    local chunk="${4:-4096}" stdin="${5:-0}"
-    local zf=(get "$fasta" --strand-aware --rc --chunk-size "$chunk")
+    local stdin="${4:-0}"
+    local zf=(get "$fasta" --strand-aware --rc)
     if ! "$BEDTOOLS" getfasta -fi "$fasta" -bed "$bed" -s 2>/dev/null \
         | "$SEQTK" seq -r > "$TMPDIR/bt.raw"; then
         fail "$label (bedtools/seqtk err)"
@@ -1086,15 +1086,13 @@ BED
     verify_index_cross "64 regions (hash map path)" "$simple" "${reg1024[@]}"
 
     echo "  [index:cross] BED and names"
-    verify_index_cross "small BED default chunk" "$simple" --bed "$bed_small" --chunk-size 3
-    verify_index_cross "medium BED chunk 97" "$simple" --bed "$bed_medium" --chunk-size 97
-    verify_index_cross "large BED chunk 257" "$simple" --bed "$bed_large" --chunk-size 257
-    verify_index_cross "BED chunk-size -1" "$simple" --bed "$bed_medium" --chunk-size -1
-    verify_index_cross "BED chunk-size 1" "$simple" --bed "$bed_small" --chunk-size 1
-    verify_index_cross "BED via stdin" "$simple" "$bed_small" --bed - --chunk-size 3
-    verify_index_cross "BED stranded" "$simple" --bed "$bed_small" --chunk-size 3 --strand-aware
-    verify_index_cross "BED --honor-strand alias" "$simple" --bed "$bed_small" --chunk-size 4096 --honor-strand
-    verify_index_cross "large BED stranded chunk 257" "$simple" --bed "$bed_large" --chunk-size 257 --strand-aware
+    verify_index_cross "small BED" "$simple" --bed "$bed_small"
+    verify_index_cross "medium BED" "$simple" --bed "$bed_medium"
+    verify_index_cross "large BED" "$simple" --bed "$bed_large"
+    verify_index_cross "BED via stdin" "$simple" "$bed_small" --bed -
+    verify_index_cross "BED stranded" "$simple" --bed "$bed_small" --strand-aware
+    verify_index_cross "BED --honor-strand alias" "$simple" --bed "$bed_small" --honor-strand
+    verify_index_cross "large BED stranded" "$simple" --bed "$bed_large" --strand-aware
     verify_index_cross "mixed-width BED" "$mixed" --bed "$mx_bed"
     verify_index_cross "names file" "$simple" --names "$names"
 
@@ -1232,35 +1230,26 @@ section3() {
     local simple="$PROJECT_ROOT/tests/data/simple.fasta"
     ensure_index "$simple"
     local BED_SMALL="$TMPDIR/small.bed" BED_MEDIUM="$TMPDIR/medium.bed"
-    gen_bed_file "$BED_SMALL" 10; gen_bed_file "$BED_MEDIUM" 100; gen_bed_file "$TMPDIR/large.bed" 1000
 
     run_size_suite() {
-        local label="$1" count="$2" chunk="$3"
+        local label="$1" count="$2"
         local bed="$TMPDIR/${label}.bed"
         gen_bed_file "$bed" "$count"
-        echo "  suite $label ($count rows, chunk=$chunk)"
-        parity_bedtools "$label default" "$bed" 0 "$simple" "$chunk"
-        parity_bedtools "$label stranded" "$bed" 1 "$simple" "$chunk"
-        parity_bed_samtools "$label vs samtools" "$bed" "$simple" "$chunk"
-        parity_bedtools "$label via stdin" "$bed" 0 "$simple" "$chunk" 1
-        parity_bed_samtools "$label stdin vs samtools" "$bed" "$simple" "$chunk" 1
-        parity_bedtools "$label stranded stdin" "$bed" 1 "$simple" "$chunk" 1
+        echo "  suite $label ($count rows)"
+        parity_bedtools "$label default" "$bed" 0 "$simple"
+        parity_bedtools "$label stranded" "$bed" 1 "$simple"
+        parity_bed_samtools "$label vs samtools" "$bed" "$simple"
+        parity_bedtools "$label via stdin" "$bed" 0 "$simple" 1
+        parity_bed_samtools "$label stdin vs samtools" "$bed" "$simple" 1
+        parity_bedtools "$label stranded stdin" "$bed" 1 "$simple" 1
     }
 
-    run_size_suite small 10 3
-    run_size_suite medium 100 97
-    run_size_suite large 1000 257
-
-    echo "  chunk-size 1"
-    parity_bed_samtools "small chunk-size 1" "$BED_SMALL" "$simple" 1
-    parity_bedtools "small chunk-size 1" "$BED_SMALL" 0 "$simple" 1
-
-    echo "  chunk-size -1"
-    parity_bed_samtools "medium all-in-one" "$BED_MEDIUM" "$simple" -1
-    parity_bedtools "medium all-in-one" "$BED_MEDIUM" 0 "$simple" -1
+    run_size_suite small 10
+    run_size_suite medium 100
+    run_size_suite large 1000
 
     if command -v "$BEDTOOLS" &>/dev/null; then
-        parity_bedtools "--honor-strand alias" "$BED_SMALL" 1 "$simple" 4096 0 --honor-strand
+        parity_bedtools "--honor-strand alias" "$BED_SMALL" 1 "$simple" 0 --honor-strand
     fi
 
     "$ZFASTA" get "$simple" seq1:1-10 seq2:1-6 --summary > "$TMPDIR/got.tmp" 2>"$TMPDIR/summary.err" \
@@ -1392,10 +1381,10 @@ BED
         || fail "[extended:header] annotated --rc header"
 
     if command -v "$BEDTOOLS" &>/dev/null && [[ -x "$SEQTK" ]]; then
-        parity_bed_rc_composed "BED stranded RC" "$simple" "$bed_comp" 2 0
-        parity_bed_rc_composed "BED stranded RC stdin" "$simple" "$bed_comp" 2 1
+        parity_bed_rc_composed "BED stranded RC" "$simple" "$bed_comp" 0
+        parity_bed_rc_composed "BED stranded RC stdin" "$simple" "$bed_comp" 1
         gen_bed_rc_file "$TMPDIR/bed_rc.bed" "$TMPDIR/bed_str.bed"
-        parity_bed_rc_composed "BED stranded RC chrom" "$chrom" "$TMPDIR/bed_str.bed" 4096 0
+        parity_bed_rc_composed "BED stranded RC chrom" "$chrom" "$TMPDIR/bed_str.bed" 0
     fi
 
     oracle rc "$iupac" iupac_all 1 33 "$TMPDIR/iupac_rc_py.fa"
@@ -1737,14 +1726,6 @@ run_perf_bed() {
             zebrac_clear_commands
             get_add_command perf_bed "$workload" z-fasta-default z-fasta "$json" \
                 "$qz get $qf --bed $qbed > /dev/null" "$nbytes" "$out_bases"
-            if (( n <= 10000 )); then
-                get_add_command perf_bed "$workload" z-fasta-chunk-all z-fasta "$json" \
-                    "$qz get $qf --bed $qbed --chunk-size -1 > /dev/null" "$nbytes" "$out_bases"
-            fi
-            if (( n <= 100 )); then
-                get_add_command perf_bed "$workload" z-fasta-chunk-1 z-fasta "$json" \
-                    "$qz get $qf --bed $qbed --chunk-size 1 > /dev/null" "$nbytes" "$out_bases"
-            fi
             bench_has_tool bedtools && get_add_command perf_bed "$workload" bedtools bedtools "$json" \
                 "$qb getfasta -fi $qf -bed $qbed > /dev/null" "$nbytes" "$out_bases"
             bench_has_tool samtools && get_add_command perf_bed "$workload" samtools samtools "$json" \
