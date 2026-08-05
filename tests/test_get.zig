@@ -103,6 +103,13 @@ test "loadIndex - .zfi file" {
     var idx = main.index_format.loadIndex(io, "tests/data/simple.fasta");
     defer idx.deinit(io);
 
+    var first_byte: [1]u8 = undefined;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try std.Io.File.readPositionalAll(idx.fasta_map.file, io, &first_byte, 0),
+    );
+    try std.testing.expectEqual(@as(u8, '>'), first_byte[0]);
+
     try std.testing.expectEqual(@as(usize, 2), idx.records.len);
     try std.testing.expectEqual(@as(u64, 24), idx.records[0].seq_len);
     try std.testing.expectEqual(@as(u64, 12), idx.records[1].seq_len);

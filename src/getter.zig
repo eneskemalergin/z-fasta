@@ -486,8 +486,7 @@ fn emitRegion(resolved: ResolvedRegion, fasta: []const u8, writer: anytype) void
 /// regions fall back to mmap.
 const max_pread_span_bytes: usize = 64 * 1024;
 
-/// GET-only handle for sparse large-FASTA reads via `std.Io.File.readPositionalAll`
-/// (Zig 0.16 portable positional I/O). Not part of index load.
+/// Borrowed loader handle for sparse large-FASTA reads via portable positional I/O.
 const SparseFastaSource = struct {
     io: std.Io,
     file: std.Io.File,
@@ -1477,13 +1476,10 @@ pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions
     var idx = index_format.loadIndexWithMode(io, fasta_path, load_mode);
     defer idx.deinit(io);
 
-    // GET-only: open FASTA for sparse positional reads when the catalog is large.
-    // Index load stays mmap-only; this fd is not part of LoadedIndex.
-    const sparse: ?SparseFastaSource = if (idx.fasta_size >= sort_by_offset_min_fasta_bytes) blk: {
-        const file = std.Io.Dir.cwd().openFile(io, fasta_path, .{}) catch break :blk null;
-        break :blk .{ .io = io, .file = file };
-    } else null;
-    defer if (sparse) |s| s.file.close(io);
+    const sparse: ?SparseFastaSource = if (idx.fasta_size >= sort_by_offset_min_fasta_bytes)
+        .{ .io = io, .file = idx.fasta_map.file }
+    else
+        null;
 
     var out_buf: [65536]u8 = undefined;
     var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);

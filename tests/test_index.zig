@@ -1474,6 +1474,38 @@ test "loadIndexCheckedWithMode preserves fai duplicate lookup semantics" {
     try std.testing.expectEqual(@as(?usize, 1), records_only_idx.lookupName("dup"));
 }
 
+test "loadIndexChecked retains FASTA descriptor for fai positional reads" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "fai-source-descriptor", "fa");
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    {
+        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+        defer fasta_file.close(io);
+        try std.Io.File.writeStreamingAll(fasta_file, io, ">seq\nACGT\n");
+    }
+    {
+        const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{});
+        defer fai_file.close(io);
+        try std.Io.File.writeStreamingAll(fai_file, io, "seq\t4\t5\t4\t5\n");
+    }
+
+    var idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .records_only);
+    defer idx.deinit(io);
+
+    var first_byte: [1]u8 = undefined;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try std.Io.File.readPositionalAll(idx.fasta_map.file, io, &first_byte, 0),
+    );
+    try std.testing.expectEqual(@as(u8, '>'), first_byte[0]);
+}
+
 test "loadIndexChecked rejects fai with zero line_bases" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

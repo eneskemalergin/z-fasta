@@ -267,10 +267,9 @@ pub const LoadMode = enum {
 /// Loaded FASTA + index state (from `.zfi` or samtools-compatible `.fai`).
 ///
 /// Ownership (one owner each; `deinit(io)` is the only cleanup entry point):
-/// - **Maps** (`fasta_map`, optional `zfi_map` / `fai_map`): owned by this struct;
-///   destroyed via `MemoryMap.destroy(io)`. Byte slices (`fasta_data`, `zfi_data`,
-///   `fai_data`, `name_blob`) and `.zfi` `records` / side-table views are borrows
-///   into those maps, which are never freed separately.
+/// - **FASTA file and maps**: `fasta_map.file` remains open for positional reads.
+///   `deinit` destroys `fasta_map`, optional `zfi_map` / `fai_map`, then closes the
+///   FASTA file. Byte slices and typed views borrow from those maps.
 /// - **Arena**: owns heap for `.fai` record arrays, `name_slices` string copies,
 ///   `sidecar_path`, `fai_line_offsets`, and `name_map` table storage. Reclaimed
 ///   only via `arena.deinit()` (do not `name_map.deinit()` on an arena-backed map).
@@ -347,6 +346,7 @@ pub const LoadedIndex = struct {
     }
 
     pub fn deinit(self: *LoadedIndex, io: std.Io) void {
+        const fasta_file = self.fasta_map.file;
         self.fasta_map.destroy(io);
         if (self.zfi_map) |*m| m.destroy(io);
         if (self.fai_map) |*m| m.destroy(io);
@@ -354,6 +354,7 @@ pub const LoadedIndex = struct {
         // `name_map.deinit()`: Zig 0.16 ArenaAllocator.free is not safe for the
         // HashMap's non-LIFO buffer free (crashes). `arena.deinit()` reclaims all.
         self.arena.deinit();
+        fasta_file.close(io);
     }
 
     pub fn lookupName(self: *const LoadedIndex, name: []const u8) ?usize {
@@ -465,7 +466,8 @@ pub fn loadIndexCheckedWithMode(io: std.Io, fasta_path: []const u8, mode: LoadMo
         error.AccessDenied => return error.AccessDenied,
         else => return error.Io,
     };
-    defer fasta_file.close(io);
+    var fasta_transferred = false;
+    defer if (!fasta_transferred) fasta_file.close(io);
 
     const fasta_stat = fasta_file.stat(io) catch return error.Io;
 
@@ -474,7 +476,6 @@ pub fn loadIndexCheckedWithMode(io: std.Io, fasta_path: []const u8, mode: LoadMo
     }
 
     var fasta_view = try platform.FileView.mapFile(io, fasta_file, @intCast(fasta_stat.size));
-    var fasta_transferred = false;
     defer if (!fasta_transferred) fasta_view.destroy(io);
 
     // Try .zfi first
