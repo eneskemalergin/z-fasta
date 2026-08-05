@@ -59,7 +59,7 @@ Options:
   --emit-fai    Output FAI to stdout when every record has fixed line geometry;
                 otherwise fails and directs you to default .zfi indexing
   --no-dedup    Keep duplicate sequence names in the index (default: first wins at
-                index time). get resolves duplicate names to the last record.
+                index time). get resolves duplicate names to the first record.
   --help        Show help message
   --version     Print version
 ```
@@ -77,7 +77,7 @@ z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt]
 
 Extract one or more sequences or sub-regions from an indexed FASTA. Positional output is **byte-identical** to `samtools faidx` on the verified path. BED and names flows are checked against `bedtools getfasta` and `samtools faidx -r`. Multiple regions load the index once and stream in CLI order. BED rows and names-file entries are appended in source order ahead of later positional arguments.
 
-Requires an index: `.zfi` preferred, then `.fai`. Messy (non-uniform) records need a side-table `.zfi`; a plain `.fai` cannot describe them.
+Requires an index. A present `.zfi` is authoritative, including when it is invalid. `.fai` is used only when `.zfi` is absent. Messy (non-uniform) records need a side-table `.zfi`; a plain `.fai` cannot describe them.
 
 **Region formats:** `NAME` (full sequence); `NAME:START-END` (1-based inclusive); `NAME:START-` (from START through end of sequence). Ensembl-style names with colons work (for example `chromosome:GRCh38:1:1:248956422:1`).
 
@@ -147,7 +147,7 @@ z-fasta index genome.fa
 # Output .fai to stdout (uniform FASTA only)
 z-fasta index --emit-fai genome.fa > genome.fai
 
-# Keep duplicate names in the index (get still resolves to the last record)
+# Keep duplicate names in the index (get resolves to the first record)
 z-fasta index --no-dedup genome.fa
 
 # Extract a full sequence / sub-region / multi-region
@@ -181,7 +181,7 @@ z-fasta stats --index-only genome.fa
 
 ### Index formats
 
-- **`.zfi` (default, preferred):** binary index with embedded names, optional per-line side tables for messy layout, and source identity (size plus embedded FASTA mtime). Load prefers `.zfi` over `.fai`.
+- **`.zfi` (default, authoritative when present):** binary index with embedded names, optional per-line side tables for messy layout, and source identity (size plus embedded FASTA mtime).
 - **`.fai` (compatibility):** text index for uniform, FAI-representable records only. `--emit-fai` refuses variable widths and other non-representable layouts instead of writing a misleading file. Stale `.fai` checks are mtime-only (weaker than `.zfi`).
 
 ### Messy FASTA
@@ -190,13 +190,13 @@ Variable line widths, trailing spaces or tabs, blank lines, mixed CRLF/LF, and a
 
 ### Duplicate names
 
-Duplicate _names_ are not the same as identical _sequence contents_. Default `index` keeps the first name; `index --no-dedup` keeps all. `get` resolves a repeated name to the **last** matching record in the loaded index. `validate` reports `duplicate_name`. Full `stats` prints source-level extras (`sum(k-1)`); `stats --index-only` prints `n/a (run without --index-only)` on a deduplicated index and never fabricates `0` (with an `--no-dedup` index it reports repeats kept in the index).
+Duplicate _names_ are not the same as identical _sequence contents_. Default `index` keeps the first name; `index --no-dedup` keeps all. `get` resolves a repeated name to the **first** exact match. Duplicate lookup is ambiguous, so use unique identifiers when records must be addressable individually. `validate` reports `duplicate_name`. Full `stats` prints source-level extras (`sum(k-1)`); `stats --index-only` prints `n/a (run without --index-only)` on a deduplicated index and never fabricates `0` (with an `--no-dedup` index it reports repeats kept in the index).
 
 ## Support and limits
 
-**Formats:** `.zfi` is the default. It handles uniform records and messy layout (variable widths, trailing whitespace, blank lines, mixed CRLF/LF, missing final newline) via side tables. `.fai` is compatibility only for uniform, FAI-representable records; `--emit-fai` refuses messy layout. Load prefers `.zfi`. Compressed FASTA, BGZF, and FASTQ are out of scope.
+**Formats:** `.zfi` is the default. It handles uniform records and messy layout (variable widths, trailing whitespace, blank lines, mixed CRLF/LF, missing final newline) via side tables. `.fai` is compatibility only for uniform, FAI-representable records; `--emit-fai` refuses messy layout. A present `.zfi` blocks `.fai` selection when it is stale or invalid. Compressed FASTA, BGZF, and FASTQ are out of scope.
 
-**Names:** index hard-rejects sequence names longer than 65535 bytes. `validate --max-header-len` warns above N bytes (default 1024) and does not raise that index limit.
+**Names:** index hard-rejects sequence names longer than 65535 bytes. Empty identifiers are valid but difficult to address and should be avoided. An explicit empty positional argument retrieves one; blank names-file lines stay skipped and BED requires a non-empty chromosome. `validate --max-header-len` warns above N bytes (default 1024) and does not raise that index limit.
 
 **Get / validate caps:** at most 1024 positional regions per `get` call. `--names` loads the whole file (max 512 MiB; `--chunk-size` does not stream it). BED defaults to 4096-row batches; `--chunk-size -1` loads the whole BED up to 512 MiB. `validate` stops after 10000 retained events.
 
@@ -256,7 +256,7 @@ See the [detailed index benchmark report](bench/index/REPORT.md) for tool defini
 ### Correctness
 
 - **Index:** `bench/index/run.sh` edge cases **24/24 matching cases plus one `binary_data` review**; messy layouts from `python3 bench/shared/generate_messy.py` into `bench/shared/cache/messy_fixtures/` (correctness) and `messy_perf/` (proteome perf).
-- **Get:** `bench/get/run.sh` correctness **405/405** (positional, multi-region, BED, names, RC, messy) against samtools, bedtools, and seqtk where applicable.
+- **Get:** `bench/get/run.sh` correctness **415/415** (positional, multi-region, BED, names, RC, messy) against samtools, bedtools, and seqtk where applicable.
 - **Stats:** `bench/stats/run.sh` correctness **89/89** (BioPython oracle, index formats, layout twins, messy fixtures, duplicates policy, peer parity).
 - **Unit tests:** `./zig build test` (index, get, stats, complement, BED parser, validator).
 - **Messy FASTA:** z-fasta indexes and extracts mixed-width and trailing-whitespace FASTA that samtools-style FAI tools reject. Details: [bench/index/REPORT.md](bench/index/REPORT.md).

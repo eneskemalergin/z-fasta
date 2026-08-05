@@ -47,7 +47,7 @@ const USAGE =
     \\  --emit-fai   Output FAI to stdout when every record has fixed line geometry;
     \\               otherwise fails and directs you to default .zfi indexing
     \\  --no-dedup   Keep duplicate sequence names in the index (default: first wins
-    \\               at index time). get resolves duplicate names to the last record.
+    \\               at index time). get resolves duplicate names to the first record.
     \\
     \\Get usage:
     \\  z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt]

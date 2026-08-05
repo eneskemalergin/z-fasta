@@ -21,6 +21,12 @@ test "parseRegion - simple name" {
     try std.testing.expect(r.is_full);
 }
 
+test "parseRegion - empty identifier" {
+    const r = parseRegion("");
+    try std.testing.expectEqualStrings("", r.name);
+    try std.testing.expect(r.is_full);
+}
+
 test "parseRegion - name with range" {
     const r = parseRegion("chr1:100-200");
     try std.testing.expectEqualStrings("chr1", r.name);
@@ -358,11 +364,11 @@ fn writeFastaArtifact(allocator: std.mem.Allocator, stem: []const u8, data: []co
     return path;
 }
 
-fn writeZfi(allocator: std.mem.Allocator, fasta_path: []const u8, data: []const u8) !void {
+fn writeZfi(allocator: std.mem.Allocator, fasta_path: []const u8, data: []const u8, enable_dedup: bool) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    var index = try main.indexer.scanZfiData(data, true, arena.allocator());
+    var index = try main.indexer.scanZfiData(data, enable_dedup, arena.allocator());
     defer index.deinit(arena.allocator());
 
     const fasta_file = try std.Io.Dir.cwd().openFile(io, fasta_path, .{});
@@ -394,7 +400,7 @@ test "get on zfi output for simple.fasta seq1:1-10" {
     defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
 
-    try writeZfi(allocator, path, data);
+    try writeZfi(allocator, path, data, true);
 
     const got = try captureExtractRegion(allocator, path, "seq1:1-10");
     const expected =
@@ -423,7 +429,7 @@ test "get on messy mixed_widths after indexing" {
     defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
 
-    try writeZfi(allocator, path, data);
+    try writeZfi(allocator, path, data, true);
 
     const region = "mixed_widths:3-24";
     const output = try captureExtractRegion(allocator, path, region);
@@ -434,6 +440,31 @@ test "get on messy mixed_widths after indexing" {
         \\
     ;
     try std.testing.expectEqualStrings(expected, output);
+}
+
+test "CLI get selects the first empty identifier through zfi and fai" {
+    const data = ">\nAAAA\n>\nCCCCCC\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try writeFastaArtifact(allocator, "get-empty-name", data);
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    try writeZfi(allocator, fasta_path, data, false);
+    try expectCliSuccess(allocator, &.{ ZFASTA_BIN, "get", fasta_path, "" }, ">\nAAAA\n");
+
+    try std.Io.Dir.cwd().deleteFile(io, zfi_path);
+    {
+        const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{});
+        defer fai_file.close(io);
+        try std.Io.File.writeStreamingAll(fai_file, io, "\t4\t2\t4\t5\n\t6\t9\t6\t7\n");
+    }
+    try expectCliSuccess(allocator, &.{ ZFASTA_BIN, "get", fasta_path, "" }, ">\nAAAA\n");
 }
 
 /// Hard CLI failures: exact exit code, exact stderr, empty stdout (no partial success).
@@ -461,6 +492,26 @@ fn expectCliFailure(
     }
     try std.testing.expectEqual(@as(usize, 0), result.stdout.len);
     try std.testing.expectEqualStrings(expected_stderr, result.stderr);
+}
+
+fn expectCliSuccess(allocator: std.mem.Allocator, argv: []const []const u8, expected_stdout: []const u8) !void {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+
+    const result = try std.process.run(allocator, threaded.io(), .{
+        .argv = argv,
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        else => return error.ChildProcessFailed,
+    }
+    try std.testing.expectEqualStrings(expected_stdout, result.stdout);
+    try std.testing.expectEqual(@as(usize, 0), result.stderr.len);
 }
 
 /// Usage dumps: exit 1, empty stdout, stderr matches `z-fasta --help` stdout exactly.
@@ -602,6 +653,34 @@ test "CLI failures: missing FASTA path is exit 1 with exact stderr" {
     try expectCliFailure(allocator, &.{ ZFASTA_BIN, "stats", missing }, 1, expected);
     try expectCliFailure(allocator, &.{ ZFASTA_BIN, "validate", missing }, 1, expected);
     try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", missing, "seq1" }, 1, expected);
+}
+
+test "CLI failures: invalid present zfi blocks valid fai for get and stats" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta = try writeFastaArtifact(allocator, "invalid-zfi-cli", ">seq\nACGT\n");
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta});
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    {
+        const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{});
+        defer fai_file.close(io);
+        try std.Io.File.writeStreamingAll(fai_file, io, "seq\t4\t5\t4\t5\n");
+    }
+    {
+        const zfi_file = try std.Io.Dir.cwd().createFile(io, zfi_path, .{});
+        defer zfi_file.close(io);
+        try std.Io.File.writeStreamingAll(zfi_file, io, "not a zfi index");
+    }
+
+    const expected = try std.fmt.allocPrint(allocator, "error: corrupt index file for: {s}\n", .{fasta});
+    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", fasta, "seq" }, 1, expected);
+    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "stats", "--index-only", fasta }, 1, expected);
 }
 
 test "CLI failures: get usage, conflicts, and missing sequence" {

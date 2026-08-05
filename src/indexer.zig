@@ -551,22 +551,7 @@ pub fn scanZfiData(
     return scanZfiReader(&r, &read_buf, enable_dedup, allocator);
 }
 
-/// Wrap prebuilt records as a production `ZfiIndex` with empty side tables and
-/// an empty name blob. Prefer `scanZfiData` for real FASTA fixtures so embedded
-/// names and side tables match the CLI. Use this for deliberately crafted records
-/// (including corrupt fixtures) that still must go through `writeZfiIndex`.
-pub fn zfiIndexFromRecords(records: []const IndexRecord, allocator: std.mem.Allocator) !ZfiIndex {
-    var index = ZfiIndex{
-        .records = .empty,
-        .side_tables = .empty,
-        .name_blob = .empty,
-    };
-    errdefer index.deinit(allocator);
-    try index.records.appendSlice(allocator, records);
-    return index;
-}
-
-/// Single on-disk `.zfi` serialization path (`plan/zfi-format.md`):
+/// Single on-disk `.zfi` serialization path:
 /// header, records, side tables, name blob, `ZFID` source identity, `ZFNM` footer.
 fn writeZfiIndex(
     writer: *std.Io.Writer,

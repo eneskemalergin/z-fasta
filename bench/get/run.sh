@@ -4,7 +4,7 @@
 # Usage:
 #   bash bench/get/run.sh [options]
 #
-# Defaults: correctness first (405 checks), then perf (--runs 5, --warmup 1, --duration 5000).
+# Defaults: correctness first (415 checks), then perf (--runs 5, --warmup 1, --duration 5000).
 # A full perf pass (all sections, default zebrac settings) typically takes several hours.
 # pyfaidx is omitted from timed positional runs (typically 30-100x slower than z-fasta;
 # may be enabled for a final polish pass).
@@ -486,7 +486,6 @@ SKIP_INDEX=false SKIP_GET=false SKIP_MULTI=false SKIP_BED=false SKIP_RC=false SK
 
 # Correctness fixture paths (distinct from perf MESSY_DIR=shared/cache/messy_perf)
 MESSY_TEST_DIR="$BENCH_ROOT/shared/cache/messy_fixtures"
-FIXTURE_CACHE="$SCRIPT_DIR/.fixture_cache"
 
 MESSY_POS_CASES=(
     "mixed_widths:1-1,1-32,3-24,10-20"
@@ -726,7 +725,7 @@ verify_open_ended_region() {
     fi
 }
 
-# verify_index_cross: byte-identical get with .zfi present vs .fai-only fallback.
+# verify_index_cross: byte-identical get with `.zfi` present vs `.fai` selected.
 # Optional third arg: existing file → read GET input from stdin (e.g. BED via pipe).
 verify_index_cross() {
     local desc="$1" src="$2"
@@ -789,9 +788,9 @@ verify_index() {
     "$ZFASTA" "${zf_get[@]}" > "$TMPDIR/fai.out" 2>/dev/null || {
         mv "$stash" "${fasta}.zfi"; fail "[index:fai] $tag get via .fai failed"; return
     }
-    pass "[index:fai] $tag get with .zfi absent (.fai fallback)"
-    diff_oracle "$TMPDIR/st.out" "$TMPDIR/fai.out" "[parity:samtools] $tag via .fai fallback"
-    diff_oracle "$TMPDIR/zfi.out" "$TMPDIR/fai.out" "[index:cross] $tag .zfi == .fai fallback"
+    pass "[index:fai] $tag get with .zfi absent"
+    diff_oracle "$TMPDIR/st.out" "$TMPDIR/fai.out" "[parity:samtools] $tag via .fai"
+    diff_oracle "$TMPDIR/zfi.out" "$TMPDIR/fai.out" "[index:cross] $tag .zfi == .fai"
     mv "$stash" "${fasta}.zfi"
 }
 
@@ -963,24 +962,26 @@ BED
 }
 
 gen_iupac_fixture() {
-    local out="$FIXTURE_CACHE/iupac.fasta"
-    [[ -f "${out}.zfi" ]] && { printf '%s\n' "$out"; return; }
-    printf '>iupac_all\nACGTURYSWKMBDHVNacgturyswkmbdhvnu\n' > "$out"
-    "$ZFASTA" index "$out" >/dev/null 2>&1
+    local out="$TMPDIR/iupac.fasta"
+    if [[ ! -f "$out" ]]; then
+        printf '>iupac_all\nACGTURYSWKMBDHVNacgturyswkmbdhvnu\n' > "$out"
+    fi
+    [[ -f "${out}.zfi" ]] || "$ZFASTA" index "$out" >/dev/null 2>&1
     printf '%s\n' "$out"
 }
 
 gen_chrom_fixture() {
     local total="${1:-16384}"
-    local out="$FIXTURE_CACHE/chrom_${total}.fasta"
-    [[ -f "${out}.zfi" ]] && { printf '%s\n' "$out"; return; }
-    {
-        echo ">chrSynthetic"
-        awk -v total="$total" 'BEGIN{pattern="ACGTNRYWSKMBDHVacgtnrywskmbdhv"; s=""
-            while(length(s)<total){s=s pattern} s=substr(s,1,total)
-            while(length(s)>0){print substr(s,1,71); s=substr(s,72)}}'
-    } > "$out"
-    "$ZFASTA" index "$out" >/dev/null 2>&1
+    local out="$TMPDIR/chrom_${total}.fasta"
+    if [[ ! -f "$out" ]]; then
+        {
+            echo ">chrSynthetic"
+            awk -v total="$total" 'BEGIN{pattern="ACGTNRYWSKMBDHVacgtnrywskmbdhv"; s=""
+                while(length(s)<total){s=s pattern} s=substr(s,1,total)
+                while(length(s)>0){print substr(s,1,71); s=substr(s,72)}}'
+        } > "$out"
+    fi
+    [[ -f "${out}.zfi" ]] || "$ZFASTA" index "$out" >/dev/null 2>&1
     printf '%s\n' "$out"
 }
 
@@ -1026,7 +1027,7 @@ BED
 
 # --- sections ---
 section0_index() {
-    section_hdr 0 "Index path coverage (.zfi vs .fai fallback)"
+    section_hdr 0 "Index path coverage (.zfi vs .fai)"
     echo "  Uniform fixtures only; cache messy_fixtures stay .zfi-only ([extended:messy])"
     local simple="tests/data/simple.fasta" proteome="tests/data/proteome.fasta"
     local edge="tests/data/edge_cases.fasta" mixed="tests/data/mixed_widths.fasta"
@@ -1073,7 +1074,7 @@ BED
     verify_index_cross "open-ended region" "$simple" "seq1:10-"
     verify_index_cross "pipe name sub-region" "$proteome" "sp|P12345|PROT_HUMAN:1-10"
     verify_index_cross "mixed-width sub-region" "$mixed" "mixed1:55-75"
-    verify_index_cross "duplicate name (last wins)" "$edge" "dupname"
+    verify_index_cross "duplicate name (first wins)" "$edge" "dupname"
     verify_index_cross "lowercase sub-region" "$edge" "lowercase:1-6"
 
     echo "  [index:cross] multi-region"
@@ -1475,12 +1476,52 @@ section5() {
     done
 
     local dup="$TMPDIR/dup_edge.fasta"
-    cp "$E/edge_cases.fasta" "$dup"
+    printf '>dupname\nAAAA\n>other\nGG\n>dupname\nCCCCCC\n' > "$dup"
     "$ZFASTA" index --no-dedup "$dup" >/dev/null 2>&1 || fail "[extended:dedup] index"
-    printf '>dupname\nCCCCCCCC\n' > "$TMPDIR/dup_expected.fa"
-    "$ZFASTA" get "$dup" dupname > "$TMPDIR/got.tmp" 2>/dev/null \
-        && diff_oracle "$TMPDIR/dup_expected.fa" "$TMPDIR/got.tmp" "[extended:dedup] dupname last record" \
-        || fail "[extended:dedup] dupname last record"
+    "$ZFASTA" index --emit-fai --no-dedup "$dup" > "${dup}.fai" 2>/dev/null || fail "[extended:dedup] fai index"
+    printf '>dupname\nAAAA\n' > "$TMPDIR/dup_expected.fa"
+    printf '>dupname:1-4\nAAAA\n' > "$TMPDIR/dup_bed_expected.fa"
+    printf 'dupname\n' > "$TMPDIR/dup_names.txt"
+    printf 'dupname\t0\t4\n' > "$TMPDIR/dup.bed"
+    for sidecar in zfi fai; do
+        if [[ "$sidecar" == fai ]]; then
+            mv "${dup}.zfi" "$TMPDIR/dup.zfi"
+        fi
+        "$ZFASTA" get "$dup" dupname > "$TMPDIR/got.tmp" 2>/dev/null \
+            && diff_oracle "$TMPDIR/dup_expected.fa" "$TMPDIR/got.tmp" "[extended:dedup] $sidecar positional first record" \
+            || fail "[extended:dedup] $sidecar positional first record"
+        "$ZFASTA" get "$dup" --names "$TMPDIR/dup_names.txt" > "$TMPDIR/got.tmp" 2>/dev/null \
+            && diff_oracle "$TMPDIR/dup_expected.fa" "$TMPDIR/got.tmp" "[extended:dedup] $sidecar names first record" \
+            || fail "[extended:dedup] $sidecar names first record"
+        "$ZFASTA" get "$dup" --bed "$TMPDIR/dup.bed" > "$TMPDIR/got.tmp" 2>/dev/null \
+            && diff_oracle "$TMPDIR/dup_bed_expected.fa" "$TMPDIR/got.tmp" "[extended:dedup] $sidecar BED first record" \
+            || fail "[extended:dedup] $sidecar BED first record"
+        if [[ "$sidecar" == fai ]]; then
+            mv "$TMPDIR/dup.zfi" "${dup}.zfi"
+        fi
+    done
+
+    local empty_name="$TMPDIR/empty_name.fasta"
+    printf '>\nAAAA\n>\nCCCCCC\n' > "$empty_name"
+    "$ZFASTA" index --no-dedup "$empty_name" >/dev/null 2>&1 || fail "[extended:empty-name] zfi index"
+    "$ZFASTA" index --emit-fai --no-dedup "$empty_name" > "${empty_name}.fai" 2>/dev/null || fail "[extended:empty-name] fai index"
+    printf '>\nAAAA\n' > "$TMPDIR/empty_name_expected.fa"
+    "$ZFASTA" get "$empty_name" "" > "$TMPDIR/got.tmp" 2>/dev/null \
+        && diff_oracle "$TMPDIR/empty_name_expected.fa" "$TMPDIR/got.tmp" "[extended:empty-name] zfi positional first record" \
+        || fail "[extended:empty-name] zfi positional first record"
+    mv "${empty_name}.zfi" "$TMPDIR/empty_name.zfi"
+    "$ZFASTA" get "$empty_name" "" > "$TMPDIR/got.tmp" 2>/dev/null \
+        && diff_oracle "$TMPDIR/empty_name_expected.fa" "$TMPDIR/got.tmp" "[extended:empty-name] fai positional first record" \
+        || fail "[extended:empty-name] fai positional first record"
+    "$SAMTOOLS" faidx "$empty_name" "" > "$TMPDIR/got.tmp" 2>/dev/null \
+        && diff_oracle "$TMPDIR/empty_name_expected.fa" "$TMPDIR/got.tmp" "[parity:samtools] empty identifier" \
+        || fail "[parity:samtools] empty identifier"
+    mv "$TMPDIR/empty_name.zfi" "${empty_name}.zfi"
+
+    printf '\n# comment\n\r\n' > "$TMPDIR/blank_names.txt"
+    expect_fail "blank names input has no regions" "$ZFASTA" get "$E/simple.fasta" --names "$TMPDIR/blank_names.txt"
+    printf '\t0\t4\n' > "$TMPDIR/empty_chrom.bed"
+    expect_fail "empty BED chromosome rejected" "$ZFASTA" get "$E/simple.fasta" --bed "$TMPDIR/empty_chrom.bed"
 
     expect_fail "get on nonexistent seq" "$ZFASTA" get "$E/simple.fasta" NOSUCHSEQ
     expect_fail "get on invalid region" "$ZFASTA" get "$E/simple.fasta" seq1:invalid
@@ -1497,7 +1538,7 @@ run_tests() {
     FAIL=0
     local verify_tmp="$SCRIPT_DIR/.verify_tmp"
     rm -rf "$verify_tmp"
-    mkdir -p "$verify_tmp" "$FIXTURE_CACHE"
+    mkdir -p "$verify_tmp"
     TMPDIR="$verify_tmp"
     bench_ensure_messy --fixtures
 

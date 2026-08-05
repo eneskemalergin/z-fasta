@@ -521,7 +521,7 @@ verify_modes() {
         run_stats "$fasta" "$mode" "$zfi_txt" "$err" || { fail "$label" "$err"; continue; }
         check_oracle "$label" check "$mode" zfi "$fasta" "$exp" "$zfi_txt"
 
-        # .fai fallback vs BioPython (stash .zfi so loader uses .fai)
+        # .fai selection vs BioPython (stash .zfi so it is absent)
         stash="$TMPDIR/$name.$mode.zfi"
         mv "${fasta}.zfi" "$stash"
         fai_txt="$TMPDIR/$name.$mode.fai.txt"

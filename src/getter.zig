@@ -1,7 +1,7 @@
 //! Sequence extraction: positional regions, BED/names batching, strand, and RC transforms.
 //!
 //! Uniform records use O(1) byte-offset math; non-uniform records use side-table lookup.
-//! Prefers `.zfi` via `index_format.loadIndex`, with `.fai` fallback.
+//! A present `.zfi` is authoritative; `.fai` is used only when `.zfi` is absent.
 
 const std = @import("std");
 const complement = @import("complement.zig");
@@ -108,10 +108,6 @@ const BatchStats = struct {
 ///   NAME:START-END    1-based, inclusive
 ///   NAME:START-       from START to end
 pub fn parseRegion(input: []const u8) Region {
-    if (input.len == 0) {
-        printErrorAndExit("error: empty region string\n", .{});
-    }
-
     // Only the rightmost colon can start a coordinate suffix. Any earlier suffix
     // contains that colon, so its coordinate fields cannot both be integers.
     var colon_pos: ?usize = null;
@@ -572,13 +568,14 @@ fn emitRegionViaPread(
 
         var i: usize = 0;
         while (i < take) {
-            if (out_buf.len - out_len < 2) {
+            const chunk = @min(take - i, wrap_width - line_pos);
+            const needed = chunk + @as(usize, @intFromBool(line_pos + chunk == wrap_width));
+            if (out_buf.len - out_len < needed) {
                 writer.writeAll(out_buf[0..out_len]) catch {
                     printErrorAndExit("error: write failed\n", .{});
                 };
                 out_len = 0;
             }
-            const chunk = @min(take - i, wrap_width - line_pos);
             if (resolved.orientation.complement) {
                 complement.complementInto(out_buf[out_len .. out_len + chunk], src[i .. i + chunk]);
             } else {
@@ -658,16 +655,14 @@ fn emitRegionForwardUniform(resolved: ResolvedRegion, fasta: []const u8, writer:
 
         var i: usize = 0;
         while (i < take) {
-            const room = out_buf.len - out_len;
-            // Need space for at least one base and a possible newline.
-            if (room < 2) {
+            const chunk = @min(take - i, wrap_width - line_pos);
+            const needed = chunk + @as(usize, @intFromBool(line_pos + chunk == wrap_width));
+            if (out_buf.len - out_len < needed) {
                 writer.writeAll(out_buf[0..out_len]) catch {
                     printErrorAndExit("error: write failed\n", .{});
                 };
                 out_len = 0;
             }
-            const bases_to_wrap = wrap_width - line_pos;
-            const chunk = @min(take - i, bases_to_wrap);
             if (resolved.orientation.complement) {
                 complement.complementInto(out_buf[out_len .. out_len + chunk], src[i .. i + chunk]);
             } else {
@@ -784,13 +779,14 @@ fn emitRegionBackwardUniform(resolved: ResolvedRegion, fasta: []const u8, writer
 
         var i: usize = 0;
         while (i < take) {
-            if (out_buf.len - out_len < 2) {
+            const chunk = @min(take - i, wrap_width - line_pos);
+            const needed = chunk + @as(usize, @intFromBool(line_pos + chunk == wrap_width));
+            if (out_buf.len - out_len < needed) {
                 writer.writeAll(out_buf[0..out_len]) catch {
                     printErrorAndExit("error: write failed\n", .{});
                 };
                 out_len = 0;
             }
-            const chunk = @min(take - i, wrap_width - line_pos);
             // Walk src from the right end of this take window.
             const src_end = take - i;
             if (resolved.orientation.complement) {
@@ -1935,4 +1931,104 @@ test "emitRegion handles non-uniform side-table reverse complement extraction" {
     }, fasta, &writer.writer);
 
     try std.testing.expectEqualStrings(">seq:2-8\nCGGGGTT\n", writer.written());
+}
+
+test "uniform emitters flush complete chunks at the output-buffer boundary" {
+    const base_count: usize = 70_000;
+    const allocator = std.testing.allocator;
+    const fasta = try allocator.alloc(u8, base_count + 1);
+    defer allocator.free(fasta);
+    @memset(fasta[0..base_count], 'A');
+    fasta[base_count] = '\n';
+
+    const orientations = [_]Orientation{ .{}, Orientation.reverseComplement() };
+    for (orientations) |orientation| {
+        var writer = std.Io.Writer.Allocating.init(allocator);
+        defer writer.deinit();
+
+        emitRegion(.{
+            .name = "seq",
+            .start = 1,
+            .display_end = base_count,
+            .is_full = true,
+            .start_byte = 0,
+            .seq_offset = 0,
+            .num_bases = base_count,
+            .line_bases = base_count,
+            .line_bytes = base_count + 1,
+            .side_table = &.{},
+            .orientation = orientation,
+            .annotate_transform = false,
+            .original_index = 0,
+        }, fasta, &writer.writer);
+
+        var lines = std.mem.splitScalar(u8, writer.written(), '\n');
+        try std.testing.expectEqualStrings(">seq", lines.next().?);
+        var emitted: usize = 0;
+        while (lines.next()) |line| {
+            if (line.len == 0) break;
+            try std.testing.expectEqual(@min(@as(usize, 60), base_count - emitted), line.len);
+            for (line) |base| {
+                try std.testing.expectEqual(if (orientation.complement) @as(u8, 'T') else 'A', base);
+            }
+            emitted += line.len;
+        }
+        try std.testing.expectEqual(base_count, emitted);
+    }
+}
+
+test "positional emitter flushes at the output-buffer boundary" {
+    const base_count: usize = 65_000;
+    const allocator = std.testing.allocator;
+    const fasta = try allocator.alloc(u8, base_count + 1);
+    defer allocator.free(fasta);
+    @memset(fasta[0..base_count], 'A');
+    fasta[base_count] = '\n';
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{ .read = true });
+    defer file.close(std.testing.io);
+    try std.Io.File.writeStreamingAll(file, std.testing.io, fasta);
+
+    const resolved = ResolvedRegion{
+        .name = "seq",
+        .start = 1,
+        .display_end = base_count,
+        .is_full = true,
+        .start_byte = 0,
+        .seq_offset = 0,
+        .num_bases = base_count,
+        .line_bases = base_count,
+        .line_bytes = base_count + 1,
+        .side_table = &.{},
+        .orientation = Orientation.complementOnly(),
+        .annotate_transform = false,
+        .original_index = 0,
+    };
+    try std.testing.expect(canEmitRegionViaPread(resolved, fasta.len));
+
+    var file_buf: [max_pread_span_bytes]u8 = undefined;
+    var writer = std.Io.Writer.Allocating.init(allocator);
+    defer writer.deinit();
+    emitRegionViaPread(
+        resolved,
+        .{ .io = std.testing.io, .file = file },
+        fasta.len,
+        &file_buf,
+        &writer.writer,
+    );
+
+    const sequence_lines = std.math.divCeil(usize, base_count, 60) catch unreachable;
+    try std.testing.expectEqual(">seq\n".len + base_count + sequence_lines, writer.written().len);
+    var lines = std.mem.splitScalar(u8, writer.written(), '\n');
+    try std.testing.expectEqualStrings(">seq", lines.next().?);
+    var emitted: usize = 0;
+    while (lines.next()) |line| {
+        if (line.len == 0) break;
+        try std.testing.expectEqual(@min(@as(usize, 60), base_count - emitted), line.len);
+        for (line) |base| try std.testing.expectEqual(@as(u8, 'T'), base);
+        emitted += line.len;
+    }
+    try std.testing.expectEqual(base_count, emitted);
 }
