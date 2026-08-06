@@ -289,7 +289,7 @@ pub const LoadedIndex = struct {
     zfi_map: ?std.Io.File.MemoryMap = null,
     fai_map: ?std.Io.File.MemoryMap = null,
     records: []const IndexRecord,
-    name_map: std.StringHashMap(usize),
+    name_map: std.StringHashMap(u32),
     has_name_map: bool,
     /// Arena-owned name per record index when names were copied into the arena.
     name_slices: []const []const u8 = &.{},
@@ -330,7 +330,7 @@ pub const LoadedIndex = struct {
         }
         var it = self.name_map.iterator();
         while (it.next()) |entry| {
-            if (entry.value_ptr.* == rec_idx) {
+            if (@as(usize, entry.value_ptr.*) == rec_idx) {
                 return entry.key_ptr.*;
             }
         }
@@ -361,7 +361,8 @@ pub const LoadedIndex = struct {
 
     pub fn lookupName(self: *const LoadedIndex, name: []const u8) ?usize {
         if (self.has_name_map) {
-            return self.name_map.get(name);
+            const rec_idx = self.name_map.get(name) orelse return null;
+            return rec_idx;
         }
 
         if (self.name_slices.len > 0) {
@@ -579,13 +580,13 @@ fn buildNameMapFast(
     allocator: std.mem.Allocator,
     records: []const IndexRecord,
     name_data: []const u8,
-) LoadIndexError!std.StringHashMap(usize) {
-    var name_map = std.StringHashMap(usize).init(allocator);
+) LoadIndexError!std.StringHashMap(u32) {
+    var name_map = std.StringHashMap(u32).init(allocator);
     name_map.ensureTotalCapacity(@intCast(records.len)) catch return error.OutOfMemory;
     for (records, 0..) |rec, i| {
         const name = rec.getName(name_data);
         const entry = name_map.getOrPutAssumeCapacity(name);
-        if (!entry.found_existing) entry.value_ptr.* = i;
+        if (!entry.found_existing) entry.value_ptr.* = @intCast(i);
     }
     return name_map;
 }
@@ -691,13 +692,13 @@ fn tryLoadZfi(
         .stats_scan => false,
     };
 
-    var name_map: std.StringHashMap(usize) = undefined;
+    var name_map: std.StringHashMap(u32) = undefined;
     var has_name_map = false;
     if (build_name_map) {
         name_map = buildNameMapFast(allocator, records, name_blob) catch return error.OutOfMemory;
         has_name_map = true;
     } else {
-        name_map = std.StringHashMap(usize).init(allocator);
+        name_map = std.StringHashMap(u32).init(allocator);
     }
 
     transferred = true;
@@ -957,7 +958,7 @@ fn loadFaiStreamed(
     else
         @as([]const u64, &.{});
 
-    var name_map = std.StringHashMap(usize).init(allocator);
+    var name_map = std.StringHashMap(u32).init(allocator);
     const has_name_map = switch (mode) {
         .matched => true,
         .stats_scan => false,
@@ -965,7 +966,7 @@ fn loadFaiStreamed(
     if (has_name_map) {
         name_map.ensureTotalCapacity(@intCast(owned_slices.len)) catch return error.OutOfMemory;
         for (owned_slices, 0..) |name, i| {
-            name_map.putAssumeCapacity(name, i);
+            name_map.putAssumeCapacity(name, @intCast(i));
         }
     }
 
