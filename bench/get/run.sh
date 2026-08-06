@@ -6,8 +6,6 @@
 #
 # Defaults: correctness first (418 checks), then perf (--runs 5, --warmup 5, --duration 5000).
 # A full perf pass (all sections, default zebrac settings) typically takes several hours.
-# pyfaidx is omitted from timed positional runs (typically 30-100x slower than z-fasta;
-# may be enabled for a final polish pass).
 # Multi-region seqtk/fastahack reference loops are omitted by default (O(N) subprocesses;
 # cost grows linearly and duplicates positional seqtk reference data). Set
 # GET_MULTI_REFERENCE=1 to re-enable them for a one-off reference sweep.
@@ -25,7 +23,6 @@
 #   bash bench/get/run.sh --skip-messy --skip-bed
 #   bash bench/get/run.sh --focused --skip-tests --runs 5 --warmup 5
 #   bash bench/get/run.sh --regenerate-fixtures
-#   bash bench/get/run.sh --allow-incomplete
 #   bash bench/get/run.sh --skip-benchmarks --skip-report   # correctness only
 #
 # ── Workload fixtures (generated; bench/get/data/ is gitignored) ───
@@ -69,7 +66,6 @@ DO_RC=true
 DO_MESSY=true
 DO_REPORT=true
 REGENERATE_FIXTURES=false
-ALLOW_INCOMPLETE=false
 FOCUSED=false
 
 BENCH_VIEW_DIR=""
@@ -137,10 +133,6 @@ raise SystemExit(f"region_span_bases: {region!r} not found in index")
 PY
 }
 
-region_out_bases() {
-    region_span_bases "$1"
-}
-
 region_bases() {
     region_span_bases "$1" "$2"
 }
@@ -162,7 +154,6 @@ while [[ $# -gt 0 ]]; do
         --skip-messy) DO_MESSY=false; shift ;;
         --skip-report) DO_REPORT=false; shift ;;
         --regenerate-fixtures) REGENERATE_FIXTURES=true; shift ;;
-        --allow-incomplete) ALLOW_INCOMPLETE=true; shift ;;
         --focused) FOCUSED=true; DO_MESSY=false; DO_REPORT=false; shift ;;
         -h|--help)
             sed -n '2,/^set -euo pipefail$/p' "$0" | head -n -1
@@ -229,17 +220,6 @@ bed_to_regions() {
     awk -F'\t' '!/^[[:space:]]*$|^#|^track|^browser/{sub(/\r$/,""); printf "%s:%d-%d\n",$1,$2+1,$3}' "$1"
 }
 
-read_region_file() {
-    local path="$1"
-    local -n _out=$2
-    _out=()
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        [[ -z "$line" || "$line" == \#* ]] && continue
-        _out+=("$line")
-    done < "$path"
-}
-
-
 multi_positional_get_core() {
     local tool_q="$1"
     local fa_q="$2"
@@ -259,7 +239,7 @@ multi_positional_get_cmd() {
 export_manifest_tool_versions() {
     export_manifest_core_versions
     export_manifest_required_tool_versions bedtools seqtk
-    export_manifest_optional_tool_versions fastahack pyfaidx noodles rustbio
+    export_manifest_optional_tool_versions fastahack noodles rustbio
 }
 
 write_run_manifest() {
@@ -1088,9 +1068,16 @@ gen_chrom_fixture() {
     if [[ ! -f "$out" ]]; then
         {
             echo ">chrSynthetic"
-            awk -v total="$total" 'BEGIN{pattern="ACGTNRYWSKMBDHVacgtnrywskmbdhv"; s=""
-                while(length(s)<total){s=s pattern} s=substr(s,1,total)
-                while(length(s)>0){print substr(s,1,71); s=substr(s,72)}}'
+            awk -v total="$total" 'BEGIN {
+                pattern = "ACGTNRYWSKMBDHVacgtnrywskmbdhv"
+                pattern_len = length(pattern)
+                window = pattern
+                while (length(window) < pattern_len + 71) window = window pattern
+                for (offset = 0; offset < total; offset += 71) {
+                    width = total - offset < 71 ? total - offset : 71
+                    print substr(window, offset % pattern_len + 1, width)
+                }
+            }'
         } > "$out"
     fi
     [[ -f "${out}.zfi" ]] || "$ZFASTA" index "$out" >/dev/null 2>&1
@@ -2097,12 +2084,13 @@ run_perf_pos() {
             local qrgn; qrgn="$(quote_arg "$region")"
             local out_bases; out_bases="$(region_bases "$region" "$fai_fa")"
             local json="$out_dir/${ds}_${label}.json"
-            local json_fai="$out_dir/${ds}_${label}_zfai.json"
             local workload="${ds}/${label}"
 
             zebrac_clear_commands
             get_add_command perf_pos "$workload" z-fasta-default z-fasta "$json" \
                 "$qz get $qzfi $qrgn > /dev/null" "$nbytes" "$out_bases"
+            get_add_command perf_pos "$workload" z-fasta-fai z-fasta "$json" \
+                "$qz get $qfai $qrgn > /dev/null" "$nbytes" "$out_bases"
             bench_has_tool samtools && get_add_command perf_pos "$workload" samtools samtools "$json" \
                 "$qs faidx $qfai $qrgn > /dev/null" "$nbytes" "$out_bases"
             bench_has_tool noodles && get_add_command perf_pos "$workload" noodles noodles "$json" \
@@ -2116,11 +2104,6 @@ run_perf_pos() {
                     "$qh -r $qrgn $qfai > /dev/null" "$nbytes" "$out_bases"
             fi
             bench_group "$json"
-
-            zebrac_clear_commands
-            get_add_command perf_pos "$workload" z-fasta-fai z-fasta "$json_fai" \
-                "$qz get $qfai $qrgn > /dev/null" "$nbytes" "$out_bases"
-            bench_group "$json_fai"
             echo "  perf_pos $workload"
         done
     done
@@ -2162,14 +2145,16 @@ run_perf_multi() {
             workload="${ds}/N=${n}"
             total_bases=$((n * 1000))
 
-            local zf_cmd nd_cmd rb_cmd st_cmd
+            local zf_cmd zf_fai_cmd nd_cmd rb_cmd st_cmd
             zf_cmd="$(multi_positional_get_cmd "$qz" "$qzfi" "$path")"
+            zf_fai_cmd="$(multi_positional_get_cmd "$qz" "$qfai" "$path")"
             nd_cmd="$(multi_positional_get_cmd "$qn" "$qfai" "$path")"
             rb_cmd="$(multi_positional_get_cmd "$qr" "$qfai" "$path")"
             st_cmd="$qs faidx -r $(quote_arg "$path") $qfai > /dev/null"
 
             zebrac_clear_commands
             get_add_command perf_multi "$workload" z-fasta-default z-fasta "$json" "$zf_cmd" "$nbytes" "$total_bases"
+            get_add_command perf_multi "$workload" z-fasta-fai z-fasta "$json" "$zf_fai_cmd" "$nbytes" "$total_bases"
             bench_has_tool samtools && get_add_command perf_multi "$workload" samtools samtools "$json" "$st_cmd" "$nbytes" "$total_bases"
             bench_has_tool noodles && get_add_command perf_multi "$workload" noodles noodles "$json" "$nd_cmd" "$nbytes" "$total_bases"
             bench_has_tool rustbio && get_add_command perf_multi "$workload" rustbio-custom-get rustbio "$json" "$rb_cmd" "$nbytes" "$total_bases"
@@ -2222,6 +2207,8 @@ run_perf_bed() {
             zebrac_clear_commands
             get_add_command perf_bed "$workload" z-fasta-default z-fasta "$json" \
                 "$qz get $qzfi --bed $qbed > /dev/null" "$nbytes" "$out_bases"
+            get_add_command perf_bed "$workload" z-fasta-fai z-fasta "$json" \
+                "$qz get $qfai --bed $qbed > /dev/null" "$nbytes" "$out_bases"
             bench_has_tool bedtools && get_add_command perf_bed "$workload" bedtools bedtools "$json" \
                 "$qb getfasta -fi $qfai -bed $qbed > /dev/null" "$nbytes" "$out_bases"
             bench_has_tool samtools && get_add_command perf_bed "$workload" samtools samtools "$json" \
@@ -2238,6 +2225,8 @@ run_perf_bed() {
                 zebrac_clear_commands
                 get_add_command perf_bed "${workload}/stdin" z-fasta-default z-fasta "$json" \
                     "cat $qbed | $qz get $qzfi --bed - > /dev/null" "$nbytes" "$out_bases"
+                get_add_command perf_bed "${workload}/stdin" z-fasta-fai z-fasta "$json" \
+                    "cat $qbed | $qz get $qfai --bed - > /dev/null" "$nbytes" "$out_bases"
                 bench_group "$json"
                 echo "  perf_bed ${workload}/stdin"
             fi
@@ -2281,6 +2270,8 @@ run_perf_rc() {
             "$qz get $qzfi $qrgn > /dev/null" "$nbytes" "$out_bases"
         get_add_command perf_rc "$workload" z-fasta-rc z-fasta "$json" \
             "$qz get $qzfi $qrgn --rc > /dev/null" "$nbytes" "$out_bases"
+        get_add_command perf_rc "$workload" z-fasta-fai-rc z-fasta "$json" \
+            "$qz get $qfai $qrgn --rc > /dev/null" "$nbytes" "$out_bases"
         get_add_command perf_rc "$workload" z-fasta-complement-only z-fasta "$json" \
             "$qz get $qzfi $qrgn --complement-only > /dev/null" "$nbytes" "$out_bases"
         get_add_command perf_rc "$workload" z-fasta-reverse-only z-fasta "$json" \
@@ -2377,7 +2368,7 @@ PY
         messy_nbytes="$(file_size_bytes "$messy_fasta")"
         uniform_nbytes="$(file_size_bytes "$uniform_fasta")"
         qrgn="$(quote_arg "$region_full")"
-        out_bases="$(region_out_bases "$region_full")"
+        out_bases="$(region_span_bases "$region_full")"
         json="$out_dir/${name}_${span_id}.json"
         base_workload="${name}/${span_id}"
 
@@ -2462,13 +2453,11 @@ run_perf() {
 
 run_report() {
     local py; py="$(report_python)"
-    local args=()
-    $ALLOW_INCOMPLETE && args+=(--allow-incomplete)
     echo ""
     echo "================================================================"
     echo "  Generating REPORT.md"
     echo "================================================================"
-    "$py" "$SCRIPT_DIR/generate_report.py" "${args[@]}"
+    "$py" "$SCRIPT_DIR/generate_report.py"
 }
 
 TIMESTAMP="${GET_RUN_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
