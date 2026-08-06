@@ -20,6 +20,9 @@ const NAME_IN_ZFI_FLAG: u8 = 2;
 pub const name_in_zfi_flag = NAME_IN_ZFI_FLAG;
 const SIDE_TABLE_OFFSET_BYTES = 5;
 const MAX_SIDE_TABLE_OFFSET = (1 << (SIDE_TABLE_OFFSET_BYTES * 8)) - 1;
+// Holds the maximum u16 name, four tabs, four maximum-width numeric fields,
+// and the line delimiter.
+const FAI_READER_BUFFER_BYTES: usize = 65_600;
 
 /// Maximum absolute side-table byte offset (`plan/docs/zfi-format.md`).
 pub const max_side_table_offset: u64 = MAX_SIDE_TABLE_OFFSET;
@@ -149,9 +152,9 @@ pub const SideTableLine = extern struct {
 /// Index record for ZFI output (40 bytes padded).
 ///
 /// For `.zfi` indexes, `name_offset` / `name_len` point into the embedded name blob.
-/// For `.fai` loads, `name_offset` / `name_len` point into the mmap'd `.fai`
-/// line (name field before the first tab). Do not call `getName` with `fasta_data` on
-/// `.fai` records; pass `LoadedIndex.fai_data` or use `getRecordName`.
+/// For full-map `.fai` loads, they point into the mapped `.fai` line. Streamed
+/// `.fai` loads keep copied names separately. Use `LoadedIndex.getRecordName` when
+/// the index source is not already known.
 ///
 /// v0.3 stores non-uniform-width metadata in `_pad` so uniform records remain
 /// byte-identical to v0.2 records. `_pad[0] & 1 == 0` means the classic O(1)
@@ -256,11 +259,12 @@ pub fn encodeSideTableLine(line: SideTableLine) [zfi_side_table_line_bytes]u8 {
 }
 
 /// Result of loading an index (from .zfi or .fai)
-pub const LoadMode = enum {
-    records_only,
+pub const LoadMode = union(enum) {
     lookup_full_map,
     /// Stats composition: `.fai` rows streamed without retaining every name in RAM.
     stats_scan,
+    /// Positional GET: retain only the first sidecar record for each requested name.
+    positional: []const []const u8,
 };
 
 /// Loaded FASTA + index state (from `.zfi` or samtools-compatible `.fai`).
@@ -269,11 +273,11 @@ pub const LoadMode = enum {
 /// - **FASTA file and maps**: `fasta_file` remains open until `deinit`.
 ///   `deinit` destroys the optional FASTA map and optional sidecar maps, then closes
 ///   the FASTA file. Byte slices and typed views borrow from those maps.
-/// - **Arena**: owns heap for `.fai` record arrays, `name_slices` string copies,
+/// - **Arena**: owns heap for streamed `.fai` record arrays and copied names,
 ///   `sidecar_path`, `fai_line_offsets`, and `name_map` table storage. Reclaimed
 ///   only via `arena.deinit()` (do not `name_map.deinit()` on an arena-backed map).
-/// - **`name_map` keys**: either borrowed from a map (`buildNameMapFast`) or
-///   arena copies (`buildNameTable` / records-only names). The map never frees keys.
+/// - **`name_map` keys**: borrowed from a sidecar map for full loads, or from
+///   arena-owned `name_slices` for matched positional `.fai` loads.
 /// - **`io`**: borrowed for destroy only; caller must keep it alive until `deinit`.
 ///
 /// GET and stats load through this type and only call `deinit(io)`. Validator maps
@@ -316,8 +320,8 @@ pub const LoadedIndex = struct {
         }
         const rec = self.records[rec_idx];
         // Wire names (including empty `>\n…` / `.fai` lines that start with tab).
-        // `.zfi` always stores name_offset/name_len on the record. FAI `records_only`
-        // zeros name_len for non-empty names and relies on name_map / sidecar instead.
+        // `.zfi` always stores name_offset/name_len on the record. Streamed FAI
+        // loads keep copied names or sidecar offsets separately.
         if (rec.name_len > 0 or rec.nameInZfi() or self.source == .zfi) {
             return rec.getName(self.recordNameData());
         }
@@ -347,7 +351,8 @@ pub const LoadedIndex = struct {
         if (self.fasta_map) |*m| m.destroy(io);
         if (self.zfi_map) |*m| m.destroy(io);
         if (self.fai_map) |*m| m.destroy(io);
-        // `name_map` table bytes and key copies are arena-owned. Do not call
+        // `name_map` table bytes are arena-owned. Keys borrow a sidecar map or
+        // arena-owned copied names. Do not call
         // `name_map.deinit()`: Zig 0.16 ArenaAllocator.free is not safe for the
         // HashMap's non-LIFO buffer free (crashes). `arena.deinit()` reclaims all.
         self.arena.deinit();
@@ -574,10 +579,7 @@ fn buildNameMapFast(
     allocator: std.mem.Allocator,
     records: []const IndexRecord,
     name_data: []const u8,
-) LoadIndexError!struct {
-    name_map: std.StringHashMap(usize),
-    name_slices: []const []const u8,
-} {
+) LoadIndexError!std.StringHashMap(usize) {
     var name_map = std.StringHashMap(usize).init(allocator);
     name_map.ensureTotalCapacity(@intCast(records.len)) catch return error.OutOfMemory;
     for (records, 0..) |rec, i| {
@@ -585,30 +587,7 @@ fn buildNameMapFast(
         const entry = name_map.getOrPutAssumeCapacity(name);
         if (!entry.found_existing) entry.value_ptr.* = i;
     }
-    return .{ .name_map = name_map, .name_slices = &.{} };
-}
-
-fn buildNameTable(
-    allocator: std.mem.Allocator,
-    records: []const IndexRecord,
-    name_data: []const u8,
-) LoadIndexError!struct {
-    name_map: std.StringHashMap(usize),
-    name_slices: []const []const u8,
-} {
-    var name_map = std.StringHashMap(usize).init(allocator);
-    const name_slices = try allocator.alloc([]const u8, records.len);
-
-    name_map.ensureTotalCapacity(@intCast(records.len)) catch return error.OutOfMemory;
-    for (records, 0..) |rec, i| {
-        const name_src = rec.getName(name_data);
-        const name_copy = try allocator.dupe(u8, name_src);
-        name_slices[i] = name_copy;
-        const entry = name_map.getOrPutAssumeCapacity(name_copy);
-        if (!entry.found_existing) entry.value_ptr.* = i;
-    }
-
-    return .{ .name_map = name_map, .name_slices = name_slices };
+    return name_map;
 }
 
 pub fn dropFastaSpan(fasta_data: []const u8, start: usize, end_exclusive: usize) void {
@@ -706,15 +685,16 @@ fn tryLoadZfi(
     defer if (!transferred) arena.deinit();
     const allocator = arena.allocator();
 
-    const build_name_map = mode == .lookup_full_map;
+    const build_name_map = switch (mode) {
+        .lookup_full_map => true,
+        .positional => |names| names.len > 1,
+        .stats_scan => false,
+    };
 
     var name_map: std.StringHashMap(usize) = undefined;
-    var name_slices: []const []const u8 = &.{};
     var has_name_map = false;
     if (build_name_map) {
-        const built = buildNameMapFast(allocator, records, name_blob) catch return error.OutOfMemory;
-        name_map = built.name_map;
-        name_slices = built.name_slices;
+        name_map = buildNameMapFast(allocator, records, name_blob) catch return error.OutOfMemory;
         has_name_map = true;
     } else {
         name_map = std.StringHashMap(usize).init(allocator);
@@ -729,7 +709,7 @@ fn tryLoadZfi(
         .records = records,
         .name_map = name_map,
         .has_name_map = has_name_map,
-        .name_slices = name_slices,
+        .name_slices = &.{},
         .name_blob = name_blob,
         .fasta_data = fasta_data,
         .fasta_size = fasta_stat.size,
@@ -770,11 +750,10 @@ fn tryLoadFai(
 
     const fasta_data: []const u8 = if (fasta_view.*) |*view| view.bytes() else &.{};
 
-    if (mode == .records_only) {
-        return loadFaiRecordsOnly(io, fai_file, fai_stat.size, fasta_file, fasta_view, fasta_stat, true, null);
-    }
-    if (mode == .stats_scan) {
-        return loadFaiStatsScan(io, fai_file, fai_path, fai_stat.size, fasta_file, fasta_view, fasta_stat);
+    switch (mode) {
+        .stats_scan => return loadFaiStreamed(io, fai_file, fai_stat.size, fasta_file, fasta_view, fasta_stat, .{ .stats_scan = fai_path }),
+        .positional => |names| return loadFaiStreamed(io, fai_file, fai_stat.size, fasta_file, fasta_view, fasta_stat, .{ .matched = names }),
+        .lookup_full_map => {},
     }
 
     var fai_view = platform.FileView.mapFile(io, fai_file, @intCast(fai_stat.size)) catch return error.MmapFailed;
@@ -840,7 +819,7 @@ fn tryLoadFai(
     }
 
     const loaded_records = records[0..record_count];
-    const built = buildNameTable(allocator, loaded_records, fai_data) catch return error.OutOfMemory;
+    const name_map = buildNameMapFast(allocator, loaded_records, fai_data) catch return error.OutOfMemory;
 
     transferred = true;
     return .{ .loaded = LoadedIndex{
@@ -849,9 +828,9 @@ fn tryLoadFai(
         .fasta_map = if (fasta_view.*) |view| view.map else null,
         .fai_map = fai_view.map,
         .records = loaded_records,
-        .name_map = built.name_map,
+        .name_map = name_map,
         .has_name_map = true,
-        .name_slices = built.name_slices,
+        .name_slices = &.{},
         .fai_data = fai_data,
         .fasta_data = fasta_data,
         .fasta_size = fasta_stat.size,
@@ -861,15 +840,19 @@ fn tryLoadFai(
     } };
 }
 
-fn loadFaiRecordsOnly(
+const FaiStreamMode = union(enum) {
+    matched: []const []const u8,
+    stats_scan: []const u8,
+};
+
+fn loadFaiStreamed(
     io: std.Io,
     fai_file: std.Io.File,
     fai_size: u64,
     fasta_file: std.Io.File,
     fasta_view: *?platform.FileView,
     fasta_stat: std.Io.File.Stat,
-    store_names: bool,
-    sidecar_path: ?[]const u8,
+    mode: FaiStreamMode,
 ) LoadIndexError!LoadAttempt {
     const fasta_data: []const u8 = if (fasta_view.*) |*view| view.bytes() else &.{};
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -884,11 +867,33 @@ fn loadFaiRecordsOnly(
     errdefer slices_list.deinit(allocator);
     var offsets_list: std.ArrayListUnmanaged(u64) = .empty;
     errdefer offsets_list.deinit(allocator);
-    const track_line_offsets = sidecar_path != null and !store_names;
 
-    var io_buf: [65536]u8 = undefined;
+    const store_names = switch (mode) {
+        .matched => true,
+        .stats_scan => false,
+    };
+    const track_line_offsets = switch (mode) {
+        .stats_scan => true,
+        .matched => false,
+    };
+
+    var requested = std.StringHashMap(bool).init(std.heap.page_allocator);
+    defer requested.deinit();
+    switch (mode) {
+        .matched => |names| {
+            requested.ensureTotalCapacity(@intCast(names.len)) catch return error.OutOfMemory;
+            for (names) |name| {
+                const entry = requested.getOrPutAssumeCapacity(name);
+                if (!entry.found_existing) entry.value_ptr.* = false;
+            }
+        },
+        .stats_scan => {},
+    }
+
+    var io_buf: [FAI_READER_BUFFER_BYTES]u8 = undefined;
     var file_reader = fai_file.reader(io, &io_buf);
     var file_offset: u64 = 0;
+    var saw_record = false;
 
     while (true) {
         const maybe_line = file_reader.interface.takeDelimiter('\n') catch return error.Io;
@@ -915,6 +920,18 @@ fn loadFaiRecordsOnly(
         };
         if (!isValidFaiRecordGeometry(rec, fasta_stat.size)) return .corrupt;
 
+        saw_record = true;
+        const retain = switch (mode) {
+            .stats_scan => true,
+            .matched => blk: {
+                const matched = requested.getPtr(line[0..fields.name_end]) orelse break :blk false;
+                if (matched.*) break :blk false;
+                matched.* = true;
+                break :blk true;
+            },
+        };
+        if (!retain) continue;
+
         if (store_names) {
             const name = allocator.dupe(u8, line[0..fields.name_end]) catch return error.OutOfMemory;
             try slices_list.append(allocator, name);
@@ -923,12 +940,12 @@ fn loadFaiRecordsOnly(
         try records_list.append(allocator, rec);
     }
 
-    if (records_list.items.len == 0) return .corrupt;
+    if (!saw_record) return .corrupt;
 
-    const path_copy = if (sidecar_path) |path|
-        allocator.dupe(u8, path) catch return error.OutOfMemory
-    else
-        null;
+    const path_copy = switch (mode) {
+        .stats_scan => |path| allocator.dupe(u8, path) catch return error.OutOfMemory,
+        .matched => null,
+    };
 
     const owned_records = records_list.toOwnedSlice(allocator) catch return error.OutOfMemory;
     const owned_slices = if (store_names)
@@ -940,14 +957,26 @@ fn loadFaiRecordsOnly(
     else
         @as([]const u64, &.{});
 
+    var name_map = std.StringHashMap(usize).init(allocator);
+    const has_name_map = switch (mode) {
+        .matched => true,
+        .stats_scan => false,
+    };
+    if (has_name_map) {
+        name_map.ensureTotalCapacity(@intCast(owned_slices.len)) catch return error.OutOfMemory;
+        for (owned_slices, 0..) |name, i| {
+            name_map.putAssumeCapacity(name, i);
+        }
+    }
+
     transferred = true;
     return .{ .loaded = LoadedIndex{
         .io = io,
         .fasta_file = fasta_file,
         .fasta_map = if (fasta_view.*) |view| view.map else null,
         .records = owned_records,
-        .name_map = std.StringHashMap(usize).init(allocator),
-        .has_name_map = false,
+        .name_map = name_map,
+        .has_name_map = has_name_map,
         .name_slices = owned_slices,
         .fai_data = null,
         .fasta_data = fasta_data,
@@ -964,7 +993,7 @@ fn readFaiNameAtOffset(io: std.Io, allocator: std.mem.Allocator, fai_path: []con
     const fai_file = std.Io.Dir.cwd().openFile(io, fai_path, .{}) catch return error.Io;
     defer fai_file.close(io);
 
-    var io_buf: [65536]u8 = undefined;
+    var io_buf: [FAI_READER_BUFFER_BYTES]u8 = undefined;
     var file_reader = fai_file.reader(io, &io_buf);
     file_reader.seekTo(offset) catch return error.Io;
     const maybe_line = file_reader.interface.takeDelimiter('\n') catch return error.Io;
@@ -974,23 +1003,11 @@ fn readFaiNameAtOffset(io: std.Io, allocator: std.mem.Allocator, fai_path: []con
     return allocator.dupe(u8, line[0..name_end]);
 }
 
-fn loadFaiStatsScan(
-    io: std.Io,
-    fai_file: std.Io.File,
-    fai_path: []const u8,
-    fai_size: u64,
-    fasta_file: std.Io.File,
-    fasta_view: *?platform.FileView,
-    fasta_stat: std.Io.File.Stat,
-) LoadIndexError!LoadAttempt {
-    return loadFaiRecordsOnly(io, fai_file, fai_size, fasta_file, fasta_view, fasta_stat, false, fai_path);
-}
-
 fn readFaiNameLine(io: std.Io, allocator: std.mem.Allocator, fai_path: []const u8, rec_idx: usize) LoadIndexError![]const u8 {
     const fai_file = std.Io.Dir.cwd().openFile(io, fai_path, .{}) catch return error.Io;
     defer fai_file.close(io);
 
-    var io_buf: [65536]u8 = undefined;
+    var io_buf: [FAI_READER_BUFFER_BYTES]u8 = undefined;
     var file_reader = fai_file.reader(io, &io_buf);
 
     var line_no: usize = 0;

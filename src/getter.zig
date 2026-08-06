@@ -411,6 +411,10 @@ const DiskSpan = struct {
     trailing_bases: u64,
 };
 
+fn spansOverlapOrTouch(first_start: u64, first_end: u64, second_start: u64, second_end: u64) bool {
+    return first_start <= second_end and second_start <= first_end;
+}
+
 fn sideTableLineForBase(lines: []const index_format.SideTableLine, base_index: u64) usize {
     var lo: usize = 0;
     var hi = lines.len;
@@ -481,19 +485,6 @@ const RegionOutput = struct {
             printErrorAndExit("error: write failed\n", .{});
         };
         self.len = 0;
-    }
-
-    fn appendBase(self: *RegionOutput, byte: u8, do_complement: bool, writer: anytype) void {
-        if (self.len + 2 > self.bytes.len) self.flush(writer);
-        self.bytes[self.len] = if (do_complement) complement.complement(byte) else byte;
-        self.len += 1;
-        self.bases_written += 1;
-        self.line_pos += 1;
-        if (self.line_pos == 60) {
-            self.bytes[self.len] = '\n';
-            self.len += 1;
-            self.line_pos = 0;
-        }
     }
 
     inline fn appendForward(self: *RegionOutput, src: []const u8, do_complement: bool, writer: anytype) void {
@@ -842,7 +833,8 @@ fn emitResolvedBatch(
             const separated_before = shared_first_base > next_last_base and shared_first_base - next_last_base > 1;
             const logical_neighbor = resolved[group_end].record_index == shared_record and
                 !separated_after and !separated_before;
-            if ((!logical_neighbor and next.start > shared_end) or merged_end - merged_start > shared.len) break;
+            const disk_neighbor = spansOverlapOrTouch(shared_start, shared_end, next.start, next.end);
+            if ((!logical_neighbor and !disk_neighbor) or merged_end - merged_start > shared.len) break;
             shared_start = merged_start;
             shared_end = merged_end;
             shared_first_base = @min(shared_first_base, next_first_base);
@@ -1223,10 +1215,19 @@ pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions
     var requests = std.ArrayList(ParsedRequest).empty;
     defer requests.deinit(allocator);
 
-    // Single positional requests skip the name map.
-    // Multi-request, names, and BED paths load it once.
+    // Positional requests are known before loading, so `.fai` retains only their
+    // first matching records. Names and BED still require the complete lookup map.
     const load_mode: index_format.LoadMode = switch (options.source) {
-        .positional => |region_strs| if (region_strs.len > 1) .lookup_full_map else .records_only,
+        .positional => |region_strs| blk: {
+            appendCliRequests(&requests, region_strs, options.orientation, allocator);
+            const names = allocator.alloc([]const u8, requests.items.len) catch {
+                printErrorAndExit("error: out of memory\n", .{});
+            };
+            for (requests.items, names) |request, *name| {
+                name.* = request.region.name;
+            }
+            break :blk .{ .positional = names };
+        },
         .names, .bed => .lookup_full_map,
     };
     var idx = index_format.loadIndexForGet(io, fasta_path, load_mode);
@@ -1245,8 +1246,7 @@ pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions
     var totals = BatchStats{};
 
     switch (options.source) {
-        .positional => |region_strs| {
-            appendCliRequests(&requests, region_strs, options.orientation, allocator);
+        .positional => {
             const batch = processParsedRequests(&idx, allocator, requests.items, &.{}, options.annotate_transform, writer, fasta_source);
             totals.region_count += batch.region_count;
             totals.total_bases += batch.total_bases;
@@ -1309,6 +1309,15 @@ test "summary writing fails when the destination is full" {
     var writer = std.Io.Writer.fixed(&buffer);
 
     try std.testing.expectError(error.WriteFailed, writeSummary(&writer, 1, 1, 1));
+}
+
+test "shared disk spans require overlap or adjacency in either order" {
+    try std.testing.expect(spansOverlapOrTouch(10, 20, 20, 30));
+    try std.testing.expect(spansOverlapOrTouch(20, 30, 10, 20));
+    try std.testing.expect(spansOverlapOrTouch(10, 20, 15, 25));
+    try std.testing.expect(spansOverlapOrTouch(15, 25, 10, 20));
+    try std.testing.expect(!spansOverlapOrTouch(10, 20, 21, 30));
+    try std.testing.expect(!spansOverlapOrTouch(21, 30, 10, 20));
 }
 
 test "request workspace reuses consecutive names" {

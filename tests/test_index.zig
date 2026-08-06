@@ -1403,11 +1403,12 @@ test "loadIndexCheckedWithMode selects first duplicate in zfi" {
 
     var full_map_idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .lookup_full_map);
     defer full_map_idx.deinit(io);
-    var records_only_idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .records_only);
-    defer records_only_idx.deinit(io);
+    const requested = [_][]const u8{"dup"};
+    var positional_idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .{ .positional = &requested });
+    defer positional_idx.deinit(io);
 
-    try std.testing.expectEqual(full_map_idx.lookupName("dup"), records_only_idx.lookupName("dup"));
-    try std.testing.expectEqual(@as(?usize, 0), records_only_idx.lookupName("dup"));
+    try std.testing.expectEqual(full_map_idx.lookupName("dup"), positional_idx.lookupName("dup"));
+    try std.testing.expectEqual(@as(?usize, 0), positional_idx.lookupName("dup"));
 }
 
 test "loadIndexChecked uses valid zfi and rejects it when stale despite valid fai" {
@@ -1563,15 +1564,118 @@ test "loadIndexCheckedWithMode selects first duplicate in fai" {
 
     var full_map_idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .lookup_full_map);
     defer full_map_idx.deinit(io);
-    var records_only_idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .records_only);
-    defer records_only_idx.deinit(io);
+    const requested = [_][]const u8{"dup"};
+    var positional_idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .{ .positional = &requested });
+    defer positional_idx.deinit(io);
 
-    try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.fai, records_only_idx.source);
-    try std.testing.expect(!records_only_idx.has_name_map);
-    try std.testing.expectEqual(@as(u16, 3), records_only_idx.records[0].name_len);
-    try std.testing.expectEqualStrings("dup", records_only_idx.getRecordName(0));
-    try std.testing.expectEqual(full_map_idx.lookupName("dup"), records_only_idx.lookupName("dup"));
-    try std.testing.expectEqual(@as(?usize, 0), records_only_idx.lookupName("dup"));
+    try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.fai, positional_idx.source);
+    try std.testing.expect(positional_idx.has_name_map);
+    try std.testing.expectEqual(@as(usize, 1), positional_idx.records.len);
+    try std.testing.expectEqualStrings("dup", positional_idx.getRecordName(0));
+    try std.testing.expectEqual(full_map_idx.lookupName("dup"), positional_idx.lookupName("dup"));
+    try std.testing.expectEqual(@as(?usize, 0), positional_idx.lookupName("dup"));
+}
+
+test "positional fai loading retains first matches and validates the complete sidecar" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "positional-fai", "fa");
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    {
+        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+        defer fasta_file.close(io);
+        try std.Io.File.writeStreamingAll(
+            fasta_file,
+            io,
+            ">wanted\nAAAA\n>wanted\nCCCCCC\n>colon:name\nGGGG\n>\nTT\n>other\nAC\n",
+        );
+    }
+    {
+        const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
+        defer fai_file.close(io);
+        try std.Io.File.writeStreamingAll(
+            fai_file,
+            io,
+            "wanted\t4\t8\t4\t5\nwanted\t6\t21\t6\t7\ncolon:name\t4\t40\t4\t5\n\t2\t47\t2\t3\nother\t2\t57\t2\t3\n",
+        );
+    }
+
+    const requested = [_][]const u8{ "wanted", "missing", "colon:name", "" };
+    {
+        var idx = try main.index_format.loadIndexCheckedWithMode(
+            io,
+            fasta_path,
+            .{ .positional = requested[0..] },
+        );
+        defer idx.deinit(io);
+
+        try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.fai, idx.source);
+        try std.testing.expect(idx.has_name_map);
+        try std.testing.expectEqual(@as(usize, 3), idx.records.len);
+        try std.testing.expectEqual(@as(usize, 3), idx.name_slices.len);
+        try std.testing.expectEqual(@as(?usize, 0), idx.lookupName("wanted"));
+        try std.testing.expectEqual(@as(?usize, 1), idx.lookupName("colon:name"));
+        try std.testing.expectEqual(@as(?usize, 2), idx.lookupName(""));
+        try std.testing.expectEqual(@as(?usize, null), idx.lookupName("missing"));
+        try std.testing.expectEqual(@as(u64, 4), idx.records[0].seq_len);
+        try std.testing.expectEqualStrings("wanted", idx.getRecordName(0));
+    }
+
+    {
+        const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
+        defer fai_file.close(io);
+        try std.Io.File.writeStreamingAll(
+            fai_file,
+            io,
+            "wanted\t4\t8\t4\t5\nwanted\t6\t21\t6\t7\ncolon:name\t4\t40\t4\t5\n\t2\t47\t2\t3\nother\t2\t57\t2\t1\n",
+        );
+    }
+
+    try std.testing.expectError(
+        error.CorruptIndex,
+        main.index_format.loadIndexCheckedWithMode(
+            io,
+            fasta_path,
+            .{ .positional = requested[0..] },
+        ),
+    );
+}
+
+test "full fai lookup borrows mapped names" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "borrowed-fai-name", "fa");
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    {
+        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+        defer fasta_file.close(io);
+        try std.Io.File.writeStreamingAll(fasta_file, io, ">seq\nACGT\n");
+    }
+    {
+        const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
+        defer fai_file.close(io);
+        try std.Io.File.writeStreamingAll(fai_file, io, "seq\t4\t5\t4\t5\n");
+    }
+
+    var idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .lookup_full_map);
+    defer idx.deinit(io);
+    const mapped_name = idx.records[0].getName(idx.fai_data.?);
+    var names = idx.name_map.iterator();
+    const map_entry = names.next().?;
+
+    try std.testing.expectEqual(@as(usize, 0), idx.name_slices.len);
+    try std.testing.expectEqual(mapped_name.ptr, idx.getRecordName(0).ptr);
+    try std.testing.expectEqual(mapped_name.ptr, map_entry.key_ptr.*.ptr);
 }
 
 test "loadIndexChecked retains FASTA descriptor for fai positional reads" {
@@ -1595,7 +1699,8 @@ test "loadIndexChecked retains FASTA descriptor for fai positional reads" {
         try std.Io.File.writeStreamingAll(fai_file, io, "seq\t4\t5\t4\t5\n");
     }
 
-    var idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .records_only);
+    const requested = [_][]const u8{"seq"};
+    var idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .{ .positional = &requested });
     defer idx.deinit(io);
 
     var first_byte: [1]u8 = undefined;
@@ -1734,12 +1839,12 @@ test "loadIndexChecked rejects fai whose sequence span exceeds FASTA" {
     try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, fasta_path));
 }
 
-test "loadIndexCheckedWithMode records_only rejects impossible fai geometry" {
+test "loadIndexCheckedWithMode positional rejects impossible fai geometry" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try uniqueArtifactPath(allocator, "bad-fai-records-only", "fa");
+    const fasta_path = try uniqueArtifactPath(allocator, "bad-fai-positional", "fa");
     const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
     defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
@@ -1754,7 +1859,7 @@ test "loadIndexCheckedWithMode records_only rejects impossible fai geometry" {
 
     try std.testing.expectError(
         error.CorruptIndex,
-        main.index_format.loadIndexCheckedWithMode(io, fasta_path, .records_only),
+        main.index_format.loadIndexCheckedWithMode(io, fasta_path, .{ .positional = &.{"seq1"} }),
     );
 }
 
@@ -1851,23 +1956,73 @@ test "loadIndexChecked rejects fai name longer than u16" {
     try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, fasta_path));
 }
 
+test "streamed fai loading accepts the maximum sequence name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_path = try uniqueArtifactPath(allocator, "fai-max-name", "fa");
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    const name = try allocator.alloc(u8, std.math.maxInt(u16));
+    @memset(name, 'n');
+
+    {
+        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+        defer fasta_file.close(io);
+        try std.Io.File.writeStreamingAll(fasta_file, io, ">");
+        try std.Io.File.writeStreamingAll(fasta_file, io, name);
+        try std.Io.File.writeStreamingAll(fasta_file, io, "\nA\n");
+    }
+    {
+        const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
+        defer fai_file.close(io);
+        try std.Io.File.writeStreamingAll(fai_file, io, name);
+        try std.Io.File.writeStreamingAll(fai_file, io, "\t1\t65537\t1\t2\n");
+    }
+
+    {
+        var idx = try main.index_format.loadIndexCheckedWithMode(
+            io,
+            fasta_path,
+            .{ .positional = &.{name} },
+        );
+        defer idx.deinit(io);
+
+        try std.testing.expectEqual(@as(usize, 1), idx.records.len);
+        try std.testing.expectEqualStrings(name, idx.getRecordName(0));
+    }
+    {
+        var idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .stats_scan);
+        defer idx.deinit(io);
+
+        try std.testing.expectEqual(@as(usize, 1), idx.records.len);
+        try std.testing.expectEqualStrings(name, idx.getRecordNameWithIo(io, 0));
+    }
+}
+
 fn expectFaiLoaderModesAgree(fasta_path: []const u8) !void {
     var full = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .lookup_full_map);
     defer full.deinit(io);
-    var records_only = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .records_only);
-    defer records_only.deinit(io);
+    const names = try std.testing.allocator.alloc([]const u8, full.records.len);
+    defer std.testing.allocator.free(names);
+    for (names, 0..) |*name, i| name.* = full.getRecordName(i);
+    var positional = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .{ .positional = names });
+    defer positional.deinit(io);
     var stats_scan = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .stats_scan);
     defer stats_scan.deinit(io);
 
     try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.fai, full.source);
-    try std.testing.expectEqual(full.source, records_only.source);
+    try std.testing.expectEqual(full.source, positional.source);
     try std.testing.expectEqual(full.source, stats_scan.source);
-    try std.testing.expectEqual(full.records.len, records_only.records.len);
+    try std.testing.expectEqual(full.records.len, positional.records.len);
     try std.testing.expectEqual(full.records.len, stats_scan.records.len);
     try std.testing.expectEqual(full.records.len, stats_scan.fai_line_offsets.len);
 
     for (full.records, 0..) |rec, i| {
-        const streamed = records_only.records[i];
+        const streamed = positional.records[i];
         const scanned = stats_scan.records[i];
 
         // Geometry and length fields must match across loader modes.
@@ -1884,7 +2039,7 @@ fn expectFaiLoaderModesAgree(fasta_path: []const u8) !void {
         // stats_scan sidecar offsets are the same byte positions the full loader stores.
         try std.testing.expectEqual(rec.name_offset, stats_scan.fai_line_offsets[i]);
 
-        try std.testing.expectEqualStrings(full.getRecordName(i), records_only.getRecordName(i));
+        try std.testing.expectEqualStrings(full.getRecordName(i), positional.getRecordName(i));
         try std.testing.expectEqualStrings(full.getRecordName(i), stats_scan.getRecordNameWithIo(io, i));
     }
 }
