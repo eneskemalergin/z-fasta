@@ -116,22 +116,16 @@ Checks structure, alphabets, and headers (duplicate names, invalid characters, n
 ### Stats
 
 ```bash
-z-fasta stats [options] <file.fasta>
-
-Options:
-  --index-only  Compute stats from index only (no FASTA scan; startup-dominated)
+z-fasta stats <file.fasta>
 ```
 
-**Index-derived:** sequence count, total bases, min/max/mean/median lengths, N50, L50, N90, L90, AU, shortest/longest names, and duplicate reporting.
-
-**Full scan (default):** composition on top of the index metrics: nucleotide frequencies, GC content (N excluded), GC skew, soft-masked fraction; for proteins, top 3 amino acids with full names.
+Reports sequence count, total bases, min/max/mean/median lengths, N50, L50, N90, L90, AU, shortest/longest names, duplicate names, and composition. Nucleotide output includes frequencies, GC content, GC skew, and soft-masked fraction. Protein output includes the top three amino acids and lowercase fraction.
 
 ### Sequence type classification
 
 All commands share `stats.detectType` (IUPAC nucleotide alphabet; nucleotide if those letters are strictly more than 90% of counted bases). Sampling differs on purpose:
 
-- `stats` (default): full-file composition scan
-- `stats --index-only`: no type (composition skipped)
+- `stats`: full-file composition scan
 - `get --rc` / `--complement-only`: up to 256 bases per record
 - `validate`: up to the first 100000 sequence bases; `--json --summary` reports `sequence_type`, `type_bases_sampled`, and `type_sample_cap`
 
@@ -171,7 +165,6 @@ z-fasta validate --fix -o genome.clean.fa genome.fa
 
 # Assembly stats
 z-fasta stats genome.fa
-z-fasta stats --index-only genome.fa
 ```
 
 ## Formats and behavior
@@ -187,7 +180,7 @@ Variable line widths, trailing spaces or tabs, blank lines, mixed CRLF/LF, and a
 
 ### Duplicate names
 
-Duplicate _names_ are not the same as identical _sequence contents_. Default `index` keeps the first name; `index --no-dedup` keeps all. `get` resolves a repeated name to the **first** exact match. Duplicate lookup is ambiguous, so use unique identifiers when records must be addressable individually. `validate` reports `duplicate_name`. Full `stats` prints source-level extras (`sum(k-1)`); `stats --index-only` prints `n/a (run without --index-only)` on a deduplicated index and never fabricates `0` (with an `--no-dedup` index it reports repeats kept in the index).
+Duplicate _names_ are not the same as identical _sequence contents_. Default `index` keeps the first name; `index --no-dedup` keeps all. `get` resolves a repeated name to the **first** exact match. Duplicate lookup is ambiguous, so use unique identifiers when records must be addressable individually. `validate` reports `duplicate_name`. `stats` prints source-level extras (`sum(k-1)`).
 
 ## Support and limits
 
@@ -197,7 +190,7 @@ Duplicate _names_ are not the same as identical _sequence contents_. Default `in
 
 **Get / validate caps:** at most 1024 positional regions per `get` call. Names and BED request names may be at most 65535 bytes. Streaming request storage retains up to 4 MiB of unique name bytes plus one final name per batch; names batches hold at most 65536 requests and BED batches at most 4096. `validate` stops after 10000 retained events.
 
-**Memory:** index reads sequence payload through a bounded buffer. GET reads requested FASTA spans through one descriptor and retains only index metadata, active requests, side tables, and fixed buffers. Stats and validate still map FASTA data, so full scans can approach the mapped file size. `stats --index-only` skips the sequence scan.
+**Memory:** index reads sequence payload through a bounded buffer. GET reads requested FASTA spans through one descriptor and retains only index metadata, active requests, side tables, and fixed buffers. Stats and validate still map FASTA data, so full scans can approach the mapped file size.
 
 **Platforms:** Linux, macOS, and Windows share the same commands and GET file-access path. Memory mapping and advice used by other commands stay behind the portable platform layer. CI builds and smokes six native platform lanes: x86_64 and arm64 on all three operating systems. Tagged releases publish the same six archives; v0.3.0 was the first complete six-archive release.
 

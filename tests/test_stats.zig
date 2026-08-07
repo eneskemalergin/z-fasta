@@ -1,6 +1,6 @@
 //! Stats unit and CLI tests: formatting helpers, type detection, and duplicate reporting.
 //!
-//! Exercises index-only vs full-scan output against fixture FASTAs.
+//! Exercises complete stats output against fixture FASTAs.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -197,20 +197,13 @@ test "detectType - large totals do not overflow the 90% threshold" {
 
 const ZFASTA_BIN = if (builtin.os.tag == .windows) "zig-out\\bin\\z-fasta.exe" else "zig-out/bin/z-fasta";
 
-fn runStatsAndCapture(allocator: std.mem.Allocator, fasta_path: []const u8, index_only: bool) ![]u8 {
+fn runStatsAndCapture(allocator: std.mem.Allocator, fasta_path: []const u8) ![]u8 {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(allocator);
-    try argv.append(allocator, ZFASTA_BIN);
-    try argv.append(allocator, "stats");
-    if (index_only) try argv.append(allocator, "--index-only");
-    try argv.append(allocator, fasta_path);
-
     var proc = try std.process.spawn(io, .{
-        .argv = argv.items,
+        .argv = &.{ ZFASTA_BIN, "stats", fasta_path },
         .stdout = .pipe,
     });
     defer proc.kill(io);
@@ -228,49 +221,35 @@ fn runStatsAndCapture(allocator: std.mem.Allocator, fasta_path: []const u8, inde
 test "stats - simple.fasta has 2 sequences" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta", false);
+    const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta");
     try std.testing.expect(std.mem.indexOf(u8, output, "Sequences:      2") != null);
 }
 
 test "stats - simple.fasta has 36 total bases" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta", false);
+    const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta");
     try std.testing.expect(std.mem.indexOf(u8, output, "Total bases:    36") != null);
 }
 
 test "stats - simple.fasta detected as Nucleotide" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta", false);
+    const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta");
     try std.testing.expect(std.mem.indexOf(u8, output, "Type:           Nucleotide") != null);
 }
 
 test "stats - proteome.fasta detected as Protein" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const output = try runStatsAndCapture(arena.allocator(), "tests/data/proteome.fasta", false);
+    const output = try runStatsAndCapture(arena.allocator(), "tests/data/proteome.fasta");
     try std.testing.expect(std.mem.indexOf(u8, output, "Type:           Protein") != null);
-}
-
-test "stats - index-only does not show composition" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta", true);
-    try std.testing.expect(std.mem.indexOf(u8, output, "Composition:") == null);
-}
-
-test "stats - index-only shows placeholder type" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta", true);
-    try std.testing.expect(std.mem.indexOf(u8, output, "run without --index-only") != null);
 }
 
 test "stats - simple.fasta N50=24 L50=1" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta", true);
+    const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta");
     try std.testing.expect(std.mem.indexOf(u8, output, "N50:            24") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "L50:            1") != null);
 }
@@ -278,21 +257,21 @@ test "stats - simple.fasta N50=24 L50=1" {
 test "stats - simple.fasta GC content" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta", false);
+    const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta");
     try std.testing.expect(std.mem.indexOf(u8, output, "GC:  55.56%") != null);
 }
 
 test "stats - mixed_widths.fasta has 3 sequences" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const output = try runStatsAndCapture(arena.allocator(), "tests/data/mixed_widths.fasta", true);
+    const output = try runStatsAndCapture(arena.allocator(), "tests/data/mixed_widths.fasta");
     try std.testing.expect(std.mem.indexOf(u8, output, "Sequences:      3") != null);
 }
 
 test "stats - proteome Composition shows amino acids" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const output = try runStatsAndCapture(arena.allocator(), "tests/data/proteome.fasta", false);
+    const output = try runStatsAndCapture(arena.allocator(), "tests/data/proteome.fasta");
     try std.testing.expect(std.mem.indexOf(u8, output, "Alanine") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "20 amino acids total") != null);
 }
@@ -327,66 +306,16 @@ test "tallyFastaHeaderNames reports zero extras when names unique" {
     try std.testing.expectEqual(@as(usize, 0), main.stats.countNameDuplicateExtras(&map));
 }
 
-test "stats full reports source duplicates for edge_cases" {
+test "stats reports source duplicates for edge_cases" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const output = try runStatsAndCapture(arena.allocator(), "tests/data/edge_cases.fasta", false);
+    const output = try runStatsAndCapture(arena.allocator(), "tests/data/edge_cases.fasta");
     try std.testing.expect(std.mem.indexOf(u8, output, "Duplicates:     1\n") != null);
 }
 
-test "stats full reports zero duplicates when source names are unique" {
+test "stats reports zero duplicates when source names are unique" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta", false);
+    const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta");
     try std.testing.expect(std.mem.indexOf(u8, output, "Duplicates:     0\n") != null);
-}
-
-test "stats index-only reports n/a on deduplicated edge_cases index" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const output = try runStatsAndCapture(arena.allocator(), "tests/data/edge_cases.fasta", true);
-    try std.testing.expect(std.mem.indexOf(u8, output, "Duplicates:     n/a (run without --index-only)\n") != null);
-}
-
-test "stats index-only reports duplicates on --no-dedup edge_cases index" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-    const io = std.testing.io;
-
-    try std.Io.Dir.cwd().createDirPath(io, "zig-cache/test-artifacts");
-    const fasta_path = try std.fmt.allocPrint(allocator, "zig-cache/test-artifacts/stats-nodedup-{d}.fasta", .{
-        @as(u64, @intCast(std.Io.Clock.Timestamp.now(io, .awake).raw.toNanoseconds())),
-    });
-    {
-        const src = try std.Io.Dir.cwd().openFile(io, "tests/data/edge_cases.fasta", .{});
-        defer src.close(io);
-        const st = try src.stat(io);
-        const data = try allocator.alloc(u8, @intCast(st.size));
-        _ = try src.readPositionalAll(io, data, 0);
-        const dst = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-        defer dst.close(io);
-        try std.Io.File.writeStreamingAll(dst, io, data);
-    }
-    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
-    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
-    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
-
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const spawn_io = threaded.io();
-    const index_result = try std.process.run(allocator, spawn_io, .{
-        .argv = &.{ ZFASTA_BIN, "index", "--no-dedup", fasta_path },
-        .stdout_limit = .limited(64 * 1024),
-        .stderr_limit = .limited(64 * 1024),
-    });
-    defer allocator.free(index_result.stdout);
-    defer allocator.free(index_result.stderr);
-    switch (index_result.term) {
-        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
-        else => return error.ChildProcessFailed,
-    }
-
-    const output = try runStatsAndCapture(allocator, fasta_path, true);
-    try std.testing.expect(std.mem.indexOf(u8, output, "Duplicates:     1\n") != null);
 }

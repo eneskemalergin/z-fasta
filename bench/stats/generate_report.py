@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Generate stats benchmark REPORT.md and figures from zebrac JSON.
 
-Mirrors bench/get and bench/index report grammar (Overview, field matrix,
-Provenance, wall/RSS/faults, mode 2x2, scaling). Color map is STATS_COLORS
-below. Prose follows plan/WRITING.md (ASCII; no emojis).
+Mirrors bench/get and bench/index report grammar (overview, field matrix,
+provenance, wall/RSS/faults, and scaling). Color map is STATS_COLORS below.
+Prose follows plan/WRITING.md (ASCII; no emojis).
 """
 
 from __future__ import annotations
@@ -39,13 +39,6 @@ FULL_TOOLS = [
     "seqtk",
 ]
 
-MODE_TOOLS = [
-    "z-fasta-full",
-    "z-fasta-full-fai",
-    "z-fasta-indexed-zfi",
-    "z-fasta-indexed-fai",
-]
-
 SCALING_TOOLS = [
     "z-fasta-full",
     "z-fasta-full-fai",
@@ -55,7 +48,7 @@ SCALING_TOOLS = [
     "seqtk",
 ]
 
-# Cleaner legend/table labels for scaling (composition peers only; no --index-only).
+# Cleaner legend/table labels for scaling.
 SCALING_DISPLAY = {
     "z-fasta-full": "z-fasta",
     "z-fasta-full-fai": "z-fasta (fai)",
@@ -70,8 +63,6 @@ REFERENCE_TOOLS = frozenset({"seqtk"})
 STATS_COLORS = {
     "z-fasta-full": "#F7A41D",
     "z-fasta-full-fai": "#FFB74D",
-    "z-fasta-indexed-zfi": "#C67A00",
-    "z-fasta-indexed-fai": "#E65100",
     "seqkit": "#1565C0",
     "noodles": "#C45C26",
     "rustbio": "#8B3A2A",
@@ -81,8 +72,6 @@ STATS_COLORS = {
 STATS_DISPLAY = {
     "z-fasta-full": "z-fasta full",
     "z-fasta-full-fai": "z-fasta full (fai)",
-    "z-fasta-indexed-zfi": "z-fasta indexed (zfi)",
-    "z-fasta-indexed-fai": "z-fasta indexed (fai)",
     "seqkit": "seqkit",
     "noodles": "noodles",
     "rustbio": "rust-bio",
@@ -101,7 +90,6 @@ FACET_WSPACE = 0.28
 REPORT_FIGURES = frozenset(
     {
         "perf_full.png",
-        "perf_mode.png",
         "scaling_size.png",
         "scaling_size_slope.png",
         "scaling_seqs_fixed.png",
@@ -937,10 +925,8 @@ def md_overview(manifest: dict, results_dir: Path) -> str:
             "- **Full stats (peers):** `z-fasta stats` with `.zfi` (lengths + composition scan) vs "
             "noodles / rust-bio wrappers, seqkit `stats -a`, and seqtk `comp` (nucleotide only; "
             "hatched reference).",
-            "- **Scaling:** composition peers only (no `--index-only`): wall / RSS / page faults vs "
+            "- **Scaling:** complete stats and composition peers: wall / RSS / page faults vs "
             "file size and vs sequence count (absolute facets + min->max x slopes; x tables in details).",
-            "- **z-fasta modes (2x2):** full and `--index-only`, each with `.zfi` and with `.fai` "
-            "(`.zfi` stashed). Indexed skips composition; same assembly surface for both index formats.",
             "",
             "**Index policy:** sidecars are preloaded once. Timed commands only run `stats` / peer "
             "tools; index *build* is outside this wall (see `bench/index/REPORT.md`).",
@@ -954,35 +940,31 @@ def md_overview(manifest: dict, results_dir: Path) -> str:
 
 
 def md_field_matrix() -> str:
-    """Capability overview: split assembly vs composition so --index-only is obvious."""
+    """Capability overview for complete stats."""
     return _join(
         [
-            "z-fasta has two stats modes. **Full** (`z-fasta stats`) prints assembly metrics "
-            "from the sidecar, then mmap-scans sequence bytes for composition. "
-            "**Indexed** (`z-fasta stats --index-only`) prints assembly metrics only "
-            "(no composition scan). Peers re-parse the FASTA every time; they have no "
-            "`.zfi` / `.fai` shortcut.",
+            "`z-fasta stats` reads length metadata from the selected sidecar, then scans "
+            "sequence bytes for composition. Peers re-parse the FASTA every time.",
             "",
             "### Assembly metrics (lengths / index)",
             "",
-            "| Metric | z-fasta full | z-fasta indexed | noodles | rust-bio | seqkit `-a` | seqtk `comp` |",
-            "| --- | --- | --- | --- | --- | --- | --- |",
-            "| Sequences / total bases | yes | yes | yes | yes | yes | totals |",
-            "| Min / max / mean / median | yes | yes | yes | yes | yes | - |",
-            "| N50 / L50 | yes | yes | yes | yes | yes | - |",
-            "| N90 / L90 / AU | yes | yes | yes | yes | - | - |",
-            "| Shortest / longest names | yes | yes | yes | yes | - | - |",
+            "| Metric | z-fasta | noodles | rust-bio | seqkit `-a` | seqtk `comp` |",
+            "| --- | --- | --- | --- | --- | --- |",
+            "| Sequences / total bases | yes | yes | yes | yes | totals |",
+            "| Min / max / mean / median | yes | yes | yes | yes | - |",
+            "| N50 / L50 | yes | yes | yes | yes | - |",
+            "| N90 / L90 / AU | yes | yes | yes | - | - |",
+            "| Shortest / longest names | yes | yes | yes | - | - |",
             "",
             "### Composition (sequence scan)",
             "",
-            "| Metric | z-fasta full | z-fasta indexed | noodles | rust-bio | seqkit `-a` | seqtk `comp` |",
-            "| --- | --- | --- | --- | --- | --- | --- |",
-            "| GC / GC skew / soft-mask | yes | - | yes | yes | GC | partial |",
-            "| A / C / G / T / N / Other | yes | - | yes | yes | - | yes |",
-            "| Top amino acids (protein) | yes | - | yes | yes | - | - |",
+            "| Metric | z-fasta | noodles | rust-bio | seqkit `-a` | seqtk `comp` |",
+            "| --- | --- | --- | --- | --- | --- |",
+            "| GC / GC skew / soft-mask | yes | yes | yes | GC | partial |",
+            "| A / C / G / T / N / Other | yes | yes | yes | - | yes |",
+            "| Top amino acids (protein) | yes | yes | yes | - | - |",
             "",
             "**How to read the benches:** Full-stats peers are fair for composition work. "
-            "Indexed lanes in mode / scaling charts are lengths-only (near-flat vs file size). "
             "seqkit also reports Q1/Q3/gaps/Q20 (FASTA/Q QC); those are out of scope for z-fasta. "
             "Wrappers are clean-FASTA peers only (no messy / side-table path).",
             "",
@@ -999,7 +981,11 @@ def md_run_provenance(manifest: dict, ir) -> str:
         if name in tools and tools[name]:
             tool_lines.append(f"- **{name}:** {tools[name]}")
     sections = manifest.get("sections") or {}
-    sec_lines = [f"- `{k}` -> `{v}`" for k, v in sections.items()]
+    sec_lines = [
+        f"- `{key}` -> `{sections[key]}`"
+        for key in ("perf_full", "scale_size", "scale_seqs_fixed")
+        if key in sections
+    ]
     parts = [
         f"- **Timestamp:** `{manifest.get('timestamp', '')}`",
         f"- **Runner:** {manifest.get('runner', 'zebrac')} ({manifest.get('mode', 'warm')})",
@@ -1019,38 +1005,6 @@ def md_run_provenance(manifest: dict, ir) -> str:
     parts += tool_lines or ["- _(none recorded)_"]
     parts += ["", ir.md_data_used(PROJECT_ROOT)]
     return _join(parts)
-
-
-def md_composition_tax(mode_df: pd.DataFrame, nums) -> str:
-    """(full - indexed_zfi) / full wall fraction per dataset."""
-    rows = []
-    for ds in DATASET_ORDER:
-        full = mode_df[(mode_df["dataset"] == ds) & (mode_df["tool"] == "z-fasta-full")]
-        idx = mode_df[(mode_df["dataset"] == ds) & (mode_df["tool"] == "z-fasta-indexed-zfi")]
-        if full.empty or idx.empty:
-            continue
-        fv = float(full["mean"].iloc[0])
-        iv = float(idx["mean"].iloc[0])
-        frac = (fv - iv) / fv if fv > 0 else None
-        rows.append(
-            {
-                "Dataset": ds,
-                "full (s)": f"{fv:.4f}",
-                "indexed zfi (s)": f"{iv:.4f}",
-                "composition fraction": f"{frac:.2%}" if frac is not None else "n/a",
-            }
-        )
-    if not rows:
-        return ""
-    t = nums.next_table()
-    return _join(
-        [
-            f"**Table {t}:** Composition tax. Fraction of full wall explained by the mmap scan: "
-            "`(full - indexed(zfi)) / full`.",
-            "",
-            pd.DataFrame(rows).to_markdown(index=False),
-        ]
-    )
 
 
 def _scaling_pivot(df: pd.DataFrame, tools: list[str], param_col: str, param_order: list, xlabel: str, fmt, ir) -> str:
@@ -1185,8 +1139,7 @@ def md_scaling_section(
             f"## {section_title}",
             "",
             "Synthetic FASTAs under `bench/shared/cache/scaling/` (generated on demand). "
-            "Indexes preloaded; timed work is composition `stats` / peers only "
-            "(no `--index-only` here; that lives in Mode Comparison). "
+            "Indexes preloaded; timed work is complete `stats` / peers only. "
             "Two figures per sweep: absolute wall / RSS / faults, then whether the "
             "x vs z-fasta gap grows from the smallest fixture to the largest. "
             "Per-point x values stay in the collapsible tables.",
@@ -1272,8 +1225,8 @@ def main() -> None:
         raise SystemExit(f"No run_*.json under {results_dir}")
     incomplete = ir.is_incomplete_run(
         manifest,
-        required_sections=("perf_full", "perf_mode", "scale_size", "scale_seqs_fixed"),
-        skip_flags=("skip_full", "skip_mode", "skip_scale_size", "skip_scale_seqs_fixed"),
+        required_sections=("perf_full", "scale_size", "scale_seqs_fixed"),
+        skip_flags=("skip_full", "skip_scale_size", "skip_scale_seqs_fixed"),
     )
     if incomplete and not args.allow_incomplete:
         raise SystemExit(
@@ -1282,11 +1235,10 @@ def main() -> None:
         )
 
     full_df = load_section(results_dir, manifest, "perf_full", ir)
-    mode_df = load_section(results_dir, manifest, "perf_mode", ir)
     size_df = enrich_size(load_section(results_dir, manifest, "scale_size", ir))
     seq_df = enrich_seqs(load_section(results_dir, manifest, "scale_seqs_fixed", ir))
 
-    if full_df is None and mode_df is None and size_df is None and seq_df is None:
+    if full_df is None and size_df is None and seq_df is None:
         raise SystemExit("No section data found")
 
     figures_dir = results_dir / "figures"
@@ -1461,118 +1413,6 @@ def main() -> None:
                 ir=ir,
                 nums=nums,
                 figures_dir=figures_dir,
-            )
-        )
-
-    # --- Mode 2x2 ---
-    if mode_df is not None and not mode_df.empty:
-        mode_tools = tools_in_run(mode_df, MODE_TOOLS)
-        sample_n = manifest.get("runs", "?")
-        report_lines.append("## z-fasta Mode Comparison")
-        report_lines.append(
-            "Four lanes: **full** and **indexed** (`--index-only`), each with `.zfi` and with "
-            "`.fai` (`.zfi` stashed outside the timed window). Indexed skips the composition "
-            "mmap scan. `.zfi` is preferred; `.fai` is the compatibility lane for uniform, "
-            "FAI-representable records (messy side tables still need `.zfi`). **Figure facets** "
-            "are wall time, peak RSS, and minor page faults; **x-axis** is dataset; **bar color** "
-            "is mode lane (same layout as Full stats)."
-        )
-        tax = md_composition_tax(mode_df, nums)
-        if tax:
-            report_lines.append(tax)
-
-        fig_metric_facets(
-            mode_df,
-            figures_dir / "perf_mode.png",
-            mode_tools,
-            ir,
-            title="Mode comparison: wall time, peak RSS, page faults",
-            fig_note=(
-                f"X = Genome / Transcriptome / Proteome. Error bars = zebrac stddev "
-                f"(n={sample_n}). Four gold shades: full, full (fai), indexed (zfi), "
-                "indexed (fai). Rotated labels = other / z-fasta full (all facets)."
-            ),
-            baseline=BASELINE,
-            annotate=True,
-        )
-
-        t_wall = nums.table
-        report_lines.append(
-            md_metric_tables(
-                heading="Mode wall time",
-                intro="Wall time for the four z-fasta lanes on REAL datasets.",
-                work=mode_df,
-                tools=mode_tools,
-                value_col="mean",
-                fmt=fmt_wall,
-                ir=ir,
-                nums=nums,
-                baseline=BASELINE,
-                ratio_summary="Time x = other lane / z-fasta full.",
-                zf_label="z-fasta full",
-                comp_label="Other",
-                ratio_label="Time x",
-                fmt_zf=lambda r: f"{r.zfasta_v:.4f}s",
-                fmt_comp=lambda r: f"{r.comp_v:.4f}s",
-            )
-        )
-        t_rss = nums.table
-        report_lines.append(
-            md_metric_tables(
-                heading="Mode memory",
-                intro="Peak RSS for the four z-fasta lanes.",
-                work=mode_df,
-                tools=mode_tools,
-                value_col="peak_rss_mb",
-                fmt=fmt_rss,
-                ir=ir,
-                nums=nums,
-                baseline=BASELINE,
-                ratio_summary="RSS x = other lane / z-fasta full.",
-                zf_label="z-fasta full",
-                comp_label="Other",
-                ratio_label="RSS x",
-                fmt_zf=lambda r: f"{r.zfasta_v:.1f} MB",
-                fmt_comp=lambda r: f"{r.comp_v:.1f} MB",
-            )
-        )
-        t_pf = nums.table
-        report_lines.append(
-            md_metric_tables(
-                heading="Mode page faults",
-                intro="Minor page faults for the four z-fasta lanes.",
-                work=mode_df,
-                tools=mode_tools,
-                value_col="minor_faults",
-                fmt=fmt_faults,
-                ir=ir,
-                nums=nums,
-                baseline=BASELINE,
-                ratio_summary="Faults x = other lane / z-fasta full.",
-                zf_label="z-fasta full",
-                comp_label="Other",
-                ratio_label="Faults x",
-                fmt_zf=lambda r: f"{r.zfasta_v:.0f}",
-                fmt_comp=lambda r: f"{r.comp_v:.0f}",
-            )
-        )
-        report_lines.append(
-            md_combined_metric_figure(
-                nums=nums,
-                fig_rel="results/figures/perf_mode.png",
-                fig_caption=(
-                    f"Tables {t_wall}, {t_rss}, and {t_pf} as grouped bars "
-                    "(datasets on x-axis; mode color from legend)"
-                ),
-                reading=[
-                    "**Facets:** wall time (log y) | peak RSS (linear) | minor page faults (log y).",
-                    "**X-axis:** Genome, Transcriptome, Proteome.",
-                    "**Bar colors:** full, full (fai), indexed (zfi), indexed (fai).",
-                    "**Bar labels (rotated):** `1x` on full (`.zfi`); other labels = lane / full. "
-                    "Same ratio rules on wall, RSS, and page faults.",
-                    "Indexed lanes should be near-instant (lengths only). FAI tax shows most "
-                    "on many-record files.",
-                ],
             )
         )
 

@@ -1,7 +1,4 @@
-//! Assembly and proteome statistics: index-only and full composition scan modes.
-//!
-//! Source duplicate extras are counted from the FASTA when scanning; index-only mode
-//! reports `n/a` unless the index retained repeats (`--no-dedup`).
+//! Assembly and proteome statistics from indexed FASTA files.
 
 const std = @import("std");
 const index_format = @import("index_format.zig");
@@ -150,54 +147,21 @@ pub fn tallyFastaHeaderNames(fasta: []const u8, map: *std.StringHashMap(usize)) 
     }
 }
 
-const DuplicateReport = union(enum) {
-    /// Known source-level extras (`sum(k-1)`).
-    count: usize,
-    /// Index-only cannot prove absence of duplicates on a deduplicated index.
-    unknown,
-};
-
 fn reportSourceDuplicates(
     idx: *LoadedIndex,
-    io: std.Io,
     allocator: std.mem.Allocator,
-    index_only: bool,
-) DuplicateReport {
+) usize {
     var map = std.StringHashMap(usize).init(allocator);
     defer map.deinit();
 
-    if (!index_only) {
-        tallyFastaHeaderNames(idx.fasta_data, &map) catch {
-            printErrorAndExit("error: out of memory\n", .{});
-        };
-        return .{ .count = countNameDuplicateExtras(&map) };
-    }
-
-    // Index-only: report only when the index itself retains repeated names
-    // (--no-dedup). A fully unique index cannot distinguish "no source dups"
-    // from "dedup dropped them", so never fabricate 0.
-    for (0..idx.records.len) |ri| {
-        const name = getRecordName(idx, io, ri);
-        const gop = map.getOrPut(name) catch {
-            printErrorAndExit("error: out of memory\n", .{});
-        };
-        if (!gop.found_existing) gop.value_ptr.* = 0;
-        gop.value_ptr.* += 1;
-    }
-    var had_repeat = false;
-    var it = map.iterator();
-    while (it.next()) |entry| {
-        if (entry.value_ptr.* > 1) {
-            had_repeat = true;
-            break;
-        }
-    }
-    if (!had_repeat) return .unknown;
-    return .{ .count = countNameDuplicateExtras(&map) };
+    tallyFastaHeaderNames(idx.fasta_data, &map) catch {
+        printErrorAndExit("error: out of memory\n", .{});
+    };
+    return countNameDuplicateExtras(&map);
 }
 
 /// Run the stats command.
-pub fn runStats(io: std.Io, fasta_path: []const u8, index_only: bool) void {
+pub fn runStats(io: std.Io, fasta_path: []const u8) void {
     var idx = index_format.loadIndexWithMode(io, fasta_path, .stats_scan);
     defer idx.deinit(io);
 
@@ -286,10 +250,8 @@ pub fn runStats(io: std.Io, fasta_path: []const u8, index_only: bool) void {
     const shortest_name = getRecordName(&idx, io, shortest_idx);
     const longest_name = getRecordName(&idx, io, longest_idx);
 
-    const duplicates = reportSourceDuplicates(&idx, io, allocator, index_only);
-
-    // Run composition scan early (if not --index-only) so we can include Type in the header
-    const comp: ?CompositionStats = if (!index_only) scanComposition(&idx) else null;
+    const duplicates = reportSourceDuplicates(&idx, allocator);
+    const comp = scanComposition(&idx);
 
     // Output
     var out_buf: [65536]u8 = undefined;
@@ -306,10 +268,10 @@ pub fn runStats(io: std.Io, fasta_path: []const u8, index_only: bool) void {
         .fai => ".fai",
     };
 
-    const type_str: []const u8 = if (comp) |c| switch (c.seq_type) {
+    const type_str: []const u8 = switch (comp.seq_type) {
         .nucleotide => "Nucleotide",
         .protein => "Protein",
-    } else "(run without --index-only for composition)";
+    };
 
     writer.print("File:           {s} ({s} on disk)\n", .{ fasta_path, size_str }) catch {
         printErrorAndExit("error: write failed\n", .{});
@@ -353,17 +315,13 @@ pub fn runStats(io: std.Io, fasta_path: []const u8, index_only: bool) void {
     writer.print("AU:             {s}\n", .{formatComma(&comma_buf, au)}) catch {
         printErrorAndExit("error: write failed\n", .{});
     };
-    switch (duplicates) {
-        .count => |n| writer.print("Duplicates:     {d}\n", .{n}) catch {
-            printErrorAndExit("error: write failed\n", .{});
-        },
-        .unknown => writer.print("Duplicates:     n/a (run without --index-only)\n", .{}) catch {
-            printErrorAndExit("error: write failed\n", .{});
-        },
-    }
+    writer.print("Duplicates:     {d}\n", .{duplicates}) catch {
+        printErrorAndExit("error: write failed\n", .{});
+    };
 
-    // Tier 2: composition details (unless --index-only)
-    if (comp) |c| {
+    // Tier 2: composition details
+    {
+        const c = comp;
         writer.print("\nComposition:\n", .{}) catch {};
 
         if (c.seq_type == .nucleotide) {

@@ -11,8 +11,7 @@ This report times `z-fasta stats` against clean-FASTA peers on the shared REAL d
 **What is timed**
 
 - **Full stats (peers):** `z-fasta stats` with `.zfi` (lengths + composition scan) vs noodles / rust-bio wrappers, seqkit `stats -a`, and seqtk `comp` (nucleotide only; hatched reference).
-- **Scaling:** composition peers only (no `--index-only`): wall / RSS / page faults vs file size and vs sequence count (absolute facets + min->max x slopes; x tables in details).
-- **z-fasta modes (2x2):** full and `--index-only`, each with `.zfi` and with `.fai` (`.zfi` stashed). Indexed skips composition; same assembly surface for both index formats.
+- **Scaling:** complete stats and composition peers: wall / RSS / page faults vs file size and vs sequence count (absolute facets + min->max x slopes; x tables in details).
 
 **Index policy:** sidecars are preloaded once. Timed commands only run `stats` / peer tools; index *build* is outside this wall (see `bench/index/REPORT.md`).
 
@@ -22,27 +21,27 @@ Correctness values (N50, GC, ...) are gated by verify against BioPython (`bench/
 
 ## What each tool reports
 
-z-fasta has two stats modes. **Full** (`z-fasta stats`) prints assembly metrics from the sidecar, then mmap-scans sequence bytes for composition. **Indexed** (`z-fasta stats --index-only`) prints assembly metrics only (no composition scan). Peers re-parse the FASTA every time; they have no `.zfi` / `.fai` shortcut.
+`z-fasta stats` reads length metadata from the selected sidecar, then scans sequence bytes for composition. Peers re-parse the FASTA every time.
 
 ### Assembly metrics (lengths / index)
 
-| Metric | z-fasta full | z-fasta indexed | noodles | rust-bio | seqkit `-a` | seqtk `comp` |
-| --- | --- | --- | --- | --- | --- | --- |
-| Sequences / total bases | yes | yes | yes | yes | yes | totals |
-| Min / max / mean / median | yes | yes | yes | yes | yes | - |
-| N50 / L50 | yes | yes | yes | yes | yes | - |
-| N90 / L90 / AU | yes | yes | yes | yes | - | - |
-| Shortest / longest names | yes | yes | yes | yes | - | - |
+| Metric | z-fasta | noodles | rust-bio | seqkit `-a` | seqtk `comp` |
+| --- | --- | --- | --- | --- | --- |
+| Sequences / total bases | yes | yes | yes | yes | totals |
+| Min / max / mean / median | yes | yes | yes | yes | - |
+| N50 / L50 | yes | yes | yes | yes | - |
+| N90 / L90 / AU | yes | yes | yes | - | - |
+| Shortest / longest names | yes | yes | yes | - | - |
 
 ### Composition (sequence scan)
 
-| Metric | z-fasta full | z-fasta indexed | noodles | rust-bio | seqkit `-a` | seqtk `comp` |
-| --- | --- | --- | --- | --- | --- | --- |
-| GC / GC skew / soft-mask | yes | - | yes | yes | GC | partial |
-| A / C / G / T / N / Other | yes | - | yes | yes | - | yes |
-| Top amino acids (protein) | yes | - | yes | yes | - | - |
+| Metric | z-fasta | noodles | rust-bio | seqkit `-a` | seqtk `comp` |
+| --- | --- | --- | --- | --- | --- |
+| GC / GC skew / soft-mask | yes | yes | yes | GC | partial |
+| A / C / G / T / N / Other | yes | yes | yes | - | yes |
+| Top amino acids (protein) | yes | yes | yes | - | - |
 
-**How to read the benches:** Full-stats peers are fair for composition work. Indexed lanes in mode / scaling charts are lengths-only (near-flat vs file size). seqkit also reports Q1/Q3/gaps/Q20 (FASTA/Q QC); those are out of scope for z-fasta. Wrappers are clean-FASTA peers only (no messy / side-table path).
+**How to read the benches:** Peers are compared against complete stats where their reported fields overlap. seqkit also reports Q1/Q3/gaps/Q20 (FASTA/Q QC); those are out of scope for z-fasta. Wrappers are clean-FASTA peers only (no messy / side-table path).
 
 Oracle: [`bench/stats/oracle.py`](oracle.py). Verify: [`bench/stats/run.sh`](run.sh) correctness (`run_tests`).
 
@@ -59,7 +58,6 @@ Oracle: [`bench/stats/oracle.py`](oracle.py). Verify: [`bench/stats/run.sh`](run
 **Sections**
 
 - `perf_full` -> `perf_full_20260801_094735`
-- `perf_mode` -> `perf_mode_20260801_094735`
 - `scale_size` -> `scale_size_20260801_094735`
 - `scale_seqs_fixed` -> `scale_seqs_fixed_20260801_094735`
 
@@ -193,7 +191,7 @@ Minor page faults for the same full-stats commands.
 
 ## Scaling: file size
 
-Synthetic FASTAs under `bench/shared/cache/scaling/` (generated on demand). Indexes preloaded; timed work is composition `stats` / peers only (no `--index-only` here; that lives in Mode Comparison). Two figures per sweep: absolute wall / RSS / faults, then whether the x vs z-fasta gap grows from the smallest fixture to the largest. Per-point x values stay in the collapsible tables.
+Synthetic FASTAs under `bench/shared/cache/scaling/` (generated on demand). Indexes preloaded; timed work is complete `stats` / peers only. Two figures per sweep: absolute wall / RSS / faults, then whether the x vs z-fasta gap grows from the smallest fixture to the largest. Per-point x values stay in the collapsible tables.
 
 **Table 7:** Mean ± stddev wall time by File size (MB) and tool.
 
@@ -425,7 +423,7 @@ Synthetic FASTAs under `bench/shared/cache/scaling/` (generated on demand). Inde
 
 ## Scaling: sequence count (fixed 1024 bp)
 
-Synthetic FASTAs under `bench/shared/cache/scaling/` (generated on demand). Indexes preloaded; timed work is composition `stats` / peers only (no `--index-only` here; that lives in Mode Comparison). Two figures per sweep: absolute wall / RSS / faults, then whether the x vs z-fasta gap grows from the smallest fixture to the largest. Per-point x values stay in the collapsible tables.
+Synthetic FASTAs under `bench/shared/cache/scaling/` (generated on demand). Indexes preloaded; timed work is complete `stats` / peers only. Two figures per sweep: absolute wall / RSS / faults, then whether the x vs z-fasta gap grows from the smallest fixture to the largest. Per-point x values stay in the collapsible tables.
 
 **Table 13:** Mean ± stddev wall time by Sequence count and tool.
 
@@ -562,121 +560,5 @@ Synthetic FASTAs under `bench/shared/cache/scaling/` (generated on demand). Inde
 
 - Left = smallest fixture; right = largest. Gold dashed = 1x.
 - Rising = peer gets relatively worse with scale; falling = relatively better.
-
-<div style="margin: 1.5em 0"></div>
-
-## z-fasta Mode Comparison
-
-Four lanes: **full** and **indexed** (`--index-only`), each with `.zfi` and with `.fai` (`.zfi` stashed outside the timed window). Indexed skips the composition mmap scan. `.zfi` is preferred; `.fai` is the compatibility lane for uniform, FAI-representable records (messy side tables still need `.zfi`). **Figure facets** are wall time, peak RSS, and minor page faults; **x-axis** is dataset; **bar color** is mode lane (same layout as Full stats).
-
-**Table 19:** Composition tax. Fraction of full wall explained by the mmap scan: `(full - indexed(zfi)) / full`.
-
-| Dataset       |   full (s) |   indexed zfi (s) | composition fraction   |
-|:--------------|-----------:|------------------:|:-----------------------|
-| Genome        |     5.1449 |            0.0021 | 99.96%                 |
-| Transcriptome |     0.866  |            0.0911 | 89.47%                 |
-| Proteome      |     0.0253 |            0.0061 | 75.94%                 |
-
-## Mode wall time
-
-Wall time for the four z-fasta lanes on REAL datasets.
-
-**Table 20:** Mean ± stddev by dataset and tool.
-
-| dataset       | z-fasta full   | z-fasta full (fai)   | z-fasta indexed (zfi)   | z-fasta indexed (fai)   |
-|:--------------|:---------------|:---------------------|:------------------------|:------------------------|
-| Genome        | 5.145±0.011 s  | 5.147±0.007 s        | 2.11±0.05 ms            | 3.03±0.07 ms            |
-| Transcriptome | 0.866±0.003 s  | 0.918±0.004 s        | 0.091±0.000 s           | 2.056±0.009 s           |
-| Proteome      | 0.025±0.002 s  | 0.029±0.002 s        | 6.08±0.15 ms            | 0.162±0.004 s           |
-
-<details><summary><strong>Table 21:</strong> Time x = other lane / z-fasta full.</summary>
-
-| Dataset       | z-fasta vs            | z-fasta full   | Other   | Time x   |
-|:--------------|:----------------------|:---------------|:--------|:---------|
-| Genome        | z-fasta full (fai)    | 5.1449s        | 5.1467s | 1.00x    |
-| Genome        | z-fasta indexed (zfi) | 5.1449s        | 0.0021s | 0.000x   |
-| Genome        | z-fasta indexed (fai) | 5.1449s        | 0.0030s | 0.001x   |
-| Transcriptome | z-fasta full (fai)    | 0.8660s        | 0.9181s | 1.06x    |
-| Transcriptome | z-fasta indexed (zfi) | 0.8660s        | 0.0911s | 0.105x   |
-| Transcriptome | z-fasta indexed (fai) | 0.8660s        | 2.0561s | 2.37x    |
-| Proteome      | z-fasta full (fai)    | 0.0253s        | 0.0286s | 1.13x    |
-| Proteome      | z-fasta indexed (zfi) | 0.0253s        | 0.0061s | 0.241x   |
-| Proteome      | z-fasta indexed (fai) | 0.0253s        | 0.1622s | 6.42x    |
-
-</details>
-
-<div style="margin: 1.5em 0"></div>
-
-## Mode memory
-
-Peak RSS for the four z-fasta lanes.
-
-**Table 22:** Mean ± stddev by dataset and tool.
-
-| dataset       | z-fasta full   | z-fasta full (fai)   | z-fasta indexed (zfi)   | z-fasta indexed (fai)   |
-|:--------------|:---------------|:---------------------|:------------------------|:------------------------|
-| Genome        | 3006.0±0.0 MB  | 3006.0±0.0 MB        | 3.4±0.0 MB              | 3.4±0.1 MB              |
-| Transcriptome | 496.1±0.1 MB   | 525.5±0.0 MB         | 65.0±0.0 MB             | 94.8±0.0 MB             |
-| Proteome      | 16.4±0.1 MB    | 18.8±0.0 MB          | 3.7±0.0 MB              | 6.3±0.0 MB              |
-
-<details><summary><strong>Table 23:</strong> RSS x = other lane / z-fasta full.</summary>
-
-| Dataset       | z-fasta vs            | z-fasta full   | Other     | RSS x   |
-|:--------------|:----------------------|:---------------|:----------|:--------|
-| Genome        | z-fasta full (fai)    | 3006.0 MB      | 3006.0 MB | 1.000x  |
-| Genome        | z-fasta indexed (zfi) | 3006.0 MB      | 3.4 MB    | 0.001x  |
-| Genome        | z-fasta indexed (fai) | 3006.0 MB      | 3.4 MB    | 0.001x  |
-| Transcriptome | z-fasta full (fai)    | 496.1 MB       | 525.5 MB  | 1.06x   |
-| Transcriptome | z-fasta indexed (zfi) | 496.1 MB       | 65.0 MB   | 0.131x  |
-| Transcriptome | z-fasta indexed (fai) | 496.1 MB       | 94.8 MB   | 0.191x  |
-| Proteome      | z-fasta full (fai)    | 16.4 MB        | 18.8 MB   | 1.14x   |
-| Proteome      | z-fasta indexed (zfi) | 16.4 MB        | 3.7 MB    | 0.227x  |
-| Proteome      | z-fasta indexed (fai) | 16.4 MB        | 6.3 MB    | 0.382x  |
-
-</details>
-
-<div style="margin: 1.5em 0"></div>
-
-## Mode page faults
-
-Minor page faults for the four z-fasta lanes.
-
-**Table 24:** Mean ± stddev by dataset and tool.
-
-| dataset       | z-fasta full   | z-fasta full (fai)   | z-fasta indexed (zfi)   | z-fasta indexed (fai)   |
-|:--------------|:---------------|:---------------------|:------------------------|:------------------------|
-| Genome        | 24375±3        | 24388±2              | 304±2                   | 316±3                   |
-| Transcriptome | 10942±3        | 21010±3              | 7230±2                  | 24384±2                 |
-| Proteome      | 860±6          | 1728±3               | 750±4                   | 1726±4                  |
-
-<details><summary><strong>Table 25:</strong> Faults x = other lane / z-fasta full.</summary>
-
-| Dataset       | z-fasta vs            |   z-fasta full |   Other | Faults x   |
-|:--------------|:----------------------|---------------:|--------:|:-----------|
-| Genome        | z-fasta full (fai)    |          24375 |   24388 | 1.00x      |
-| Genome        | z-fasta indexed (zfi) |          24375 |     304 | 0.012x     |
-| Genome        | z-fasta indexed (fai) |          24375 |     316 | 0.013x     |
-| Transcriptome | z-fasta full (fai)    |          10942 |   21010 | 1.92x      |
-| Transcriptome | z-fasta indexed (zfi) |          10942 |    7230 | 0.661x     |
-| Transcriptome | z-fasta indexed (fai) |          10942 |   24384 | 2.23x      |
-| Proteome      | z-fasta full (fai)    |            860 |    1728 | 2.01x      |
-| Proteome      | z-fasta indexed (zfi) |            860 |     750 | 0.872x     |
-| Proteome      | z-fasta indexed (fai) |            860 |    1726 | 2.01x      |
-
-</details>
-
-<div style="margin: 1.5em 0"></div>
-
-**Figure 6:** Tables 20, 22, and 24 as grouped bars (datasets on x-axis; mode color from legend).
-
-![Figure 6](results/figures/perf_mode.png)
-
-**Reading Figure 6**
-
-- **Facets:** wall time (log y) | peak RSS (linear) | minor page faults (log y).
-- **X-axis:** Genome, Transcriptome, Proteome.
-- **Bar colors:** full, full (fai), indexed (zfi), indexed (fai).
-- **Bar labels (rotated):** `1x` on full (`.zfi`); other labels = lane / full. Same ratio rules on wall, RSS, and page faults.
-- Indexed lanes should be near-instant (lengths only). FAI tax shows most on many-record files.
 
 <div style="margin: 1.5em 0"></div>

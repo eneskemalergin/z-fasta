@@ -6,7 +6,7 @@ All notable changes to z-fasta will be documented in this file.
 
 ## Unreleased
 
-Indexing and GET performance and memory cleanup. No `.zfi` format change. **Re-index not required.** The `index --low-mem` flag is removed because bare `index` now provides the same low-memory behavior.
+Indexing, GET, and stats performance and memory cleanup. No `.zfi` format change. **Re-index not required.** The `index --low-mem` flag is removed because bare `index` now provides the same low-memory behavior.
 
 ### Changed
 
@@ -22,10 +22,14 @@ Indexing and GET performance and memory cleanup. No `.zfi` format change. **Re-i
   - Positional `.fai` loading retains only requested records; `.zfi` remains authoritative when present. Both formats resolve duplicate names to the first exact match.
   - Each invocation accepts one request source. Summary timing includes index loading and streamed request acquisition, and annotations describe the final composed orientation.
 
+- **Stats**
+  - `stats` always reports the complete length and composition surface. The partial `--index-only` mode is removed and now follows the normal unknown-option error path.
+
 - **Benchmarks**
   - The index report now compares the four product configurations directly: `.zfi` or `.fai`, each with deduplication on or off.
   - Real-data and scaling results cover the single production index path and retain the existing peer comparisons.
   - GET correctness passes 418 checks. Performance compares `.zfi` and `.fai` across positional, multi-region, BED, and reverse-complement work without obsolete chunk-mode lanes.
+  - Stats correctness and performance retain only complete-report lanes; partial-mode comparisons and claims are removed.
 
 ### Fixed
 

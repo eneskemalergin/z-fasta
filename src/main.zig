@@ -62,9 +62,6 @@ const USAGE =
     \\  --annotate-rc   Annotate the final output orientation when it is transformed
     \\  Positional regions: max 1024 per invocation. Names and BED input stream.
     \\
-    \\Stats options:
-    \\  --index-only   Only show index-derived stats (no composition scan)
-    \\
     \\Validate usage:
     \\  z-fasta validate [options] <file.fasta>
     \\  --strict                 Treat warnings as errors
@@ -86,8 +83,7 @@ const USAGE =
     \\  z-fasta get genome.fa --bed regions.bed  Extract BED regions
     \\  z-fasta get genome.fa --names ids.txt    Extract whole sequences from a file
     \\  z-fasta get genome.fa --bed regions.bed --strand-aware --summary
-    \\  z-fasta stats genome.fa                  Full stats with composition
-    \\  z-fasta stats --index-only genome.fa     Quick index-only stats
+    \\  z-fasta stats genome.fa                  Show stats with composition
     \\  z-fasta validate genome.fa               Check FASTA validity
     \\  z-fasta validate --json --summary genome.fa
     \\
@@ -418,13 +414,10 @@ test "parseTransformFlags rejects conflicting transform flags" {
 
 fn runStatsCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     var fasta_path: ?[]const u8 = null;
-    var index_only = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printHelpAndExit(io);
-        } else if (std.mem.eql(u8, arg, "--index-only")) {
-            index_only = true;
         } else {
             rejectUnknownOption(arg);
             fasta_path = arg;
@@ -432,10 +425,10 @@ fn runStatsCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     }
 
     const path = fasta_path orelse {
-        printErrorAndExit("error: usage: z-fasta stats [--index-only] <file.fasta>\n", .{});
+        printErrorAndExit("error: usage: z-fasta stats <file.fasta>\n", .{});
     };
 
-    stats.runStats(io, path, index_only);
+    stats.runStats(io, path);
 }
 
 // ============================================================================

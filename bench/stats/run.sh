@@ -4,7 +4,7 @@
 # Usage:
 #   bash bench/stats/run.sh [options]
 #
-# Defaults: correctness first (89 checks), then perf (--runs 5, --warmup 1, --duration 5000).
+# Defaults: correctness first, then perf (--runs 5, --warmup 1, --duration 5000).
 # Report generation: python3 bench/stats/generate_report.py
 #   (run.sh calls this after perf; --allow-incomplete for drafts)
 # Use --skip-tests (alias --skip-verify) to run perf/report only. Correctness failure aborts before perf or report.
@@ -16,8 +16,8 @@
 #   bash bench/stats/run.sh
 #   bash bench/stats/run.sh --skip-tests --skip-report   # perf only
 #   bash bench/stats/run.sh --skip-verify --skip-perf    # same via aliases
-#   bash bench/stats/run.sh --skip-full --skip-mode       # scaling only
-#   bash bench/stats/run.sh --skip-scale                  # REAL full + mode only
+#   bash bench/stats/run.sh --skip-full                   # scaling only
+#   bash bench/stats/run.sh --skip-scale                  # REAL data only
 #   bash bench/stats/run.sh --skip-size                   # skip file-size sweep only
 #   bash bench/stats/run.sh --skip-seqs                   # skip seq-count sweep only
 #   bash bench/stats/run.sh --regenerate-fixtures
@@ -40,7 +40,6 @@
 #   results/run_<ts>.json    manifest (sections, tool versions, skip flags)
 #   results/metadata_<ts>.jsonl
 #   results/perf_full_<ts>/  peer + z-fasta full (REAL)
-#   results/perf_mode_<ts>/  z-fasta full / full (fai) / indexed (zfi) / indexed (fai)
 #   results/scale_size_<ts>/ file-size scaling
 #   results/scale_seqs_fixed_<ts>/ sequence-count scaling
 #
@@ -68,7 +67,6 @@ ZEBRAC_DURATION_MS="${ZEBRAC_DURATION_MS:-5000}"
 DO_TESTS=true
 DO_BENCHMARKS=true
 DO_FULL=true
-DO_MODE=true
 DO_SCALE=true
 DO_SCALE_SIZE=true
 DO_SCALE_SEQS=true
@@ -85,7 +83,6 @@ while [[ $# -gt 0 ]]; do
         --skip-tests|--skip-verify) DO_TESTS=false; shift ;;
         --skip-benchmarks|--skip-perf) DO_BENCHMARKS=false; shift ;;
         --skip-full) DO_FULL=false; shift ;;
-        --skip-mode) DO_MODE=false; shift ;;
         --skip-scale) DO_SCALE=false; shift ;;
         --skip-size) DO_SCALE_SIZE=false; shift ;;
         --skip-seqs) DO_SCALE_SEQS=false; shift ;;
@@ -157,19 +154,18 @@ write_run_manifest() {
     local manifest="$1" timestamp="$2" metadata="$3"
     python3 - "$manifest" "$timestamp" "$metadata" "$RUNS" "$WARMUP" "$ZEBRAC_DURATION_MS" \
         "$DO_TESTS" \
-        "${SECTION_FULL:-}" "${SECTION_MODE:-}" \
+        "${SECTION_FULL:-}" \
         "${SECTION_SCALE_SIZE:-}" "${SECTION_SCALE_SEQS:-}" <<'PY'
 import json, os, sys
 from pathlib import Path
 
 manifest, ts, metadata, runs, warmup, duration = sys.argv[1:7]
 do_verify = sys.argv[7] == "true"
-section_full, section_mode, section_size, section_seqs = sys.argv[8:12]
+section_full, section_size, section_seqs = sys.argv[8:11]
 
 sections = {}
 for key, val in (
     ("perf_full", section_full),
-    ("perf_mode", section_mode),
     ("scale_size", section_size),
     ("scale_seqs_fixed", section_seqs),
 ):
@@ -196,7 +192,6 @@ out = {
     "verify_pass": os.environ.get("BENCH_VERIFY_PASS"),
     "index_preload": True,
     "skip_full": "perf_full" not in sections,
-    "skip_mode": "perf_mode" not in sections,
     "skip_scale_size": "scale_size" not in sections,
     "skip_scale_seqs_fixed": "scale_seqs_fixed" not in sections,
     "metadata": metadata,
@@ -269,10 +264,9 @@ run_zebrac_tool_fai() {
 }
 
 # Timed peers for one FASTA. One zebrac group per tool so progress is visible.
-# include_zfasta_modes: also time full(fai), indexed(zfi), indexed(fai).
 run_stats_peers() {
     local section="$1" workload="$2" fa="$3" out_dir="$4"
-    local include_zfasta_modes="${5:-false}"
+    local include_fai="${5:-false}"
     local allow_seqtk="${6:-true}"
 
     local qf qz qk qn qr qt nbytes json
@@ -288,18 +282,10 @@ run_stats_peers() {
     run_zebrac_tool "$section" "$workload" z-fasta-full z-fasta "$json" \
         "$qz stats $qf > /dev/null" "$nbytes"
 
-    if [[ "$include_zfasta_modes" == "true" ]]; then
+    if [[ "$include_fai" == "true" ]]; then
         json="$out_dir/${workload}__z-fasta-full-fai.json"
         run_zebrac_tool_fai "$fa" "$section" "$workload" z-fasta-full-fai z-fasta "$json" \
             "$qz stats $qf > /dev/null" "$nbytes"
-
-        json="$out_dir/${workload}__z-fasta-indexed-zfi.json"
-        run_zebrac_tool "$section" "$workload" z-fasta-indexed-zfi z-fasta "$json" \
-            "$qz stats --index-only $qf > /dev/null" "$nbytes"
-
-        json="$out_dir/${workload}__z-fasta-indexed-fai.json"
-        run_zebrac_tool_fai "$fa" "$section" "$workload" z-fasta-indexed-fai z-fasta "$json" \
-            "$qz stats --index-only $qf > /dev/null" "$nbytes"
     fi
 
     if bench_has_tool noodles; then
@@ -433,11 +419,8 @@ prepare_messy() {
 }
 
 run_stats() {
-    local fasta="$1" mode="$2" out="$3" err="$4"
-    local -a args=(stats)
-    [[ "$mode" == index-only ]] && args+=(--index-only)
-    args+=("$fasta")
-    if ! "$ZFASTA" "${args[@]}" >"$out" 2>"$err"; then
+    local fasta="$1" out="$2" err="$3"
+    if ! "$ZFASTA" stats "$fasta" >"$out" 2>"$err"; then
         echo "z-fasta stats failed (see stderr)" >"$err"
         return 1
     fi
@@ -500,60 +483,50 @@ prepare_fixtures() {
     done
 }
 
-verify_modes() {
+verify_formats() {
     local tag="$1" name="$2" fasta="$3" exp="$4" zfi_only="${5:-}"
-    local mode out err stash label zfi_txt fai_txt
+    local err stash label zfi_txt fai_txt
 
     section_hdr "$tag" "$name"
 
-    for mode in full index-only; do
-        zfi_txt="$TMPDIR/$name.$mode.zfi.txt"
-        err="$TMPDIR/$name.$mode.zfi.err"
-        if [[ "$zfi_only" == zfi-only ]]; then
-            label="[oracle:$name:$mode:zfi] vs BioPython"
-            run_stats "$fasta" "$mode" "$zfi_txt" "$err" || { fail "$label" "$err"; continue; }
-            check_oracle "$label" check "$mode" zfi "$fasta" "$exp" "$zfi_txt"
-            continue
-        fi
+    zfi_txt="$TMPDIR/$name.zfi.txt"
+    err="$TMPDIR/$name.zfi.err"
+    label="[oracle:$name:zfi] vs BioPython"
+    run_stats "$fasta" "$zfi_txt" "$err" || { fail "$label" "$err"; return; }
+    check_oracle "$label" check zfi "$fasta" "$exp" "$zfi_txt"
+    if [[ "$zfi_only" == zfi-only ]]; then
+        return
+    fi
 
-        # .zfi path vs BioPython
-        label="[oracle:$name:$mode:zfi] vs BioPython"
-        run_stats "$fasta" "$mode" "$zfi_txt" "$err" || { fail "$label" "$err"; continue; }
-        check_oracle "$label" check "$mode" zfi "$fasta" "$exp" "$zfi_txt"
-
-        # .fai selection vs BioPython (stash .zfi so it is absent)
-        stash="$TMPDIR/$name.$mode.zfi"
-        mv "${fasta}.zfi" "$stash"
-        fai_txt="$TMPDIR/$name.$mode.fai.txt"
-        err="$TMPDIR/$name.$mode.fai.err"
-        label="[oracle:$name:$mode:fai] vs BioPython"
-        if ! run_stats "$fasta" "$mode" "$fai_txt" "$err"; then
-            fail "$label" "$err"
-            mv "$stash" "${fasta}.zfi"
-            continue
-        fi
-        check_oracle "$label" check "$mode" fai "$fasta" "$exp" "$fai_txt"
+    stash="$TMPDIR/$name.zfi"
+    mv "${fasta}.zfi" "$stash"
+    fai_txt="$TMPDIR/$name.fai.txt"
+    err="$TMPDIR/$name.fai.err"
+    label="[oracle:$name:fai] vs BioPython"
+    if ! run_stats "$fasta" "$fai_txt" "$err"; then
+        fail "$label" "$err"
         mv "$stash" "${fasta}.zfi"
+        return
+    fi
+    check_oracle "$label" check fai "$fasta" "$exp" "$fai_txt"
+    mv "$stash" "${fasta}.zfi"
 
-        # Identity: .zfi stats == .fai stats.
-        check_oracle "[index:cross] $name $mode .zfi == .fai" same "$mode" "$zfi_txt" "$fai_txt"
-    done
+    check_oracle "[index:cross] $name .zfi == .fai" same "$zfi_txt" "$fai_txt"
 }
 
 # One pass per peer tool so failures name the tool (get-style).
 # Wrappers: clean fixtures only (WRAPPER_FIXTURES). Never run on messy side-table files.
 verify_parity() {
     local name="$1" fasta="$2" exp="$3"
-    local idx_txt="$TMPDIR/$name.index-only.zfi.txt"
-    local full_txt="$TMPDIR/$name.full.zfi.txt"
+    local stats_txt="$TMPDIR/$name.zfi.txt"
     local tool bin out err label
     local ran=0
     local use_wrappers=false
     local sk
 
-    if [[ ! -f "$idx_txt" || ! -f "$full_txt" ]]; then
+    if [[ ! -f "$stats_txt" ]]; then
         err="$TMPDIR/$name.parity_setup.err"
-        echo "missing z-fasta stats outputs for $name (run oracle modes first)" >"$err"
+        echo "missing z-fasta stats output for $name (run format verification first)" >"$err"
         fail "[parity:$name] setup" "$err"
         return
     fi
@@ -580,7 +553,7 @@ verify_parity() {
                 fail "$label (stale binary)" "$err"
                 continue
             fi
-            check_oracle "$label" parity "$fasta" "$exp" "$idx_txt" "$full_txt" "$tool" "$out"
+            check_oracle "$label" parity "$fasta" "$exp" "$stats_txt" "$tool" "$out"
             ran=$((ran + 1))
         done
     fi
@@ -595,7 +568,7 @@ verify_parity() {
             fail "$label (run)" "$err"
             break
         fi
-        check_oracle "$label" parity "$fasta" "$exp" "$idx_txt" "$full_txt" seqkit "$out"
+        check_oracle "$label" parity "$fasta" "$exp" "$stats_txt" seqkit "$out"
         ran=$((ran + 1))
         break
     done
@@ -610,7 +583,7 @@ verify_parity() {
             fail "$label (run)" "$err"
             break
         fi
-        check_oracle "$label" parity "$fasta" "$exp" "$idx_txt" "$full_txt" seqtk "$out"
+        check_oracle "$label" parity "$fasta" "$exp" "$stats_txt" seqtk "$out"
         ran=$((ran + 1))
         break
     done
@@ -624,7 +597,7 @@ verify_parity() {
 
 verify_file() {
     local name="$1"
-    verify_modes oracle "$name" "$TMPDIR/$name.fasta" "$TMPDIR/$name.expected.json"
+    verify_formats oracle "$name" "$TMPDIR/$name.fasta" "$TMPDIR/$name.expected.json"
     if ! $SKIP_TOOLS; then
         verify_parity "$name" "$TMPDIR/$name.fasta" "$TMPDIR/$name.expected.json"
     fi
@@ -637,7 +610,7 @@ verify_messy() {
         [[ -f "$MESSY_DIR/${name}.fasta" ]] || { fail "[extended:messy] missing fixture $name"; continue; }
         prepare_messy "$name" "$fasta" || { fail "[extended:messy] index failed $name"; continue; }
         oracle expected "$fasta" >"$TMPDIR/messy_${name}.expected.json"
-        verify_modes "extended:messy" "messy_$name" "$fasta" "$TMPDIR/messy_${name}.expected.json" zfi-only
+        verify_formats "extended:messy" "messy_$name" "$fasta" "$TMPDIR/messy_${name}.expected.json" zfi-only
     done
 
     # Uniform control: peers can index; exercise .zfi and .fai stats cross-compare.
@@ -647,7 +620,7 @@ verify_messy() {
     cp "$MESSY_DIR/${name}.fasta" "$fasta"
     ensure_index "$fasta" || { fail "[extended:messy] index failed $name" "$TMPDIR/faidx.err"; return; }
     oracle expected "$fasta" >"$TMPDIR/messy_${name}.expected.json"
-    verify_modes "extended:messy" "messy_$name" "$fasta" "$TMPDIR/messy_${name}.expected.json"
+    verify_formats "extended:messy" "messy_$name" "$fasta" "$TMPDIR/messy_${name}.expected.json"
 }
 
 verify_dedup_stats() {
@@ -663,18 +636,17 @@ verify_dedup_stats() {
     ensure_index "$dedup_fasta" || { fail "[extended:dedup] default index setup" "$TMPDIR/faidx.err"; return; }
     oracle expected "$dedup_fasta" >"$exp_dedup"
     err="$TMPDIR/dedup_default.err"
-    run_stats "$dedup_fasta" index-only "$TMPDIR/dedup_default.index-only.txt" "$err" \
-        || { fail "[extended:dedup] default index-only stats" "$err"; return; }
-    check_oracle "[extended:dedup] default vs BioPython" check index-only zfi \
-        "$dedup_fasta" "$exp_dedup" "$TMPDIR/dedup_default.index-only.txt"
+    run_stats "$dedup_fasta" "$TMPDIR/dedup_default.txt" "$err" \
+        || { fail "[extended:dedup] default stats" "$err"; return; }
+    check_oracle "[extended:dedup] default vs BioPython" check zfi \
+        "$dedup_fasta" "$exp_dedup" "$TMPDIR/dedup_default.txt"
 
     cp "$TEST_DATA/edge_cases.fasta" "$nodedup_fasta"
     rm -f "${nodedup_fasta}.zfi" "${nodedup_fasta}.fai"
     "$ZFASTA" index --no-dedup "$nodedup_fasta" >/dev/null 2>&1 \
         || { fail "[extended:dedup] index --no-dedup"; return; }
     oracle expected "$nodedup_fasta" --no-dedup >"$exp_nodedup"
-    verify_modes "extended:dedup" "edge_cases_nodedup" "$nodedup_fasta" "$exp_nodedup" zfi-only
-
+    verify_formats "extended:dedup" "edge_cases_nodedup" "$nodedup_fasta" "$exp_nodedup" zfi-only
     dedup_seqs="$("$PYTHON" -c "import json; print(json.load(open('$exp_dedup'))['num_seqs'])")"
     nodedup_seqs="$("$PYTHON" -c "import json; print(json.load(open('$exp_nodedup'))['num_seqs'])")"
     if [[ "$nodedup_seqs" -gt "$dedup_seqs" ]]; then
@@ -689,9 +661,8 @@ verify_dedup_stats() {
 verify_layout_twins() {
     section_hdr "extended:layout" "messy == uniform (same bases)"
     local uniform="$TMPDIR/layout_uniform.fasta"
-    local variant name fasta err mode
-    local uref_full="$TMPDIR/layout_uniform.full.txt"
-    local uref_idx="$TMPDIR/layout_uniform.index-only.txt"
+    local variant name fasta err
+    local uniform_stats="$TMPDIR/layout_uniform.txt"
 
     generate_layout_twins
     [[ -f "$LAYOUT_TWINS/uniform.fasta" ]] || {
@@ -704,14 +675,12 @@ verify_layout_twins() {
     "$ZFASTA" index "$uniform" >/dev/null 2>&1 \
         || { fail "[extended:layout] index uniform"; return; }
     err="$TMPDIR/layout_uniform.err"
-    run_stats "$uniform" full "$uref_full" "$err" \
-        || { fail "[extended:layout] uniform full stats" "$err"; return; }
-    run_stats "$uniform" index-only "$uref_idx" "$err" \
-        || { fail "[extended:layout] uniform index-only stats" "$err"; return; }
+    run_stats "$uniform" "$uniform_stats" "$err" \
+        || { fail "[extended:layout] uniform stats" "$err"; return; }
 
     oracle expected "$uniform" >"$TMPDIR/layout_uniform.expected.json"
-    check_oracle "[extended:layout] uniform vs BioPython" check full zfi \
-        "$uniform" "$TMPDIR/layout_uniform.expected.json" "$uref_full"
+    check_oracle "[extended:layout] uniform vs BioPython" check zfi \
+        "$uniform" "$TMPDIR/layout_uniform.expected.json" "$uniform_stats"
 
     for variant in "${LAYOUT_TWIN_VARIANTS[@]}"; do
         name="layout_$variant"
@@ -725,27 +694,18 @@ verify_layout_twins() {
         "$ZFASTA" index "$fasta" >/dev/null 2>&1 \
             || { fail "[extended:layout] index $variant"; continue; }
 
-        for mode in full index-only; do
-            err="$TMPDIR/${name}.${mode}.err"
-            run_stats "$fasta" "$mode" "$TMPDIR/${name}.${mode}.txt" "$err" \
-                || { fail "[extended:layout] $variant $mode stats" "$err"; continue; }
-            if [[ "$mode" == full ]]; then
-                check_oracle "[extended:layout] $variant full == uniform" same full \
-                    "$uref_full" "$TMPDIR/${name}.full.txt"
-            else
-                check_oracle "[extended:layout] $variant index-only == uniform" same index-only \
-                    "$uref_idx" "$TMPDIR/${name}.index-only.txt"
-            fi
-        done
+        err="$TMPDIR/${name}.err"
+        run_stats "$fasta" "$TMPDIR/${name}.txt" "$err" \
+            || { fail "[extended:layout] $variant stats" "$err"; continue; }
+        check_oracle "[extended:layout] $variant == uniform" same \
+            "$uniform_stats" "$TMPDIR/${name}.txt"
 
         oracle expected "$fasta" >"$TMPDIR/${name}.expected.json"
-        check_oracle "[extended:layout] $variant vs BioPython" check full zfi \
-            "$fasta" "$TMPDIR/${name}.expected.json" "$TMPDIR/${name}.full.txt"
+        check_oracle "[extended:layout] $variant vs BioPython" check zfi \
+            "$fasta" "$TMPDIR/${name}.expected.json" "$TMPDIR/${name}.txt"
     done
 }
 
-# Product policy: full stats report source-level extras; index-only never fabricates 0
-# on a deduplicated index (n/a). --no-dedup index-only can report retained repeats.
 verify_duplicates_policy() {
     section_hdr "extended:dedup" "Duplicates line policy"
     local fasta="$TMPDIR/dup_policy.fasta"
@@ -757,57 +717,15 @@ verify_duplicates_policy() {
     "$ZFASTA" index "$fasta" >/dev/null 2>&1 \
         || { fail "[extended:dedup] default index for Duplicates policy"; return; }
 
-    out="$TMPDIR/dup_policy.full.txt"
-    run_stats "$fasta" full "$out" "$err" \
-        || { fail "[extended:dedup] full stats on default index" "$err"; return; }
+    out="$TMPDIR/dup_policy.txt"
+    run_stats "$fasta" "$out" "$err" \
+        || { fail "[extended:dedup] stats on default index" "$err"; return; }
     dups="$(awk '/^Duplicates:/{print $2; exit}' "$out")"
     if [[ "$dups" == "1" ]]; then
-        pass "[extended:dedup] full Duplicates=1 for edge_cases (source extras)"
+        pass "[extended:dedup] Duplicates=1 for edge_cases (source extras)"
     else
         echo "expected Duplicates: 1, got ${dups:-missing}" >"$err"
-        fail "[extended:dedup] full Duplicates=1 for edge_cases" "$err"
-    fi
-
-    out="$TMPDIR/dup_policy.index-only.txt"
-    run_stats "$fasta" index-only "$out" "$err" \
-        || { fail "[extended:dedup] index-only on default index" "$err"; return; }
-    if grep -q '^Duplicates:[[:space:]]*n/a' "$out"; then
-        pass "[extended:dedup] index-only Duplicates=n/a on deduped index"
-    else
-        echo "expected Duplicates: n/a ..., got:" >"$err"
-        grep '^Duplicates:' "$out" >>"$err" || true
-        fail "[extended:dedup] index-only Duplicates=n/a on deduped index" "$err"
-    fi
-
-    rm -f "${fasta}.zfi" "${fasta}.fai"
-    "$ZFASTA" index --no-dedup "$fasta" >/dev/null 2>&1 \
-        || { fail "[extended:dedup] index --no-dedup for Duplicates policy"; return; }
-    out="$TMPDIR/dup_policy.nodedup.index-only.txt"
-    run_stats "$fasta" index-only "$out" "$err" \
-        || { fail "[extended:dedup] index-only on --no-dedup index" "$err"; return; }
-    dups="$(awk '/^Duplicates:/{print $2; exit}' "$out")"
-    if [[ "$dups" == "1" ]]; then
-        pass "[extended:dedup] index-only Duplicates=1 on --no-dedup index"
-    else
-        echo "expected Duplicates: 1, got ${dups:-missing}" >"$err"
-        fail "[extended:dedup] index-only Duplicates=1 on --no-dedup index" "$err"
-    fi
-
-    # --no-dedup with unique names still cannot invent 0 under index-only.
-    local uniq="$TMPDIR/dup_policy_uniq.fasta"
-    cp "$TEST_DATA/simple.fasta" "$uniq"
-    rm -f "${uniq}.zfi" "${uniq}.fai"
-    "$ZFASTA" index --no-dedup "$uniq" >/dev/null 2>&1 \
-        || { fail "[extended:dedup] index --no-dedup unique names"; return; }
-    out="$TMPDIR/dup_policy_uniq.index-only.txt"
-    run_stats "$uniq" index-only "$out" "$err" \
-        || { fail "[extended:dedup] index-only on --no-dedup unique" "$err"; return; }
-    if grep -q '^Duplicates:[[:space:]]*n/a' "$out"; then
-        pass "[extended:dedup] index-only Duplicates=n/a on --no-dedup unique names"
-    else
-        echo "expected Duplicates: n/a ..., got:" >"$err"
-        grep '^Duplicates:' "$out" >>"$err" || true
-        fail "[extended:dedup] index-only Duplicates=n/a on --no-dedup unique names" "$err"
+        fail "[extended:dedup] Duplicates=1 for edge_cases" "$err"
     fi
 }
 
@@ -838,24 +756,16 @@ verify_edge_paths() {
     expect_fail "[extended:edge] not_fasta (no index)" \
         "$ZFASTA" stats "$junk"
 
-    # Indexed simple: --index-only must omit Composition; full must include it.
     local ok="$TMPDIR/edge_ok.fasta"
     cp "$TEST_DATA/simple.fasta" "$ok"
     ensure_index "$ok" || { fail "[extended:edge] index setup" "$TMPDIR/faidx.err"; return; }
-    local out="$TMPDIR/edge_ok.index-only.txt" err="$TMPDIR/edge_ok.err"
-    run_stats "$ok" index-only "$out" "$err" || { fail "[extended:edge] index-only run" "$err"; return; }
+    local out="$TMPDIR/edge_ok.txt" err="$TMPDIR/edge_ok.err"
+    run_stats "$ok" "$out" "$err" || { fail "[extended:edge] stats run" "$err"; return; }
     if grep -q "Composition:" "$out"; then
-        echo "Composition present under --index-only" >"$err"
-        fail "[extended:edge] index-only omits Composition" "$err"
-    else
-        pass "[extended:edge] index-only omits Composition"
-    fi
-    run_stats "$ok" full "$TMPDIR/edge_ok.full.txt" "$err" || { fail "[extended:edge] full run" "$err"; return; }
-    if grep -q "Composition:" "$TMPDIR/edge_ok.full.txt"; then
-        pass "[extended:edge] full includes Composition"
+        pass "[extended:edge] stats includes Composition"
     else
         echo "Composition missing" >"$err"
-        fail "[extended:edge] full includes Composition" "$err"
+        fail "[extended:edge] stats includes Composition" "$err"
     fi
 }
 
@@ -927,7 +837,7 @@ run_perf_full() {
     echo "--------------------------------------------------"
     echo "  Note: each tool is timed alone. On Genome (~3 GB) peers re-parse"
     echo "  the whole file every sample (warmup+runs). Expect long walls."
-    echo "  z-fasta full (fai) / indexed lanes live in perf_mode + scaling."
+    echo "  The .fai lane is retained in scaling."
 
     local ds fa allow_seqtk
     for ds in Genome Transcriptome Proteome; do
@@ -938,46 +848,6 @@ run_perf_full() {
         echo "  -- dataset $ds ($(du -h "$fa" | cut -f1)) --"
         run_stats_peers perf_full "$ds" "$fa" "$out_dir" false "$allow_seqtk"
         echo "  done perf_full $ds"
-    done
-}
-
-run_perf_mode() {
-    local out_dir="$RESULTS_DIR/perf_mode_${TIMESTAMP}"
-    mkdir -p "$out_dir"
-    SECTION_MODE="perf_mode_${TIMESTAMP}"
-
-    echo "--------------------------------------------------"
-    echo " z-fasta modes (full zfi/fai + indexed zfi/fai)"
-    echo "--------------------------------------------------"
-    echo "  Policy: .zfi preferred; .fai is compatibility for uniform records."
-    echo "  Same stats surface for both (messy side tables need .zfi)."
-
-    local ds fa qf qz nbytes json
-    qz="$(quote_arg "$ZFASTA")"
-    for ds in Genome Transcriptome Proteome; do
-        fa="${REAL_DATASETS[$ds]:-}"
-        [[ -n "$fa" ]] || continue
-        qf="$(quote_arg "$fa")"
-        nbytes="$(file_size_bytes "$fa")"
-        echo "  -- dataset $ds --"
-
-        json="$out_dir/${ds}__z-fasta-full.json"
-        run_zebrac_tool perf_mode "$ds" z-fasta-full z-fasta "$json" \
-            "$qz stats $qf > /dev/null" "$nbytes"
-
-        json="$out_dir/${ds}__z-fasta-full-fai.json"
-        run_zebrac_tool_fai "$fa" perf_mode "$ds" z-fasta-full-fai z-fasta "$json" \
-            "$qz stats $qf > /dev/null" "$nbytes"
-
-        json="$out_dir/${ds}__z-fasta-indexed-zfi.json"
-        run_zebrac_tool perf_mode "$ds" z-fasta-indexed-zfi z-fasta "$json" \
-            "$qz stats --index-only $qf > /dev/null" "$nbytes"
-
-        json="$out_dir/${ds}__z-fasta-indexed-fai.json"
-        run_zebrac_tool_fai "$fa" perf_mode "$ds" z-fasta-indexed-fai z-fasta "$json" \
-            "$qz stats --index-only $qf > /dev/null" "$nbytes"
-
-        echo "  done perf_mode $ds"
     done
 }
 
@@ -1026,16 +896,14 @@ run_perf() {
     RUN_MANIFEST="$RESULTS_DIR/run_${TIMESTAMP}.json"
     if [[ -n "${STATS_RUN_TIMESTAMP:-}" ]] && [[ -f "$METADATA_JSONL" ]]; then
         # Drop sections we are about to re-run so resume does not duplicate metadata rows.
-        python3 - "$METADATA_JSONL" "$DO_FULL" "$DO_MODE" "$DO_SCALE" "$DO_SCALE_SIZE" "$DO_SCALE_SEQS" <<'PY'
+        python3 - "$METADATA_JSONL" "$DO_FULL" "$DO_SCALE" "$DO_SCALE_SIZE" "$DO_SCALE_SEQS" <<'PY'
 import json, sys
 from pathlib import Path
 path = Path(sys.argv[1])
-do_full, do_mode, do_scale, do_size, do_seqs = (a == "true" for a in sys.argv[2:7])
+do_full, do_scale, do_size, do_seqs = (a == "true" for a in sys.argv[2:6])
 drop = set()
 if do_full:
     drop.add("perf_full")
-if do_mode:
-    drop.add("perf_mode")
 if do_scale and do_size:
     drop.add("scale_size")
 if do_scale and do_seqs:
@@ -1063,8 +931,6 @@ PY
     preload_real_indexes
 
     $DO_FULL && run_perf_full
-    $DO_MODE && run_perf_mode
-
     if $DO_SCALE; then
         ensure_scaling_fixtures
         preload_scaling_indexes
@@ -1073,7 +939,6 @@ PY
     fi
 
     : "${SECTION_FULL:=$(existing_section_dir perf_full)}"
-    : "${SECTION_MODE:=$(existing_section_dir perf_mode)}"
     : "${SECTION_SCALE_SIZE:=$(existing_section_dir scale_size)}"
     : "${SECTION_SCALE_SEQS:=$(existing_section_dir scale_seqs_fixed)}"
 

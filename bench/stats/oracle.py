@@ -544,34 +544,22 @@ def check_header(expected: dict, got: dict, errors: list[str], index_tag: str) -
     str_ok(errors, "header.file_size", expected["fasta_size"], got.get("file_size", "?"))
 
 
-def compare_duplicates(expected: dict, got: dict, errors: list[str], *, index_only: bool) -> None:
-    """Product policy: full stats report source extras; index-only never fabricates 0."""
+def compare_duplicates(expected: dict, got: dict, errors: list[str]) -> None:
     if "source_duplicates" not in expected:
-        return
-    if index_only:
-        # A number is knowable only when the index retains repeated names.
-        # Unique index names → n/a (dedup may have dropped repeats, or source
-        # may only duplicate empty records the indexer omits).
-        if expected.get("index_duplicates", 0) > 0:
-            int_ok(errors, "duplicates", expected["index_duplicates"], got.get("duplicates", -1))
-        elif "duplicates_na" not in got:
-            errors.append(
-                f"duplicates: expected n/a under index-only with no retained repeats, got {got.get('duplicates', '?')!r}"
-            )
         return
     int_ok(errors, "duplicates", expected["source_duplicates"], got.get("duplicates", -1))
 
 
-def compare_index(expected: dict, got: dict, errors: list[str], *, index_only: bool = False) -> None:
+def compare_index(expected: dict, got: dict, errors: list[str]) -> None:
     for key in ("num_seqs", "total_bases", "shortest_len", "longest_len", "mean", "median", "n50", "l50", "n90", "l90", "au"):
         int_ok(errors, key, expected[key], got.get(key, -1))
     str_ok(errors, "shortest_name", expected["shortest_name"], got.get("shortest_name", "?"))
     str_ok(errors, "longest_name", expected["longest_name"], got.get("longest_name", "?"))
-    compare_duplicates(expected, got, errors, index_only=index_only)
+    compare_duplicates(expected, got, errors)
 
 
 def compare_full(expected: dict, got: dict, errors: list[str]) -> None:
-    compare_index(expected, got, errors, index_only=False)
+    compare_index(expected, got, errors)
     want_type = "Nucleotide" if expected["seq_type"] == "nucleotide" else "Protein"
     str_ok(errors, "type", want_type, got.get("type", "?"))
 
@@ -643,7 +631,7 @@ def cmd_expected(argv: list[str]) -> None:
 
 
 def cmd_check(argv: list[str]) -> None:
-    mode, index_tag, fasta_path, exp_path, stats_path = argv[2], argv[3], argv[4], argv[5], argv[6]
+    index_tag, fasta_path, exp_path, stats_path = argv[2], argv[3], argv[4], argv[5]
     expected = json.loads(Path(exp_path).read_text())
     text = Path(stats_path).read_text()
     got = parse_zfasta(text)
@@ -651,64 +639,19 @@ def cmd_check(argv: list[str]) -> None:
 
     check_header(expected, got, errors, index_tag)
 
-    if mode == "index-only":
-        if "Composition:" in text:
-            errors.append("index-only: composition section present")
-        if "run without --index-only" not in got.get("type", ""):
-            errors.append(f"index-only: bad type placeholder ({got.get('type', '?')!r})")
-        compare_index(expected, got, errors, index_only=True)
-    else:
-        if "Composition:" not in text:
-            errors.append("full: composition section missing")
-        compare_full(expected, got, errors)
-
-    if errors:
-        fail(errors)
-
-
-def cmd_verify_mode(argv: list[str]) -> None:
-    mode, fasta_path, exp_path, zfi_path, fai_path = argv[2], argv[3], argv[4], argv[5], argv[6]
-    expected = json.loads(Path(exp_path).read_text())
-    errors: list[str] = []
-    index_only = mode == "index-only"
-
-    for tag, path in (("zfi", zfi_path), ("fai", fai_path)):
-        text = Path(path).read_text()
-        got = parse_zfasta(text)
-        check_header(expected, got, errors, tag)
-        if index_only:
-            if "Composition:" in text:
-                errors.append(f"{tag}: composition section present")
-            if "run without --index-only" not in got.get("type", ""):
-                errors.append(f"{tag}: bad index-only type placeholder")
-            compare_index(expected, got, errors, index_only=True)
-        else:
-            if "Composition:" not in text:
-                errors.append(f"{tag}: composition section missing")
-            compare_full(expected, got, errors)
-
-    zfi = parse_zfasta(Path(zfi_path).read_text())
-    fai = parse_zfasta(Path(fai_path).read_text())
-    if index_only:
-        compare_index(
-            {k: zfi.get(k, -1) for k in ("num_seqs", "total_bases", "shortest_len", "longest_len", "mean", "median", "n50", "l50", "n90", "l90", "au")}
-            | {"shortest_name": zfi.get("shortest_name", "?"), "longest_name": zfi.get("longest_name", "?")},
-            fai,
-            errors,
-        )
-        cross_duplicates_ok(zfi, fai, errors)
-    else:
-        compare_parsed_full(zfi, fai, errors)
+    if "Composition:" not in text:
+        errors.append("composition section missing")
+    compare_full(expected, got, errors)
 
     if errors:
         fail(errors)
 
 
 def cmd_parity(argv: list[str]) -> None:
-    fasta, exp_path, zfi_idx, zfi_full = argv[2], argv[3], argv[4], argv[5]
+    fasta, exp_path, zfi_full = argv[2], argv[3], argv[4]
     expected = json.loads(Path(exp_path).read_text())
     errors: list[str] = []
-    pos = 6
+    pos = 5
     tools_validated = 0
     while pos < len(argv):
         tool, path = argv[pos], argv[pos + 1]
@@ -751,21 +694,12 @@ def cmd_parity(argv: list[str]) -> None:
 
 
 def cmd_same(argv: list[str]) -> None:
-    mode, a_path, b_path = argv[2], argv[3], argv[4]
+    a_path, b_path = argv[2], argv[3]
     a = parse_zfasta(Path(a_path).read_text())
     b = parse_zfasta(Path(b_path).read_text())
     errors: list[str] = []
 
-    if mode == "index-only":
-        compare_index(
-            {k: a.get(k, -1) for k in ("num_seqs", "total_bases", "shortest_len", "longest_len", "mean", "median", "n50", "l50", "n90", "l90", "au")}
-            | {"shortest_name": a.get("shortest_name", "?"), "longest_name": a.get("longest_name", "?")},
-            b,
-            errors,
-        )
-        cross_duplicates_ok(a, b, errors)
-    else:
-        compare_parsed_full(a, b, errors)
+    compare_parsed_full(a, b, errors)
 
     if errors:
         fail(errors)
@@ -774,7 +708,6 @@ def cmd_same(argv: list[str]) -> None:
 COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "expected": cmd_expected,
     "check": cmd_check,
-    "verify-mode": cmd_verify_mode,
     "same": cmd_same,
     "parity": cmd_parity,
 }
@@ -782,7 +715,7 @@ COMMANDS: dict[str, Callable[[list[str]], None]] = {
 
 def main() -> None:
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
-        print("usage: oracle.py <expected|check|verify-mode|same|parity> ...", file=sys.stderr)
+        print("usage: oracle.py <expected|check|same|parity> ...", file=sys.stderr)
         sys.exit(2)
     COMMANDS[sys.argv[1]](sys.argv)
 

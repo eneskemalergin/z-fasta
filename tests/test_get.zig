@@ -734,6 +734,7 @@ test "stats rejects unknown options before and after FASTA path" {
 
     try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "stats", unknown, fasta }, unknown);
     try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "stats", fasta, unknown }, unknown);
+    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "stats", "--index-only", fasta }, "--index-only");
 }
 
 test "validate rejects unknown options before and after FASTA path" {
@@ -815,7 +816,7 @@ test "CLI failures: invalid present zfi blocks valid fai for get and stats" {
     const expected = try std.fmt.allocPrint(allocator, "error: corrupt index file for: {s}\n", .{fasta});
     try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", fasta, "seq" }, 1, expected);
     try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", fasta, "--names", "missing.txt" }, 1, expected);
-    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "stats", "--index-only", fasta }, 1, expected);
+    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "stats", fasta }, 1, expected);
 }
 
 test "streamed names failures suppress summary and expose only valid output prefixes" {
@@ -955,7 +956,7 @@ test "CLI failures: stats and validate usage errors" {
         allocator,
         &.{ ZFASTA_BIN, "stats" },
         1,
-        "error: usage: z-fasta stats [--index-only] <file.fasta>\n",
+        "error: usage: z-fasta stats <file.fasta>\n",
     );
     try expectCliFailure(
         allocator,
