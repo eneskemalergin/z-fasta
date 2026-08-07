@@ -18,12 +18,14 @@ Indexing and GET performance and memory cleanup. No `.zfi` format change. **Re-i
 - **Get**
   - BED input uses one streaming path. The `--chunk-size` option and its all-memory `-1` mode are removed.
   - Names and BED requests use reusable active storage instead of retaining complete inputs or command-lifetime BED names.
+  - FASTA extraction reads requested spans through one portable path across positional, names, BED, strand, and orientation work, without a mapped fallback or retained complete output.
+  - Positional `.fai` loading retains only requested records; `.zfi` remains authoritative when present. Both formats resolve duplicate names to the first exact match.
   - Each invocation accepts one request source. Summary timing includes index loading and streamed request acquisition, and annotations describe the final composed orientation.
 
 - **Benchmarks**
   - The index report now compares the four product configurations directly: `.zfi` or `.fai`, each with deduplication on or off.
   - Real-data and scaling results cover the single production index path and retain the existing peer comparisons.
-  - GET correctness and performance use the single supported BED path without obsolete chunk-mode lanes.
+  - GET correctness passes 418 checks. Performance compares `.zfi` and `.fai` across positional, multi-region, BED, and reverse-complement work without obsolete chunk-mode lanes.
 
 ### Fixed
 

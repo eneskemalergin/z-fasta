@@ -1999,6 +1999,7 @@ test "streamed fai loading accepts the maximum sequence name" {
         defer idx.deinit(io);
 
         try std.testing.expectEqual(@as(usize, 1), idx.records.len);
+        try std.testing.expectEqualStrings("?", idx.getRecordName(0));
         try std.testing.expectEqualStrings(name, idx.getRecordNameWithIo(io, 0));
     }
 }

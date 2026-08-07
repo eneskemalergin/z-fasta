@@ -24,7 +24,7 @@ Quick links: [Supported Today](#supported-today) | [Installation](#installation)
 
 `get` accepts positional regions, BED files, BED from stdin, names files, strand-aware extraction, and orientation transforms (`--rc`, `--reverse-only`, `--complement-only`, `--annotate-rc`). FASTQ and compressed FASTA/BGZF remain out of scope.
 
-CI builds and smokes the binary on Linux, macOS, and Windows. Mapping-backed commands go through a portable `MemoryMap` layer; POSIX memory advice is an optimization and a no-op on Windows.
+CI builds and smokes the binary on Linux, macOS, and Windows. GET reads requested spans through the same portable file path on every platform. Commands that still map data use the portable mapping layer; POSIX memory advice remains optional.
 
 ## Why z-fasta?
 
@@ -197,9 +197,9 @@ Duplicate _names_ are not the same as identical _sequence contents_. Default `in
 
 **Get / validate caps:** at most 1024 positional regions per `get` call. Names and BED request names may be at most 65535 bytes. Streaming request storage retains up to 4 MiB of unique name bytes plus one final name per batch; names batches hold at most 65536 requests and BED batches at most 4096. `validate` stops after 10000 retained events.
 
-**Memory:** index reads sequence payload through a bounded buffer. Get, stats, and validate retain mapped FASTA paths, so their RSS can approach the mapped file size. `stats --index-only` skips the sequence scan. Dense BED releases mapped pages behind the cursor; sparse gets on large FASTAs prefer positional reads.
+**Memory:** index reads sequence payload through a bounded buffer. GET reads requested FASTA spans through one descriptor and retains only index metadata, active requests, side tables, and fixed buffers. Stats and validate still map FASTA data, so full scans can approach the mapped file size. `stats --index-only` skips the sequence scan.
 
-**Platforms:** Linux, macOS, and Windows share the same commands through portable mapping. Memory-advice hints are POSIX-only (unused on Windows). CI builds and smokes six native platform lanes: x86_64 and arm64 on all three operating systems. Tagged releases publish the same six archives; v0.3.0 was the first complete six-archive release.
+**Platforms:** Linux, macOS, and Windows share the same commands and GET file-access path. Memory mapping and advice used by other commands stay behind the portable platform layer. CI builds and smokes six native platform lanes: x86_64 and arm64 on all three operating systems. Tagged releases publish the same six archives; v0.3.0 was the first complete six-archive release.
 
 ## Performance & Correctness
 
@@ -217,26 +217,37 @@ See the [detailed index benchmark report](bench/index/REPORT.md) for tool defini
 
 ### Get: O(1) Region Extraction
 
-| Dataset                  | Region       | z-fasta | noodles | rust-bio | samtools | Speedup vs samtools |
-| ------------------------ | ------------ | ------- | ------- | -------- | -------- | ------------------- |
-| Genome (~2.9 GiB)        | 1 kbp region | 2.1 ms  | 2.5 ms  | 2.5 ms   | 3.2 ms   | **1.5x**            |
-| Proteome (~13 MiB)       | 1 kbp region | 2.3 ms  | 6.7 ms  | 19.8 ms  | 12.7 ms  | **5.5x**            |
-| Transcriptome (~459 MiB) | 1 kbp region | 4.4 ms  | 87.6 ms | 544.1 ms | 289.3 ms | **65.8x**           |
+| Dataset                  | Region       | z-fasta (.zfi) | z-fasta (.fai) | noodles | rust-bio | samtools | vs noodles | vs samtools |
+| ------------------------ | ------------ | -------------- | -------------- | ------- | -------- | -------- | ---------- | ----------- |
+| Genome (~2.9 GiB)        | 1 kbp region | 2.0 ms         | 2.2 ms         | 2.6 ms  | 2.7 ms   | 3.3 ms   | **1.28x**  | **1.62x**   |
+| Transcriptome (~459 MiB) | 1 kbp region | 4.8 ms         | 27.1 ms        | 88.1 ms | 530.5 ms | 292.0 ms | **18.5x**  | **61.2x**   |
+| Proteome (~13 MiB)       | 1 kbp region | 2.4 ms         | 3.6 ms         | 6.8 ms  | 20.0 ms  | 12.7 ms  | **2.9x**   | **5.4x**    |
 
 > Small-region extraction is O(1), but on this host the end-to-end CLI path is startup-dominated below roughly 10 kbp. For very large full-sequence extraction, fastahack can still win on raw write-path overhead; z-fasta stays ahead of samtools across the real-dataset GET cases.
 
-**`--rc`** uses the same mmap-backed extraction path and applies reverse traversal plus complement lookup during emission instead of materializing a second copy of the region.
+**`--rc`** applies reverse traversal and complement lookup during output without materializing a second copy of the region.
 
-**Multi-region:** one call loads the index once and streams results in CLI order ([bench/get/REPORT.md](bench/get/REPORT.md) run `20260801_093130`, Transcriptome, 1 kbp per region):
+**Multi-region:** one call loads the index once and streams results in request order. Transcriptome, 1 kbp per region:
 
-| Regions | z-fasta | samtools | noodles  | Speedup vs samtools |
-| ------- | ------- | -------- | -------- | ------------------- |
-| 1       | 5.5 ms  | 294.2 ms | 88.1 ms  | **53.1x**           |
-| 10      | 28.3 ms | 294.3 ms | 91.6 ms  | **10.4x**           |
-| 100     | 28.2 ms | 298.3 ms | 129.0 ms | **10.6x**           |
-| 1,000   | 37.2 ms | 297.0 ms | 462.0 ms | **8.0x**            |
+| Regions | z-fasta (.zfi) | z-fasta (.fai) | noodles  | samtools | vs noodles | vs samtools |
+| ------- | -------------- | -------------- | -------- | -------- | ---------- | ----------- |
+| 1       | 4.9 ms         | 26.9 ms        | 86.5 ms  | 283.1 ms | **17.7x**  | **57.9x**   |
+| 10      | 24.5 ms        | 30.6 ms        | 89.4 ms  | 283.9 ms | **3.6x**   | **11.6x**   |
+| 100     | 24.2 ms        | 32.2 ms        | 124.5 ms | 290.9 ms | **5.1x**   | **12.0x**   |
+| 1,000   | 30.0 ms        | 37.1 ms        | 407.7 ms | 295.8 ms | **13.6x**  | **9.9x**    |
 
 > Benchmarked on REAL_Transcriptome.fa. Latency is dominated by index resolution and output setup rather than region byte count.
+
+**BED:** one invocation streams 1 kbp intervals from a BED file. Transcriptome:
+
+| BED rows | z-fasta (.zfi) | z-fasta (.fai) | noodles  | bedtools | vs noodles | vs bedtools |
+| -------- | -------------- | -------------- | -------- | -------- | ---------- | ----------- |
+| 10       | 26.0 ms        | 57.7 ms        | 91.8 ms  | 585.6 ms | **3.5x**   | **22.5x**   |
+| 100      | 25.5 ms        | 55.9 ms        | 130.6 ms | 582.4 ms | **5.1x**   | **22.9x**   |
+| 1,000    | 27.4 ms        | 59.9 ms        | 469.4 ms | 575.9 ms | **17.1x**  | **21.0x**   |
+| 10,000   | 43.6 ms        | 75.4 ms        | 3.700 s  | 670.3 ms | **84.8x**  | **15.4x**   |
+
+See the [detailed GET benchmark report](bench/get/REPORT.md) for tool definitions, methodology, memory, page faults, BED, reverse-complement, and messy-layout results.
 
 ### Stats: Assembly/Proteome Statistics
 

@@ -170,7 +170,6 @@ pub const IndexRecord = extern struct {
     line_bytes: u32,
 
     pub fn getName(self: IndexRecord, data: []const u8) []const u8 {
-        // `.zfi`: slice into FASTA (byte after `>`). `.fai`: slice into `.fai` mmap line.
         return data[self.name_offset..][0..self.name_len];
     }
 
@@ -319,15 +318,8 @@ pub const LoadedIndex = struct {
             return self.name_slices[rec_idx];
         }
         const rec = self.records[rec_idx];
-        // Wire names (including empty `>\n…` / `.fai` lines that start with tab).
-        // `.zfi` always stores name_offset/name_len on the record. Streamed FAI
-        // loads keep copied names or sidecar offsets separately.
-        if (rec.name_len > 0 or rec.nameInZfi() or self.source == .zfi) {
-            return rec.getName(self.recordNameData());
-        }
-        if (self.fai_data != null) {
-            return rec.getName(self.recordNameData());
-        }
+        if (self.source == .zfi) return rec.getName(self.name_blob.?);
+        if (self.fai_data) |data| return rec.getName(data);
         var it = self.name_map.iterator();
         while (it.next()) |entry| {
             if (@as(usize, entry.value_ptr.*) == rec_idx) {
