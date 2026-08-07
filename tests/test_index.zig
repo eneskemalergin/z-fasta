@@ -1754,6 +1754,24 @@ test "GET loader keeps FASTA readable without mapping it" {
     try std.testing.expectEqual(@as(u8, '>'), first_byte[0]);
 }
 
+test "stats loader keeps zfi FASTA readable without mapping it" {
+    var idx = try main.index_format.loadIndexCheckedWithMode(io, "tests/data/simple.fasta", .stats_scan);
+    defer idx.deinit(io);
+
+    try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.zfi, idx.source);
+    try std.testing.expectEqual(null, idx.fasta_map);
+    try std.testing.expectEqual(@as(usize, 0), idx.fasta_data.len);
+    try std.testing.expect(idx.zfi_map != null);
+    try std.testing.expectEqualStrings("seq1", idx.getRecordName(0));
+
+    var first_byte: [1]u8 = undefined;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try std.Io.File.readPositionalAll(idx.fasta_file, io, &first_byte, 0),
+    );
+    try std.testing.expectEqual(@as(u8, '>'), first_byte[0]);
+}
+
 test "loadIndexChecked rejects fai with zero line_bases" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1863,7 +1881,7 @@ test "loadIndexCheckedWithMode positional rejects impossible fai geometry" {
     );
 }
 
-test "loadIndexCheckedWithMode stats_scan rejects impossible fai geometry" {
+test "stats loader rejects impossible fai geometry" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1999,8 +2017,9 @@ test "streamed fai loading accepts the maximum sequence name" {
         defer idx.deinit(io);
 
         try std.testing.expectEqual(@as(usize, 1), idx.records.len);
-        try std.testing.expectEqualStrings("?", idx.getRecordName(0));
-        try std.testing.expectEqualStrings(name, idx.getRecordNameWithIo(io, 0));
+        try std.testing.expectEqualStrings(name, idx.getRecordName(0));
+        try std.testing.expect(idx.fasta_map == null);
+        try std.testing.expectEqual(@as(usize, 0), idx.fasta_data.len);
     }
 }
 
@@ -2020,7 +2039,9 @@ fn expectFaiLoaderModesAgree(fasta_path: []const u8) !void {
     try std.testing.expectEqual(full.source, stats_scan.source);
     try std.testing.expectEqual(full.records.len, positional.records.len);
     try std.testing.expectEqual(full.records.len, stats_scan.records.len);
-    try std.testing.expectEqual(full.records.len, stats_scan.fai_line_offsets.len);
+    try std.testing.expectEqual(full.records.len, stats_scan.name_slices.len);
+    try std.testing.expect(stats_scan.fasta_map == null);
+    try std.testing.expectEqual(@as(usize, 0), stats_scan.fasta_data.len);
 
     for (full.records, 0..) |rec, i| {
         const streamed = positional.records[i];
@@ -2037,11 +2058,8 @@ fn expectFaiLoaderModesAgree(fasta_path: []const u8) !void {
         try std.testing.expectEqual(rec.line_bases, scanned.line_bases);
         try std.testing.expectEqual(rec.line_bytes, scanned.line_bytes);
 
-        // stats_scan sidecar offsets are the same byte positions the full loader stores.
-        try std.testing.expectEqual(rec.name_offset, stats_scan.fai_line_offsets[i]);
-
         try std.testing.expectEqualStrings(full.getRecordName(i), positional.getRecordName(i));
-        try std.testing.expectEqualStrings(full.getRecordName(i), stats_scan.getRecordNameWithIo(io, i));
+        try std.testing.expectEqualStrings(full.getRecordName(i), stats_scan.getRecordName(i));
     }
 }
 

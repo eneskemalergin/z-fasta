@@ -2,10 +2,10 @@
 
 const std = @import("std");
 const index_format = @import("index_format.zig");
-const platform = @import("platform.zig");
 
 const IndexRecord = index_format.IndexRecord;
 const LoadedIndex = index_format.LoadedIndex;
+const SideTableLine = index_format.SideTableLine;
 const printErrorAndExit = index_format.printErrorAndExit;
 
 const SIMD_CHUNK_SIZE = 32;
@@ -310,7 +310,7 @@ fn writeReport(
 
 /// Run the stats command.
 pub fn runStats(io: std.Io, fasta_path: []const u8) void {
-    var idx = index_format.loadIndexWithMode(io, fasta_path, .stats_scan);
+    var idx = index_format.loadIndexForStats(io, fasta_path);
     defer idx.deinit(io);
 
     const records = idx.records;
@@ -330,9 +330,13 @@ pub fn runStats(io: std.Io, fasta_path: []const u8) void {
     const summary = summarizeLengths(records, lengths) catch {
         printErrorAndExit("error: sequence length overflow\n", .{});
     };
-    const shortest_name = idx.getRecordNameWithIo(io, summary.shortest_index);
-    const longest_name = idx.getRecordNameWithIo(io, summary.longest_index);
-    const comp = scanComposition(&idx);
+    const shortest_name = idx.getRecordName(summary.shortest_index);
+    const longest_name = idx.getRecordName(summary.longest_index);
+    const comp = scanComposition(&idx, allocator) catch |err| switch (err) {
+        error.OutOfMemory => printErrorAndExit("error: out of memory\n", .{}),
+        error.ReadFailed => printErrorAndExit("error: failed to read FASTA\n", .{}),
+        error.CorruptGeometry => printErrorAndExit("error: index sequence lengths do not match FASTA data\n", .{}),
+    };
     if (comp.total_bases != summary.total_symbols) {
         printErrorAndExit("error: index sequence lengths do not match FASTA data\n", .{});
     }
@@ -357,192 +361,166 @@ pub fn runStats(io: std.Io, fasta_path: []const u8) void {
     };
 }
 
-const fasta_release_batch_bytes: usize = 8 * 1024 * 1024;
+const STATS_READ_BUFFER_BYTES: usize = 256 * 1024;
 
-/// Release FASTA mmap pages during sequential composition scan; batches `madvise` to limit syscall overhead.
-const CompositionReleaseCursor = struct {
-    released_end: usize = 0,
-    scan_end: usize = 0,
+const FastaSource = struct {
+    io: std.Io,
+    file: std.Io.File,
+    size: u64,
+};
 
-    fn beforeRegion(self: *CompositionReleaseCursor, fasta: []const u8, start_byte: usize) void {
-        if (start_byte <= self.released_end) return;
-        const pending = start_byte - self.released_end;
-        if (pending >= fasta_release_batch_bytes) {
-            index_format.dropFastaSpan(fasta, self.released_end, start_byte);
-            self.released_end = start_byte;
+const StatsRecord = struct {
+    geometry: IndexRecord,
+    side_table: []const SideTableLine,
+};
+
+const ScanError = error{ OutOfMemory, ReadFailed, CorruptGeometry };
+
+const BoundedFastaReader = struct {
+    source: FastaSource,
+    buffer: []u8,
+    start: u64 = 0,
+    len: usize = 0,
+
+    fn read(self: *BoundedFastaReader, offset: u64, limit: u64) ScanError![]const u8 {
+        if (self.buffer.len == 0 or offset >= self.source.size or limit == 0) return error.CorruptGeometry;
+
+        const buffered_end = std.math.add(u64, self.start, self.len) catch return error.CorruptGeometry;
+        if (offset >= self.start and offset < buffered_end) {
+            const relative: usize = @intCast(offset - self.start);
+            const available = self.len - relative;
+            const take: usize = @intCast(@min(@as(u64, available), limit));
+            return self.buffer[relative..][0..take];
         }
-    }
 
-    fn afterRegion(self: *CompositionReleaseCursor, span_end: usize) void {
-        if (span_end > self.scan_end) self.scan_end = span_end;
-    }
-
-    fn flush(self: *CompositionReleaseCursor, fasta: []const u8) void {
-        const drop_end = @max(self.scan_end, self.released_end);
-        if (drop_end > self.released_end) {
-            index_format.dropFastaSpan(fasta, self.released_end, drop_end);
-            self.released_end = drop_end;
-        }
+        const wanted: usize = @intCast(@min(@as(u64, self.buffer.len), self.source.size - offset));
+        const got = std.Io.File.readPositionalAll(
+            self.source.file,
+            self.source.io,
+            self.buffer[0..wanted],
+            offset,
+        ) catch return error.ReadFailed;
+        if (got != wanted) return error.CorruptGeometry;
+        self.start = offset;
+        self.len = got;
+        const take: usize = @intCast(@min(@as(u64, got), limit));
+        return self.buffer[0..take];
     }
 };
 
-fn scanCompositionBytes(
-    fasta: []const u8,
-    start: usize,
-    end: usize,
-    counts: *[256]u64,
-    total_bases: *u64,
-    lowercase_count: *u64,
-) void {
-    for (fasta[start..end]) |byte| {
+fn countCompositionFiltered(data: []const u8, comp: *CompositionStats) void {
+    for (data) |byte| {
         if (byte > ' ') {
-            counts[byte] += 1;
-            total_bases.* += 1;
+            comp.counts[byte] += 1;
+            comp.total_bases += 1;
             if (byte >= 'a' and byte <= 'z') {
-                lowercase_count.* += 1;
+                comp.lowercase_count += 1;
             }
         }
     }
 }
 
-fn uniformRecordByteSpan(rec: IndexRecord) usize {
-    const full_lines = rec.seq_len / rec.line_bases;
-    const remainder = rec.seq_len % rec.line_bases;
-    return @intCast(full_lines * rec.line_bytes + remainder);
-}
-
-fn compositionRegionEnd(fasta: []const u8, rec: IndexRecord, start: usize) usize {
-    const full_lines = rec.seq_len / rec.line_bases;
-    const remainder = rec.seq_len % rec.line_bases;
-    var end: usize = start;
-    if (remainder > 0) {
-        end = start + (full_lines * rec.line_bytes) + remainder;
-        if (end < fasta.len and (fasta[end] == '\n' or fasta[end] == '\r')) {
-            end += 1;
-            if (end < fasta.len and fasta[end - 1] == '\r' and fasta[end] == '\n') {
-                end += 1;
-            }
-        }
-    } else {
-        end = start + (full_lines * rec.line_bytes);
-    }
-    return @min(end, fasta.len);
-}
-
-fn scanCompositionRecord(
-    idx: *const LoadedIndex,
-    rec: IndexRecord,
-    counts: *[256]u64,
-    total_bases: *u64,
-    lowercase_count: *u64,
-    release: *CompositionReleaseCursor,
-) void {
-    const fasta = idx.fasta_data;
+fn scanUniformRecord(reader: *BoundedFastaReader, rec: IndexRecord, comp: *CompositionStats) ScanError!void {
     if (rec.seq_len == 0) return;
+    if (rec.line_bases == 0 or rec.line_bytes < rec.line_bases) return error.CorruptGeometry;
 
-    if (!rec.isUniformWidth()) {
-        const side_table = idx.sideTableLines(rec);
-        var record_end: usize = 0;
-        for (side_table) |line| {
-            const start: usize = @intCast(line.byte_offset);
-            const end = @min(fasta.len, start + @as(usize, @intCast(line.line_bytes)));
-            release.beforeRegion(fasta, start);
-            scanCompositionBytes(fasta, start, end, counts, total_bases, lowercase_count);
-            if (end > record_end) record_end = end;
+    const last_base = rec.seq_len - 1;
+    const line = last_base / rec.line_bases;
+    const column = last_base % rec.line_bases;
+    const line_offset = std.math.mul(u64, line, rec.line_bytes) catch return error.CorruptGeometry;
+    const last_offset = std.math.add(u64, line_offset, column) catch return error.CorruptGeometry;
+    const span_len = std.math.add(u64, last_offset, 1) catch return error.CorruptGeometry;
+    const span_end = std.math.add(u64, rec.seq_offset, span_len) catch return error.CorruptGeometry;
+    if (span_end > reader.source.size) return error.CorruptGeometry;
+
+    var offset = rec.seq_offset;
+    while (offset < span_end) {
+        const data = try reader.read(offset, span_end - offset);
+
+        var pos: usize = 0;
+        while (pos < data.len) {
+            const physical = offset - rec.seq_offset + pos;
+            const line_pos: usize = @intCast(physical % rec.line_bytes);
+            if (line_pos >= rec.line_bases) {
+                pos += @min(data.len - pos, @as(usize, rec.line_bytes) - line_pos);
+                continue;
+            }
+            const bases = @min(data.len - pos, @as(usize, rec.line_bases) - line_pos);
+            countCompositionSlice(data[pos..][0..bases], &comp.counts, &comp.total_bases, &comp.lowercase_count);
+            pos += bases;
         }
-        release.afterRegion(record_end);
-        return;
+        offset += data.len;
     }
-
-    const start: usize = @intCast(rec.seq_offset);
-    release.beforeRegion(fasta, start);
-
-    if (tryScanFixedWidthRecord(fasta, rec, start, counts, total_bases, lowercase_count)) {
-        release.afterRegion(compositionRegionEnd(fasta, rec, start));
-        return;
-    }
-
-    const end = compositionRegionEnd(fasta, rec, start);
-    scanCompositionBytes(fasta, start, end, counts, total_bases, lowercase_count);
-    release.afterRegion(end);
 }
 
-/// Scan all sequence regions in the FASTA for composition.
-fn scanComposition(idx: *const LoadedIndex) CompositionStats {
-    const fasta = idx.fasta_data;
+fn scanSideTableRecord(reader: *BoundedFastaReader, lines: []const SideTableLine, comp: *CompositionStats) ScanError!void {
+    if (lines.len == 0) return error.CorruptGeometry;
 
-    // Sequential access hint for full scan (no-op on Windows).
-    platform.advise(fasta, .sequential);
+    var line_index: usize = 0;
+    while (line_index < lines.len) {
+        const start = lines[line_index].byte_offset;
+        var end = std.math.add(u64, start, lines[line_index].line_bytes) catch return error.CorruptGeometry;
+        line_index += 1;
 
-    var counts: [256]u64 = .{0} ** 256;
-    var lowercase_count: u64 = 0;
-    var total_bases: u64 = 0;
-
-    const records = idx.records;
-
-    var release = CompositionReleaseCursor{};
-
-    if (recordsInSeqOffsetOrder(records)) {
-        var scan_end: usize = 0;
-        for (records) |rec| {
-            if (rec.seq_len == 0) continue;
-
-            if (!rec.isUniformWidth()) {
-                scanCompositionRecord(idx, rec, &counts, &total_bases, &lowercase_count, &release);
-                if (release.scan_end > scan_end) scan_end = release.scan_end;
-                continue;
-            }
-
-            const start: usize = @intCast(rec.seq_offset);
-            if (start >= release.released_end + fasta_release_batch_bytes) {
-                release.beforeRegion(fasta, start);
-            }
-
-            if (tryScanFixedWidthRecord(fasta, rec, start, &counts, &total_bases, &lowercase_count)) {
-                const end = start + uniformRecordByteSpan(rec);
-                if (end > scan_end) scan_end = end;
-                continue;
-            }
-
-            const end = compositionRegionEnd(fasta, rec, start);
-            scanCompositionBytes(fasta, start, end, &counts, &total_bases, &lowercase_count);
-            if (end > scan_end) scan_end = end;
+        while (line_index < lines.len and lines[line_index].byte_offset == end) {
+            const next_end = std.math.add(u64, end, lines[line_index].line_bytes) catch return error.CorruptGeometry;
+            if (next_end - start > reader.buffer.len) break;
+            end = next_end;
+            line_index += 1;
         }
-        release.scan_end = scan_end;
+        if (end > reader.source.size) return error.CorruptGeometry;
+
+        var offset = start;
+        while (offset < end) {
+            const data = try reader.read(offset, end - offset);
+            countCompositionFiltered(data, comp);
+            offset += data.len;
+        }
+    }
+}
+
+fn scanStatsRecord(reader: *BoundedFastaReader, record: StatsRecord, comp: *CompositionStats) ScanError!void {
+    if (record.geometry.seq_len == 0) return;
+    if (record.geometry.isUniformWidth()) {
+        try scanUniformRecord(reader, record.geometry, comp);
     } else {
-        // `.fai` rows are usually name-sorted, not file order; must sort before page release.
-        const sorted_indices = std.heap.page_allocator.alloc(usize, records.len) catch {
-            printErrorAndExit("error: out of memory\n", .{});
-        };
-        defer std.heap.page_allocator.free(sorted_indices);
-        for (sorted_indices, 0..) |*slot, i| slot.* = i;
-        std.mem.sort(usize, sorted_indices, records, struct {
-            fn lessThan(ctx: []const IndexRecord, a: usize, b: usize) bool {
-                return ctx[a].seq_offset < ctx[b].seq_offset;
+        try scanSideTableRecord(reader, record.side_table, comp);
+    }
+}
+
+fn scanComposition(idx: *const LoadedIndex, allocator: std.mem.Allocator) ScanError!CompositionStats {
+    var comp = CompositionStats{
+        .counts = .{0} ** 256,
+        .total_bases = 0,
+        .seq_type = .nucleotide,
+        .lowercase_count = 0,
+    };
+    var buffer: [STATS_READ_BUFFER_BYTES]u8 = undefined;
+    var reader = BoundedFastaReader{
+        .source = .{ .io = idx.io, .file = idx.fasta_file, .size = idx.fasta_size },
+        .buffer = &buffer,
+    };
+
+    if (recordsInSeqOffsetOrder(idx.records)) {
+        for (idx.records) |rec| {
+            try scanStatsRecord(&reader, .{ .geometry = rec, .side_table = idx.sideTableLines(rec) }, &comp);
+        }
+    } else {
+        const indices = allocator.alloc(usize, idx.records.len) catch return error.OutOfMemory;
+        for (indices, 0..) |*slot, i| slot.* = i;
+        std.mem.sort(usize, indices, idx.records, struct {
+            fn lessThan(records: []const IndexRecord, a: usize, b: usize) bool {
+                return records[a].seq_offset < records[b].seq_offset;
             }
         }.lessThan);
-
-        for (sorted_indices) |rec_idx| {
-            scanCompositionRecord(
-                idx,
-                records[rec_idx],
-                &counts,
-                &total_bases,
-                &lowercase_count,
-                &release,
-            );
+        for (indices) |rec_index| {
+            const rec = idx.records[rec_index];
+            try scanStatsRecord(&reader, .{ .geometry = rec, .side_table = idx.sideTableLines(rec) }, &comp);
         }
     }
-    release.flush(fasta);
 
-    const seq_type = detectType(&counts, total_bases);
-
-    return CompositionStats{
-        .counts = counts,
-        .total_bases = total_bases,
-        .seq_type = seq_type,
-        .lowercase_count = lowercase_count,
-    };
+    comp.seq_type = detectType(&comp.counts, comp.total_bases);
+    return comp;
 }
 
 fn recordsInSeqOffsetOrder(records: []const IndexRecord) bool {
@@ -552,36 +530,6 @@ fn recordsInSeqOffsetOrder(records: []const IndexRecord) bool {
         if (rec.seq_offset < prev) return false;
         prev = rec.seq_offset;
     }
-    return true;
-}
-
-fn tryScanFixedWidthRecord(
-    fasta: []const u8,
-    rec: IndexRecord,
-    start: usize,
-    counts: *[256]u64,
-    total_bases: *u64,
-    lowercase_count: *u64,
-) bool {
-    if (rec.seq_len == 0 or rec.line_bases == 0) return true;
-    if (rec.line_bytes < rec.line_bases) return false;
-
-    const newline_bytes = rec.line_bytes - rec.line_bases;
-    if (newline_bytes != 1 and newline_bytes != 2) return false;
-
-    var pos = start;
-    var bases_remaining = rec.seq_len;
-    while (bases_remaining > 0) {
-        const bases_this_line: usize = @intCast(@min(bases_remaining, @as(u64, rec.line_bases)));
-        const line_end = pos + bases_this_line;
-        if (line_end > fasta.len) return false;
-
-        countCompositionSlice(fasta[pos..line_end], counts, total_bases, lowercase_count);
-
-        bases_remaining -= bases_this_line;
-        pos += if (bases_remaining > 0) @as(usize, @intCast(rec.line_bytes)) else bases_this_line;
-    }
-
     return true;
 }
 
@@ -680,6 +628,150 @@ test "countCompositionSlice tallies composition and lowercase" {
     try std.testing.expectEqual(@as(u64, 1), counts['A']);
     try std.testing.expectEqual(@as(u64, 1), counts['a']);
     try std.testing.expectEqual(@as(u64, 2), counts['N']);
+}
+
+test "bounded uniform reader handles LF CRLF and missing final newline" {
+    const Case = struct {
+        bytes: []const u8,
+        record: IndexRecord,
+    };
+    const cases = [_]Case{
+        .{
+            .bytes = "prefixACGT\nacgt\nNN",
+            .record = .{ .seq_offset = 6, .seq_len = 10, .line_bases = 4, .line_bytes = 5 },
+        },
+        .{
+            .bytes = "xACGT\r\nacgt\r\nNN\r\nsuffix",
+            .record = .{ .seq_offset = 1, .seq_len = 10, .line_bases = 4, .line_bytes = 6 },
+        },
+    };
+    const buffer_sizes = [_]usize{ 1, 2, 3, 4, 5, 6, 7, 15, 16, 17, 32, 33 };
+
+    for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
+        defer file.close(std.testing.io);
+        try std.Io.File.writeStreamingAll(file, std.testing.io, case.bytes);
+        const source = FastaSource{ .io = std.testing.io, .file = file, .size = case.bytes.len };
+
+        for (buffer_sizes) |buffer_size| {
+            var comp = CompositionStats{
+                .counts = .{0} ** 256,
+                .total_bases = 0,
+                .seq_type = .nucleotide,
+                .lowercase_count = 0,
+            };
+            var storage: [33]u8 = undefined;
+            var reader = BoundedFastaReader{ .source = source, .buffer = storage[0..buffer_size] };
+
+            try scanUniformRecord(&reader, case.record, &comp);
+            try std.testing.expectEqual(@as(u64, 10), comp.total_bases);
+            try std.testing.expectEqual(@as(u64, 4), comp.lowercase_count);
+            try std.testing.expectEqual(@as(u64, 1), comp.counts['A']);
+            try std.testing.expectEqual(@as(u64, 1), comp.counts['a']);
+            try std.testing.expectEqual(@as(u64, 2), comp.counts['N']);
+        }
+    }
+}
+
+test "bounded readers exclude headers gaps and adjacent record bytes" {
+    const bytes = ">one\nAC\nGT\n>two\nTT\n";
+    const buffer_sizes = [_]usize{ 3, 32 };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
+    defer file.close(std.testing.io);
+    try std.Io.File.writeStreamingAll(file, std.testing.io, bytes);
+    const source = FastaSource{ .io = std.testing.io, .file = file, .size = bytes.len };
+
+    for (buffer_sizes) |buffer_size| {
+        var storage: [32]u8 = undefined;
+        var comp = CompositionStats{
+            .counts = .{0} ** 256,
+            .total_bases = 0,
+            .seq_type = .nucleotide,
+            .lowercase_count = 0,
+        };
+        var reader = BoundedFastaReader{ .source = source, .buffer = storage[0..buffer_size] };
+
+        try scanUniformRecord(
+            &reader,
+            .{ .seq_offset = 5, .seq_len = 4, .line_bases = 2, .line_bytes = 3 },
+            &comp,
+        );
+        try scanUniformRecord(
+            &reader,
+            .{ .seq_offset = 16, .seq_len = 2, .line_bases = 2, .line_bytes = 3 },
+            &comp,
+        );
+
+        try std.testing.expectEqual(@as(u64, 6), comp.total_bases);
+        try std.testing.expectEqual(@as(u64, 1), comp.counts['A']);
+        try std.testing.expectEqual(@as(u64, 1), comp.counts['C']);
+        try std.testing.expectEqual(@as(u64, 1), comp.counts['G']);
+        try std.testing.expectEqual(@as(u64, 3), comp.counts['T']);
+        try std.testing.expectEqual(@as(u64, 0), comp.counts['>']);
+    }
+}
+
+test "bounded side-table reader coalesces only adjacent owned spans" {
+    const bytes = "AC\nGT\nignored\nnn\r\n";
+    const lines = [_]SideTableLine{
+        .{ .base_start = 0, .byte_offset = 0, .line_bytes = 3, .line_bases = 2 },
+        .{ .base_start = 2, .byte_offset = 3, .line_bytes = 3, .line_bases = 2 },
+        .{ .base_start = 4, .byte_offset = 14, .line_bytes = 4, .line_bases = 2 },
+    };
+    const buffer_sizes = [_]usize{ 1, 2, 3, 4, 5, 6, 7 };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
+    defer file.close(std.testing.io);
+    try std.Io.File.writeStreamingAll(file, std.testing.io, bytes);
+    const source = FastaSource{ .io = std.testing.io, .file = file, .size = bytes.len };
+
+    for (buffer_sizes) |buffer_size| {
+        var comp = CompositionStats{
+            .counts = .{0} ** 256,
+            .total_bases = 0,
+            .seq_type = .nucleotide,
+            .lowercase_count = 0,
+        };
+        var storage: [7]u8 = undefined;
+        var reader = BoundedFastaReader{ .source = source, .buffer = storage[0..buffer_size] };
+
+        try scanSideTableRecord(&reader, &lines, &comp);
+        try std.testing.expectEqual(@as(u64, 6), comp.total_bases);
+        try std.testing.expectEqual(@as(u64, 2), comp.lowercase_count);
+        try std.testing.expectEqual(@as(u64, 0), comp.counts['i']);
+        try std.testing.expectEqual(@as(u64, 2), comp.counts['n']);
+    }
+}
+
+test "bounded reader rejects geometry beyond the FASTA boundary" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
+    defer file.close(std.testing.io);
+    try std.Io.File.writeStreamingAll(file, std.testing.io, "ACGT");
+    const source = FastaSource{ .io = std.testing.io, .file = file, .size = 4 };
+    var storage: [2]u8 = undefined;
+    var comp = CompositionStats{
+        .counts = .{0} ** 256,
+        .total_bases = 0,
+        .seq_type = .nucleotide,
+        .lowercase_count = 0,
+    };
+    var reader = BoundedFastaReader{ .source = source, .buffer = &storage };
+
+    try std.testing.expectError(
+        error.CorruptGeometry,
+        scanUniformRecord(
+            &reader,
+            .{ .seq_offset = 0, .seq_len = 5, .line_bases = 5, .line_bytes = 6 },
+            &comp,
+        ),
+    );
 }
 
 test "median arithmetic is overflow safe" {
