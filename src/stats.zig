@@ -24,140 +24,288 @@ const CompositionStats = struct {
     lowercase_count: u64,
 };
 
-/// Format a u64 with comma separators into the provided buffer.
-pub fn formatComma(buf: []u8, value: u64) []const u8 {
-    if (value == 0) {
-        buf[0] = '0';
-        return buf[0..1];
-    }
+const LengthSummary = struct {
+    total_symbols: u64,
+    shortest_index: usize,
+    longest_index: usize,
+    mean: u64,
+    q1: u64,
+    median: u64,
+    q3: u64,
+    range: u64,
+    n50: u64,
+    l50: usize,
+    n90: u64,
+    l90: usize,
+    aun_numerator: u128,
+};
 
-    // First format without commas (digits in reverse)
-    var tmp: [20]u8 = undefined;
-    var v = value;
-    var tmp_len: usize = 0;
-    while (v > 0) {
-        tmp[tmp_len] = @intCast((v % 10) + '0');
-        v /= 10;
-        tmp_len += 1;
-    }
+const NucleotideSummary = struct {
+    type_name: []const u8,
+    categories: [8]u64,
+    canonical: u64,
+    gc_total: u64,
+};
 
-    // Write left-to-right with commas every 3 digits from the right
-    var pos: usize = 0;
-    var d: usize = 0;
-    while (d < tmp_len) {
-        if (d > 0 and (tmp_len - d) % 3 == 0) {
-            buf[pos] = ',';
-            pos += 1;
-        }
-        buf[pos] = tmp[tmp_len - 1 - d];
-        pos += 1;
-        d += 1;
-    }
-    return buf[0..pos];
-}
+const ProteinSummary = struct {
+    categories: [protein_fields.len]u64,
+    stop: u64,
+    invalid: u64,
+};
 
-/// Format bytes into human-readable size (e.g., "3.1 GB")
-pub fn formatSize(buf: []u8, bytes: u64) []const u8 {
-    const gb: f64 = @as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0 * 1024.0);
-    const mb: f64 = @as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0);
-    const kb: f64 = @as(f64, @floatFromInt(bytes)) / 1024.0;
+const CompositionSummary = union(enum) {
+    nucleotide: NucleotideSummary,
+    protein: ProteinSummary,
+};
 
-    if (gb >= 1.0) {
-        return std.fmt.bufPrint(buf, "{d:.1} GB", .{gb}) catch "?";
-    } else if (mb >= 1.0) {
-        return std.fmt.bufPrint(buf, "{d:.1} MB", .{mb}) catch "?";
-    } else if (kb >= 1.0) {
-        return std.fmt.bufPrint(buf, "{d:.1} KB", .{kb}) catch "?";
-    } else {
-        return std.fmt.bufPrint(buf, "{d} B", .{bytes}) catch "?";
-    }
-}
-
-const AminoAcid = struct {
+const ProteinField = struct {
+    key: []const u8,
     code: u8,
-    name: []const u8,
 };
 
-const amino_acid_names = [_]AminoAcid{
-    .{ .code = 'A', .name = "Alanine" },
-    .{ .code = 'R', .name = "Arginine" },
-    .{ .code = 'N', .name = "Asparagine" },
-    .{ .code = 'D', .name = "Aspartate" },
-    .{ .code = 'C', .name = "Cysteine" },
-    .{ .code = 'E', .name = "Glutamate" },
-    .{ .code = 'Q', .name = "Glutamine" },
-    .{ .code = 'G', .name = "Glycine" },
-    .{ .code = 'H', .name = "Histidine" },
-    .{ .code = 'I', .name = "Isoleucine" },
-    .{ .code = 'L', .name = "Leucine" },
-    .{ .code = 'K', .name = "Lysine" },
-    .{ .code = 'M', .name = "Methionine" },
-    .{ .code = 'F', .name = "Phenylalanine" },
-    .{ .code = 'P', .name = "Proline" },
-    .{ .code = 'S', .name = "Serine" },
-    .{ .code = 'T', .name = "Threonine" },
-    .{ .code = 'W', .name = "Tryptophan" },
-    .{ .code = 'Y', .name = "Tyrosine" },
-    .{ .code = 'V', .name = "Valine" },
+const protein_fields = [_]ProteinField{
+    .{ .key = "a_alanine", .code = 'A' },
+    .{ .key = "r_arginine", .code = 'R' },
+    .{ .key = "n_asparagine", .code = 'N' },
+    .{ .key = "d_aspartate", .code = 'D' },
+    .{ .key = "c_cysteine", .code = 'C' },
+    .{ .key = "e_glutamate", .code = 'E' },
+    .{ .key = "q_glutamine", .code = 'Q' },
+    .{ .key = "g_glycine", .code = 'G' },
+    .{ .key = "h_histidine", .code = 'H' },
+    .{ .key = "i_isoleucine", .code = 'I' },
+    .{ .key = "l_leucine", .code = 'L' },
+    .{ .key = "k_lysine", .code = 'K' },
+    .{ .key = "m_methionine", .code = 'M' },
+    .{ .key = "f_phenylalanine", .code = 'F' },
+    .{ .key = "p_proline", .code = 'P' },
+    .{ .key = "s_serine", .code = 'S' },
+    .{ .key = "t_threonine", .code = 'T' },
+    .{ .key = "w_tryptophan", .code = 'W' },
+    .{ .key = "y_tyrosine", .code = 'Y' },
+    .{ .key = "v_valine", .code = 'V' },
+    .{ .key = "b_asx", .code = 'B' },
+    .{ .key = "z_glx", .code = 'Z' },
+    .{ .key = "j_xle", .code = 'J' },
+    .{ .key = "x_unknown", .code = 'X' },
+    .{ .key = "u_selenocysteine", .code = 'U' },
+    .{ .key = "o_pyrrolysine", .code = 'O' },
 };
 
-fn getAminoAcidName(code: u8) []const u8 {
-    const upper = if (code >= 'a' and code <= 'z') code - 32 else code;
-    for (amino_acid_names) |aa| {
-        if (aa.code == upper) return aa.name;
-    }
-    return "Unknown";
+fn medianSorted(values: []const u64) u64 {
+    const middle = values.len / 2;
+    if (values.len % 2 == 1) return values[middle];
+    const lower = values[middle - 1];
+    return lower + (values[middle] - lower) / 2;
 }
 
-/// Extra repeated records by name: for each name with count k, add (k - 1).
-pub fn countNameDuplicateExtras(map: *const std.StringHashMap(usize)) usize {
-    var extras: usize = 0;
-    var it = map.iterator();
-    while (it.next()) |entry| {
-        if (entry.value_ptr.* > 1) extras += entry.value_ptr.* - 1;
+fn summarizeLengths(records: []const IndexRecord, lengths: []u64) !LengthSummary {
+    var total: u64 = 0;
+    var shortest_index: usize = 0;
+    var longest_index: usize = 0;
+    var aun_numerator: u128 = 0;
+    for (records, 0..) |record, i| {
+        total = try std.math.add(u64, total, record.seq_len);
+        lengths[i] = record.seq_len;
+        if (record.seq_len < records[shortest_index].seq_len) shortest_index = i;
+        if (record.seq_len > records[longest_index].seq_len) longest_index = i;
+        const square = @as(u128, record.seq_len) * @as(u128, record.seq_len);
+        aun_numerator = try std.math.add(u128, aun_numerator, square);
     }
-    return extras;
-}
 
-/// Tally first-token FASTA header names (line-leading `>`). Names are slices into `fasta`.
-pub fn tallyFastaHeaderNames(fasta: []const u8, map: *std.StringHashMap(usize)) !void {
-    var at_line_start = true;
-    var i: usize = 0;
-    while (i < fasta.len) : (i += 1) {
-        const c = fasta[i];
-        if (at_line_start and c == '>') {
-            const name_start = i + 1;
-            var name_end = name_start;
-            while (name_end < fasta.len and
-                fasta[name_end] != ' ' and
-                fasta[name_end] != '\t' and
-                fasta[name_end] != '\n' and
-                fasta[name_end] != '\r')
-            {
-                name_end += 1;
-            }
-            const name = fasta[name_start..name_end];
-            const gop = try map.getOrPut(name);
-            if (!gop.found_existing) gop.value_ptr.* = 0;
-            gop.value_ptr.* += 1;
-            at_line_start = false;
-            continue;
+    std.mem.sort(u64, lengths, {}, std.sort.asc(u64));
+    const half = lengths.len / 2;
+    const q1 = if (lengths.len == 1) lengths[0] else medianSorted(lengths[0..half]);
+    const q3 = if (lengths.len == 1) lengths[0] else medianSorted(lengths[lengths.len - half ..]);
+    const threshold_50: u128 = (@as(u128, total) * 50 + 99) / 100;
+    const threshold_90: u128 = (@as(u128, total) * 90 + 99) / 100;
+    var seen: u128 = 0;
+    var n50: u64 = 0;
+    var l50: usize = 0;
+    var n90: u64 = 0;
+    var l90: usize = 0;
+    var rank: usize = 0;
+    var i = lengths.len;
+    while (i > 0) {
+        i -= 1;
+        rank += 1;
+        seen += lengths[i];
+        if (l50 == 0 and seen >= threshold_50) {
+            n50 = lengths[i];
+            l50 = rank;
         }
-        at_line_start = (c == '\n');
+        if (l90 == 0 and seen >= threshold_90) {
+            n90 = lengths[i];
+            l90 = rank;
+        }
+    }
+
+    return .{
+        .total_symbols = total,
+        .shortest_index = shortest_index,
+        .longest_index = longest_index,
+        .mean = total / records.len,
+        .q1 = q1,
+        .median = medianSorted(lengths),
+        .q3 = q3,
+        .range = records[longest_index].seq_len - records[shortest_index].seq_len,
+        .n50 = n50,
+        .l50 = l50,
+        .n90 = n90,
+        .l90 = l90,
+        .aun_numerator = aun_numerator,
+    };
+}
+
+fn writeFixedUnsigned(writer: *std.Io.Writer, numerator: u128, denominator: u128, decimals: u8) !void {
+    const scale: u128 = switch (decimals) {
+        2 => 100,
+        3 => 1000,
+        else => unreachable,
+    };
+    var whole = numerator / denominator;
+    const remainder = numerator % denominator;
+    var fraction = (remainder * scale + denominator / 2) / denominator;
+    if (fraction == scale) {
+        whole += 1;
+        fraction = 0;
+    }
+    try writer.print("{d}.", .{whole});
+    var divisor = scale / 10;
+    while (divisor > 0) : (divisor /= 10) {
+        try writer.writeByte(@intCast('0' + (fraction / divisor) % 10));
     }
 }
 
-fn reportSourceDuplicates(
-    idx: *LoadedIndex,
-    allocator: std.mem.Allocator,
-) usize {
-    var map = std.StringHashMap(usize).init(allocator);
-    defer map.deinit();
+fn writeFixedSigned(writer: *std.Io.Writer, numerator: i128, denominator: u128, decimals: u8) !void {
+    const magnitude: u128 = @intCast(if (numerator < 0) -numerator else numerator);
+    const scale: u128 = if (decimals == 3) 1000 else 100;
+    const rounded = (magnitude % denominator * scale + denominator / 2) / denominator;
+    if (numerator < 0 and (magnitude / denominator != 0 or rounded != 0)) try writer.writeByte('-');
+    try writeFixedUnsigned(writer, magnitude, denominator, decimals);
+}
 
-    tallyFastaHeaderNames(idx.fasta_data, &map) catch {
-        printErrorAndExit("error: out of memory\n", .{});
-    };
-    return countNameDuplicateExtras(&map);
+fn countLetter(comp: *const CompositionStats, upper: u8) u64 {
+    return comp.counts[upper] + comp.counts[upper + ('a' - 'A')];
+}
+
+fn summarizeComposition(comp: *const CompositionStats) !CompositionSummary {
+    if (comp.seq_type == .nucleotide) {
+        const a = countLetter(comp, 'A');
+        const c = countLetter(comp, 'C');
+        const g = countLetter(comp, 'G');
+        const t = countLetter(comp, 'T');
+        const u = countLetter(comp, 'U');
+        const n = countLetter(comp, 'N');
+        var ambiguous: u64 = 0;
+        for ("RYSWKMBDHV") |code| ambiguous += countLetter(comp, code);
+        const assigned = @as(u128, a) + c + g + t + u + n + ambiguous;
+        if (assigned > comp.total_bases) return error.CompositionMismatch;
+        return .{ .nucleotide = .{
+            .type_name = if (t > 0 and u > 0)
+                "nucleotide_mixed_tu"
+            else if (t > 0)
+                "nucleotide_t"
+            else if (u > 0)
+                "nucleotide_u"
+            else
+                "nucleotide",
+            .categories = .{ a, c, g, t, u, n, ambiguous, @intCast(@as(u128, comp.total_bases) - assigned) },
+            .canonical = a + c + g + t + u,
+            .gc_total = g + c,
+        } };
+    }
+
+    var categories: [protein_fields.len]u64 = undefined;
+    var assigned: u128 = 0;
+    for (protein_fields, 0..) |field, i| {
+        categories[i] = countLetter(comp, field.code);
+        assigned += categories[i];
+    }
+    const stop = comp.counts['*'];
+    assigned += stop;
+    if (assigned > comp.total_bases) return error.CompositionMismatch;
+    return .{ .protein = .{
+        .categories = categories,
+        .stop = stop,
+        .invalid = @intCast(@as(u128, comp.total_bases) - assigned),
+    } };
+}
+
+fn writeCountPercent(writer: *std.Io.Writer, key: []const u8, count: u64, total: u64) !void {
+    try writer.print("  {s}: {d} ", .{ key, count });
+    try writeFixedUnsigned(writer, @as(u128, count) * 100, total, 2);
+    try writer.writeAll("%\n");
+}
+
+fn writeNucleotide(writer: *std.Io.Writer, summary: NucleotideSummary, comp: *const CompositionStats) !void {
+    try writer.print("  type: {s}\n  percent_denominator: total_symbols\n", .{summary.type_name});
+    const keys = [_][]const u8{ "a", "c", "g", "t", "u", "n", "iupac_ambiguous", "invalid" };
+    for (keys, summary.categories) |key, count| try writeCountPercent(writer, key, count, comp.total_bases);
+    if (summary.canonical == 0) {
+        try writer.writeAll("  gc: n/a\n");
+    } else {
+        try writer.writeAll("  gc: ");
+        try writeFixedUnsigned(writer, @as(u128, summary.gc_total) * 100, summary.canonical, 2);
+        try writer.writeAll("%\n");
+    }
+    if (summary.gc_total == 0) {
+        try writer.writeAll("  gc_skew: n/a\n");
+    } else {
+        try writer.writeAll("  gc_skew: ");
+        try writeFixedSigned(
+            writer,
+            @as(i128, summary.categories[2]) - @as(i128, summary.categories[1]),
+            summary.gc_total,
+            3,
+        );
+        try writer.writeByte('\n');
+    }
+    try writeCountPercent(writer, "lowercase", comp.lowercase_count, comp.total_bases);
+}
+
+fn writeProtein(writer: *std.Io.Writer, summary: ProteinSummary, comp: *const CompositionStats) !void {
+    try writer.writeAll("  type: protein\n  percent_denominator: total_symbols\n");
+    for (protein_fields, summary.categories) |field, count| {
+        try writeCountPercent(writer, field.key, count, comp.total_bases);
+    }
+    try writeCountPercent(writer, "stop", summary.stop, comp.total_bases);
+    try writeCountPercent(writer, "invalid", summary.invalid, comp.total_bases);
+    try writeCountPercent(writer, "lowercase", comp.lowercase_count, comp.total_bases);
+}
+
+fn writeReport(
+    writer: *std.Io.Writer,
+    fasta_path: []const u8,
+    index_extension: []const u8,
+    fasta_size: u64,
+    records: []const IndexRecord,
+    summary: LengthSummary,
+    shortest_name: []const u8,
+    longest_name: []const u8,
+    comp: *const CompositionStats,
+    composition: CompositionSummary,
+) !void {
+    try writer.print(
+        "File:\n  path: {s}\n  index: {s}{s}\n  size_bytes: {d}\n\n" ++
+            "Lengths:\n  indexed_records: {d}\n  total_symbols: {d}\n" ++
+            "  shortest_length: {d}\n  shortest_name: {s}\n" ++
+            "  longest_length: {d}\n  longest_name: {s}\n" ++
+            "  mean: {d}\n  q1: {d}\n  median: {d}\n  q3: {d}\n  range: {d}\n\n" ++
+            "Nx:\n  n50: {d}\n  l50: {d}\n  n90: {d}\n  l90: {d}\n  aun: ",
+        .{
+            fasta_path,                              fasta_path,    index_extension,                        fasta_size,   records.len,  summary.total_symbols,
+            records[summary.shortest_index].seq_len, shortest_name, records[summary.longest_index].seq_len, longest_name, summary.mean, summary.q1,
+            summary.median,                          summary.q3,    summary.range,                          summary.n50,  summary.l50,  summary.n90,
+            summary.l90,
+        },
+    );
+    try writeFixedUnsigned(writer, summary.aun_numerator, summary.total_symbols, 2);
+    try writer.writeAll("\n\nComposition:\n");
+    switch (composition) {
+        .nucleotide => |nucleotide| try writeNucleotide(writer, nucleotide, comp),
+        .protein => |protein| try writeProtein(writer, protein, comp),
+    }
 }
 
 /// Run the stats command.
@@ -172,13 +320,6 @@ pub fn runStats(io: std.Io, fasta_path: []const u8) void {
         printErrorAndExit("error: no sequences in index\n", .{});
     }
 
-    // Compute total bases
-    var total_bases: u64 = 0;
-    for (records) |rec| {
-        total_bases += rec.seq_len;
-    }
-
-    // Sort lengths descending for N50/L50/N90/L90/AU
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -186,244 +327,34 @@ pub fn runStats(io: std.Io, fasta_path: []const u8) void {
     const lengths = allocator.alloc(u64, num_seqs) catch {
         printErrorAndExit("error: out of memory\n", .{});
     };
-    for (records, 0..) |rec, i| {
-        lengths[i] = rec.seq_len;
-    }
-
-    // Sort descending
-    std.mem.sort(u64, lengths, {}, struct {
-        fn cmp(_: void, a: u64, b: u64) bool {
-            return a > b;
-        }
-    }.cmp);
-
-    // Single pass: N50, L50, N90, L90, AU
-    var bases_seen: u64 = 0;
-    var au_sum: u128 = 0;
-    var n50: u64 = 0;
-    var l50: usize = 0;
-    var n90: u64 = 0;
-    var l90: usize = 0;
-    var found_n50 = false;
-    var found_n90 = false;
-
-    const threshold_50 = (total_bases + 1) / 2; // ceiling
-    const threshold_90 = (total_bases * 9 + 9) / 10; // ceiling
-
-    for (lengths, 0..) |len, i| {
-        bases_seen += len;
-        au_sum += @as(u128, len) * @as(u128, len);
-
-        if (!found_n50 and bases_seen >= threshold_50) {
-            n50 = len;
-            l50 = i + 1;
-            found_n50 = true;
-        }
-        if (!found_n90 and bases_seen >= threshold_90) {
-            n90 = len;
-            l90 = i + 1;
-            found_n90 = true;
-        }
-    }
-
-    const au: u64 = if (total_bases > 0) @intCast(au_sum / @as(u128, total_bases)) else 0;
-
-    // Mean and median
-    const mean: u64 = if (num_seqs > 0) total_bases / num_seqs else 0;
-    const median: u64 = if (num_seqs > 0) blk: {
-        if (num_seqs % 2 == 1) {
-            break :blk lengths[num_seqs / 2];
-        } else {
-            break :blk (lengths[num_seqs / 2 - 1] + lengths[num_seqs / 2]) / 2;
-        }
-    } else 0;
-
-    // Find shortest and longest with names
-    var shortest_idx: usize = 0;
-    var longest_idx: usize = 0;
-    for (records, 0..) |rec, i| {
-        if (rec.seq_len < records[shortest_idx].seq_len) shortest_idx = i;
-        if (rec.seq_len > records[longest_idx].seq_len) longest_idx = i;
-    }
-
-    // Get names - handle both .zfi and .fai sources.
-    const shortest_name = getRecordName(&idx, io, shortest_idx);
-    const longest_name = getRecordName(&idx, io, longest_idx);
-
-    const duplicates = reportSourceDuplicates(&idx, allocator);
+    const summary = summarizeLengths(records, lengths) catch {
+        printErrorAndExit("error: sequence length overflow\n", .{});
+    };
+    const shortest_name = idx.getRecordNameWithIo(io, summary.shortest_index);
+    const longest_name = idx.getRecordNameWithIo(io, summary.longest_index);
     const comp = scanComposition(&idx);
+    if (comp.total_bases != summary.total_symbols) {
+        printErrorAndExit("error: index sequence lengths do not match FASTA data\n", .{});
+    }
+    const composition = summarizeComposition(&comp) catch {
+        printErrorAndExit("error: composition does not match indexed symbols\n", .{});
+    };
 
-    // Output
     var out_buf: [65536]u8 = undefined;
     var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
     const writer = &stdout_fw.interface;
-
-    var size_buf: [64]u8 = undefined;
-    const size_str = formatSize(&size_buf, idx.fasta_size);
-
-    var comma_buf: [64]u8 = undefined;
 
     const index_ext: []const u8 = switch (idx.source) {
         .zfi => ".zfi",
         .fai => ".fai",
     };
 
-    const type_str: []const u8 = switch (comp.seq_type) {
-        .nucleotide => "Nucleotide",
-        .protein => "Protein",
-    };
-
-    writer.print("File:           {s} ({s} on disk)\n", .{ fasta_path, size_str }) catch {
+    writeReport(writer, fasta_path, index_ext, idx.fasta_size, records, summary, shortest_name, longest_name, &comp, composition) catch {
         printErrorAndExit("error: write failed\n", .{});
     };
-    writer.print("Index:          {s}{s}\n", .{ fasta_path, index_ext }) catch {
+    stdout_fw.flush() catch {
         printErrorAndExit("error: write failed\n", .{});
     };
-    writer.print("Type:           {s}\n", .{type_str}) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-    writer.print("Sequences:      {s}\n", .{formatComma(&comma_buf, @intCast(num_seqs))}) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-    writer.print("Total bases:    {s}\n", .{formatComma(&comma_buf, total_bases)}) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-    writer.print("Shortest:       {s} ({s})\n", .{ formatComma(&comma_buf, records[shortest_idx].seq_len), shortest_name }) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-    writer.print("Longest:        {s} ({s})\n", .{ formatComma(&comma_buf, records[longest_idx].seq_len), longest_name }) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-    writer.print("Mean:           {s}\n", .{formatComma(&comma_buf, mean)}) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-    writer.print("Median:         {s}\n", .{formatComma(&comma_buf, median)}) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-    writer.print("N50:            {s}\n", .{formatComma(&comma_buf, n50)}) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-    writer.print("L50:            {s}\n", .{formatComma(&comma_buf, @intCast(l50))}) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-    writer.print("N90:            {s}\n", .{formatComma(&comma_buf, n90)}) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-    writer.print("L90:            {s}\n", .{formatComma(&comma_buf, @intCast(l90))}) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-    writer.print("AU:             {s}\n", .{formatComma(&comma_buf, au)}) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-    writer.print("Duplicates:     {d}\n", .{duplicates}) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-
-    // Tier 2: composition details
-    {
-        const c = comp;
-        writer.print("\nComposition:\n", .{}) catch {};
-
-        if (c.seq_type == .nucleotide) {
-            // Nucleotide stats
-            const a_count = c.counts['A'] + c.counts['a'];
-            const c_count = c.counts['C'] + c.counts['c'];
-            const g_count = c.counts['G'] + c.counts['g'];
-            const t_count = c.counts['T'] + c.counts['t'];
-            const n_count = c.counts['N'] + c.counts['n'];
-
-            const acgt_total = a_count + c_count + g_count + t_count;
-            const all_total = c.total_bases;
-
-            // Other = total - A - C - G - T - N
-            const other = if (all_total > a_count + c_count + g_count + t_count + n_count)
-                all_total - a_count - c_count - g_count - t_count - n_count
-            else
-                0;
-
-            const f_total: f64 = @floatFromInt(all_total);
-            const f_acgt: f64 = @floatFromInt(acgt_total);
-
-            writer.print("  A:   {d:.2}%\n", .{if (f_total > 0) @as(f64, @floatFromInt(a_count)) / f_total * 100.0 else 0.0}) catch {};
-            writer.print("  C:   {d:.2}%\n", .{if (f_total > 0) @as(f64, @floatFromInt(c_count)) / f_total * 100.0 else 0.0}) catch {};
-            writer.print("  G:   {d:.2}%\n", .{if (f_total > 0) @as(f64, @floatFromInt(g_count)) / f_total * 100.0 else 0.0}) catch {};
-            writer.print("  T:   {d:.2}%\n", .{if (f_total > 0) @as(f64, @floatFromInt(t_count)) / f_total * 100.0 else 0.0}) catch {};
-            writer.print("  N:   {d:.2}%\n", .{if (f_total > 0) @as(f64, @floatFromInt(n_count)) / f_total * 100.0 else 0.0}) catch {};
-
-            if (other > 0) {
-                writer.print("  Other: {d:.2}%\n", .{@as(f64, @floatFromInt(other)) / f_total * 100.0}) catch {};
-            }
-
-            // GC content (N excluded from denominator)
-            const gc = @as(f64, @floatFromInt(g_count + c_count));
-            const gc_pct = if (f_acgt > 0) gc / f_acgt * 100.0 else 0.0;
-            const n_pct = if (f_total > 0) @as(f64, @floatFromInt(n_count)) / f_total * 100.0 else 0.0;
-
-            if (n_pct > 1.0) {
-                writer.print("  GC:  {d:.2}% (excl. N)\n", .{gc_pct}) catch {};
-            } else {
-                writer.print("  GC:  {d:.2}%\n", .{gc_pct}) catch {};
-            }
-
-            // GC skew
-            const f_g: f64 = @floatFromInt(g_count);
-            const f_c: f64 = @floatFromInt(c_count);
-            const gc_sum = f_g + f_c;
-            if (gc_sum > 0) {
-                writer.print("  GC skew: {d:.3}\n", .{(f_g - f_c) / gc_sum}) catch {};
-            }
-
-            // N content
-            writer.print("  N content: {s}\n", .{formatComma(&comma_buf, n_count)}) catch {};
-
-            // Soft-masked
-            const soft_pct = if (f_total > 0) @as(f64, @floatFromInt(c.lowercase_count)) / f_total * 100.0 else 0.0;
-            writer.print("  Soft-masked: {d:.2}%\n", .{soft_pct}) catch {};
-        } else {
-            // Protein stats: top 3 most frequent amino acids
-            const f_total: f64 = @floatFromInt(c.total_bases);
-
-            // Collect amino acid counts (combine upper+lower)
-            const AaCount = struct { code: u8, count: u64 };
-            var aa_counts: [20]AaCount = undefined;
-            for (amino_acid_names, 0..) |aa, i| {
-                const lower = aa.code + 32;
-                aa_counts[i] = .{
-                    .code = aa.code,
-                    .count = c.counts[aa.code] + c.counts[lower],
-                };
-            }
-
-            // Sort by count descending
-            std.mem.sort(AaCount, &aa_counts, {}, struct {
-                fn cmp(_: void, a: AaCount, b: AaCount) bool {
-                    return a.count > b.count;
-                }
-            }.cmp);
-
-            // Print top 3
-            for (0..@min(3, aa_counts.len)) |i| {
-                const pct = if (f_total > 0) @as(f64, @floatFromInt(aa_counts[i].count)) / f_total * 100.0 else 0.0;
-                writer.print("  {c}:   {d:.2}%  ({s})\n", .{
-                    aa_counts[i].code,
-                    pct,
-                    getAminoAcidName(aa_counts[i].code),
-                }) catch {};
-            }
-            writer.print("  (20 amino acids total)\n", .{}) catch {};
-
-            // Lowercase fraction
-            const soft_pct = if (f_total > 0) @as(f64, @floatFromInt(c.lowercase_count)) / f_total * 100.0 else 0.0;
-            writer.print("  Lowercase: {d:.2}%\n", .{soft_pct}) catch {};
-        }
-    }
-
-    stdout_fw.flush() catch {};
-}
-
-/// Get the name of a record, handling both .zfi and .fai sources.
-fn getRecordName(idx: *LoadedIndex, io: std.Io, rec_idx: usize) []const u8 {
-    return idx.getRecordNameWithIo(io, rec_idx);
 }
 
 const fasta_release_batch_bytes: usize = 8 * 1024 * 1024;
@@ -498,8 +429,7 @@ fn compositionRegionEnd(fasta: []const u8, rec: IndexRecord, start: usize) usize
     return @min(end, fasta.len);
 }
 
-/// Inline composition scan for one record (hot path; kept in scanComposition for inlining).
-fn scanCompositionRecordInline(
+fn scanCompositionRecord(
     idx: *const LoadedIndex,
     rec: IndexRecord,
     counts: *[256]u64,
@@ -549,15 +479,6 @@ fn scanComposition(idx: *const LoadedIndex) CompositionStats {
     var total_bases: u64 = 0;
 
     const records = idx.records;
-    const record_count = records.len;
-    if (record_count == 0) {
-        return CompositionStats{
-            .counts = counts,
-            .total_bases = total_bases,
-            .seq_type = .nucleotide,
-            .lowercase_count = lowercase_count,
-        };
-    }
 
     var release = CompositionReleaseCursor{};
 
@@ -567,7 +488,7 @@ fn scanComposition(idx: *const LoadedIndex) CompositionStats {
             if (rec.seq_len == 0) continue;
 
             if (!rec.isUniformWidth()) {
-                scanCompositionRecordInline(idx, rec, &counts, &total_bases, &lowercase_count, &release);
+                scanCompositionRecord(idx, rec, &counts, &total_bases, &lowercase_count, &release);
                 if (release.scan_end > scan_end) scan_end = release.scan_end;
                 continue;
             }
@@ -590,7 +511,7 @@ fn scanComposition(idx: *const LoadedIndex) CompositionStats {
         release.scan_end = scan_end;
     } else {
         // `.fai` rows are usually name-sorted, not file order; must sort before page release.
-        const sorted_indices = std.heap.page_allocator.alloc(usize, record_count) catch {
+        const sorted_indices = std.heap.page_allocator.alloc(usize, records.len) catch {
             printErrorAndExit("error: out of memory\n", .{});
         };
         defer std.heap.page_allocator.free(sorted_indices);
@@ -602,7 +523,7 @@ fn scanComposition(idx: *const LoadedIndex) CompositionStats {
         }.lessThan);
 
         for (sorted_indices) |rec_idx| {
-            scanCompositionRecordInline(
+            scanCompositionRecord(
                 idx,
                 records[rec_idx],
                 &counts,
@@ -614,7 +535,6 @@ fn scanComposition(idx: *const LoadedIndex) CompositionStats {
     }
     release.flush(fasta);
 
-    // Detect nucleotide vs protein
     const seq_type = detectType(&counts, total_bases);
 
     return CompositionStats{
@@ -633,21 +553,6 @@ fn recordsInSeqOffsetOrder(records: []const IndexRecord) bool {
         prev = rec.seq_offset;
     }
     return true;
-}
-
-test "recordsInSeqOffsetOrder detects sorted and unsorted offsets" {
-    const sorted = [_]IndexRecord{
-        .{ .seq_offset = 10, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
-        .{ .seq_offset = 20, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
-        .{ .seq_offset = 30, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
-    };
-    try std.testing.expect(recordsInSeqOffsetOrder(&sorted));
-
-    const unsorted = [_]IndexRecord{
-        .{ .seq_offset = 30, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
-        .{ .seq_offset = 10, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
-    };
-    try std.testing.expect(!recordsInSeqOffsetOrder(&unsorted));
 }
 
 fn tryScanFixedWidthRecord(
@@ -710,18 +615,6 @@ fn countCompositionSlice(
     }
 }
 
-test "countCompositionSlice tallies composition and lowercase" {
-    var counts: [256]u64 = .{0} ** 256;
-    var total: u64 = 0;
-    var lowercase: u64 = 0;
-    countCompositionSlice("ACGTacgtNN", &counts, &total, &lowercase);
-    try std.testing.expectEqual(@as(u64, 10), total);
-    try std.testing.expectEqual(@as(u64, 4), lowercase);
-    try std.testing.expectEqual(@as(u64, 1), counts['A']);
-    try std.testing.expectEqual(@as(u64, 1), counts['a']);
-    try std.testing.expectEqual(@as(u64, 2), counts['N']);
-}
-
 /// Detect if sequences are nucleotide or protein from composition counts.
 ///
 /// Shared by stats (full-file counts), GET (per-record sample), and validate
@@ -761,3 +654,118 @@ pub const get_type_sample_bases: u64 = 256;
 
 /// Bases sampled across the file for validate alphabet selection.
 pub const validate_type_sample_bases: u64 = 100_000;
+
+test "recordsInSeqOffsetOrder detects sorted and unsorted offsets" {
+    const sorted = [_]IndexRecord{
+        .{ .seq_offset = 10, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
+        .{ .seq_offset = 20, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
+        .{ .seq_offset = 30, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
+    };
+    try std.testing.expect(recordsInSeqOffsetOrder(&sorted));
+
+    const unsorted = [_]IndexRecord{
+        .{ .seq_offset = 30, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
+        .{ .seq_offset = 10, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
+    };
+    try std.testing.expect(!recordsInSeqOffsetOrder(&unsorted));
+}
+
+test "countCompositionSlice tallies composition and lowercase" {
+    var counts: [256]u64 = .{0} ** 256;
+    var total: u64 = 0;
+    var lowercase: u64 = 0;
+    countCompositionSlice("ACGTacgtNN", &counts, &total, &lowercase);
+    try std.testing.expectEqual(@as(u64, 10), total);
+    try std.testing.expectEqual(@as(u64, 4), lowercase);
+    try std.testing.expectEqual(@as(u64, 1), counts['A']);
+    try std.testing.expectEqual(@as(u64, 1), counts['a']);
+    try std.testing.expectEqual(@as(u64, 2), counts['N']);
+}
+
+test "median arithmetic is overflow safe" {
+    const near_max = [_]u64{ std.math.maxInt(u64) - 1, std.math.maxInt(u64) };
+
+    try std.testing.expectEqual(std.math.maxInt(u64) - 1, medianSorted(&near_max));
+}
+
+test "length total overflow is rejected" {
+    const records = [_]IndexRecord{
+        .{ .seq_len = std.math.maxInt(u64), .line_bases = 1, .line_bytes = 2 },
+        .{ .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
+    };
+    var lengths: [2]u64 = undefined;
+
+    try std.testing.expectError(error.Overflow, summarizeLengths(&records, &lengths));
+}
+
+test "fixed decimals use exact half-away rounding" {
+    var buffer: [64]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeFixedUnsigned(&writer, 100, 32, 2);
+    try writer.writeByte(' ');
+    try writeFixedUnsigned(&writer, 226, 16, 2);
+    try writer.writeByte(' ');
+    try writeFixedSigned(&writer, -30, 32, 3);
+    try writer.writeByte(' ');
+    try writeFixedSigned(&writer, -1, 10_000, 3);
+
+    try std.testing.expectEqualStrings("3.13 14.13 -0.938 0.000", writer.buffered());
+}
+
+test "report writing propagates a full destination" {
+    const records = [_]IndexRecord{
+        .{ .seq_len = 4, .line_bases = 4, .line_bytes = 5 },
+    };
+    const summary = LengthSummary{
+        .total_symbols = 4,
+        .shortest_index = 0,
+        .longest_index = 0,
+        .mean = 4,
+        .q1 = 4,
+        .median = 4,
+        .q3 = 4,
+        .range = 0,
+        .n50 = 4,
+        .l50 = 1,
+        .n90 = 4,
+        .l90 = 1,
+        .aun_numerator = 16,
+    };
+    var comp = CompositionStats{
+        .counts = .{0} ** 256,
+        .total_bases = 4,
+        .seq_type = .nucleotide,
+        .lowercase_count = 0,
+    };
+    comp.counts['A'] = 4;
+    var buffer: [1]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+
+    try std.testing.expectError(
+        error.WriteFailed,
+        writeReport(
+            &writer,
+            "x.fa",
+            ".zfi",
+            8,
+            &records,
+            summary,
+            "x",
+            "x",
+            &comp,
+            try summarizeComposition(&comp),
+        ),
+    );
+}
+
+test "composition categories cannot exceed indexed symbols" {
+    var comp = CompositionStats{
+        .counts = .{0} ** 256,
+        .total_bases = 4,
+        .seq_type = .nucleotide,
+        .lowercase_count = 0,
+    };
+    comp.counts['A'] = 5;
+
+    try std.testing.expectError(error.CompositionMismatch, summarizeComposition(&comp));
+}

@@ -331,10 +331,8 @@ pub const LoadedIndex = struct {
 
     pub fn getRecordNameWithIo(self: *LoadedIndex, io: std.Io, rec_idx: usize) []const u8 {
         if (self.sidecar_path) |path| {
-            if (self.fai_line_offsets.len > rec_idx) {
-                return readFaiNameAtOffset(io, self.arena.allocator(), path, self.fai_line_offsets[rec_idx]) catch "?";
-            }
-            return readFaiNameLine(io, self.arena.allocator(), path, rec_idx) catch "?";
+            if (rec_idx >= self.fai_line_offsets.len) return "?";
+            return readFaiNameAtOffset(io, self.arena.allocator(), path, self.fai_line_offsets[rec_idx]) catch "?";
         }
         return self.getRecordName(rec_idx);
     }
@@ -994,26 +992,6 @@ fn readFaiNameAtOffset(io: std.Io, allocator: std.mem.Allocator, fai_path: []con
     if (line.len == 0) return error.CorruptIndex;
     const name_end = std.mem.indexOfScalar(u8, line, '\t') orelse return error.CorruptIndex;
     return allocator.dupe(u8, line[0..name_end]);
-}
-
-fn readFaiNameLine(io: std.Io, allocator: std.mem.Allocator, fai_path: []const u8, rec_idx: usize) LoadIndexError![]const u8 {
-    const fai_file = std.Io.Dir.cwd().openFile(io, fai_path, .{}) catch return error.Io;
-    defer fai_file.close(io);
-
-    var io_buf: [FAI_READER_BUFFER_BYTES]u8 = undefined;
-    var file_reader = fai_file.reader(io, &io_buf);
-
-    var line_no: usize = 0;
-    while (true) {
-        const maybe_line = file_reader.interface.takeDelimiter('\n') catch return error.Io;
-        const line = maybe_line orelse return error.CorruptIndex;
-        if (line.len == 0) continue;
-        if (line_no == rec_idx) {
-            const name_end = std.mem.indexOfScalar(u8, line, '\t') orelse return error.CorruptIndex;
-            return allocator.dupe(u8, line[0..name_end]);
-        }
-        line_no += 1;
-    }
 }
 
 fn parseFaiFieldU64(line: []const u8, field_start: *usize) LoadIndexError!u64 {

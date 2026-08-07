@@ -1,100 +1,12 @@
-//! Stats unit and CLI tests: formatting helpers, type detection, and duplicate reporting.
+//! Stats unit and CLI tests: type detection and exact report behavior.
 //!
 //! Exercises complete stats output against fixture FASTAs.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const main = @import("main");
-const formatComma = main.stats.formatComma;
-const formatSize = main.stats.formatSize;
 const detectType = main.stats.detectType;
 const SequenceType = main.stats.SequenceType;
-
-// ============================================================================
-// formatComma tests
-// ============================================================================
-
-test "formatComma - zero" {
-    var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("0", formatComma(&buf, 0));
-}
-
-test "formatComma - single digit" {
-    var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("5", formatComma(&buf, 5));
-}
-
-test "formatComma - three digits" {
-    var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("999", formatComma(&buf, 999));
-}
-
-test "formatComma - four digits" {
-    var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("1,000", formatComma(&buf, 1000));
-}
-
-test "formatComma - six digits" {
-    var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("999,999", formatComma(&buf, 999_999));
-}
-
-test "formatComma - seven digits" {
-    var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("1,000,000", formatComma(&buf, 1_000_000));
-}
-
-test "formatComma - large number (billions)" {
-    var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("3,099,750,718", formatComma(&buf, 3_099_750_718));
-}
-
-test "formatComma - max u32" {
-    var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("4,294,967,295", formatComma(&buf, 4_294_967_295));
-}
-
-test "formatComma - large u64" {
-    var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("1,000,000,000,000", formatComma(&buf, 1_000_000_000_000));
-}
-
-test "formatComma - 12345" {
-    var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("12,345", formatComma(&buf, 12345));
-}
-
-test "formatComma - 100" {
-    var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("100", formatComma(&buf, 100));
-}
-
-// ============================================================================
-// formatSize tests
-// ============================================================================
-
-test "formatSize - bytes" {
-    var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("512 B", formatSize(&buf, 512));
-}
-
-test "formatSize - kilobytes" {
-    var buf: [64]u8 = undefined;
-    const result = formatSize(&buf, 10 * 1024);
-    try std.testing.expectEqualStrings("10.0 KB", result);
-}
-
-test "formatSize - megabytes" {
-    var buf: [64]u8 = undefined;
-    const result = formatSize(&buf, 66 * 1024 * 1024);
-    try std.testing.expectEqualStrings("66.0 MB", result);
-}
-
-test "formatSize - gigabytes" {
-    var buf: [64]u8 = undefined;
-    const result = formatSize(&buf, 3 * 1024 * 1024 * 1024);
-    try std.testing.expectEqualStrings("3.0 GB", result);
-}
 
 // ============================================================================
 // detectType tests
@@ -218,104 +130,98 @@ fn runStatsAndCapture(allocator: std.mem.Allocator, fasta_path: []const u8) ![]u
     return result;
 }
 
-test "stats - simple.fasta has 2 sequences" {
+test "stats renders the exact nucleotide report" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta");
-    try std.testing.expect(std.mem.indexOf(u8, output, "Sequences:      2") != null);
+
+    const expected =
+        \\File:
+        \\  path: tests/data/simple.fasta
+        \\  index: tests/data/simple.fasta.zfi
+        \\  size_bytes: 82
+        \\
+        \\Lengths:
+        \\  indexed_records: 2
+        \\  total_symbols: 36
+        \\  shortest_length: 12
+        \\  shortest_name: seq2
+        \\  longest_length: 24
+        \\  longest_name: seq1
+        \\  mean: 18
+        \\  q1: 12
+        \\  median: 18
+        \\  q3: 24
+        \\  range: 12
+        \\
+        \\Nx:
+        \\  n50: 24
+        \\  l50: 1
+        \\  n90: 12
+        \\  l90: 2
+        \\  aun: 20.00
+        \\
+        \\Composition:
+        \\  type: nucleotide_t
+        \\  percent_denominator: total_symbols
+        \\  a: 10 27.78%
+        \\  c: 10 27.78%
+        \\  g: 10 27.78%
+        \\  t: 6 16.67%
+        \\  u: 0 0.00%
+        \\  n: 0 0.00%
+        \\  iupac_ambiguous: 0 0.00%
+        \\  invalid: 0 0.00%
+        \\  gc: 55.56%
+        \\  gc_skew: 0.000
+        \\  lowercase: 0 0.00%
+        \\
+    ;
+
+    try std.testing.expectEqualStrings(expected, output);
 }
 
-test "stats - simple.fasta has 36 total bases" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta");
-    try std.testing.expect(std.mem.indexOf(u8, output, "Total bases:    36") != null);
-}
-
-test "stats - simple.fasta detected as Nucleotide" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta");
-    try std.testing.expect(std.mem.indexOf(u8, output, "Type:           Nucleotide") != null);
-}
-
-test "stats - proteome.fasta detected as Protein" {
+test "stats renders the exact complete protein field set" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const output = try runStatsAndCapture(arena.allocator(), "tests/data/proteome.fasta");
-    try std.testing.expect(std.mem.indexOf(u8, output, "Type:           Protein") != null);
-}
 
-test "stats - simple.fasta N50=24 L50=1" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta");
-    try std.testing.expect(std.mem.indexOf(u8, output, "N50:            24") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "L50:            1") != null);
-}
-
-test "stats - simple.fasta GC content" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta");
-    try std.testing.expect(std.mem.indexOf(u8, output, "GC:  55.56%") != null);
-}
-
-test "stats - mixed_widths.fasta has 3 sequences" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const output = try runStatsAndCapture(arena.allocator(), "tests/data/mixed_widths.fasta");
-    try std.testing.expect(std.mem.indexOf(u8, output, "Sequences:      3") != null);
-}
-
-test "stats - proteome Composition shows amino acids" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const output = try runStatsAndCapture(arena.allocator(), "tests/data/proteome.fasta");
-    try std.testing.expect(std.mem.indexOf(u8, output, "Alanine") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "20 amino acids total") != null);
-}
-
-test "tallyFastaHeaderNames counts source duplicate extras" {
-    const fasta =
-        \\>a
-        \\ACGT
-        \\>b
-        \\TTTT
-        \\>a
-        \\GGGG
+    const composition =
+        \\Composition:
+        \\  type: protein
+        \\  percent_denominator: total_symbols
+        \\  a_alanine: 8 11.27%
+        \\  r_arginine: 2 2.82%
+        \\  n_asparagine: 2 2.82%
+        \\  d_aspartate: 3 4.23%
+        \\  c_cysteine: 1 1.41%
+        \\  e_glutamate: 4 5.63%
+        \\  q_glutamine: 1 1.41%
+        \\  g_glycine: 5 7.04%
+        \\  h_histidine: 4 5.63%
+        \\  i_isoleucine: 1 1.41%
+        \\  l_leucine: 5 7.04%
+        \\  k_lysine: 5 7.04%
+        \\  m_methionine: 3 4.23%
+        \\  f_phenylalanine: 5 7.04%
+        \\  p_proline: 4 5.63%
+        \\  s_serine: 4 5.63%
+        \\  t_threonine: 5 7.04%
+        \\  w_tryptophan: 2 2.82%
+        \\  y_tyrosine: 3 4.23%
+        \\  v_valine: 4 5.63%
+        \\  b_asx: 0 0.00%
+        \\  z_glx: 0 0.00%
+        \\  j_xle: 0 0.00%
+        \\  x_unknown: 0 0.00%
+        \\  u_selenocysteine: 0 0.00%
+        \\  o_pyrrolysine: 0 0.00%
+        \\  stop: 0 0.00%
+        \\  invalid: 0 0.00%
+        \\  lowercase: 0 0.00%
         \\
     ;
-    var map = std.StringHashMap(usize).init(std.testing.allocator);
-    defer map.deinit();
-    try main.stats.tallyFastaHeaderNames(fasta, &map);
-    try std.testing.expectEqual(@as(usize, 1), main.stats.countNameDuplicateExtras(&map));
-}
+    const start = std.mem.indexOf(u8, output, "Composition:\n") orelse return error.MissingComposition;
 
-test "tallyFastaHeaderNames reports zero extras when names unique" {
-    const fasta =
-        \\>seq1
-        \\ACGT
-        \\>seq2
-        \\TTTT
-        \\
-    ;
-    var map = std.StringHashMap(usize).init(std.testing.allocator);
-    defer map.deinit();
-    try main.stats.tallyFastaHeaderNames(fasta, &map);
-    try std.testing.expectEqual(@as(usize, 0), main.stats.countNameDuplicateExtras(&map));
-}
-
-test "stats reports source duplicates for edge_cases" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const output = try runStatsAndCapture(arena.allocator(), "tests/data/edge_cases.fasta");
-    try std.testing.expect(std.mem.indexOf(u8, output, "Duplicates:     1\n") != null);
-}
-
-test "stats reports zero duplicates when source names are unique" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta");
-    try std.testing.expect(std.mem.indexOf(u8, output, "Duplicates:     0\n") != null);
+    try std.testing.expectEqualStrings(composition, output[start..]);
 }

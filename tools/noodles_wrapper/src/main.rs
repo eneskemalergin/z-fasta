@@ -29,6 +29,9 @@ use std::io::{self, BufRead, BufReader, Write, BufWriter};
 use noodles_core::Region;
 use noodles_fasta::{fai, fs, io::{IndexedReader, Reader}};
 
+#[path = "../../stats_peer.rs"]
+mod stats_peer;
+
 fn usage() -> ! {
     eprintln!("Usage: noodles_wrapper <index|get|stats> <args...>");
     eprintln!("  index <fasta>                    Build .fai index");
@@ -278,46 +281,6 @@ fn cmd_get_names(config: &GetConfig) -> io::Result<()> {
 //  Does not strip messy whitespace or use side tables.
 // ════════════════════════════════════════════════════════════════════
 
-const IUPAC_NUC: &[u8] = b"ACGTURYSWKMBDHVNacgturyswkmbdhvn";
-const AA_CODES: &[u8] = b"ARNDCEQGHILKMFPSTWYV";
-const AA_NAMES: &[&str] = &[
-    "Alanine",
-    "Arginine",
-    "Asparagine",
-    "Aspartate",
-    "Cysteine",
-    "Glutamate",
-    "Glutamine",
-    "Glycine",
-    "Histidine",
-    "Isoleucine",
-    "Leucine",
-    "Lysine",
-    "Methionine",
-    "Phenylalanine",
-    "Proline",
-    "Serine",
-    "Threonine",
-    "Tryptophan",
-    "Tyrosine",
-    "Valine",
-];
-
-fn detect_type(counts: &[u64; 256], total: u64) -> &'static str {
-    if total == 0 {
-        return "nucleotide";
-    }
-    let mut nuc = 0u64;
-    for &b in IUPAC_NUC {
-        nuc += counts[b as usize];
-    }
-    if nuc * 10 > total * 9 {
-        "nucleotide"
-    } else {
-        "protein"
-    }
-}
-
 fn cmd_stats(fasta_path: &str) -> io::Result<()> {
     let file = File::open(fasta_path)?;
     let mut reader = Reader::new(BufReader::new(file));
@@ -326,167 +289,25 @@ fn cmd_stats(fasta_path: &str) -> io::Result<()> {
     let mut lengths: Vec<u64> = Vec::new();
     let mut counts = [0u64; 256];
     let mut lowercase = 0u64;
-    let mut comp_total = 0u64;
 
     for result in reader.records() {
         let record = result?;
         let name = String::from_utf8_lossy(record.name()).into_owned();
-        let seq = record.sequence();
-        if seq.is_empty() || !seen.insert(name.clone()) {
+        let sequence = record.sequence();
+        if sequence.is_empty() || !seen.insert(name.clone()) {
             continue;
         }
         names.push(name);
-        lengths.push(seq.len() as u64);
-        for &b in seq.as_ref() {
-            counts[b as usize] += 1;
-            comp_total += 1;
-            if b.is_ascii_lowercase() {
+        lengths.push(sequence.len() as u64);
+        for &byte in sequence.as_ref() {
+            counts[byte as usize] += 1;
+            if byte.is_ascii_lowercase() {
                 lowercase += 1;
             }
         }
     }
 
-    let num_seqs = lengths.len() as u64;
-    let total_bases: u64 = lengths.iter().sum();
-    let mut sorted = lengths.clone();
-    sorted.sort_by(|a, b| b.cmp(a));
-
-    let mean = if num_seqs > 0 { total_bases / num_seqs } else { 0 };
-    let median = if num_seqs == 0 {
-        0
-    } else if num_seqs % 2 == 1 {
-        sorted[(num_seqs / 2) as usize]
-    } else {
-        (sorted[(num_seqs / 2 - 1) as usize] + sorted[(num_seqs / 2) as usize]) / 2
-    };
-
-    let threshold_50 = (total_bases + 1) / 2;
-    let threshold_90 = (total_bases * 9 + 9) / 10;
-    let mut bases_seen = 0u64;
-    let mut au_sum: u128 = 0;
-    let mut n50 = 0u64;
-    let mut l50 = 0u64;
-    let mut n90 = 0u64;
-    let mut l90 = 0u64;
-    let mut found_n50 = false;
-    let mut found_n90 = false;
-    for (i, &len) in sorted.iter().enumerate() {
-        bases_seen += len;
-        au_sum += (len as u128) * (len as u128);
-        if !found_n50 && bases_seen >= threshold_50 {
-            n50 = len;
-            l50 = (i + 1) as u64;
-            found_n50 = true;
-        }
-        if !found_n90 && bases_seen >= threshold_90 {
-            n90 = len;
-            l90 = (i + 1) as u64;
-            found_n90 = true;
-        }
-    }
-    let au = if total_bases > 0 {
-        (au_sum / total_bases as u128) as u64
-    } else {
-        0
-    };
-
-    let (shortest_idx, _) = lengths
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, &l)| l)
-        .unwrap_or((0, &0));
-    let (longest_idx, _) = lengths
-        .iter()
-        .enumerate()
-        .max_by_key(|(_, &l)| l)
-        .unwrap_or((0, &0));
-    let shortest_len = lengths.get(shortest_idx).copied().unwrap_or(0);
-    let longest_len = lengths.get(longest_idx).copied().unwrap_or(0);
-    let shortest_name = names.get(shortest_idx).map(|s| s.as_str()).unwrap_or("");
-    let longest_name = names.get(longest_idx).map(|s| s.as_str()).unwrap_or("");
-
-    let seq_type = detect_type(&counts, comp_total);
-    let soft_pct = if comp_total > 0 {
-        lowercase as f64 / comp_total as f64 * 100.0
-    } else {
-        0.0
-    };
-
-    let stdout = io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
-    writeln!(out, "sequences\t{num_seqs}")?;
-    writeln!(out, "total_bases\t{total_bases}")?;
-    writeln!(out, "shortest_len\t{shortest_len}")?;
-    writeln!(out, "shortest_name\t{shortest_name}")?;
-    writeln!(out, "longest_len\t{longest_len}")?;
-    writeln!(out, "longest_name\t{longest_name}")?;
-    writeln!(out, "mean\t{mean}")?;
-    writeln!(out, "median\t{median}")?;
-    writeln!(out, "n50\t{n50}")?;
-    writeln!(out, "l50\t{l50}")?;
-    writeln!(out, "n90\t{n90}")?;
-    writeln!(out, "l90\t{l90}")?;
-    writeln!(out, "au\t{au}")?;
-    writeln!(out, "type\t{seq_type}")?;
-    writeln!(out, "soft_pct\t{soft_pct:.4}")?;
-
-    if seq_type == "nucleotide" {
-        let a = counts[b'A' as usize] + counts[b'a' as usize];
-        let c = counts[b'C' as usize] + counts[b'c' as usize];
-        let g = counts[b'G' as usize] + counts[b'g' as usize];
-        let t = counts[b'T' as usize] + counts[b't' as usize];
-        let n = counts[b'N' as usize] + counts[b'n' as usize];
-        let acgt = a + c + g + t;
-        let other = comp_total.saturating_sub(a + c + g + t + n);
-        let f_total = comp_total as f64;
-        let pct = |x: u64| if f_total > 0.0 { x as f64 / f_total * 100.0 } else { 0.0 };
-        writeln!(out, "a_pct\t{:.4}", pct(a))?;
-        writeln!(out, "c_pct\t{:.4}", pct(c))?;
-        writeln!(out, "g_pct\t{:.4}", pct(g))?;
-        writeln!(out, "t_pct\t{:.4}", pct(t))?;
-        writeln!(out, "n_pct\t{:.4}", pct(n))?;
-        writeln!(out, "other_pct\t{:.4}", pct(other))?;
-        let gc_pct = if acgt > 0 {
-            (g + c) as f64 / acgt as f64 * 100.0
-        } else {
-            0.0
-        };
-        writeln!(out, "gc_pct\t{gc_pct:.4}")?;
-        let gc_sum = g + c;
-        if gc_sum > 0 {
-            let skew = (g as f64 - c as f64) / gc_sum as f64;
-            writeln!(out, "gc_skew\t{skew:.6}")?;
-        }
-        writeln!(out, "n_content\t{n}")?;
-    } else {
-        let mut aa: Vec<(u8, u64, usize)> = AA_CODES
-            .iter()
-            .enumerate()
-            .map(|(i, &code)| {
-                let lower = code.to_ascii_lowercase();
-                let cnt = counts[code as usize] + counts[lower as usize];
-                (code, cnt, i)
-            })
-            .collect();
-        aa.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)));
-        for (rank, (code, cnt, idx)) in aa.iter().take(3).enumerate() {
-            let pct = if comp_total > 0 {
-                *cnt as f64 / comp_total as f64 * 100.0
-            } else {
-                0.0
-            };
-            writeln!(
-                out,
-                "top_aa_{}\t{}:{:.4}:{}",
-                rank + 1,
-                *code as char,
-                pct,
-                AA_NAMES[*idx]
-            )?;
-        }
-    }
-
-    Ok(())
+    stats_peer::write_report(io::stdout().lock(), &names, &lengths, &counts, lowercase)
 }
 
 // ════════════════════════════════════════════════════════════════════
