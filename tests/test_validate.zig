@@ -32,7 +32,158 @@ fn expectFixIdempotent(allocator: std.mem.Allocator, broken: []const u8) !void {
     try std.testing.expectEqual(@as(usize, 0), after.events.items.len);
 }
 
-// --- unit tests (moved from src/validator.zig) ---
+fn validateAndDeinitForAllocationCheck(allocator: std.mem.Allocator, data: []const u8) !void {
+    var summary = try validator.validateData(allocator, data, .{});
+    defer summary.deinit(allocator);
+}
+
+fn fixAndFreeForAllocationCheck(allocator: std.mem.Allocator, data: []const u8) !void {
+    const widths = [_]u32{4};
+    const fixed = try validator.fixData(allocator, data, &widths);
+    defer allocator.free(fixed);
+}
+
+fn readTestFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            std.debug.print("required test fixture missing: {s}\n", .{path});
+            return error.RequiredFixtureMissing;
+        },
+        else => |e| return e,
+    };
+    defer file.close(io);
+    const stat = try file.stat(io);
+    const size = std.math.cast(usize, stat.size) orelse return error.FileTooBig;
+    const data = try allocator.alloc(u8, size);
+    errdefer allocator.free(data);
+    const bytes_read = try file.readPositionalAll(io, data, 0);
+    if (bytes_read != data.len) return error.UnexpectedEndOfFile;
+    return data;
+}
+
+fn uniqueArtifactPath(allocator: std.mem.Allocator, stem: []const u8) ![]u8 {
+    try std.Io.Dir.cwd().createDirPath(io, "zig-cache/test-artifacts");
+    const now = std.Io.Clock.Timestamp.now(io, .awake);
+    const nanos: u64 = @intCast(now.raw.toNanoseconds());
+    return std.fmt.allocPrint(allocator, "zig-cache/test-artifacts/{s}-{d}.fa", .{ stem, nanos });
+}
+
+fn writeFastaArtifact(allocator: std.mem.Allocator, stem: []const u8, data: []const u8) ![]u8 {
+    const path = try uniqueArtifactPath(allocator, stem);
+    errdefer allocator.free(path);
+    errdefer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
+    try std.Io.File.writeStreamingAll(file, io, data);
+    return path;
+}
+
+fn scanZfi(allocator: std.mem.Allocator, data: []const u8) !main.indexer.ZfiIndex {
+    return main.indexer.scanZfiData(data, true, allocator);
+}
+
+fn expectHasSideTable(index: *const main.indexer.ZfiIndex) !void {
+    var any_non_uniform = false;
+    for (index.records.items) |rec| {
+        if (!rec.isUniformWidth()) any_non_uniform = true;
+    }
+    try std.testing.expect(any_non_uniform);
+    try std.testing.expect(index.side_tables.items.len > 0);
+}
+
+fn expectAllUniformNoSideTable(index: *const main.indexer.ZfiIndex) !void {
+    for (index.records.items) |rec| {
+        try std.testing.expect(rec.isUniformWidth());
+    }
+    try std.testing.expectEqual(@as(usize, 0), index.side_tables.items.len);
+}
+
+fn writeZfiForData(allocator: std.mem.Allocator, fasta_path: []const u8, data: []const u8) !void {
+    var index = try scanZfi(allocator, data);
+    defer index.deinit(allocator);
+
+    const fasta_file = try std.Io.Dir.cwd().openFile(io, fasta_path, .{});
+    defer fasta_file.close(io);
+    const mtime_ns = main.index_format.timestampToNs((try fasta_file.stat(io)).mtime);
+
+    var zfi_path_buf: [4096]u8 = undefined;
+    const zfi_path = try std.fmt.bufPrint(&zfi_path_buf, "{s}.zfi", .{fasta_path});
+    try main.indexer.writeZfiIndexFile(io, zfi_path, &index, data.len, mtime_ns);
+}
+
+fn captureExtractRegion(allocator: std.mem.Allocator, fasta_path: []const u8, region: []const u8) ![]u8 {
+    var idx = try main.index_format.loadIndexChecked(allocator, io, fasta_path);
+    defer idx.deinit();
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    errdefer out.deinit();
+    main.getter.extractRegion(&idx, region, &out.writer);
+    return out.toOwnedSlice();
+}
+
+fn fixFormatOnly(allocator: std.mem.Allocator, broken: []const u8) ![]u8 {
+    var summary = try validator.validateData(allocator, broken, .{});
+    defer summary.deinit(allocator);
+    try std.testing.expect(validator.fixRejection(&summary, .{}) == null);
+    return validator.fixData(allocator, broken, summary.record_widths.items);
+}
+
+fn expectValidateClean(allocator: std.mem.Allocator, data: []const u8) !void {
+    var summary = try validator.validateData(allocator, data, .{});
+    defer summary.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), summary.events.items.len);
+}
+
+fn expectFormatFixPreservesRegion(
+    allocator: std.mem.Allocator,
+    stem: []const u8,
+    broken: []const u8,
+    region: []const u8,
+    expected: []const u8,
+) !void {
+    var broken_index = try scanZfi(allocator, broken);
+    defer broken_index.deinit(allocator);
+    try expectHasSideTable(&broken_index);
+
+    const fixed = try fixFormatOnly(allocator, broken);
+    defer allocator.free(fixed);
+    try expectValidateClean(allocator, fixed);
+
+    var fixed_index = try scanZfi(allocator, fixed);
+    defer fixed_index.deinit(allocator);
+    try expectAllUniformNoSideTable(&fixed_index);
+
+    const broken_path = try writeFastaArtifact(allocator, stem, broken);
+    defer allocator.free(broken_path);
+    defer std.Io.Dir.cwd().deleteFile(io, broken_path) catch {};
+    const fixed_path = try writeFastaArtifact(allocator, stem, fixed);
+    defer allocator.free(fixed_path);
+    defer std.Io.Dir.cwd().deleteFile(io, fixed_path) catch {};
+    const broken_zfi = try std.fmt.allocPrint(allocator, "{s}.zfi", .{broken_path});
+    defer allocator.free(broken_zfi);
+    defer std.Io.Dir.cwd().deleteFile(io, broken_zfi) catch {};
+    const fixed_zfi = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fixed_path});
+    defer allocator.free(fixed_zfi);
+    defer std.Io.Dir.cwd().deleteFile(io, fixed_zfi) catch {};
+
+    try writeZfiForData(allocator, broken_path, broken);
+    try writeZfiForData(allocator, fixed_path, fixed);
+
+    const broken_output = try captureExtractRegion(allocator, broken_path, region);
+    defer allocator.free(broken_output);
+    const fixed_output = try captureExtractRegion(allocator, fixed_path, region);
+    defer allocator.free(fixed_output);
+
+    try std.testing.expectEqualStrings(broken_output, fixed_output);
+    try std.testing.expectEqualStrings(expected, fixed_output);
+}
+
+fn zfiEmbeddedName(index: *const main.indexer.ZfiIndex, rec_idx: usize) []const u8 {
+    const rec = index.records.items[rec_idx];
+    return index.name_blob.items[rec.name_offset..][0..rec.name_len];
+}
+
+// --- Unit tests ---
 
 test "validateData reports duplicate and empty sequence" {
     var summary = try validator.validateData(std.testing.allocator, ">dup\nAAAA\n>dup\n", .{});
@@ -45,6 +196,19 @@ test "validateData reports duplicate and empty sequence" {
     try std.testing.expectEqual(@as(usize, 2), summary.header_count);
 }
 
+test "validator operations release allocations on every failure path" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        validateAndDeinitForAllocationCheck,
+        .{">dup\nAAAA \n>dup\n"},
+    );
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        fixAndFreeForAllocationCheck,
+        .{">seq\nAAAA \n"},
+    );
+}
+
 test "validateData caps retained events and sets truncated" {
     const allocator = std.testing.allocator;
 
@@ -52,20 +216,65 @@ test "validateData caps retained events and sets truncated" {
     defer at_cap.deinit(allocator);
     try at_cap.appendSlice(allocator, ">seq\n");
     var i: usize = 0;
-    while (i < validator.max_validate_events) : (i += 1) {
+    while (i < validator.MAX_VALIDATE_EVENTS) : (i += 1) {
         try at_cap.appendSlice(allocator, "ACGT \n");
     }
 
     var capped = try validator.validateData(allocator, at_cap.items, .{});
     defer capped.deinit(allocator);
     try std.testing.expect(!capped.truncated);
-    try std.testing.expectEqual(validator.max_validate_events, capped.events.items.len);
+    try std.testing.expectEqual(validator.MAX_VALIDATE_EVENTS, capped.events.items.len);
 
     try at_cap.appendSlice(allocator, "ACGT \n");
     var over = try validator.validateData(allocator, at_cap.items, .{});
     defer over.deinit(allocator);
     try std.testing.expect(over.truncated);
-    try std.testing.expectEqual(validator.max_validate_events, over.events.items.len);
+    try std.testing.expectEqual(validator.MAX_VALIDATE_EVENTS, over.events.items.len);
+    try std.testing.expectEqual(
+        validator.MAX_VALIDATE_EVENTS + 1,
+        over.kind_counts[@intFromEnum(validator.Kind.trailing_whitespace)],
+    );
+}
+
+test "event cap retains later fix blockers" {
+    const allocator = std.testing.allocator;
+    var input: std.ArrayList(u8) = .empty;
+    defer input.deinit(allocator);
+    try input.appendSlice(allocator, ">dup\n");
+    for (0..validator.MAX_VALIDATE_EVENTS) |_| {
+        try input.appendSlice(allocator, "A \n");
+    }
+    try input.appendSlice(allocator, ">dup\nA\n");
+
+    var summary = try validator.validateData(allocator, input.items, .{});
+    defer summary.deinit(allocator);
+
+    try std.testing.expect(summary.truncated);
+    try std.testing.expectEqual(@as(usize, 1), summary.error_count);
+    try std.testing.expectEqual(validator.Kind.duplicate_name, validator.fixRejection(&summary, .{}).?);
+    try std.testing.expectEqual(
+        validator.Kind.duplicate_name,
+        validator.fixRejection(&summary, .{ .fix_format_only = true }).?,
+    );
+}
+
+test "event cap retains warnings left after format fix" {
+    const allocator = std.testing.allocator;
+    var input: std.ArrayList(u8) = .empty;
+    defer input.deinit(allocator);
+    try input.appendSlice(allocator, ">seq\n");
+    for (0..validator.MAX_VALIDATE_EVENTS) |_| {
+        try input.appendSlice(allocator, "A \n");
+    }
+    try input.appendSlice(allocator, ">empty\n");
+
+    var summary = try validator.validateData(allocator, input.items, .{});
+    defer summary.deinit(allocator);
+
+    try std.testing.expect(summary.truncated);
+    try std.testing.expectEqual(validator.MAX_VALIDATE_EVENTS + 1, summary.warning_count);
+    try std.testing.expectEqual(@as(u8, 2), validator.exitCodeForOptions(&summary, .{ .fix = true }));
+    try std.testing.expectEqual(@as(u8, 1), validator.exitCodeForOptions(&summary, .{ .fix = true, .strict = true }));
 }
 
 test "renderJsonEvent keeps long names without 256-byte truncation" {
@@ -144,7 +353,7 @@ test "renderJsonEvent escapes invalid UTF-8 name bytes" {
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
     defer parsed.deinit();
-    // JSON \u00ff decodes to Unicode U+00FF (ÿ), not the raw invalid FASTA byte.
+    // JSON \u00ff decodes to Unicode U+00FF, not the raw invalid FASTA byte.
     try std.testing.expectEqualStrings("seq\u{00ff}name", parsed.value.object.get("name").?.string);
 }
 
@@ -168,7 +377,7 @@ test "validateData to JSON keeps invalid UTF-8 header bytes escapable" {
     try std.testing.expectEqualStrings("bad\u{00ff}name", parsed.value.object.get("name").?.string);
 }
 
-test "gates fixture: invalid UTF-8 and long header are visible to validate" {
+test "gates fixture: invalid UTF-8 names remain reportable" {
     const allocator = std.testing.allocator;
 
     const utf8_data = try readTestFile(allocator, "tests/data/gates/invalid_utf8_header.fasta");
@@ -184,6 +393,10 @@ test "gates fixture: invalid UTF-8 and long header are visible to validate" {
     defer allocator.free(json);
     try std.testing.expect(std.unicode.utf8ValidateSlice(json));
     try std.testing.expect(std.mem.indexOf(u8, json, "\\u00ff") != null);
+}
+
+test "gates fixture: long headers remain visible" {
+    const allocator = std.testing.allocator;
 
     const long_data = try readTestFile(allocator, "tests/data/gates/long_header.fasta");
     defer allocator.free(long_data);
@@ -224,6 +437,7 @@ test "validate --json --summary reports sequence type sample fields" {
         .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
         else => return error.ChildProcessFailed,
     }
+    try std.testing.expectEqual(@as(usize, 0), result.stderr.len);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, std.mem.trim(u8, result.stdout, " \t\r\n"), .{});
     defer parsed.deinit();
@@ -258,6 +472,17 @@ test "validateData tracks line-width and trailing whitespace warnings" {
 
     try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .trailing_whitespace));
     try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .inconsistent_line_widths));
+}
+
+test "validateData rejects a final sequence line wider than the established width" {
+    var summary = try validator.validateData(std.testing.allocator, ">seq\nAA\nAAAA\n", .{});
+    defer summary.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .inconsistent_line_widths));
+    const event = summary.events.items[0];
+    try std.testing.expectEqual(@as(u32, 2), event.expected_width);
+    try std.testing.expectEqual(@as(u32, 4), event.actual_width);
+    try std.testing.expectEqual(@as(usize, 3), event.line);
 }
 
 test "validateData checks schemas" {
@@ -360,95 +585,7 @@ test "fixData does not remove empty sequence warnings" {
     try std.testing.expectEqual(@as(usize, 1), countKind(&after, .empty_sequence));
 }
 
-// --- integration tests ---
-
-fn readTestFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
-        error.FileNotFound => {
-            std.debug.print("required test fixture missing: {s}\n", .{path});
-            return error.RequiredFixtureMissing;
-        },
-        else => |e| return e,
-    };
-    defer file.close(io);
-    const stat = try file.stat(io);
-    const data = try allocator.alloc(u8, stat.size);
-    _ = try file.readPositionalAll(io, data, 0);
-    return data;
-}
-
-fn uniqueArtifactPath(allocator: std.mem.Allocator, stem: []const u8) ![]u8 {
-    try std.Io.Dir.cwd().createDirPath(io, "zig-cache/test-artifacts");
-    const now = std.Io.Clock.Timestamp.now(io, .awake);
-    const nanos: u64 = @intCast(now.raw.toNanoseconds());
-    return std.fmt.allocPrint(allocator, "zig-cache/test-artifacts/{s}-{d}.fa", .{ stem, nanos });
-}
-
-fn writeFastaArtifact(allocator: std.mem.Allocator, stem: []const u8, data: []const u8) ![]const u8 {
-    const path = try uniqueArtifactPath(allocator, stem);
-    const file = try std.Io.Dir.cwd().createFile(io, path, .{});
-    defer file.close(io);
-    try std.Io.File.writeStreamingAll(file, io, data);
-    return path;
-}
-
-fn scanZfi(allocator: std.mem.Allocator, data: []const u8) !main.indexer.ZfiIndex {
-    return main.indexer.scanZfiData(data, true, allocator);
-}
-
-fn expectHasSideTable(index: *const main.indexer.ZfiIndex) !void {
-    var any_non_uniform = false;
-    for (index.records.items) |rec| {
-        if (!rec.isUniformWidth()) any_non_uniform = true;
-    }
-    try std.testing.expect(any_non_uniform);
-    try std.testing.expect(index.side_tables.items.len > 0);
-}
-
-fn expectAllUniformNoSideTable(index: *const main.indexer.ZfiIndex) !void {
-    for (index.records.items) |rec| {
-        try std.testing.expect(rec.isUniformWidth());
-    }
-    try std.testing.expectEqual(@as(usize, 0), index.side_tables.items.len);
-}
-
-fn writeZfiForData(allocator: std.mem.Allocator, fasta_path: []const u8, data: []const u8) !void {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var index = try scanZfi(arena.allocator(), data);
-    defer index.deinit(arena.allocator());
-
-    const fasta_file = try std.Io.Dir.cwd().openFile(io, fasta_path, .{});
-    defer fasta_file.close(io);
-    const mtime_ns = main.index_format.timestampToNs((try fasta_file.stat(io)).mtime);
-
-    var zfi_path_buf: [4096]u8 = undefined;
-    const zfi_path = try std.fmt.bufPrint(&zfi_path_buf, "{s}.zfi", .{fasta_path});
-    try main.indexer.writeZfiIndexFile(io, zfi_path, &index, data.len, mtime_ns);
-}
-
-fn captureExtractRegion(allocator: std.mem.Allocator, fasta_path: []const u8, region: []const u8) ![]u8 {
-    var idx = try main.index_format.loadIndexChecked(std.testing.allocator, io, fasta_path);
-    defer idx.deinit();
-
-    var out = std.Io.Writer.Allocating.init(allocator);
-    main.getter.extractRegion(&idx, region, &out.writer);
-    return out.toOwnedSlice();
-}
-
-fn fixFormatOnly(allocator: std.mem.Allocator, broken: []const u8) ![]u8 {
-    var summary = try validator.validateData(allocator, broken, .{});
-    defer summary.deinit(allocator);
-    try std.testing.expect(validator.fixRejection(&summary, .{}) == null);
-    return validator.fixData(allocator, broken, summary.record_widths.items);
-}
-
-fn expectValidateClean(allocator: std.mem.Allocator, data: []const u8) !void {
-    var summary = try validator.validateData(allocator, data, .{});
-    defer summary.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 0), summary.events.items.len);
-}
+// --- Integration tests ---
 
 test "validate --fix -o matches fixData rewrite" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -467,7 +604,7 @@ test "validate --fix -o matches fixData rewrite" {
     const expected = try validator.fixData(allocator, broken, summary.record_widths.items);
 
     const in_path = try writeFastaArtifact(allocator, "validate-fix-cli-in", broken);
-    const out_path = try uniqueArtifactPath(allocator, "validate-fix-cli-out");
+    const out_path = try writeFastaArtifact(allocator, "validate-fix-cli-out", "previous output\n");
     defer std.Io.Dir.cwd().deleteFile(io, in_path) catch {};
     defer std.Io.Dir.cwd().deleteFile(io, out_path) catch {};
 
@@ -492,6 +629,44 @@ test "validate --fix -o matches fixData rewrite" {
     try std.testing.expectEqualStrings(expected, got);
 }
 
+test "validate --fix rejects an alternate spelling of the input path" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const broken = ">seq\nAAAA  \n";
+    const in_path = try writeFastaArtifact(allocator, "validate-fix-input-alias", broken);
+    defer std.Io.Dir.cwd().deleteFile(io, in_path) catch {};
+    const output_alias = try std.fmt.allocPrint(allocator, "./{s}", .{in_path});
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const spawn_io = threaded.io();
+
+    const result = try std.process.run(allocator, spawn_io, .{
+        .argv = &.{ ZFASTA_BIN, "validate", "--fix", "-o", output_alias, in_path },
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 1), code),
+        else => return error.ChildProcessFailed,
+    }
+    const expected_error = try std.fmt.allocPrint(
+        allocator,
+        "error: validate --fix will not overwrite input: {s}\n",
+        .{in_path},
+    );
+    try std.testing.expectEqual(@as(usize, 0), result.stdout.len);
+    try std.testing.expectEqualStrings(expected_error, result.stderr);
+
+    const input_after = try readTestFile(allocator, in_path);
+    try std.testing.expectEqualStrings(broken, input_after);
+}
+
 test "validate --fix succeeds after event list truncation" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -501,7 +676,7 @@ test "validate --fix succeeds after event list truncation" {
     defer input.deinit(allocator);
     try input.appendSlice(allocator, ">seq\n");
     var i: usize = 0;
-    while (i <= validator.max_validate_events) : (i += 1) {
+    while (i <= validator.MAX_VALIDATE_EVENTS) : (i += 1) {
         try input.appendSlice(allocator, "A \n");
     }
 
@@ -537,7 +712,7 @@ test "validate --fix succeeds after event list truncation" {
     try std.testing.expectEqual(@as(usize, 0), fixed_summary.events.items.len);
 }
 
-test "validate --fix then index uses uniform O(1) path on crafted messy FASTA" {
+test "format fix produces uniform indexed retrieval for crafted messy FASTA" {
     const broken =
         \\>messy_seq widths and trailing ws
         \\AAAA    
@@ -549,35 +724,16 @@ test "validate --fix then index uses uniform O(1) path on crafted messy FASTA" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-
-    var broken_index = try scanZfi(allocator, broken);
-    defer broken_index.deinit(allocator);
-    try expectHasSideTable(&broken_index);
-
-    const fixed = try fixFormatOnly(allocator, broken);
-    try expectValidateClean(allocator, fixed);
-
-    var fixed_index = try scanZfi(allocator, fixed);
-    defer fixed_index.deinit(allocator);
-    try expectAllUniformNoSideTable(&fixed_index);
-
-    const path = try writeFastaArtifact(allocator, "validate-fix-crafted", fixed);
-    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{path});
-    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
-    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
-
-    try writeZfiForData(allocator, path, fixed);
-
-    const got = try captureExtractRegion(allocator, path, "messy_seq:1-14");
     const expected =
         \\>messy_seq:1-14
         \\AAAACCCCGGGGTT
         \\
     ;
-    try std.testing.expectEqualStrings(expected, got);
+
+    try expectFormatFixPreservesRegion(allocator, "validate-fix-crafted", broken, "messy_seq:1-14", expected);
 }
 
-test "validate --fix then index then get on mixed_widths fixture" {
+test "format fix preserves indexed retrieval for mixed_widths fixture" {
     const broken = try readTestFile(
         std.testing.allocator,
         "bench/shared/cache/messy_fixtures/mixed_widths.fasta",
@@ -587,44 +743,16 @@ test "validate --fix then index then get on mixed_widths fixture" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-
-    var broken_index = try scanZfi(allocator, broken);
-    defer broken_index.deinit(allocator);
-    try expectHasSideTable(&broken_index);
-
-    const fixed = try fixFormatOnly(allocator, broken);
-    try expectValidateClean(allocator, fixed);
-
-    var fixed_index = try scanZfi(allocator, fixed);
-    defer fixed_index.deinit(allocator);
-    try expectAllUniformNoSideTable(&fixed_index);
-
-    const messy_path = try writeFastaArtifact(allocator, "validate-fix-messy", broken);
-    const fixed_path = try writeFastaArtifact(allocator, "validate-fix-fixed", fixed);
-    const messy_zfi = try std.fmt.allocPrint(allocator, "{s}.zfi", .{messy_path});
-    const fixed_zfi = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fixed_path});
-    defer std.Io.Dir.cwd().deleteFile(io, messy_path) catch {};
-    defer std.Io.Dir.cwd().deleteFile(io, fixed_path) catch {};
-    defer std.Io.Dir.cwd().deleteFile(io, messy_zfi) catch {};
-    defer std.Io.Dir.cwd().deleteFile(io, fixed_zfi) catch {};
-
-    try writeZfiForData(allocator, messy_path, broken);
-    try writeZfiForData(allocator, fixed_path, fixed);
-
-    const region = "mixed_widths:3-24";
-    const messy_out = try captureExtractRegion(allocator, messy_path, region);
-    const fixed_out = try captureExtractRegion(allocator, fixed_path, region);
-    try std.testing.expectEqualStrings(messy_out, fixed_out);
-
     const expected =
         \\>mixed_widths:3-24
         \\AACCCCGGGGTTTTAAAACCCC
         \\
     ;
-    try std.testing.expectEqualStrings(expected, fixed_out);
+
+    try expectFormatFixPreservesRegion(allocator, "validate-fix-mixed", broken, "mixed_widths:3-24", expected);
 }
 
-test "validate --fix then index then get on trailing_whitespace fixture" {
+test "format fix preserves indexed retrieval for trailing_whitespace fixture" {
     const broken = try readTestFile(
         std.testing.allocator,
         "bench/shared/cache/messy_fixtures/trailing_whitespace.fasta",
@@ -634,37 +762,19 @@ test "validate --fix then index then get on trailing_whitespace fixture" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-
-    var broken_index = try scanZfi(allocator, broken);
-    defer broken_index.deinit(allocator);
-    try expectHasSideTable(&broken_index);
-
-    const fixed = try fixFormatOnly(allocator, broken);
-    try expectValidateClean(allocator, fixed);
-
-    var fixed_index = try scanZfi(allocator, fixed);
-    defer fixed_index.deinit(allocator);
-    try expectAllUniformNoSideTable(&fixed_index);
-
-    const fixed_path = try writeFastaArtifact(allocator, "validate-fix-trail", fixed);
-    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fixed_path});
-    defer std.Io.Dir.cwd().deleteFile(io, fixed_path) catch {};
-    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
-
-    try writeZfiForData(allocator, fixed_path, fixed);
-
-    const got = try captureExtractRegion(allocator, fixed_path, "trailing_whitespace:1-16");
     const expected =
         \\>trailing_whitespace:1-16
         \\AAAACCCCGGGGTTTT
         \\
     ;
-    try std.testing.expectEqualStrings(expected, got);
-}
 
-fn zfiEmbeddedName(index: *const main.indexer.ZfiIndex, rec_idx: usize) []const u8 {
-    const rec = index.records.items[rec_idx];
-    return index.name_blob.items[rec.name_offset..][0..rec.name_len];
+    try expectFormatFixPreservesRegion(
+        allocator,
+        "validate-fix-trailing",
+        broken,
+        "trailing_whitespace:1-16",
+        expected,
+    );
 }
 
 test "validator and indexer agree on tests/data/validator_indexer_agreement.fasta" {
@@ -683,7 +793,7 @@ test "validator and indexer agree on tests/data/validator_indexer_agreement.fast
     try std.testing.expect(std.mem.indexOf(u8, data, ">empty_rec\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, data, " \n") != null or std.mem.indexOf(u8, data, "\t\n") != null);
 
-    // --- validator: every listed layout issue is visible ---
+    // Validator must expose every layout feature encoded by the fixture.
     var summary = try validator.validateData(allocator, data, .{});
     defer summary.deinit(allocator);
 
@@ -697,7 +807,7 @@ test "validator and indexer agree on tests/data/validator_indexer_agreement.fast
     try std.testing.expectEqual(@as(usize, 6), summary.header_count);
     try std.testing.expectEqual(@as(usize, 5), summary.sequence_count);
 
-    // --- indexer: same non-empty catalog, side tables for messy layout ---
+    // Indexer must retain the same non-empty catalog and mark messy geometry.
     var index = try scanZfi(allocator, data);
     defer index.deinit(allocator);
 

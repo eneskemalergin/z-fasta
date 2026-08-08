@@ -334,7 +334,6 @@ fn writeReport(
     }
 }
 
-/// Run the stats command.
 pub fn runStats(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8) void {
     var idx = index_format.loadIndexForStats(allocator, io, fasta_path);
     defer idx.deinit();
@@ -637,31 +636,51 @@ pub fn detectType(counts: *const [256]u64, total: u64) SequenceType {
     return .protein;
 }
 
+fn testIndexRecord(seq_offset: u64, seq_len: u64, line_bases: u32, line_bytes: u32) IndexRecord {
+    return .{
+        .name_offset = 0,
+        .name_len = 0,
+        .seq_offset = seq_offset,
+        .seq_len = seq_len,
+        .line_bases = line_bases,
+        .line_bytes = line_bytes,
+    };
+}
+
 test "recordsInSeqOffsetOrder detects sorted and unsorted offsets" {
     const sorted = [_]IndexRecord{
-        .{ .seq_offset = 10, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
-        .{ .seq_offset = 20, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
-        .{ .seq_offset = 30, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
+        testIndexRecord(10, 1, 1, 2),
+        testIndexRecord(20, 1, 1, 2),
+        testIndexRecord(30, 1, 1, 2),
     };
     try std.testing.expect(recordsInSeqOffsetOrder(&sorted));
 
     const unsorted = [_]IndexRecord{
-        .{ .seq_offset = 30, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
-        .{ .seq_offset = 10, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
+        testIndexRecord(30, 1, 1, 2),
+        testIndexRecord(10, 1, 1, 2),
     };
     try std.testing.expect(!recordsInSeqOffsetOrder(&unsorted));
 }
 
-test "countCompositionSlice tallies composition and lowercase" {
-    var comp: CompositionStats = .{};
+test "composition SIMD matches scalar counts at every tail length" {
+    var data: [512]u8 = undefined;
+    for (&data, 0..) |*byte, i| byte.* = @truncate(i);
 
-    countCompositionSlice("ACGTacgtNN", &comp);
+    for (0..data.len + 1) |len| {
+        var expected: [256]u64 = .{0} ** 256;
+        var expected_lowercase: u64 = 0;
+        for (data[0..len]) |byte| {
+            expected[byte] += 1;
+            if (byte >= 'a' and byte <= 'z') expected_lowercase += 1;
+        }
+        var comp: CompositionStats = .{};
 
-    try std.testing.expectEqual(@as(u64, 10), comp.total_bases);
-    try std.testing.expectEqual(@as(u64, 4), comp.lowercase_count);
-    try std.testing.expectEqual(@as(u64, 1), comp.counts['A']);
-    try std.testing.expectEqual(@as(u64, 1), comp.counts['a']);
-    try std.testing.expectEqual(@as(u64, 2), comp.counts['N']);
+        countCompositionSlice(data[0..len], &comp);
+
+        try std.testing.expectEqual(@as(u64, @intCast(len)), comp.total_bases);
+        try std.testing.expectEqual(expected_lowercase, comp.lowercase_count);
+        try std.testing.expectEqualSlices(u64, &expected, &comp.counts);
+    }
 }
 
 test "bounded uniform reader handles LF CRLF and missing final newline" {
@@ -672,11 +691,11 @@ test "bounded uniform reader handles LF CRLF and missing final newline" {
     const cases = [_]Case{
         .{
             .bytes = "prefixACGT\nacgt\nNN",
-            .record = .{ .seq_offset = 6, .seq_len = 10, .line_bases = 4, .line_bytes = 5 },
+            .record = testIndexRecord(6, 10, 4, 5),
         },
         .{
             .bytes = "xACGT\r\nacgt\r\nNN\r\nsuffix",
-            .record = .{ .seq_offset = 1, .seq_len = 10, .line_bases = 4, .line_bytes = 6 },
+            .record = testIndexRecord(1, 10, 4, 6),
         },
     };
     const buffer_sizes = [_]usize{ 1, 2, 3, 4, 5, 6, 7, 15, 16, 17, 32, 33 };
@@ -684,7 +703,7 @@ test "bounded uniform reader handles LF CRLF and missing final newline" {
     for (cases) |case| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
+        const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{ .read = true });
         defer file.close(std.testing.io);
         try std.Io.File.writeStreamingAll(file, std.testing.io, case.bytes);
         for (buffer_sizes) |buffer_size| {
@@ -712,7 +731,7 @@ test "bounded readers exclude headers gaps and adjacent record bytes" {
     const buffer_sizes = [_]usize{ 3, 32 };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
+    const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{ .read = true });
     defer file.close(std.testing.io);
     try std.Io.File.writeStreamingAll(file, std.testing.io, bytes);
     for (buffer_sizes) |buffer_size| {
@@ -727,12 +746,12 @@ test "bounded readers exclude headers gaps and adjacent record bytes" {
 
         try scanUniformRecord(
             &reader,
-            .{ .seq_offset = 5, .seq_len = 4, .line_bases = 2, .line_bytes = 3 },
+            testIndexRecord(5, 4, 2, 3),
             &comp,
         );
         try scanUniformRecord(
             &reader,
-            .{ .seq_offset = 16, .seq_len = 2, .line_bases = 2, .line_bytes = 3 },
+            testIndexRecord(16, 2, 2, 3),
             &comp,
         );
 
@@ -755,7 +774,7 @@ test "bounded side-table reader coalesces only adjacent owned spans" {
     const buffer_sizes = [_]usize{ 1, 2, 3, 4, 5, 6, 7 };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
+    const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{ .read = true });
     defer file.close(std.testing.io);
     try std.Io.File.writeStreamingAll(file, std.testing.io, bytes);
     for (buffer_sizes) |buffer_size| {
@@ -776,7 +795,7 @@ test "bounded side-table reader coalesces only adjacent owned spans" {
     }
 }
 
-test "bounded reader rejects geometry beyond the FASTA boundary" {
+test "bounded reader rejects invalid uniform geometry" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
@@ -790,15 +809,17 @@ test "bounded reader rejects geometry beyond the FASTA boundary" {
         .file_size = 4,
         .buffer = &storage,
     };
+    const invalid = [_]IndexRecord{
+        testIndexRecord(0, 1, 0, 0),
+        testIndexRecord(0, 1, 2, 1),
+        testIndexRecord(0, 5, 5, 6),
+        testIndexRecord(std.math.maxInt(u64), 1, 1, 1),
+        testIndexRecord(0, std.math.maxInt(u64), 1, std.math.maxInt(u32)),
+    };
 
-    try std.testing.expectError(
-        error.CorruptGeometry,
-        scanUniformRecord(
-            &reader,
-            .{ .seq_offset = 0, .seq_len = 5, .line_bases = 5, .line_bytes = 6 },
-            &comp,
-        ),
-    );
+    for (invalid) |record| {
+        try std.testing.expectError(error.CorruptGeometry, scanUniformRecord(&reader, record, &comp));
+    }
 }
 
 test "median arithmetic is overflow safe" {
@@ -809,8 +830,8 @@ test "median arithmetic is overflow safe" {
 
 test "length total overflow is rejected" {
     const records = [_]IndexRecord{
-        .{ .seq_len = std.math.maxInt(u64), .line_bases = 1, .line_bytes = 2 },
-        .{ .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
+        testIndexRecord(0, std.math.maxInt(u64), 1, 2),
+        testIndexRecord(0, 1, 1, 2),
     };
     var lengths: [2]u64 = undefined;
 
@@ -820,8 +841,8 @@ test "length total overflow is rejected" {
 test "auN accumulation and formatting use u128" {
     const length: u64 = 1 << 32;
     const records = [_]IndexRecord{
-        .{ .seq_len = length, .line_bases = 1, .line_bytes = 2 },
-        .{ .seq_len = length, .line_bases = 1, .line_bytes = 2 },
+        testIndexRecord(0, length, 1, 2),
+        testIndexRecord(0, length, 1, 2),
     };
     var lengths: [2]u64 = undefined;
     const summary = try summarizeLengths(&records, &lengths);
@@ -852,7 +873,7 @@ test "fixed decimals use exact half-away rounding" {
 
 test "report writing propagates a full destination" {
     const records = [_]IndexRecord{
-        .{ .seq_len = 4, .line_bases = 4, .line_bytes = 5 },
+        testIndexRecord(0, 4, 4, 5),
     };
     const summary = LengthSummary{
         .total_symbols = 4,

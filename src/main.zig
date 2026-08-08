@@ -13,12 +13,6 @@ pub const getter = @import("getter.zig");
 pub const stats = @import("stats.zig");
 pub const validator = @import("validator.zig");
 
-// --- Re-exports for tests ---
-pub const IndexRecord = index_format.IndexRecord;
-pub const ZfiHeader = index_format.ZfiHeader;
-pub const ZFI_MAGIC = index_format.ZFI_MAGIC;
-pub const validateFasta = indexer.validateFasta;
-
 const printErrorAndExit = index_format.printErrorAndExit;
 
 const VERSION = "0.3.1";
@@ -126,7 +120,7 @@ fn printUsageAndExit() noreturn {
     std.process.exit(1);
 }
 
-/// Positional argv tokens must not start with `-`. Known flags are matched earlier.
+// Positional argv tokens must not start with `-`. Known flags are matched earlier.
 fn rejectUnknownOption(arg: []const u8) void {
     if (arg.len > 0 and arg[0] == '-') {
         printErrorAndExit("error: unknown option: {s}\n", .{arg});
@@ -205,9 +199,7 @@ pub fn main(init: std.process.Init.Minimal) void {
     }
 }
 
-// ============================================================================
-// Subcommand: index
-// ============================================================================
+// --- Index command ---
 
 fn runIndex(io: std.Io, environ: std.process.Environ, args: *std.process.Args.Iterator) void {
     var emit_fai = false;
@@ -227,6 +219,9 @@ fn runIndex(io: std.Io, environ: std.process.Environ, args: *std.process.Args.It
             enable_dedup = true;
         } else {
             rejectUnknownOption(arg);
+            if (fasta_path != null) {
+                printErrorAndExit("error: index accepts exactly one FASTA path\n", .{});
+            }
             fasta_path = arg;
         }
     }
@@ -247,7 +242,7 @@ fn runIndex(io: std.Io, environ: std.process.Environ, args: *std.process.Args.It
         error.NotFasta => printErrorAndExit("error: not a FASTA file: {s}\n", .{path}),
         error.HeaderTooLong => printErrorAndExit(
             "error: sequence name exceeds {d} bytes: {s}\n",
-            .{ indexer.max_index_name_len, path },
+            .{ indexer.MAX_INDEX_NAME_LEN, path },
         ),
         error.NonUniformFai => printErrorAndExit(
             "error: cannot emit .fai for non-uniform sequence layout; run 'z-fasta index' (default) to write .zfi\n",
@@ -288,9 +283,7 @@ fn runIndex(io: std.Io, environ: std.process.Environ, args: *std.process.Args.It
     };
 }
 
-// ============================================================================
-// Subcommand: get
-// ============================================================================
+// --- Get command ---
 
 fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     var fasta_path: ?[]const u8 = null;
@@ -387,30 +380,7 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     });
 }
 
-test "parseTransformFlags returns requested orientation" {
-    const rc = try parseTransformFlags(true, false, false, false);
-    try std.testing.expect(rc.orientation.reverse);
-    try std.testing.expect(rc.orientation.complement);
-
-    const complement_only = try parseTransformFlags(false, true, false, true);
-    try std.testing.expect(!complement_only.orientation.reverse);
-    try std.testing.expect(complement_only.orientation.complement);
-    try std.testing.expect(complement_only.annotate_transform);
-
-    const reverse_only = try parseTransformFlags(false, false, true, false);
-    try std.testing.expect(reverse_only.orientation.reverse);
-    try std.testing.expect(!reverse_only.orientation.complement);
-}
-
-test "parseTransformFlags rejects conflicting transform flags" {
-    try std.testing.expectError(error.ConflictingTransformFlags, parseTransformFlags(true, true, false, false));
-    try std.testing.expectError(error.ConflictingTransformFlags, parseTransformFlags(true, false, true, false));
-    try std.testing.expectError(error.ConflictingTransformFlags, parseTransformFlags(false, true, true, false));
-}
-
-// ============================================================================
-// Subcommand: stats
-// ============================================================================
+// --- Stats command ---
 
 fn runStatsCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     var fasta_path: ?[]const u8 = null;
@@ -420,6 +390,9 @@ fn runStatsCmd(io: std.Io, args: *std.process.Args.Iterator) void {
             printHelpAndExit(io);
         } else {
             rejectUnknownOption(arg);
+            if (fasta_path != null) {
+                printErrorAndExit("error: stats accepts exactly one FASTA path\n", .{});
+            }
             fasta_path = arg;
         }
     }
@@ -431,9 +404,7 @@ fn runStatsCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     stats.runStats(std.heap.page_allocator, io, path);
 }
 
-// ============================================================================
-// Subcommand: validate
-// ============================================================================
+// --- Validate command ---
 
 fn runValidateCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     var fasta_path: ?[]const u8 = null;
@@ -486,6 +457,12 @@ fn runValidateCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     if (saw_summary and !saw_json) {
         printErrorAndExit("error: validate --summary requires --json\n", .{});
     }
+    if (options.fix_format_only and !options.fix) {
+        printErrorAndExit("error: validate --fix-format-only requires --fix\n", .{});
+    }
+    if (options.output_path != null and !options.fix) {
+        printErrorAndExit("error: validate -o requires --fix\n", .{});
+    }
 
     const path = fasta_path orelse {
         printErrorAndExit("error: usage: z-fasta validate [options] <file.fasta>\n", .{});
@@ -508,4 +485,33 @@ fn parsePositiveUsize(raw: []const u8, comptime flag: []const u8) usize {
         printErrorAndExit("error: {s} requires a positive integer\n", .{flag});
     }
     return parsed;
+}
+
+test "transform flags select the requested orientation" {
+    const rc = try parseTransformFlags(true, false, false, false);
+    const complement_only = try parseTransformFlags(false, true, false, true);
+    const reverse_only = try parseTransformFlags(false, false, true, false);
+
+    try std.testing.expect(rc.orientation.reverse);
+    try std.testing.expect(rc.orientation.complement);
+    try std.testing.expect(!complement_only.orientation.reverse);
+    try std.testing.expect(complement_only.orientation.complement);
+    try std.testing.expect(complement_only.annotate_transform);
+    try std.testing.expect(reverse_only.orientation.reverse);
+    try std.testing.expect(!reverse_only.orientation.complement);
+}
+
+test "transform flags reject conflicting modes" {
+    const conflicts = [_][3]bool{
+        .{ true, true, false },
+        .{ true, false, true },
+        .{ false, true, true },
+    };
+
+    for (conflicts) |flags| {
+        try std.testing.expectError(
+            error.ConflictingTransformFlags,
+            parseTransformFlags(flags[0], flags[1], flags[2], false),
+        );
+    }
 }

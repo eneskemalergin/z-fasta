@@ -11,99 +11,51 @@ const io = std.testing.io;
 
 const ZFASTA_BIN = if (builtin.os.tag == .windows) "zig-out\\bin\\z-fasta.exe" else "zig-out/bin/z-fasta";
 
-// ============================================================================
-// Region parsing tests
-// ============================================================================
+// --- Region parsing tests ---
 
-test "parseRegion - simple name" {
-    const r = parseRegion("chr1");
-    try std.testing.expectEqualStrings("chr1", r.name);
-    try std.testing.expect(r.is_full);
+test "parseRegion recognizes names and coordinate suffixes" {
+    const Case = struct {
+        input: []const u8,
+        name: []const u8,
+        start: u64 = 1,
+        end: ?u64 = null,
+        is_full: bool = true,
+    };
+    const cases = [_]Case{
+        .{ .input = "chr1", .name = "chr1" },
+        .{ .input = "", .name = "" },
+        .{ .input = "chr1:100-200", .name = "chr1", .start = 100, .end = 200, .is_full = false },
+        .{ .input = "chr1:100-", .name = "chr1", .start = 100, .is_full = false },
+        .{
+            .input = "chromosome:GRCh38:1:1:248956422:1:100-200",
+            .name = "chromosome:GRCh38:1:1:248956422:1",
+            .start = 100,
+            .end = 200,
+            .is_full = false,
+        },
+        .{
+            .input = "chromosome:GRCh38:1:1:248956422:1",
+            .name = "chromosome:GRCh38:1:1:248956422:1",
+        },
+        .{ .input = "sp|P12345|PROT_NAME:1-50", .name = "sp|P12345|PROT_NAME", .end = 50, .is_full = false },
+        .{ .input = "chr1:1-1", .name = "chr1", .end = 1, .is_full = false },
+        .{ .input = "chr1:1000000-2000000", .name = "chr1", .start = 1_000_000, .end = 2_000_000, .is_full = false },
+        .{ .input = "KI270394.1:1-100", .name = "KI270394.1", .end = 100, .is_full = false },
+        .{ .input = "1:1", .name = "1:1" },
+        .{ .input = "chr1.1.2.3", .name = "chr1.1.2.3" },
+    };
+
+    for (cases) |case| {
+        const region = parseRegion(case.input);
+
+        try std.testing.expectEqualStrings(case.name, region.name);
+        try std.testing.expectEqual(case.start, region.start);
+        try std.testing.expectEqual(case.end, region.end);
+        try std.testing.expectEqual(case.is_full, region.is_full);
+    }
 }
 
-test "parseRegion - empty identifier" {
-    const r = parseRegion("");
-    try std.testing.expectEqualStrings("", r.name);
-    try std.testing.expect(r.is_full);
-}
-
-test "parseRegion - name with range" {
-    const r = parseRegion("chr1:100-200");
-    try std.testing.expectEqualStrings("chr1", r.name);
-    try std.testing.expectEqual(@as(u64, 100), r.start);
-    try std.testing.expectEqual(@as(?u64, 200), r.end);
-    try std.testing.expect(!r.is_full);
-}
-
-test "parseRegion - name with open end" {
-    const r = parseRegion("chr1:100-");
-    try std.testing.expectEqualStrings("chr1", r.name);
-    try std.testing.expectEqual(@as(u64, 100), r.start);
-    try std.testing.expectEqual(@as(?u64, null), r.end);
-    try std.testing.expect(!r.is_full);
-}
-
-test "parseRegion - Ensembl colon name with range" {
-    const r = parseRegion("chromosome:GRCh38:1:1:248956422:1:100-200");
-    try std.testing.expectEqualStrings("chromosome:GRCh38:1:1:248956422:1", r.name);
-    try std.testing.expectEqual(@as(u64, 100), r.start);
-    try std.testing.expectEqual(@as(?u64, 200), r.end);
-    try std.testing.expect(!r.is_full);
-}
-
-test "parseRegion - Ensembl colon name without range" {
-    const r = parseRegion("chromosome:GRCh38:1:1:248956422:1");
-    try std.testing.expectEqualStrings("chromosome:GRCh38:1:1:248956422:1", r.name);
-    try std.testing.expect(r.is_full);
-}
-
-test "parseRegion - pipe-delimited protein name" {
-    const r = parseRegion("sp|P12345|PROT_NAME:1-50");
-    try std.testing.expectEqualStrings("sp|P12345|PROT_NAME", r.name);
-    try std.testing.expectEqual(@as(u64, 1), r.start);
-    try std.testing.expectEqual(@as(?u64, 50), r.end);
-}
-
-test "parseRegion - single base" {
-    const r = parseRegion("chr1:1-1");
-    try std.testing.expectEqualStrings("chr1", r.name);
-    try std.testing.expectEqual(@as(u64, 1), r.start);
-    try std.testing.expectEqual(@as(?u64, 1), r.end);
-    try std.testing.expect(!r.is_full);
-}
-
-test "parseRegion - large coordinates" {
-    const r = parseRegion("chr1:1000000-2000000");
-    try std.testing.expectEqualStrings("chr1", r.name);
-    try std.testing.expectEqual(@as(u64, 1_000_000), r.start);
-    try std.testing.expectEqual(@as(?u64, 2_000_000), r.end);
-}
-
-test "parseRegion - name with underscore and range" {
-    const r = parseRegion("KI270394.1:1-100");
-    try std.testing.expectEqualStrings("KI270394.1", r.name);
-    try std.testing.expectEqual(@as(u64, 1), r.start);
-    try std.testing.expectEqual(@as(?u64, 100), r.end);
-}
-
-test "parseRegion - name with colon but no valid range" {
-    // "1:1" looks like it could be parsed as name="1", start=1, end=null ...
-    // but there's no dash, so parseRangeSuffix returns null.
-    // The whole thing should be treated as a name.
-    const r = parseRegion("1:1");
-    try std.testing.expectEqualStrings("1:1", r.name);
-    try std.testing.expect(r.is_full);
-}
-
-test "parseRegion - name only with dots" {
-    const r = parseRegion("chr1.1.2.3");
-    try std.testing.expectEqualStrings("chr1.1.2.3", r.name);
-    try std.testing.expect(r.is_full);
-}
-
-// ============================================================================
-// Index loading tests
-// ============================================================================
+// --- Index loading tests ---
 
 test "loadIndex - .zfi file" {
     var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta");
@@ -131,15 +83,14 @@ test "loadIndex - .zfi file" {
     try std.testing.expectEqual(@as(?usize, null), idx.lookupName("nonexistent"));
 }
 
-// ============================================================================
-// Multi-region resolution tests
-// ============================================================================
+// --- Multi-region resolution tests ---
 
 test "resolveRegion - single region, full sequence" {
     var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta");
     defer idx.deinit();
 
     const r = resolveRegion(&idx, "seq1");
+
     try std.testing.expectEqualStrings("seq1", r.name);
     try std.testing.expect(r.is_full);
     try std.testing.expectEqual(@as(u64, 24), r.num_bases);
@@ -150,6 +101,7 @@ test "resolveRegion - single region, sub-range" {
     defer idx.deinit();
 
     const r = resolveRegion(&idx, "seq1:1-12");
+
     try std.testing.expectEqualStrings("seq1", r.name);
     try std.testing.expect(!r.is_full);
     try std.testing.expectEqual(@as(u64, 12), r.num_bases);
@@ -161,10 +113,9 @@ test "resolveRegion - end clamped silently" {
     var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta");
     defer idx.deinit();
 
-    // seq1 has 24 bases; request end=9999 should clamp to 24
     const r = resolveRegion(&idx, "seq1:1-9999");
+
     try std.testing.expectEqual(@as(u64, 24), r.num_bases);
-    // display_end should be the user-supplied value (before clamping)
     try std.testing.expectEqual(@as(u64, 9999), r.display_end);
 }
 
@@ -173,42 +124,21 @@ test "resolveRegion - first base resolves one symbol" {
     defer idx.deinit();
 
     const r = resolveRegion(&idx, "seq1:1-1");
+
     try std.testing.expectEqual(@as(u64, 1), r.num_bases);
 }
 
-test "resolveRegion - duplicate region preserves geometry" {
-    var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta");
-    defer idx.deinit();
-
-    const r0 = resolveRegion(&idx, "seq1:1-5");
-    const r1 = resolveRegion(&idx, "seq1:1-5");
-
-    try std.testing.expectEqual(r0.seq_offset, r1.seq_offset);
-    try std.testing.expectEqual(r0.num_bases, r1.num_bases);
-}
-
-// ============================================================================
-// resolveRegion edge cases
-// ============================================================================
+// --- resolveRegion edge cases ---
 
 test "resolveRegion - open-ended region (NAME:START-) uses seq_len as end" {
     var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta");
     defer idx.deinit();
 
-    // seq1 has 24 bases; NAME:13- should return bases 13..24 = 12 bases
     const r = resolveRegion(&idx, "seq1:13-");
+
     try std.testing.expect(!r.is_full);
     try std.testing.expectEqual(@as(u64, 12), r.num_bases);
-    // display_end should be seq_len (24), not null
     try std.testing.expectEqual(@as(u64, 24), r.display_end);
-}
-
-test "resolveRegion - single-base region" {
-    var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta");
-    defer idx.deinit();
-
-    const r = resolveRegion(&idx, "seq1:1-1");
-    try std.testing.expectEqual(@as(u64, 1), r.num_bases);
 }
 
 test "resolveRegion - last-base region" {
@@ -216,16 +146,8 @@ test "resolveRegion - last-base region" {
     defer idx.deinit();
 
     const r = resolveRegion(&idx, "seq1:24-24");
+
     try std.testing.expectEqual(@as(u64, 1), r.num_bases);
-}
-
-test "resolveRegion - cross-line region (starts line 1, ends line 2)" {
-    var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta");
-    defer idx.deinit();
-
-    // seq1 wraps at 12 bases per line; region 10-15 crosses the line boundary
-    const r = resolveRegion(&idx, "seq1:10-15");
-    try std.testing.expectEqual(@as(u64, 6), r.num_bases);
 }
 
 test "resolveRegion - full and explicit ranges preserve geometry" {
@@ -234,19 +156,9 @@ test "resolveRegion - full and explicit ranges preserve geometry" {
 
     const r_full = resolveRegion(&idx, "seq1");
     const r_range = resolveRegion(&idx, "seq1:1-24");
+
     try std.testing.expectEqual(r_full.seq_offset, r_range.seq_offset);
     try std.testing.expectEqual(r_full.num_bases, r_range.num_bases);
-}
-
-test "resolveRegion - display_end before clamp, num_bases after clamp" {
-    var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta");
-    defer idx.deinit();
-
-    const r = resolveRegion(&idx, "seq1:1-9999");
-    // num_bases clamped to seq_len
-    try std.testing.expectEqual(@as(u64, 24), r.num_bases);
-    // display_end preserves user value
-    try std.testing.expectEqual(@as(u64, 9999), r.display_end);
 }
 
 test "resolveRegion - proteome pipe-delimited name" {
@@ -254,6 +166,7 @@ test "resolveRegion - proteome pipe-delimited name" {
     defer idx.deinit();
 
     const r = resolveRegion(&idx, "sp|P12345|PROT_HUMAN:1-10");
+
     try std.testing.expectEqualStrings("sp|P12345|PROT_HUMAN", r.name);
     try std.testing.expectEqual(@as(u64, 10), r.num_bases);
 }
@@ -262,52 +175,15 @@ test "resolveRegion - long header name (200-char sequence name)" {
     var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/edge_cases.fasta");
     defer idx.deinit();
 
-    const long_name = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const long_name = "A" ** 200;
     const r = resolveRegion(&idx, long_name);
+
     try std.testing.expectEqualStrings(long_name, r.name);
     try std.testing.expect(r.is_full);
     try std.testing.expectEqual(@as(u64, 8), r.num_bases);
 }
 
-test "resolveRegion - lowercase record resolves" {
-    var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/edge_cases.fasta");
-    defer idx.deinit();
-
-    // 'lowercase' in edge_cases.fasta: acgtACGTacgt (12 bases)
-    const r = resolveRegion(&idx, "lowercase:1-1");
-    try std.testing.expectEqual(@as(u64, 1), r.num_bases);
-}
-
-test "resolveRegion - ordering: seq2 has higher file offset than seq1" {
-    var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta");
-    defer idx.deinit();
-
-    const r1 = resolveRegion(&idx, "seq1:1-1");
-    const r2 = resolveRegion(&idx, "seq2:1-1");
-    try std.testing.expect(r2.seq_offset > r1.seq_offset);
-}
-
-test "resolveRegion - file geometry is independent of request order" {
-    var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta");
-    defer idx.deinit();
-
-    const r2 = resolveRegion(&idx, "seq2:1-1");
-    const r1 = resolveRegion(&idx, "seq1:1-1");
-    try std.testing.expect(r1.seq_offset < r2.seq_offset);
-}
-
-test "resolveRegion - nonstandard characters in sequence (stars/dashes)" {
-    var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/edge_cases.fasta");
-    defer idx.deinit();
-
-    // 'nonstandard' has ACG*-NACGT (10 chars)
-    const r = resolveRegion(&idx, "nonstandard:1-10");
-    try std.testing.expectEqual(@as(u64, 10), r.num_bases);
-}
-
-// ============================================================================
-// Index-backed get fixtures
-// ============================================================================
+// --- Index-backed get fixtures ---
 
 fn uniqueArtifactPath(allocator: std.mem.Allocator, stem: []const u8, ext: []const u8) ![]u8 {
     try std.Io.Dir.cwd().createDirPath(io, "zig-cache/test-artifacts");
@@ -345,15 +221,16 @@ fn writeZfi(allocator: std.mem.Allocator, fasta_path: []const u8, data: []const 
 }
 
 fn captureExtractRegion(allocator: std.mem.Allocator, fasta_path: []const u8, region: []const u8) ![]u8 {
-    var idx = try main.index_format.loadIndexChecked(std.testing.allocator, io, fasta_path);
+    var idx = try main.index_format.loadIndexChecked(allocator, io, fasta_path);
     defer idx.deinit();
 
     var out = std.Io.Writer.Allocating.init(allocator);
+    errdefer out.deinit();
     main.getter.extractRegion(&idx, region, &out.writer);
     return out.toOwnedSlice();
 }
 
-test "get on zfi output for simple.fasta seq1:1-10" {
+test "get extracts a region across uniform FASTA lines" {
     const data = @embedFile("data/simple.fasta");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -366,13 +243,25 @@ test "get on zfi output for simple.fasta seq1:1-10" {
 
     try writeZfi(allocator, path, data, true);
 
-    const got = try captureExtractRegion(allocator, path, "seq1:1-10");
+    const got = try captureExtractRegion(allocator, path, "seq1:10-15");
     const expected =
-        \\>seq1:1-10
-        \\ACGTACGTAC
+        \\>seq1:10-15
+        \\CGTACG
         \\
     ;
     try std.testing.expectEqualStrings(expected, got);
+}
+
+test "get preserves lowercase and nonstandard sequence bytes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const lowercase = try captureExtractRegion(allocator, "tests/data/edge_cases.fasta", "lowercase");
+    const nonstandard = try captureExtractRegion(allocator, "tests/data/edge_cases.fasta", "nonstandard");
+
+    try std.testing.expectEqualStrings(">lowercase\nacgtACGTacgt\n", lowercase);
+    try std.testing.expectEqualStrings(">nonstandard\nACG*-NACGT\n", nonstandard);
 }
 
 test "get on messy mixed_widths after indexing" {
@@ -431,7 +320,7 @@ test "CLI get selects the first empty identifier through zfi and fai" {
     try expectCliSuccess(allocator, &.{ ZFASTA_BIN, "get", fasta_path, "" }, ">\nAAAA\n");
 }
 
-/// Hard CLI failures: exact exit code, exact stderr, empty stdout (no partial success).
+// Hard CLI failures require exact exit code and stderr with no partial stdout.
 fn expectCliFailure(
     allocator: std.mem.Allocator,
     argv: []const []const u8,
@@ -478,7 +367,7 @@ fn expectCliSuccess(allocator: std.mem.Allocator, argv: []const []const u8, expe
     try std.testing.expectEqual(@as(usize, 0), result.stderr.len);
 }
 
-/// Usage dumps: exit 1, empty stdout, stderr matches `z-fasta --help` stdout exactly.
+// Usage failures must reproduce the top-level help on stderr exactly.
 fn expectCliUsageFailure(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -516,6 +405,7 @@ fn expectCliUsageFailure(allocator: std.mem.Allocator, argv: []const []const u8)
 
 fn expectUnknownOptionRejected(allocator: std.mem.Allocator, argv: []const []const u8, unknown: []const u8) !void {
     const expected = try std.fmt.allocPrint(allocator, "error: unknown option: {s}\n", .{unknown});
+    defer allocator.free(expected);
     try expectCliFailure(allocator, argv, 1, expected);
 }
 
@@ -544,7 +434,7 @@ test "get help describes the request source contract" {
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Names and BED input stream.") != null);
 }
 
-const get_usage_stderr =
+const GET_USAGE_STDERR =
     \\error: usage: z-fasta get <file.fasta> (<region>... | --names file.txt|- | --bed file.bed|-)
     \\
 ;
@@ -560,6 +450,18 @@ test "index rejects unknown options before and after FASTA path" {
     try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "index", fasta, unknown }, unknown);
     try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "index", "-z", fasta }, "-z");
     try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "index", "--low-mem", fasta }, "--low-mem");
+}
+
+test "index rejects multiple FASTA paths" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    try expectCliFailure(
+        arena.allocator(),
+        &.{ ZFASTA_BIN, "index", "tests/data/simple.fasta", "tests/data/single.fasta" },
+        1,
+        "error: index accepts exactly one FASTA path\n",
+    );
 }
 
 test "get rejects unknown options before, between, and after positionals" {
@@ -624,7 +526,7 @@ test "names accepts the index name-length boundary in both formats" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const name = try allocator.alloc(u8, main.indexer.max_index_name_len);
+    const name = try allocator.alloc(u8, main.indexer.MAX_INDEX_NAME_LEN);
     @memset(name, 'A');
     var fasta = std.ArrayList(u8).empty;
     try fasta.ensureTotalCapacity(allocator, name.len + 4);
@@ -675,11 +577,13 @@ test "names rejects a request name above the index limit" {
 
     const names_path = try uniqueArtifactPath(allocator, "names-too-long", "txt");
     defer std.Io.Dir.cwd().deleteFile(io, names_path) catch {};
-    const names_file = try std.Io.Dir.cwd().createFile(io, names_path, .{});
-    const name = try allocator.alloc(u8, main.indexer.max_index_name_len + 1);
+    const name = try allocator.alloc(u8, main.indexer.MAX_INDEX_NAME_LEN + 1);
     @memset(name, 'A');
-    try std.Io.File.writeStreamingAll(names_file, io, name);
-    names_file.close(io);
+    {
+        const names_file = try std.Io.Dir.cwd().createFile(io, names_path, .{});
+        defer names_file.close(io);
+        try std.Io.File.writeStreamingAll(names_file, io, name);
+    }
 
     try expectCliFailure(
         allocator,
@@ -699,6 +603,18 @@ test "stats rejects unknown options before and after FASTA path" {
     try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "stats", unknown, fasta }, unknown);
     try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "stats", fasta, unknown }, unknown);
     try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "stats", "--index-only", fasta }, "--index-only");
+}
+
+test "stats rejects multiple FASTA paths" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    try expectCliFailure(
+        arena.allocator(),
+        &.{ ZFASTA_BIN, "stats", "tests/data/simple.fasta", "tests/data/single.fasta" },
+        1,
+        "error: stats accepts exactly one FASTA path\n",
+    );
 }
 
 test "validate rejects unknown options before and after FASTA path" {
@@ -863,7 +779,7 @@ test "CLI failures: get usage, conflicts, and missing sequence" {
         }
     }
 
-    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", fasta }, 1, get_usage_stderr);
+    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", fasta }, 1, GET_USAGE_STDERR);
     try expectCliFailure(
         allocator,
         &.{ ZFASTA_BIN, "get", fasta, "missing" },
@@ -891,13 +807,15 @@ test "BED annotations describe final composed orientation" {
 
     const bed_path = try uniqueArtifactPath(allocator, "bed-annotation", "bed");
     defer std.Io.Dir.cwd().deleteFile(io, bed_path) catch {};
-    const bed_file = try std.Io.Dir.cwd().createFile(io, bed_path, .{});
-    try std.Io.File.writeStreamingAll(
-        bed_file,
-        io,
-        "seq1\t0\t5\tplus\t0\t+\nseq1\t0\t5\tminus\t0\t-\n",
-    );
-    bed_file.close(io);
+    {
+        const bed_file = try std.Io.Dir.cwd().createFile(io, bed_path, .{});
+        defer bed_file.close(io);
+        try std.Io.File.writeStreamingAll(
+            bed_file,
+            io,
+            "seq1\t0\t5\tplus\t0\t+\nseq1\t0\t5\tminus\t0\t-\n",
+        );
+    }
 
     try expectCliSuccess(
         allocator,
@@ -927,6 +845,18 @@ test "CLI failures: stats and validate usage errors" {
         &.{ ZFASTA_BIN, "validate", "--summary", "tests/data/simple.fasta" },
         1,
         "error: validate --summary requires --json\n",
+    );
+    try expectCliFailure(
+        allocator,
+        &.{ ZFASTA_BIN, "validate", "--fix-format-only", "tests/data/simple.fasta" },
+        1,
+        "error: validate --fix-format-only requires --fix\n",
+    );
+    try expectCliFailure(
+        allocator,
+        &.{ ZFASTA_BIN, "validate", "-o", "zig-cache/test-artifacts/unused.fasta", "tests/data/simple.fasta" },
+        1,
+        "error: validate -o requires --fix\n",
     );
     try expectCliFailure(
         allocator,

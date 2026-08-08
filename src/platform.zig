@@ -21,11 +21,9 @@ pub fn mapFileReadOnly(io: std.Io, file: std.Io.File, len: usize) error{MmapFail
 pub fn adviseSequential(memory: MappedBytes) void {
     if (comptime builtin.os.tag == .windows) return;
     if (memory.len == 0) return;
-    const len = std.mem.alignBackward(usize, memory.len, std.heap.page_size_min);
-    if (len == 0) return;
     std.posix.madvise(
-        @alignCast(@constCast(memory.ptr)),
-        len,
+        @constCast(memory.ptr),
+        memory.len,
         std.posix.MADV.SEQUENTIAL,
     ) catch {};
 }

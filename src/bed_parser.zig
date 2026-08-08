@@ -42,19 +42,25 @@ pub const ParseResult = union(enum) {
 };
 
 fn parseStrand(field: []const u8) BedStrand {
-    if (field.len == 0 or std.mem.eql(u8, field, ".")) return .none;
-    if (std.mem.eql(u8, field, "+")) return .plus;
-    if (std.mem.eql(u8, field, "-")) return .minus;
-    return .invalid;
+    if (field.len == 0) return .none;
+    if (field.len != 1) return .invalid;
+
+    return switch (field[0]) {
+        '+' => .plus,
+        '-' => .minus,
+        '.' => .none,
+        else => .invalid,
+    };
 }
 
+/// Parses one BED line. Returned region slices borrow from `line`.
 pub fn parseBedLine(line: []const u8, line_number: usize) ParseError!ParseResult {
     const trimmed = if (line.len > 0 and line[line.len - 1] == '\r') line[0 .. line.len - 1] else line;
 
     if (trimmed.len == 0) return .skip;
     if (trimmed[0] == '#') return .skip;
-    if (std.mem.startsWith(u8, trimmed, "track")) return .skip;
-    if (std.mem.startsWith(u8, trimmed, "browser")) return .skip;
+    if (std.mem.eql(u8, trimmed, "track") or std.mem.startsWith(u8, trimmed, "track ")) return .skip;
+    if (std.mem.eql(u8, trimmed, "browser") or std.mem.startsWith(u8, trimmed, "browser ")) return .skip;
 
     var fields = std.mem.splitScalar(u8, trimmed, '\t');
 
@@ -120,6 +126,21 @@ test "parseBedLine skips comments and empty lines" {
     try std.testing.expectEqual(ParseResult.skip, try parseBedLine("# comment", 2));
     try std.testing.expectEqual(ParseResult.skip, try parseBedLine("track name=foo", 3));
     try std.testing.expectEqual(ParseResult.skip, try parseBedLine("browser position chr1:1-10", 4));
+}
+
+test "parseBedLine preserves chromosome names that resemble directives" {
+    const cases = [_][]const u8{
+        "track1\t0\t10",
+        "browser1\t0\t10",
+        "track\t0\t10",
+        "browser\t0\t10",
+    };
+
+    for (cases) |line| {
+        const parsed = try parseBedLine(line, 1);
+
+        try std.testing.expectEqualStrings(line[0..std.mem.indexOfScalar(u8, line, '\t').?], parsed.region.chrom);
+    }
 }
 
 test "parseBedLine trims CRLF line endings" {

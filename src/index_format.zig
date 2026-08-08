@@ -65,7 +65,7 @@ fn decodeZfiSourceIdBytes(id_bytes: []const u8) ?u64 {
 }
 
 // Legacy on-disk footer written before tight layout (16 bytes: magic + 4 pad + u64).
-const zfi_name_footer_legacy_bytes: usize = 16;
+const ZFI_NAME_FOOTER_LEGACY_BYTES: usize = 16;
 
 /// Nanoseconds since epoch as stored in `.zfi` source-identity trailers.
 pub fn timestampToNs(ts: std.Io.Timestamp) u64 {
@@ -113,11 +113,11 @@ fn parseZfiNameFooterAtEnd(zfi_data: []const u8) ?struct {
     }
 
     // Legacy 16-byte footer: magic + 4 pad bytes + little-endian u64 length.
-    if (zfi_data.len >= zfi_name_footer_legacy_bytes) {
-        const tail = zfi_data[zfi_data.len - zfi_name_footer_legacy_bytes ..];
+    if (zfi_data.len >= ZFI_NAME_FOOTER_LEGACY_BYTES) {
+        const tail = zfi_data[zfi_data.len - ZFI_NAME_FOOTER_LEGACY_BYTES ..];
         if (std.mem.eql(u8, tail[0..4], &ZFI_NAME_FOOTER_MAGIC)) {
             const name_blob_len = std.mem.readInt(u64, tail[8..16], .little);
-            return .{ .name_blob_len = name_blob_len, .footer_bytes = zfi_name_footer_legacy_bytes };
+            return .{ .name_blob_len = name_blob_len, .footer_bytes = ZFI_NAME_FOOTER_LEGACY_BYTES };
         }
     }
 
@@ -474,8 +474,6 @@ pub fn loadIndexCheckedWithMode(
     return (try tryLoadFai(allocator, io, fai_path, fasta_file, fasta_stat, mode)) orelse error.NoIndexFound;
 }
 
-// Partition name-blob / footer relative to the records region.
-//
 // Current indexes embed every name and end with `[name blob][ZFID][ZFNM footer]`.
 // The source-identity block remains optional for supported early embedded-name files.
 const ZfiNameLayout = struct {
@@ -548,23 +546,21 @@ fn tryLoadZfi(
         return error.StaleIndex;
     }
 
-    var zfi_map = platform.mapFileReadOnly(io, zfi_file, @intCast(zfi_stat.size)) catch return error.MmapFailed;
+    const zfi_size = std.math.cast(usize, zfi_stat.size) orelse return error.MmapFailed;
+    var zfi_map = platform.mapFileReadOnly(io, zfi_file, zfi_size) catch return error.MmapFailed;
     errdefer zfi_map.destroy(io);
 
     const zfi_data: platform.MappedBytes = zfi_map.memory;
 
-    // Validate minimum size for header
     if (zfi_data.len < @sizeOf(ZfiHeader)) {
         return error.CorruptIndex;
     }
 
-    // Validate magic
     const header: *const ZfiHeader = @ptrCast(@alignCast(zfi_data.ptr));
     if (!std.mem.eql(u8, &header.magic, &ZFI_MAGIC)) {
         return error.CorruptIndex;
     }
 
-    // Validate source file size (embedded identity).
     if (header.source_size != fasta_stat.size) {
         return error.StaleIndex;
     }
@@ -668,7 +664,8 @@ fn tryLoadFai(
         .lookup_full_map => {},
     }
 
-    var fai_map = platform.mapFileReadOnly(io, fai_file, @intCast(fai_stat.size)) catch return error.MmapFailed;
+    const fai_size = std.math.cast(usize, fai_stat.size) orelse return error.MmapFailed;
+    var fai_map = platform.mapFileReadOnly(io, fai_file, fai_size) catch return error.MmapFailed;
 
     errdefer fai_map.destroy(io);
 
@@ -692,7 +689,7 @@ fn tryLoadFai(
     var pos: usize = 0;
     while (pos < fai_data.len) {
         const line_start = pos;
-        const rel_eol = std.mem.indexOfScalar(u8, fai_data[pos..], '\n') orelse fai_data.len - pos;
+        const rel_eol = std.mem.findScalar(u8, fai_data[pos..], '\n') orelse fai_data.len - pos;
         const line_len = rel_eol;
         const line_end = std.math.add(usize, line_start, line_len) catch return error.CorruptIndex;
         // Advance past `\n` only when present; a final line may omit it.
@@ -910,7 +907,7 @@ fn parseFaiFieldU64(line: []const u8, field_start: *usize) LoadIndexError!u64 {
     }
     if (field_start.* >= line.len) return error.CorruptIndex;
 
-    const field_end = std.mem.indexOfScalarPos(u8, line, field_start.*, '\t') orelse line.len;
+    const field_end = std.mem.findScalarPos(u8, line, field_start.*, '\t') orelse line.len;
     const value = parseFaiAsciiU64(line[field_start.*..field_end]) orelse return error.CorruptIndex;
     field_start.* = field_end;
     return value;
@@ -922,7 +919,7 @@ fn parseFaiFieldU32(line: []const u8, field_start: *usize) LoadIndexError!u32 {
     }
     if (field_start.* >= line.len) return error.CorruptIndex;
 
-    const field_end = std.mem.indexOfScalarPos(u8, line, field_start.*, '\t') orelse line.len;
+    const field_end = std.mem.findScalarPos(u8, line, field_start.*, '\t') orelse line.len;
     const value = parseFaiAsciiU32(line[field_start.*..field_end]) orelse return error.CorruptIndex;
     field_start.* = field_end;
     return value;
@@ -942,7 +939,7 @@ const FaiLineFields = struct {
 };
 
 fn parseFaiIndexLine(line: []const u8) LoadIndexError!FaiLineFields {
-    const name_end = std.mem.indexOfScalar(u8, line, '\t') orelse return error.CorruptIndex;
+    const name_end = std.mem.findScalar(u8, line, '\t') orelse return error.CorruptIndex;
     const name_len = faiNameLen(name_end) orelse return error.CorruptIndex;
     var field_start: usize = name_end + 1;
     const seq_len = try parseFaiFieldU64(line, &field_start);
@@ -1058,7 +1055,6 @@ fn validateZfiRecords(
     return true;
 }
 
-// Parsed side-table location inside the side-table region.
 const ParsedSideTable = struct {
     start: usize,
     end: usize,

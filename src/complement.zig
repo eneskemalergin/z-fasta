@@ -34,26 +34,26 @@ fn buildComplementTable() [256]u8 {
     return table;
 }
 
-pub const iupac_complement_table: [256]u8 = buildComplementTable();
+const IUPAC_COMPLEMENT_TABLE: [256]u8 = buildComplementTable();
 
 /// Return the IUPAC complement for one base.
-/// Unknown bytes pass through unchanged so headers and non-sequence bytes are not mangled.
+/// Unknown bytes pass through unchanged.
 pub fn complement(byte: u8) u8 {
-    return iupac_complement_table[byte];
+    return IUPAC_COMPLEMENT_TABLE[byte];
 }
 
-/// Write the IUPAC complement of `src` into `dst` (same length).
+/// Write the IUPAC complement of `src` into `dst`; asserts equal lengths.
 pub fn complementInto(dst: []u8, src: []const u8) void {
     std.debug.assert(dst.len == src.len);
     var i: usize = 0;
     // Process 32-byte chunks with a table lookup per lane (no branch on base).
     while (i + 32 <= src.len) : (i += 32) {
         inline for (0..32) |j| {
-            dst[i + j] = iupac_complement_table[src[i + j]];
+            dst[i + j] = IUPAC_COMPLEMENT_TABLE[src[i + j]];
         }
     }
     while (i < src.len) : (i += 1) {
-        dst[i] = iupac_complement_table[src[i]];
+        dst[i] = IUPAC_COMPLEMENT_TABLE[src[i]];
     }
 }
 
@@ -99,4 +99,14 @@ test "complement leaves unknown bytes unchanged" {
     try std.testing.expectEqual(@as(u8, '-'), complement('-'));
     try std.testing.expectEqual(@as(u8, 'X'), complement('X'));
     try std.testing.expectEqual(@as(u8, 'x'), complement('x'));
+}
+
+test "complementInto handles an unrolled chunk and tail" {
+    const src: [33]u8 = @splat('A');
+    const expected: [33]u8 = @splat('T');
+    var dst: [33]u8 = undefined;
+
+    complementInto(&dst, &src);
+
+    try std.testing.expectEqualSlices(u8, &expected, &dst);
 }

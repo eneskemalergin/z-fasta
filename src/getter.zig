@@ -136,19 +136,7 @@ const BatchStats = struct {
 pub fn parseRegion(input: []const u8) Region {
     // Only the rightmost colon can start a coordinate suffix. Any earlier suffix
     // contains that colon, so its coordinate fields cannot both be integers.
-    var colon_pos: ?usize = null;
-    {
-        var i: usize = input.len;
-        while (i > 0) {
-            i -= 1;
-            if (input[i] == ':') {
-                colon_pos = i;
-                break;
-            }
-        }
-    }
-
-    if (colon_pos) |cp| {
+    if (std.mem.findScalarLast(u8, input, ':')) |cp| {
         const suffix = input[cp + 1 ..];
 
         if (parseRangeSuffix(suffix)) |range| {
@@ -176,21 +164,15 @@ const ParsedRange = struct {
 };
 
 fn parseRangeSuffix(suffix: []const u8) ?ParsedRange {
-    // Expect: START-END or START-
-    // Find the '-' separator
-    const dash_pos = std.mem.indexOfScalar(u8, suffix, '-') orelse return null;
+    const dash_pos = std.mem.findScalar(u8, suffix, '-') orelse return null;
 
     const start_str = suffix[0..dash_pos];
     const end_str = suffix[dash_pos + 1 ..];
 
-    // START must be a valid positive integer
     if (start_str.len == 0) return null;
     const start = std.fmt.parseInt(u64, start_str, 10) catch return null;
 
-    if (end_str.len == 0) {
-        // NAME:START- form (to end of sequence)
-        return .{ .start = start, .end = null };
-    }
+    if (end_str.len == 0) return .{ .start = start, .end = null };
 
     const end = std.fmt.parseInt(u64, end_str, 10) catch return null;
     return .{ .start = start, .end = end };

@@ -66,13 +66,14 @@ pub fn build(b: *std.Build) void {
     // CLI subprocess tests spawn zig-out/bin/z-fasta; keep it current with this suite.
     run_test_get.step.dependOn(b.getInstallStep());
 
-    const run_test_getter_unit = b.addRunArtifact(b.addTest(.{
+    const run_test_main_unit = b.addRunArtifact(b.addTest(.{ .root_module = main_module }));
+
+    const run_test_indexer_unit = b.addRunArtifact(b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/getter.zig"),
+            .root_source_file = b.path("src/indexer.zig"),
             .target = target,
             .optimize = optimize,
         }),
-        .filters = &.{"getter.test."},
     }));
 
     const run_test_stats = b.addRunArtifact(b.addTest(.{
@@ -84,22 +85,6 @@ pub fn build(b: *std.Build) void {
         }),
     }));
     run_test_stats.step.dependOn(b.getInstallStep());
-
-    const run_test_complement = b.addRunArtifact(b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/complement.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    }));
-
-    const run_test_bed_parser = b.addRunArtifact(b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/bed_parser.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    }));
 
     // Messy correctness FASTAs live in gitignored cache; materialize before tests that read them.
     const gen_messy_fixtures = b.addSystemCommand(&.{
@@ -121,7 +106,7 @@ pub fn build(b: *std.Build) void {
         const gen_test_index = b.addRunArtifact(exe);
         gen_test_index.addArgs(&.{ "index", fasta_path });
         run_test_get.step.dependOn(&gen_test_index.step);
-        run_test_getter_unit.step.dependOn(&gen_test_index.step);
+        run_test_main_unit.step.dependOn(&gen_test_index.step);
         run_test_stats.step.dependOn(&gen_test_index.step);
     }
 
@@ -143,9 +128,8 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_test_index.step);
     test_step.dependOn(&run_test_get.step);
-    test_step.dependOn(&run_test_getter_unit.step);
+    test_step.dependOn(&run_test_main_unit.step);
+    test_step.dependOn(&run_test_indexer_unit.step);
     test_step.dependOn(&run_test_stats.step);
-    test_step.dependOn(&run_test_complement.step);
-    test_step.dependOn(&run_test_bed_parser.step);
     test_step.dependOn(&run_test_validate.step);
 }

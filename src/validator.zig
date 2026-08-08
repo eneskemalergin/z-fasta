@@ -1,6 +1,6 @@
 //! FASTA structure, alphabet, and header validation with optional fix streaming.
 //!
-//! Events are capped (`max_validate_events`). JSON output escapes arbitrary header bytes.
+//! Events are capped (`MAX_VALIDATE_EVENTS`). JSON output escapes arbitrary header bytes.
 //! Shared sequence-type sampling uses `stats.detectType`.
 
 const std = @import("std");
@@ -18,12 +18,12 @@ const SimdVec = @Vector(SIMD_CHUNK_SIZE, u8);
 
 /// Hard cap on retained validate events. Further issues set `Summary.truncated`
 /// instead of growing an unbounded list.
-pub const max_validate_events: usize = 10_000;
+pub const MAX_VALIDATE_EVENTS: usize = 10_000;
 
 comptime {
     // Keep the validate help line in src/main.zig synchronized with this value.
-    if (max_validate_events != 10_000) {
-        @compileError("update validate help text for max_validate_events");
+    if (MAX_VALIDATE_EVENTS != 10_000) {
+        @compileError("update validate help text for MAX_VALIDATE_EVENTS");
     }
 }
 
@@ -101,6 +101,8 @@ pub const Kind = enum {
     }
 };
 
+const KIND_COUNT = @typeInfo(Kind).@"enum".fields.len;
+
 pub const ValidateEvent = struct {
     level: Level,
     kind: Kind,
@@ -123,8 +125,12 @@ pub const Summary = struct {
     header_count: usize = 0,
     error_count: usize = 0,
     warning_count: usize = 0,
-    /// True when more issues were found after `max_validate_events` were retained.
+    format_warning_count: usize = 0,
+    kind_counts: [KIND_COUNT]usize = .{0} ** KIND_COUNT,
+    /// True when more issues were found after `MAX_VALIDATE_EVENTS` were retained.
     truncated: bool = false,
+    /// Fix blocker found after event retention reached its cap.
+    truncated_fix_rejection: ?Kind = null,
 
     pub fn deinit(self: *Summary, allocator: std.mem.Allocator) void {
         self.events.deinit(allocator);
@@ -134,7 +140,7 @@ pub const Summary = struct {
 
 const WidthCount = struct {
     width: u32,
-    count: u32,
+    count: usize,
     first_order: usize,
 };
 
@@ -184,7 +190,10 @@ pub fn runValidate(io: std.Io, fasta_path: []const u8, options: Options) void {
     const data: []const u8 = if (stat.size == 0)
         &[_]u8{}
     else blk: {
-        fasta_map = platform.mapFileReadOnly(io, file, @intCast(stat.size)) catch {
+        const map_len = std.math.cast(usize, stat.size) orelse {
+            printErrorAndExit("error: failed to mmap file: {s}\n", .{fasta_path});
+        };
+        fasta_map = platform.mapFileReadOnly(io, file, map_len) catch {
             printErrorAndExit("error: failed to mmap file: {s}\n", .{fasta_path});
         };
         break :blk fasta_map.?.memory;
@@ -205,7 +214,9 @@ pub fn runValidate(io: std.Io, fasta_path: []const u8, options: Options) void {
         const output_path = options.output_path orelse {
             printErrorAndExit("error: validate --fix requires -o <output.fa>\n", .{});
         };
-        if (std.mem.eql(u8, fasta_path, output_path)) {
+        if (std.mem.eql(u8, fasta_path, output_path) or
+            outputResolvesToInput(io, file, output_path))
+        {
             printErrorAndExit("error: validate --fix will not overwrite input: {s}\n", .{fasta_path});
         }
         ensureFixAllowed(&summary, options);
@@ -231,12 +242,12 @@ pub fn runValidate(io: std.Io, fasta_path: []const u8, options: Options) void {
         if (!options.fix) {
             printErrorAndExit(
                 "error: validate stopped after {d} events; fix reported issues and re-run\n",
-                .{max_validate_events},
+                .{MAX_VALIDATE_EVENTS},
             );
         }
         std.debug.print(
             "warning: validate event list truncated at {d}; --fix output was still written\n",
-            .{max_validate_events},
+            .{MAX_VALIDATE_EVENTS},
         );
     }
 
@@ -250,8 +261,8 @@ pub fn validateData(allocator: std.mem.Allocator, data: []const u8, options: Opt
     };
     errdefer summary.deinit(allocator);
 
-    var seen_names = std.StringHashMap(usize).init(allocator);
-    defer seen_names.deinit();
+    var seen_names: std.StringHashMapUnmanaged(usize) = .empty;
+    defer seen_names.deinit(allocator);
 
     var type_counts: [256]u64 = .{0} ** 256;
     var type_total: u64 = 0;
@@ -353,16 +364,11 @@ pub fn exitCode(error_count: usize, warning_count: usize, strict: bool) u8 {
 pub fn exitCodeForOptions(summary: *const Summary, options: Options) u8 {
     if (!options.fix) return exitCode(summary.error_count, summary.warning_count, options.strict);
 
-    var remaining_errors: usize = 0;
-    var remaining_warnings: usize = 0;
-    for (summary.events.items) |event| {
-        if (isFixedByFormatRewrite(event.kind)) continue;
-        switch (event.level) {
-            .error_level => remaining_errors += 1,
-            .warning => remaining_warnings += 1,
-        }
-    }
-    return exitCode(remaining_errors, remaining_warnings, options.strict);
+    return exitCode(
+        summary.error_count,
+        summary.warning_count - summary.format_warning_count,
+        options.strict,
+    );
 }
 
 fn isFixedByFormatRewrite(kind: Kind) bool {
@@ -386,25 +392,50 @@ pub fn fixRejection(summary: *const Summary, options: Options) ?Kind {
             else => {},
         }
     }
+    if (summary.truncated_fix_rejection) |kind| {
+        if (kind != .invalid_character or !options.fix_format_only) return kind;
+    }
     return null;
 }
 
 fn appendEvent(allocator: std.mem.Allocator, summary: *Summary, event: ValidateEvent) !void {
-    if (summary.events.items.len >= max_validate_events) {
-        summary.truncated = true;
-        return;
-    }
-    try summary.events.append(allocator, event);
     switch (event.level) {
         .error_level => summary.error_count += 1,
         .warning => summary.warning_count += 1,
+    }
+    summary.kind_counts[@intFromEnum(event.kind)] += 1;
+    if (isFixedByFormatRewrite(event.kind)) summary.format_warning_count += 1;
+
+    if (summary.events.items.len >= MAX_VALIDATE_EVENTS) {
+        summary.truncated = true;
+        noteTruncatedFixRejection(summary, event.kind);
+        return;
+    }
+    try summary.events.append(allocator, event);
+}
+
+fn noteTruncatedFixRejection(summary: *Summary, kind: Kind) void {
+    switch (kind) {
+        .invalid_character => {
+            if (summary.truncated_fix_rejection == null) {
+                summary.truncated_fix_rejection = .invalid_character;
+            }
+        },
+        .no_sequences, .duplicate_name, .null_byte => {
+            if (summary.truncated_fix_rejection == null or
+                summary.truncated_fix_rejection == .invalid_character)
+            {
+                summary.truncated_fix_rejection = kind;
+            }
+        },
+        else => {},
     }
 }
 
 fn startRecord(
     allocator: std.mem.Allocator,
     summary: *Summary,
-    seen_names: *std.StringHashMap(usize),
+    seen_names: *std.StringHashMapUnmanaged(usize),
     state: *RecordState,
     line: []const u8,
     line_number: usize,
@@ -419,7 +450,7 @@ fn startRecord(
     while (name_end < line.len and line[name_end] != ' ' and line[name_end] != '\t') : (name_end += 1) {}
     state.name = line[1..name_end];
 
-    const gop = try seen_names.getOrPut(state.name);
+    const gop = try seen_names.getOrPut(allocator, state.name);
     if (gop.found_existing) {
         try appendEvent(allocator, summary, .{
             .level = .error_level,
@@ -464,6 +495,23 @@ fn startRecord(
 
 fn finalizeRecord(allocator: std.mem.Allocator, summary: *Summary, state: *RecordState) !void {
     if (!state.active) return;
+
+    if (!state.width_warning_emitted) {
+        if (state.expected_width) |expected| {
+            if (state.pending_width) |final_width| {
+                if (final_width > expected) {
+                    try appendEvent(allocator, summary, .{
+                        .level = .warning,
+                        .kind = .inconsistent_line_widths,
+                        .line = state.pending_line,
+                        .name = state.name,
+                        .expected_width = expected,
+                        .actual_width = final_width,
+                    });
+                }
+            }
+        }
+    }
 
     if (state.bases == 0) {
         try appendEvent(allocator, summary, .{
@@ -583,7 +631,7 @@ fn updateWidth(allocator: std.mem.Allocator, state: *RecordState, width: u32) !v
 
 fn modalWidth(state: *const RecordState) u32 {
     var best_width: u32 = DEFAULT_FIX_WIDTH;
-    var best_count: u32 = 0;
+    var best_count: usize = 0;
     var best_order: usize = std.math.maxInt(usize);
     for (state.widths.items) |entry| {
         if (entry.count > best_count or (entry.count == best_count and entry.first_order < best_order)) {
@@ -625,11 +673,9 @@ fn appendInvalidCharacterEvents(
     }
 }
 
-fn buildAlphabet(chars: ?[]const u8) [256]bool {
+fn buildAlphabet(chars: []const u8) [256]bool {
     var table = [_]bool{false} ** 256;
-    if (chars) |bytes| {
-        for (bytes) |byte| table[byte] = true;
-    }
+    for (chars) |byte| table[byte] = true;
     return table;
 }
 
@@ -720,23 +766,41 @@ fn ensureFixAllowed(summary: *const Summary, options: Options) void {
 
 /// Rewrite format-level issues to normalized LF FASTA bytes. Caller must run validateData first.
 /// Allocates the full result for tests and library callers; CLI `--fix` streams via `writeFixed`.
+/// Allocator-backed writer failures are reported as `error.OutOfMemory`.
 pub fn fixData(allocator: std.mem.Allocator, data: []const u8, record_widths: []const u32) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
-    try writeFixedContent(&aw.writer, data, record_widths);
+    writeFixedContent(&aw.writer, data, record_widths) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+    };
     return try aw.toOwnedSlice();
 }
 
 fn writeFixed(io: std.Io, data: []const u8, record_widths: []const u32, output_path: []const u8) !void {
     const cwd = std.Io.Dir.cwd();
-    const out_file = try cwd.createFile(io, output_path, .{ .truncate = true });
-    errdefer cwd.deleteFile(io, output_path) catch {};
-    defer out_file.close(io);
+    var atomic_file = try cwd.createFileAtomic(io, output_path, .{ .replace = true });
+    defer atomic_file.deinit(io);
 
     var out_buf: [65536]u8 = undefined;
-    var file_fw = out_file.writer(io, &out_buf);
+    var file_fw = atomic_file.file.writer(io, &out_buf);
     try writeFixedContent(&file_fw.interface, data, record_widths);
     try file_fw.flush();
+    try atomic_file.replace(io);
+}
+
+fn outputResolvesToInput(io: std.Io, input_file: std.Io.File, output_path: []const u8) bool {
+    const output_file = std.Io.Dir.cwd().openFile(io, output_path, .{}) catch return false;
+    defer output_file.close(io);
+
+    var input_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const input_path_len = input_file.realPath(io, &input_path_buf) catch return false;
+    var output_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const output_path_len = output_file.realPath(io, &output_path_buf) catch return false;
+    return std.mem.eql(
+        u8,
+        input_path_buf[0..input_path_len],
+        output_path_buf[0..output_path_len],
+    );
 }
 
 fn writeFixedContent(writer: *std.Io.Writer, data: []const u8, record_widths: []const u32) !void {
@@ -960,11 +1024,7 @@ fn allKinds() []const Kind {
 }
 
 fn countKind(summary: *const Summary, kind: Kind) usize {
-    var count: usize = 0;
-    for (summary.events.items) |event| {
-        if (event.kind == kind) count += 1;
-    }
-    return count;
+    return summary.kind_counts[@intFromEnum(kind)];
 }
 
 fn firstKind(summary: *const Summary, kind: Kind) ?ValidateEvent {

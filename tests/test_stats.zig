@@ -5,10 +5,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const main = @import("main");
-const detectType = main.stats.detectType;
-const SequenceType = main.stats.SequenceType;
+const stats = main.stats;
 
-// --- Type detection ---
+const ZFASTA_BIN = if (builtin.os.tag == .windows) "zig-out\\bin\\z-fasta.exe" else "zig-out/bin/z-fasta";
 
 fn countSymbols(symbols: []const u8) [256]u64 {
     var counts: [256]u64 = .{0} ** 256;
@@ -16,10 +15,32 @@ fn countSymbols(symbols: []const u8) [256]u64 {
     return counts;
 }
 
+fn runStatsAndCapture(allocator: std.mem.Allocator, fasta_path: []const u8) ![]u8 {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+
+    const result = try std.process.run(allocator, threaded.io(), .{
+        .argv = &.{ ZFASTA_BIN, "stats", fasta_path },
+        .stdout_limit = .limited(10 * 1024 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    });
+    errdefer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| if (code != 0) return error.ChildProcessFailed,
+        else => return error.ChildProcessFailed,
+    }
+    try std.testing.expectEqual(@as(usize, 0), result.stderr.len);
+    return result.stdout;
+}
+
+// --- Type detection ---
+
 test "detectType classifies representative alphabets" {
     const Case = struct {
         symbols: []const u8,
-        expected: SequenceType,
+        expected: stats.SequenceType,
     };
     const cases = [_]Case{
         .{ .symbols = "", .expected = .nucleotide },
@@ -32,7 +53,7 @@ test "detectType classifies representative alphabets" {
     for (cases) |case| {
         const counts = countSymbols(case.symbols);
 
-        try std.testing.expectEqual(case.expected, detectType(&counts, case.symbols.len));
+        try std.testing.expectEqual(case.expected, stats.detectType(&counts, case.symbols.len));
     }
 }
 
@@ -40,7 +61,7 @@ test "detectType uses a strict overflow-safe 90 percent boundary" {
     const Case = struct {
         total: u64,
         nucleotide: u64,
-        expected: SequenceType,
+        expected: stats.SequenceType,
     };
     const cases = [_]Case{
         .{ .total = 10, .nucleotide = 9, .expected = .protein },
@@ -65,7 +86,7 @@ test "detectType uses a strict overflow-safe 90 percent boundary" {
         counts['A'] = case.nucleotide;
         counts['L'] = case.total - case.nucleotide;
 
-        try std.testing.expectEqual(case.expected, detectType(&counts, case.total));
+        try std.testing.expectEqual(case.expected, stats.detectType(&counts, case.total));
     }
 }
 
@@ -81,44 +102,18 @@ test "detectType matches its threshold across deterministic fuzzy inputs" {
         var counts: [256]u64 = .{0} ** 256;
         counts[nucleotide_codes[i % nucleotide_codes.len]] = nucleotide;
         counts[protein_only_codes[i % protein_only_codes.len]] = total - nucleotide;
-        const expected: SequenceType = if (@as(u128, nucleotide) * 10 > @as(u128, total) * 9)
+        const expected: stats.SequenceType = if (@as(u128, nucleotide) * 10 > @as(u128, total) * 9)
             .nucleotide
         else
             .protein;
 
-        try std.testing.expectEqual(expected, detectType(&counts, total));
+        try std.testing.expectEqual(expected, stats.detectType(&counts, total));
     }
 }
 
 // --- CLI reports ---
 
-const ZFASTA_BIN = if (builtin.os.tag == .windows) "zig-out\\bin\\z-fasta.exe" else "zig-out/bin/z-fasta";
-
-fn runStatsAndCapture(allocator: std.mem.Allocator, fasta_path: []const u8) ![]u8 {
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var proc = try std.process.spawn(io, .{
-        .argv = &.{ ZFASTA_BIN, "stats", fasta_path },
-        .stdout = .pipe,
-    });
-    errdefer proc.kill(io);
-
-    var read_buf: [4096]u8 = undefined;
-    var stdout_reader = proc.stdout.?.reader(io, &read_buf);
-    const result = try stdout_reader.interface.allocRemaining(allocator, .limited(10 * 1024 * 1024));
-    switch (try proc.wait(io)) {
-        .exited => |code| if (code != 0) return error.ChildProcessFailed,
-        else => return error.ChildProcessFailed,
-    }
-    return result;
-}
-
 test "stats renders the exact nucleotide report" {
-    const output = try runStatsAndCapture(std.testing.allocator, "tests/data/simple.fasta");
-    defer std.testing.allocator.free(output);
-
     const expected =
         \\File:
         \\  path: tests/data/simple.fasta
@@ -162,13 +157,13 @@ test "stats renders the exact nucleotide report" {
         \\
     ;
 
+    const output = try runStatsAndCapture(std.testing.allocator, "tests/data/simple.fasta");
+    defer std.testing.allocator.free(output);
+
     try std.testing.expectEqualStrings(expected, output);
 }
 
 test "stats renders the exact protein report" {
-    const output = try runStatsAndCapture(std.testing.allocator, "tests/data/proteome.fasta");
-    defer std.testing.allocator.free(output);
-
     const expected =
         \\File:
         \\  path: tests/data/proteome.fasta
@@ -229,5 +224,9 @@ test "stats renders the exact protein report" {
         \\  lowercase: 0 0.00%
         \\
     ;
+
+    const output = try runStatsAndCapture(std.testing.allocator, "tests/data/proteome.fasta");
+    defer std.testing.allocator.free(output);
+
     try std.testing.expectEqualStrings(expected, output);
 }

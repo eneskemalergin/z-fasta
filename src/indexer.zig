@@ -2,7 +2,7 @@
 //!
 //! The parser skips empty lines for geometry, sets `seq_offset` to the first base-bearing
 //! line, invents a separator when the final line has no newline, and rejects names longer
-//! than `max_index_name_len`. Proven dense blocks update the same `ChunkParseState`; the
+//! than `MAX_INDEX_NAME_LEN`. Proven dense blocks update the same `ChunkParseState`; the
 //! first anomaly resumes the general line machine at the exact unconsumed byte.
 //!
 //! Duplicate-name filtering is first-wins and collision-safe: lookup may use a hash, but
@@ -22,7 +22,7 @@ const STRIDE_VECTOR_LEN = std.simd.suggestVectorLength(u8) orelse 1;
 // Processes 256 lines per proof batch without additional storage.
 const STRIDE_VALIDATION_BLOCK_LINES = 256;
 // The input payload occupies this fixed stack buffer regardless of FASTA size.
-pub const index_read_buffer_size = 1 * 1024 * 1024;
+pub const INDEX_READ_BUFFER_SIZE = 1 * 1024 * 1024;
 const FILE_IO_BUF_SIZE = 8 * 1024;
 // Each output and replay stage uses one fixed stack buffer of this size.
 const INDEX_OUTPUT_BUFFER_SIZE = 64 * 1024;
@@ -36,7 +36,7 @@ const FAI_U64_DECIMAL_DIGITS = 20;
 const FAI_SUFFIX_BUFFER_SIZE = 4 * (1 + FAI_U64_DECIMAL_DIGITS) + 1;
 // Exclusive creation retries only random name collisions within one directory.
 const FAI_SPOOL_CREATE_ATTEMPTS = 16;
-pub const max_index_name_len = std.math.maxInt(u16);
+pub const MAX_INDEX_NAME_LEN = std.math.maxInt(u16);
 
 pub const ScanOptions = struct {
     enable_dedup: bool,
@@ -53,10 +53,8 @@ pub const IndexOptions = struct {
 // Offset into a name blob for `.zfi` catalog dedup (one store for map and output).
 const NameBlobRef = struct { off: u32, len: u32 };
 
-/// First-wins name set for indexing. A hash accelerates the map; discarding a record
-/// requires full-string equality (`Context.eql`), never hash equality alone.
-/// Production uses `NameDedup` (`StringContext`). Tests may inject a colliding hasher via
-/// `NameDedupWith` to prove identity stays byte equality under forced collisions.
+/// First-wins name set for indexing. Discarding a record requires full-string equality,
+/// even when different names produce the same hash.
 ///
 /// FAI stores stable keys in a child arena. `.zfi` stores offsets into `name_blob` so
 /// deduplication and output share one name copy.
@@ -64,10 +62,10 @@ pub fn NameDedupWith(comptime Context: type) type {
     return struct {
         map: std.HashMap([]const u8, void, Context, std.hash_map.default_max_load_percentage),
         key_arena: ?std.heap.ArenaAllocator = null,
-        /// When set, `.zfi` dedup stores `NameBlobRef` keys into this blob (not `map`).
+        // When set, `.zfi` dedup stores `NameBlobRef` keys into this blob (not `map`).
         name_blob: ?*std.ArrayList(u8) = null,
         ref_map: ?BlobRefMap = null,
-        /// After a successful first-seen `observe` in blob mode, the embedded span.
+        // After a successful first-seen `observe` in blob mode, the embedded span.
         last_offset: u32 = 0,
         last_len: u16 = 0,
 
@@ -113,7 +111,7 @@ pub fn NameDedupWith(comptime Context: type) type {
             };
         }
 
-        /// `.zfi`: one catalog in `blob` for both dedup and embedded names.
+        // `.zfi`: one catalog in `blob` for both dedup and embedded names.
         fn initOwningBlob(allocator: std.mem.Allocator, blob: *std.ArrayList(u8)) Self {
             return .{
                 .map = std.HashMap([]const u8, void, Context, std.hash_map.default_max_load_percentage).init(allocator),
@@ -146,7 +144,7 @@ pub fn NameDedupWith(comptime Context: type) type {
             self.name_blob = null;
         }
 
-        /// Returns true when `name` was already observed (caller should skip the record).
+        // Returns true when `name` was already observed (caller should skip the record).
         pub fn observe(self: *Self, name: []const u8) !bool {
             if (self.name_blob) |blob| {
                 var rm = &(self.ref_map orelse return error.OutOfMemory);
@@ -213,8 +211,8 @@ const LineMetrics = struct {
     line_bytes: u32 = 0,
     is_uniform_width: bool = true,
     line_count: u64 = 0,
-    /// First base line: every content byte was a base (no trailing space/tab) and the
-    /// on-wire separator was LF or CRLF. Needed so `AAAA \\n` is not treated as CRLF-dense.
+    // First base line: every content byte was a base (no trailing space/tab) and the
+    // on-wire separator was LF or CRLF. Needed so `AAAA \\n` is not treated as CRLF-dense.
     first_content_dense: bool = false,
 };
 
@@ -376,8 +374,8 @@ const LineMetricsBuilder = struct {
     pending_actual_bytes: u32 = 0,
     pending_content_len: u32 = 0,
     have_pending: bool = false,
-    /// Blank seen after at least one base line; applied only when another base line follows.
-    /// Trailing blanks before EOF or the next header do not change record geometry.
+    // Blank seen after at least one base line; applied only when another base line follows.
+    // Trailing blanks before EOF or the next header do not change record geometry.
     blank_after_bases: bool = false,
 
     fn ingestLine(self: *LineMetricsBuilder, bases: u32, actual_bytes: u32, has_lf: bool, content_len: u32) void {
@@ -547,12 +545,12 @@ pub fn scanZfiData(
     allocator: std.mem.Allocator,
 ) !ZfiIndex {
     var r = std.Io.Reader.fixed(data);
-    var read_buf: [index_read_buffer_size]u8 = undefined;
+    var read_buf: [INDEX_READ_BUFFER_SIZE]u8 = undefined;
     return scanZfiReader(&r, &read_buf, enable_dedup, allocator);
 }
 
-/// Single on-disk `.zfi` serialization path:
-/// header, records, side tables, name blob, `ZFID` source identity, `ZFNM` footer.
+// Single on-disk `.zfi` serialization path:
+// header, records, side tables, name blob, `ZFID` source identity, `ZFNM` footer.
 fn writeZfiIndex(
     writer: *std.Io.Writer,
     index: *const ZfiIndex,
@@ -1027,8 +1025,8 @@ fn processChunkBytes(
                 }
 
                 const fragment = data[i..name_end];
-                if (state.name.items.len > max_index_name_len or
-                    fragment.len > max_index_name_len - state.name.items.len)
+                if (state.name.items.len > MAX_INDEX_NAME_LEN or
+                    fragment.len > MAX_INDEX_NAME_LEN - state.name.items.len)
                 {
                     return error.HeaderTooLong;
                 }
@@ -1347,7 +1345,7 @@ pub fn scanFaiData(
     allocator: std.mem.Allocator,
 ) !u32 {
     var r = std.Io.Reader.fixed(data);
-    var read_buf: [index_read_buffer_size]u8 = undefined;
+    var read_buf: [INDEX_READ_BUFFER_SIZE]u8 = undefined;
     return scanFaiReader(&r, &read_buf, writer, .{ .enable_dedup = enable_dedup }, allocator);
 }
 
@@ -1371,7 +1369,7 @@ pub fn runIndex(
     const allocator = std.heap.page_allocator;
 
     var io_buf: [FILE_IO_BUF_SIZE]u8 = undefined;
-    var read_buf: [index_read_buffer_size]u8 = undefined;
+    var read_buf: [INDEX_READ_BUFFER_SIZE]u8 = undefined;
     var file_reader = file.reader(io, &io_buf);
 
     if (options.emit_fai) {
@@ -1464,11 +1462,6 @@ pub fn runIndex(
     std.debug.print("wrote {s} ({d} sequences)\n", .{ zfi_path, zfi_index.records.items.len });
 }
 
-/// Returns whether data begins with a FASTA header marker.
-pub fn validateFasta(data: []const u8) bool {
-    return data.len > 0 and data[0] == '>';
-}
-
 test "stride block validation matches scalar for structural mutations" {
     const line_bases: u32 = 4;
     const line_count = 520;
@@ -1520,20 +1513,33 @@ test "stride block validation matches scalar for structural mutations" {
 
 test "FAI suffix formatter matches std.fmt at field boundaries" {
     const cases = [_]IndexRecord{
-        .{ .seq_len = 0, .seq_offset = 0, .line_bases = 0, .line_bytes = 0 },
         .{
+            .name_offset = 0,
+            .name_len = 0,
+            .seq_len = 0,
+            .seq_offset = 0,
+            .line_bases = 0,
+            .line_bytes = 0,
+        },
+        .{
+            .name_offset = 0,
+            .name_len = 0,
             .seq_len = std.math.maxInt(u64),
             .seq_offset = std.math.maxInt(u64),
             .line_bases = std.math.maxInt(u32),
             .line_bytes = std.math.maxInt(u32),
         },
         .{
+            .name_offset = 0,
+            .name_len = 0,
             .seq_len = 0,
             .seq_offset = std.math.maxInt(u64),
             .line_bases = 0,
             .line_bytes = std.math.maxInt(u32),
         },
         .{
+            .name_offset = 0,
+            .name_len = 0,
             .seq_len = std.math.maxInt(u64),
             .seq_offset = 0,
             .line_bases = std.math.maxInt(u32),
@@ -1542,7 +1548,7 @@ test "FAI suffix formatter matches std.fmt at field boundaries" {
     };
 
     for (cases) |rec| {
-        var actual_buf: [128]u8 = undefined;
+        var actual_buf: [FAI_SUFFIX_BUFFER_SIZE]u8 = undefined;
         const actual = formatFaiSuffix(&actual_buf, rec);
         var expected_buf: [128]u8 = undefined;
         const expected = try std.fmt.bufPrint(
@@ -1584,6 +1590,30 @@ test "initial FASTA validation is an explicit scan option" {
             std.testing.allocator,
         ),
     );
+}
+
+test "name deduplication remains exact under hash collisions" {
+    const CollisionContext = struct {
+        pub fn hash(_: @This(), _: []const u8) u64 {
+            return 0;
+        }
+
+        pub fn eql(_: @This(), a: []const u8, b: []const u8) bool {
+            return std.mem.eql(u8, a, b);
+        }
+    };
+    const CollidingDedup = NameDedupWith(CollisionContext);
+    const names = [_][]const u8{ "alpha", "beta", "alpha", "gamma", "beta" };
+    var seen = CollidingDedup.init(std.testing.allocator);
+    defer seen.deinit();
+
+    var kept: usize = 0;
+    for (names) |name| {
+        if (!(try seen.observe(name))) kept += 1;
+    }
+
+    try std.testing.expectEqual(@as(usize, 3), kept);
+    try std.testing.expectEqual(@as(usize, 3), seen.map.count());
 }
 
 test "reader failures map to SourceReadFailed" {
