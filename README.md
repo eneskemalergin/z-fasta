@@ -119,7 +119,7 @@ Checks structure, alphabets, and headers (duplicate names, invalid characters, n
 z-fasta stats <file.fasta>
 ```
 
-Reports sequence count, total bases, min/max/mean/median lengths, N50, L50, N90, L90, AU, shortest/longest names, duplicate names, and composition. Nucleotide output includes frequencies, GC content, GC skew, and soft-masked fraction. Protein output includes the top three amino acids and lowercase fraction.
+Reports indexed record count, total symbols, shortest and longest records and names, mean, quartiles, median, range, N50/L50, N90/L90, auN, and complete composition. Nucleotide output distinguishes T, U, mixed T/U, ambiguity, invalid symbols, GC, GC skew, and lowercase input. Protein output reports every standard and ambiguous residue, stop and invalid symbols, and lowercase input. Percentages use total symbols as their denominator.
 
 ### Sequence type classification
 
@@ -244,21 +244,21 @@ See the [detailed GET benchmark report](bench/get/REPORT.md) for tool definition
 
 ### Stats: Assembly/Proteome Statistics
 
-| Mode       | Dataset                  | z-fasta     | seqkit -a | Speedup vs seqkit -a |
-| ---------- | ------------------------ | ----------- | --------- | -------------------- |
-| Index-only | Genome (~2.9 GiB)        | **2.11 ms** | 17.418 s  | **~8,250x**          |
-| Index-only | Proteome (~13 MiB)       | **6.08 ms** | 63.3 ms   | **~10.4x**           |
-| Full scan  | Genome (~2.9 GiB)        | **5.149 s** | 17.418 s  | **3.38x**            |
-| Full scan  | Transcriptome (~459 MiB) | **0.870 s** | 2.390 s   | **2.75x**            |
-| Full scan  | Proteome (~13 MiB)       | **25.7 ms** | 63.3 ms   | **2.46x**            |
+| Dataset                  | z-fasta (.zfi) | z-fasta (.fai) | noodles | SeqKit `stats -a` | vs noodles | vs SeqKit |
+| ------------------------ | -------------- | -------------- | ------- | ----------------- | ---------- | --------- |
+| Genome (~2.9 GiB)        | **2.752 s**    | **2.757 s**    | 6.119 s | 17.777 s          | **2.22x**  | **6.46x** |
+| Transcriptome (~459 MiB) | **0.382 s**    | **0.416 s**    | 1.107 s | 2.403 s           | **2.90x**  | **6.29x** |
+| Proteome (~13 MiB)       | **12.3 ms**    | **15.5 ms**    | 37.0 ms | 59.6 ms           | **3.00x**  | **4.83x** |
 
-> See [bench/stats/REPORT.md](bench/stats/REPORT.md). Index-only mode reads the sidecar without scanning sequence bytes.
+> Noodles is the project benchmark wrapper that computes the same agreed complete field set. SeqKit reports a smaller assembly and composition field set, so its column is a familiar ecosystem latency reference rather than an equivalent-work comparison. Rust-bio and Seqtk remain in the detailed report but are omitted here to keep the summary readable.
+
+See the [detailed stats benchmark report](bench/stats/REPORT.md) for field coverage, seven-sample variation, RSS, page faults, correctness, and `.zfi`/`.fai` scaling results.
 
 ### Correctness
 
 - **Index:** `bench/index/run.sh` edge cases **24/24 matching cases plus one `binary_data` review**; messy layouts from `python3 bench/shared/generate_messy.py` into `bench/shared/cache/messy_fixtures/` (correctness) and `messy_perf/` (proteome perf).
 - **Get:** `bench/get/run.sh` correctness **418/418** (positional, multi-region, BED, names, RC, messy) against samtools, bedtools, and seqtk where applicable.
-- **Stats:** `bench/stats/run.sh` correctness **89/89** (BioPython oracle, index formats, layout twins, messy fixtures, duplicates policy, peer parity).
+- **Stats:** `bench/stats/run.sh` checks an independent exact oracle, `.zfi`/`.fai` parity, layout twins, messy fixtures, deduplication, CLI errors, and complete noodles/rust-bio peer parity.
 - **Unit tests:** `./zig build test` (index, get, stats, complement, BED parser, validator).
 - **Messy FASTA:** z-fasta indexes and extracts mixed-width and trailing-whitespace FASTA that samtools-style FAI tools reject. Details: [bench/index/REPORT.md](bench/index/REPORT.md).
 

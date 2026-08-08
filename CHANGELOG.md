@@ -6,7 +6,7 @@ All notable changes to z-fasta will be documented in this file.
 
 ## Unreleased
 
-Indexing, GET, and stats performance and memory cleanup. No `.zfi` format change. **Re-index not required.** The `index --low-mem` flag is removed because bare `index` now provides the same low-memory behavior.
+Single-path performance and memory cleanup across `index`, `get`, and `stats`. No `.zfi` format change. **Re-index not required.**
 
 ### Changed
 
@@ -16,26 +16,40 @@ Indexing, GET, and stats performance and memory cleanup. No `.zfi` format change
   - `.fai` output uses temporary disk storage proportional to the emitted FAI before writing to stdout, preserving all-or-nothing output without a second memory mode.
 
 - **Get**
-  - BED input uses one streaming path. The `--chunk-size` option and its all-memory `-1` mode are removed.
   - Names and BED requests use reusable active storage instead of retaining complete inputs or command-lifetime BED names.
   - FASTA extraction reads requested spans through one portable path across positional, names, BED, strand, and orientation work, without a mapped fallback or retained complete output.
   - Positional `.fai` loading retains only requested records; `.zfi` remains authoritative when present. Both formats resolve duplicate names to the first exact match.
   - Each invocation accepts one request source. Summary timing includes index loading and streamed request acquisition, and annotations describe the final composed orientation.
 
 - **Stats**
-  - `stats` always reports the complete length and composition surface. The partial `--index-only` mode is removed and now follows the normal unknown-option error path.
+  - Output now uses stable `File`, `Lengths`, `Nx`, and `Composition` sections with exact file and index details.
+  - Length output adds quartiles, range, N50/L50, N90/L90, `auN`, and the shortest and longest record names.
+  - Nucleotide output covers T, U, mixed T/U, IUPAC ambiguity, invalid symbols, GC, GC skew, and lowercase content. Protein output covers the complete residue alphabet, stop and invalid symbols, and lowercase content.
+  - Composition uses bounded indexed reads instead of mapping the complete FASTA. `.fai` loading retains only the two names required by the report.
+  - Statistics describe the records retained by the selected index. `validate` remains responsible for duplicate-name reporting.
 
 - **Benchmarks**
   - The index report now compares the four product configurations directly: `.zfi` or `.fai`, each with deduplication on or off.
   - Real-data and scaling results cover the single production index path and retain the existing peer comparisons.
   - GET correctness passes 418 checks. Performance compares `.zfi` and `.fai` across positional, multi-region, BED, and reverse-complement work without obsolete chunk-mode lanes.
-  - Stats correctness and performance retain only complete-report lanes; partial-mode comparisons and claims are removed.
+  - Stats correctness passes 57 permanent checks across `.zfi`, `.fai`, noodles, rust-bio, SeqKit, and Seqtk. Performance compares the complete `.zfi` and `.fai` report with complete Rust peers; SeqKit and Seqtk remain explicitly labeled partial references.
+
+### Removed
+
+- `index --low-mem`. Bare `index` now provides the same bounded sequence-memory behavior.
+- `get --chunk-size`, including its all-memory `-1` mode. BED input now has one streaming path.
+- `stats --index-only`. It produced a partial report that was not comparable with normal stats work; `stats` now has one complete mode, and the old flag follows the normal unknown-option error path.
+- The Stats `Duplicates` section and source-header duplicate count. `validate` owns duplicate-name reporting, while `stats` reports the population retained by the selected index.
 
 ### Fixed
 
 - **Index**
   - Indexing rejects a detected source size or modification-time change before publishing `.zfi` or replaying `.fai` output.
   - `.fai` stdout write and flush failures return an error, and temporary output is cleaned after handled success or failure.
+
+- **Stats**
+  - `auN`, percentages, and GC skew use overflow-safe integer arithmetic and exact rounding.
+  - Invalid index geometry, mismatched sequence totals, read failures, and write failures now stop cleanly.
 
 ## [0.3.1] - 2026-08-02
 
@@ -322,7 +336,7 @@ Various memory safety, optimizations and re-building benchmarking framework to w
 ### Added
 
 - **GET benchmark suite** (`bench/get/`): hyperfine timing, RSS memory, region-size scaling, real dataset benchmarks; `--skip-real` flag; `verify_get.sh` (90 diff tests); rewritten `generate_report.py` with human-readable names, per-module figures, and auto-generated `REPORT.md`
-- **STATS benchmark suite** (`bench/stats/`): index-only vs. full-scan, file-size scaling (1 MB – 1 GB), throughput CSV; `--skip-real` flag; `verify_stats.py` (107 BioPython tests); rewritten `generate_report.py` with μs index-only speedup table, seqkit in all comparisons, and auto-generated `REPORT.md`
+- **STATS benchmark suite** (`bench/stats/`): index-only vs. full-scan, file-size scaling (1 MB - 1 GB), throughput CSV; `--skip-real` flag; `verify_stats.py` (107 BioPython tests); rewritten `generate_report.py` with μs index-only speedup table, seqkit in all comparisons, and auto-generated `REPORT.md`
 - `bench/README.md`: GET and STATS added to Quick Start; `--skip-real` documented
 
 ### Fixed
