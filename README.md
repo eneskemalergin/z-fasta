@@ -1,6 +1,6 @@
 <!-- markdownlint-disable MD033 MD036 MD041 -->
 <div align="center">
-  <h1>z-fasta</h1>
+  <img src="assets/logo-readme.svg" alt="z-fasta" width="220">
   <p>
     Fast, modular FASTA toolkit built in Zig.<br/>
     SIMD-accelerated indexing, O(1) region extraction, validation, and assembly stats.<br/>

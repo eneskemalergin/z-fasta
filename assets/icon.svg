@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   viewBox="0 0 160 122"
+   role="img"
+   aria-labelledby="title description"
+   version="1.1"
+   id="svg3"
+   sodipodi:docname="icon.svg"
+   width="160"
+   height="122"
+   inkscape:version="1.4.4 (dcaf3e7d9e, 2026-05-05)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <defs
+     id="defs3" />
+  <sodipodi:namedview
+     id="namedview3"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:zoom="8.4322484"
+     inkscape:cx="36.407846"
+     inkscape:cy="79.931232"
+     inkscape:window-width="3840"
+     inkscape:window-height="2089"
+     inkscape:window-x="2160"
+     inkscape:window-y="34"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="svg3" />
+  <title
+     id="title">z-fasta</title>
+  <desc
+     id="description">The name z-fasta rendered as an orange lightning Z followed by a white hyphen and letters, with both letter a characters replaced by orange FASTA chevrons.</desc>
+  <!-- Stylized lightning Z -->
+  <!-- -f>st> spells -fasta with FASTA header markers in place of a -->
+  <g
+     id="g7"
+     transform="translate(0,-0.26240778)">
+    <rect
+       x="2.8085542"
+       y="2.8085542"
+       width="154.38289"
+       height="116.90771"
+       rx="27.067131"
+       fill="#151515"
+       stroke="#f7a41d"
+       stroke-width="3"
+       id="rect1" />
+    <g
+       id="g6"
+       transform="translate(0,-20.027031)">
+      <g
+         id="g5"
+         transform="translate(-0.11859233,-0.59296166)">
+        <g
+           fill="#f7a41d"
+           id="g12"
+           transform="matrix(0.28379533,0,0,0.28379533,0.6680128,63.120163)">
+          <g
+             id="g8"
+             transform="translate(28.189329,-3.8881397)">
+            <polygon
+               points="62,36 37,44 56,22 "
+               id="polygon4" />
+            <polygon
+               points="111,44 37,44 56,32 56,22 111,22 "
+               shape-rendering="crispEdges"
+               id="polygon5" />
+            <polygon
+               points="97,117 90,104 116,95 "
+               id="polygon6" />
+            <polygon
+               points="97,117 42,117 42,95 116,95 100,104 "
+               shape-rendering="crispEdges"
+               id="polygon7" />
+            <polygon
+               points="3,140 101,22 150,0 52,117 "
+               id="polygon8" />
+          </g>
+        </g>
+      </g>
+      <g
+         font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace"
+         font-size="25px"
+         font-weight="700"
+         id="g3"
+         transform="matrix(1.1082014,0,0,1.1082014,-13.794243,-7.5986864)">
+        <g
+           id="g4"
+           transform="matrix(1.2193877,0,0,1.2193877,-11.169888,-27.415717)">
+          <text
+             x="50"
+             y="94.953125"
+             fill="#f4eed7"
+             id="text1">-f st</text>
+          <text
+             x="78.322853"
+             y="94.677147"
+             fill="#f7a41d"
+             id="text2">&gt;</text>
+          <text
+             x="117.87634"
+             y="94.953125"
+             fill="#f7a41d"
+             id="text3">&gt;</text>
+        </g>
+      </g>
+    </g>
+  </g>
+  <metadata
+     id="metadata3">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="">
+        <dc:title>z-fasta</dc:title>
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+</svg>
