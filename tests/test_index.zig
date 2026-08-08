@@ -12,6 +12,9 @@ const expectCliFailure = utility.expectCliFailure;
 const expectCliResult = utility.expectCliResult;
 const expectUnknownOptionRejected = utility.expectUnknownOptionRejected;
 const uniqueArtifactPath = utility.uniqueArtifactPath;
+const readTestFile = utility.readRequiredFile;
+const writeFastaArtifact = utility.writeFastaArtifact;
+const statMtimeNs = utility.statMtimeNs;
 const scanFaiData = main.indexer.scanFaiData;
 const INDEX_READ_BUFFER_SIZE = main.indexer.INDEX_READ_BUFFER_SIZE;
 const IndexRecord = main.index_format.IndexRecord;
@@ -29,27 +32,15 @@ fn loadAndDeinitForAllocationCheck(allocator: std.mem.Allocator, fasta_path: []c
     defer idx.deinit();
 }
 
-fn statMtimeNs(path: []const u8) !u64 {
-    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-    defer file.close(io);
-    const st = try file.stat(io);
-    return main.index_format.timestampToNs(st.mtime);
-}
-
 // Patch a raw `.zfi` source identity so malformed-index tests reach structural checks.
 fn writeFastaAndRawZfi(allocator: std.mem.Allocator, stem: []const u8, fasta: []const u8, zfi_bytes: []const u8) !struct { fasta_path: []u8, zfi_path: []u8 } {
-    const fasta_path = try uniqueArtifactPath(allocator, stem, "fa");
+    const fasta_path = try writeFastaArtifact(allocator, stem, fasta);
     errdefer allocator.free(fasta_path);
+    errdefer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
     const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
     errdefer allocator.free(zfi_path);
-    errdefer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
     errdefer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
 
-    {
-        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-        defer fasta_file.close(io);
-        try std.Io.File.writeStreamingAll(fasta_file, io, fasta);
-    }
     // Re-open for mtime: Windows `stat` on the create handle can return AccessDenied.
     const fasta_mtime = try statMtimeNs(fasta_path);
 
@@ -72,18 +63,13 @@ fn writeFastaAndRawZfi(allocator: std.mem.Allocator, stem: []const u8, fasta: []
 }
 
 fn writeFastaAndFai(allocator: std.mem.Allocator, stem: []const u8, fasta: []const u8, fai: []const u8) !struct { fasta_path: []u8, fai_path: []u8 } {
-    const fasta_path = try uniqueArtifactPath(allocator, stem, "fa");
+    const fasta_path = try writeFastaArtifact(allocator, stem, fasta);
     errdefer allocator.free(fasta_path);
+    errdefer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
     const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
     errdefer allocator.free(fai_path);
-    errdefer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
     errdefer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
 
-    {
-        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-        defer fasta_file.close(io);
-        try std.Io.File.writeStreamingAll(fasta_file, io, fasta);
-    }
     {
         const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
         defer fai_file.close(io);
@@ -100,10 +86,7 @@ fn supportsPosixFutimens() bool {
 }
 
 fn uniqueArtifactDirPath(allocator: std.mem.Allocator, stem: []const u8) ![]u8 {
-    try std.Io.Dir.cwd().createDirPath(io, "zig-cache/test-artifacts");
-    const now = std.Io.Clock.Timestamp.now(io, .awake);
-    const nanos: u64 = @intCast(now.raw.toNanoseconds());
-    const path = try std.fmt.allocPrint(allocator, "zig-cache/test-artifacts/{s}-{d}", .{ stem, nanos });
+    const path = try uniqueArtifactPath(allocator, stem, "dir");
     errdefer allocator.free(path);
     try std.Io.Dir.cwd().createDirPath(io, path);
     return path;
@@ -150,24 +133,6 @@ fn markFileStaleOneHourAgo(file: std.Io.File) !void {
         },
         else => return error.SkipZigTest,
     }
-}
-
-fn readTestFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
-        error.FileNotFound => {
-            std.debug.print("required test fixture missing: {s}\n", .{path});
-            return error.RequiredFixtureMissing;
-        },
-        else => |e| return e,
-    };
-    defer file.close(io);
-    const stat = try file.stat(io);
-    const size = std.math.cast(usize, stat.size) orelse return error.FileTooBig;
-    const data = try allocator.alloc(u8, size);
-    errdefer allocator.free(data);
-    const bytes_read = try std.Io.File.readPositionalAll(file, io, data, 0);
-    if (bytes_read != data.len) return error.UnexpectedEndOfFile;
-    return data;
 }
 
 fn scanRecordsForTest(allocator: std.mem.Allocator, data: []const u8) !std.ArrayList(IndexRecord) {
@@ -450,18 +415,12 @@ test "[cli] - [index]: writes ZFI and applies duplicate-name policy" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try uniqueArtifactPath(allocator, "index-cli-success", "fa");
+    const fasta_path = try writeFastaArtifact(allocator, "index-cli-success", ">dup\nA\n>dup\nCC\n");
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
     const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
     const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{zfi_path});
-    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
     defer std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
-    {
-        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-        defer fasta_file.close(io);
-        try std.Io.File.writeStreamingAll(fasta_file, io, ">dup\nA\n>dup\nCC\n");
-    }
-
     const dedup_message = try std.fmt.allocPrint(allocator, "wrote {s} (1 sequences)\n", .{zfi_path});
     try expectCliResult(allocator, &.{ ZFASTA_BIN, "index", fasta_path }, 0, "", dedup_message);
     {
@@ -1162,16 +1121,11 @@ test "[integration] - [FAI loader]: resolves an empty sequence name" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try uniqueArtifactPath(allocator, "empty-name-fai", "fa");
+    const fasta_path = try writeFastaArtifact(allocator, "empty-name-fai", data);
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
     const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
     defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
 
-    {
-        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-        defer fasta_file.close(io);
-        try std.Io.File.writeStreamingAll(fasta_file, io, data);
-    }
     {
         const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{});
         defer fai_file.close(io);
@@ -1211,16 +1165,13 @@ test "[failure] - [ZFI loader]: rejects record names outside the name blob" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try uniqueArtifactPath(allocator, "corrupt-zfi", "fa");
-    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    const fasta_data = ">seq1\nACGT\n";
+    const fasta_path = try writeFastaArtifact(allocator, "corrupt-zfi", fasta_data);
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
 
-    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-    defer fasta_file.close(io);
-    try std.Io.File.writeStreamingAll(fasta_file, io, ">seq1\nACGT\n");
-
-    var index = try main.indexer.scanZfiData(">seq1\nACGT\n", true, allocator);
+    var index = try main.indexer.scanZfiData(fasta_data, true, allocator);
     defer index.deinit(allocator);
     index.records.items[0].name_offset = 999_999;
     try main.indexer.writeZfiIndexFile(io, zfi_path, &index, 11, try statMtimeNs(fasta_path));
@@ -1233,15 +1184,11 @@ test "[failure] - [ZFI loader]: rejects a sequence offset at EOF" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try uniqueArtifactPath(allocator, "past-end-zfi", "fa");
-    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
-    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
-    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
-
     const fasta_data = ">seq1\nACGT\n";
-    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-    defer fasta_file.close(io);
-    try std.Io.File.writeStreamingAll(fasta_file, io, fasta_data);
+    const fasta_path = try writeFastaArtifact(allocator, "past-end-zfi", fasta_data);
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
 
     var index = try main.indexer.scanZfiData(fasta_data, true, allocator);
     defer index.deinit(allocator);
@@ -1541,16 +1488,11 @@ test "[failure] - [index loaders]: release partial allocations" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const fasta_path = try uniqueArtifactPath(allocator, "fai-allocation-failures", "fa");
-    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    const fasta_path = try writeFastaArtifact(allocator, "fai-allocation-failures", ">a\nAAAA\n>b\nCC\n");
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
     defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
 
-    {
-        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-        defer fasta_file.close(io);
-        try std.Io.File.writeStreamingAll(fasta_file, io, ">a\nAAAA\n>b\nCC\n");
-    }
     {
         const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{});
         defer fai_file.close(io);
@@ -1569,15 +1511,11 @@ test "[property] - [ZFI loader]: modes select the first duplicate" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try uniqueArtifactPath(allocator, "duplicate-zfi", "fa");
-    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
-    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
-    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
-
     const fasta_data = ">dup\nAAAA\n>dup\nCCCCCC\n";
-    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-    defer fasta_file.close(io);
-    try std.Io.File.writeStreamingAll(fasta_file, io, fasta_data);
+    const fasta_path = try writeFastaArtifact(allocator, "duplicate-zfi", fasta_data);
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
 
     var index = try main.indexer.scanZfiData(fasta_data, false, allocator);
     defer index.deinit(allocator);
@@ -1598,18 +1536,13 @@ test "[integration] - [index loader]: gives a present ZFI authority over FAI" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try uniqueArtifactPath(allocator, "stale-zfi", "fa");
+    const fasta_data = ">seq1\nACGTACGT\n>seq2\nGGGG\n";
+    const fasta_path = try writeFastaArtifact(allocator, "stale-zfi", fasta_data);
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
     const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
     const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
-    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
     defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
-
-    const fasta_data = ">seq1\nACGTACGT\n>seq2\nGGGG\n";
-
-    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{ .truncate = true });
-    defer fasta_file.close(io);
-    try std.Io.File.writeStreamingAll(fasta_file, io, fasta_data);
 
     var index = try main.indexer.scanZfiData(fasta_data, true, allocator);
     defer index.deinit(allocator);
@@ -1640,18 +1573,13 @@ test "[failure] - [index loader]: rejects an invalid present ZFI despite valid F
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try uniqueArtifactPath(allocator, "invalid-zfi-authority", "fa");
+    const fasta_path = try writeFastaArtifact(allocator, "invalid-zfi-authority", ">seq\nACGT\n");
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
     const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
     const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
-    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
     defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
 
-    {
-        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-        defer fasta_file.close(io);
-        try std.Io.File.writeStreamingAll(fasta_file, io, ">seq\nACGT\n");
-    }
     {
         const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{});
         defer fai_file.close(io);
@@ -1681,18 +1609,13 @@ test "[failure] - [index loader]: reports an inaccessible selected sidecar" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try uniqueArtifactPath(allocator, "inaccessible-sidecar", "fa");
+    const fasta_path = try writeFastaArtifact(allocator, "inaccessible-sidecar", ">seq\nACGT\n");
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
     const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
     const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
-    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
     defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
 
-    {
-        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-        defer fasta_file.close(io);
-        try std.Io.File.writeStreamingAll(fasta_file, io, ">seq\nACGT\n");
-    }
     {
         const zfi_file = try std.Io.Dir.cwd().createFile(io, zfi_path, .{});
         defer zfi_file.close(io);
@@ -1730,15 +1653,11 @@ test "[property] - [FAI loader]: modes select the first duplicate" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try uniqueArtifactPath(allocator, "duplicate-fai", "fa");
-    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
-    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
-    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
-
     const fasta_data = ">dup\nAAAA\n>dup\nCCCCCC\n";
-    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-    defer fasta_file.close(io);
-    try std.Io.File.writeStreamingAll(fasta_file, io, fasta_data);
+    const fasta_path = try writeFastaArtifact(allocator, "duplicate-fai", fasta_data);
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
 
     const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
     defer fai_file.close(io);
@@ -1763,20 +1682,15 @@ test "[integration] - [FAI loader]: positional mode retains first matches and va
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try uniqueArtifactPath(allocator, "positional-fai", "fa");
-    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    const fasta_path = try writeFastaArtifact(
+        allocator,
+        "positional-fai",
+        ">wanted\nAAAA\n>wanted\nCCCCCC\n>colon:name\nGGGG\n>\nTT\n>other\nAC\n",
+    );
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
     defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
 
-    {
-        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-        defer fasta_file.close(io);
-        try std.Io.File.writeStreamingAll(
-            fasta_file,
-            io,
-            ">wanted\nAAAA\n>wanted\nCCCCCC\n>colon:name\nGGGG\n>\nTT\n>other\nAC\n",
-        );
-    }
     {
         const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
         defer fai_file.close(io);
@@ -1835,16 +1749,11 @@ test "[unit] - [FAI loader]: full lookup borrows mapped names" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try uniqueArtifactPath(allocator, "borrowed-fai-name", "fa");
-    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    const fasta_path = try writeFastaArtifact(allocator, "borrowed-fai-name", ">seq\nACGT\n");
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
     defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
 
-    {
-        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-        defer fasta_file.close(io);
-        try std.Io.File.writeStreamingAll(fasta_file, io, ">seq\nACGT\n");
-    }
     {
         const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
         defer fai_file.close(io);
@@ -1867,16 +1776,11 @@ test "[integration] - [FAI loader]: positional mode retains the FASTA descriptor
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try uniqueArtifactPath(allocator, "fai-source-descriptor", "fa");
-    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    const fasta_path = try writeFastaArtifact(allocator, "fai-source-descriptor", ">seq\nACGT\n");
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
     defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
 
-    {
-        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-        defer fasta_file.close(io);
-        try std.Io.File.writeStreamingAll(fasta_file, io, ">seq\nACGT\n");
-    }
     {
         const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{});
         defer fai_file.close(io);
@@ -1905,16 +1809,11 @@ test "[integration] - [get index loader]: keeps FASTA readable without mapping i
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try uniqueArtifactPath(allocator, "fai-get-source", "fa");
-    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    const fasta_path = try writeFastaArtifact(allocator, "fai-get-source", ">seq\nACGT\n");
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
     defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
 
-    {
-        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-        defer fasta_file.close(io);
-        try std.Io.File.writeStreamingAll(fasta_file, io, ">seq\nACGT\n");
-    }
     {
         const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{});
         defer fai_file.close(io);
@@ -2023,14 +1922,10 @@ test "[failure] - [FAI loader]: positional mode rejects impossible geometry" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try uniqueArtifactPath(allocator, "bad-fai-positional", "fa");
-    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    const fasta_path = try writeFastaArtifact(allocator, "bad-fai-positional", ">seq1\nACGT\n");
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
     defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
-
-    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-    defer fasta_file.close(io);
-    try std.Io.File.writeStreamingAll(fasta_file, io, ">seq1\nACGT\n");
 
     const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
     defer fai_file.close(io);
@@ -2047,14 +1942,10 @@ test "[failure] - [FAI loader]: stats mode rejects impossible geometry" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try uniqueArtifactPath(allocator, "bad-fai-stats-scan", "fa");
-    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    const fasta_path = try writeFastaArtifact(allocator, "bad-fai-stats-scan", ">seq1\nACGT\n");
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
     defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
-
-    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-    defer fasta_file.close(io);
-    try std.Io.File.writeStreamingAll(fasta_file, io, ">seq1\nACGT\n");
 
     const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
     defer fai_file.close(io);
@@ -2071,14 +1962,10 @@ test "[failure] - [FAI loader]: rejects names above the u16 limit" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try uniqueArtifactPath(allocator, "bad-fai-long-name", "fa");
-    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    const fasta_path = try writeFastaArtifact(allocator, "bad-fai-long-name", ">seq1\nACGT\n");
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
     defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
-
-    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-    defer fasta_file.close(io);
-    try std.Io.File.writeStreamingAll(fasta_file, io, ">seq1\nACGT\n");
 
     var fai_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer fai_buf.deinit(allocator);
@@ -2180,15 +2067,11 @@ test "[edge] - [ZFI loader]: accepts FASTA without a terminal newline" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try uniqueArtifactPath(allocator, "zfi-fasta-no-term-nl", "fa");
-    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
-    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
-    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
-
     const fasta_data = ">seq1\nACGT";
-    const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-    defer fasta_file.close(io);
-    try std.Io.File.writeStreamingAll(fasta_file, io, fasta_data);
+    const fasta_path = try writeFastaArtifact(allocator, "zfi-fasta-no-term-nl", fasta_data);
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
 
     var index = try main.indexer.scanZfiData(fasta_data, true, allocator);
     defer index.deinit(allocator);
@@ -2302,16 +2185,14 @@ test "[failure] - [FAI workflow]: leaves output and spool empty" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try uniqueArtifactPath(allocator, "fai-nonuniform-spool", "fa");
+    const fasta_path = try writeFastaArtifact(
+        allocator,
+        "fai-nonuniform-spool",
+        ">mixed\nAAAA\nBBBBBB\nCC\n",
+    );
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
     const spool_dir_path = try uniqueArtifactDirPath(allocator, "fai-spool-failure");
     defer std.Io.Dir.cwd().deleteTree(io, spool_dir_path) catch {};
-    {
-        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-        defer fasta_file.close(io);
-        try std.Io.File.writeStreamingAll(fasta_file, io, ">mixed\nAAAA\nBBBBBB\nCC\n");
-    }
-
     var env = try std.testing.environ.createMap(allocator);
     defer env.deinit();
     try env.put("TMPDIR", "zig-cache/test-artifacts/definitely-missing-spool");
@@ -2346,17 +2227,12 @@ test "[failure] - [ZFI loader]: rejects a source size change" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try uniqueArtifactPath(allocator, "stale-size", "fa");
-    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    const fasta_data = ">seq1\nACGT\n";
+    const fasta_path = try writeFastaArtifact(allocator, "stale-size", fasta_data);
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
 
-    const fasta_data = ">seq1\nACGT\n";
-    {
-        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-        defer fasta_file.close(io);
-        try std.Io.File.writeStreamingAll(fasta_file, io, fasta_data);
-    }
     var index = try main.indexer.scanZfiData(fasta_data, true, allocator);
     defer index.deinit(allocator);
     try main.indexer.writeZfiIndexFile(io, zfi_path, &index, fasta_data.len, try statMtimeNs(fasta_path));
@@ -2375,20 +2251,14 @@ test "[failure] - [ZFI loader]: rejects a same-size source replacement" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try uniqueArtifactPath(allocator, "stale-same-size", "fa");
-    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
-    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
-    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
-
     const fasta_a = ">seq1\nACGT\n";
     const fasta_b = ">seq1\nTTTT\n";
-    try std.testing.expectEqual(fasta_a.len, fasta_b.len);
+    const fasta_path = try writeFastaArtifact(allocator, "stale-same-size", fasta_a);
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
 
-    {
-        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-        defer fasta_file.close(io);
-        try std.Io.File.writeStreamingAll(fasta_file, io, fasta_a);
-    }
+    try std.testing.expectEqual(fasta_a.len, fasta_b.len);
     const mtime_a = try statMtimeNs(fasta_path);
     var index = try main.indexer.scanZfiData(fasta_a, true, allocator);
     defer index.deinit(allocator);
@@ -2485,16 +2355,11 @@ test "[failure] - [ZFI loader]: rejects mismatched embedded source time" {
     const allocator = arena.allocator();
 
     const fasta_data = ">seq1\nACGT\n";
-    const fasta_path = try uniqueArtifactPath(allocator, "zfi-bad-mtime", "fa");
-    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    const fasta_path = try writeFastaArtifact(allocator, "zfi-bad-mtime", fasta_data);
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
 
-    {
-        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-        defer fasta_file.close(io);
-        try std.Io.File.writeStreamingAll(fasta_file, io, fasta_data);
-    }
     const real_mtime = try statMtimeNs(fasta_path);
     const wrong_mtime = real_mtime +% 1;
 
@@ -2535,16 +2400,11 @@ test "[failure] - [ZFI loader]: rejects zero line geometry" {
     const allocator = arena.allocator();
 
     const fasta_data = ">seq1\nACGT\n";
-    const fasta_path = try uniqueArtifactPath(allocator, "zfi-zero-geom", "fa");
-    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    const fasta_path = try writeFastaArtifact(allocator, "zfi-zero-geom", fasta_data);
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
 
-    {
-        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-        defer fasta_file.close(io);
-        try std.Io.File.writeStreamingAll(fasta_file, io, fasta_data);
-    }
     var index = try main.indexer.scanZfiData(fasta_data, true, allocator);
     defer index.deinit(allocator);
     index.records.items[0].line_bases = 0;
@@ -2936,16 +2796,11 @@ test "[integration] - [index gates]: reject zero ZFI geometry" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try uniqueArtifactPath(allocator, "gates-zfi-zero", "fa");
-    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    const fasta_path = try writeFastaArtifact(allocator, "gates-zfi-zero", fasta_data);
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
 
-    {
-        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
-        defer fasta_file.close(io);
-        try std.Io.File.writeStreamingAll(fasta_file, io, fasta_data);
-    }
     var index = try main.indexer.scanZfiData(fasta_data, true, allocator);
     defer index.deinit(allocator);
     index.records.items[0].line_bases = 0;

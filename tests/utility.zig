@@ -1,7 +1,8 @@
-//! Shared process assertions and artifact paths for command test suites.
+//! Shared test mechanics for command suites.
 
 const std = @import("std");
 const builtin = @import("builtin");
+const main = @import("main");
 
 pub const ZFASTA_BIN = if (builtin.os.tag == .windows) "zig-out\\bin\\z-fasta.exe" else "zig-out/bin/z-fasta";
 
@@ -60,7 +61,74 @@ pub fn expectUnknownOptionRejected(
 pub fn uniqueArtifactPath(allocator: std.mem.Allocator, stem: []const u8, ext: []const u8) ![]u8 {
     const io = std.testing.io;
     try std.Io.Dir.cwd().createDirPath(io, "zig-cache/test-artifacts");
-    const now = std.Io.Clock.Timestamp.now(io, .awake);
-    const nanos: u64 = @intCast(now.raw.toNanoseconds());
-    return std.fmt.allocPrint(allocator, "zig-cache/test-artifacts/{s}-{d}.{s}", .{ stem, nanos, ext });
+    var nonce_bytes: [16]u8 = undefined;
+    io.random(&nonce_bytes);
+    const nonce = std.mem.readInt(u128, &nonce_bytes, .little);
+    return std.fmt.allocPrint(allocator, "zig-cache/test-artifacts/{s}-{x}.{s}", .{ stem, nonce, ext });
+}
+
+pub fn writeFastaArtifact(allocator: std.mem.Allocator, stem: []const u8, data: []const u8) ![]u8 {
+    const io = std.testing.io;
+    const path = try uniqueArtifactPath(allocator, stem, "fa");
+    errdefer allocator.free(path);
+    errdefer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
+    try std.Io.File.writeStreamingAll(file, io, data);
+    return path;
+}
+
+pub fn writeZfi(
+    allocator: std.mem.Allocator,
+    fasta_path: []const u8,
+    data: []const u8,
+    enable_dedup: bool,
+) !void {
+    const io = std.testing.io;
+    var index = try main.indexer.scanZfiData(data, enable_dedup, allocator);
+    defer index.deinit(allocator);
+
+    var path_buffer: [4096]u8 = undefined;
+    const zfi_path = try std.fmt.bufPrint(&path_buffer, "{s}.zfi", .{fasta_path});
+    try main.indexer.writeZfiIndexFile(io, zfi_path, &index, data.len, try statMtimeNs(fasta_path));
+}
+
+pub fn captureExtractRegion(
+    allocator: std.mem.Allocator,
+    fasta_path: []const u8,
+    region: []const u8,
+) ![]u8 {
+    var index = try main.index_format.loadIndexChecked(allocator, std.testing.io, fasta_path);
+    defer index.deinit();
+
+    var output = std.Io.Writer.Allocating.init(allocator);
+    errdefer output.deinit();
+    main.getter.extractRegion(&index, region, &output.writer);
+    return output.toOwnedSlice();
+}
+
+pub fn statMtimeNs(path: []const u8) !u64 {
+    const io = std.testing.io;
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    return main.index_format.timestampToNs((try file.stat(io)).mtime);
+}
+
+pub fn readRequiredFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const io = std.testing.io;
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            std.debug.print("required test fixture missing: {s}\n", .{path});
+            return error.RequiredFixtureMissing;
+        },
+        else => |e| return e,
+    };
+    defer file.close(io);
+    const stat = try file.stat(io);
+    const size = std.math.cast(usize, stat.size) orelse return error.FileTooBig;
+    const data = try allocator.alloc(u8, size);
+    errdefer allocator.free(data);
+    const bytes_read = try file.readPositionalAll(io, data, 0);
+    if (bytes_read != data.len) return error.UnexpectedEndOfFile;
+    return data;
 }

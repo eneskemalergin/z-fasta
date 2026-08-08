@@ -1,4 +1,4 @@
-//! Stats unit and CLI tests: type detection and exact report behavior.
+//! Stats tests: type detection, exact reports, index parity, and CLI failures.
 //!
 //! Exercises complete stats output against fixture FASTAs.
 
@@ -24,23 +24,67 @@ fn runStatsAndCapture(allocator: std.mem.Allocator, fasta_path: []const u8) ![]u
 
     const result = try std.process.run(allocator, threaded.io(), .{
         .argv = &.{ ZFASTA_BIN, "stats", fasta_path },
-        .stdout_limit = .limited(10 * 1024 * 1024),
+        .stdout_limit = .limited(64 * 1024),
         .stderr_limit = .limited(64 * 1024),
     });
     errdefer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
     switch (result.term) {
-        .exited => |code| if (code != 0) return error.ChildProcessFailed,
+        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
         else => return error.ChildProcessFailed,
     }
-    try std.testing.expectEqual(@as(usize, 0), result.stderr.len);
+    try std.testing.expectEqualStrings("", result.stderr);
     return result.stdout;
+}
+
+fn writeSingleLineFaiFixture(
+    allocator: std.mem.Allocator,
+    stem: []const u8,
+    name: []const u8,
+    sequence: []const u8,
+) !struct { fasta_path: []u8, fai_path: []u8 } {
+    const fasta_path = try utility.uniqueArtifactPath(allocator, stem, "fa");
+    errdefer allocator.free(fasta_path);
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    errdefer allocator.free(fai_path);
+    errdefer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    errdefer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    {
+        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+        defer fasta_file.close(io);
+        try std.Io.File.writeStreamingAll(fasta_file, io, ">");
+        try std.Io.File.writeStreamingAll(fasta_file, io, name);
+        try std.Io.File.writeStreamingAll(fasta_file, io, "\n");
+        try std.Io.File.writeStreamingAll(fasta_file, io, sequence);
+        try std.Io.File.writeStreamingAll(fasta_file, io, "\n");
+    }
+    {
+        const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{});
+        defer fai_file.close(io);
+        var buffer: [128]u8 = undefined;
+        var writer = fai_file.writer(io, &buffer);
+        try writer.interface.print("{s}\t{d}\t{d}\t{d}\t{d}\n", .{
+            name,
+            sequence.len,
+            name.len + 2,
+            sequence.len,
+            sequence.len + 1,
+        });
+        try writer.interface.flush();
+    }
+    return .{ .fasta_path = fasta_path, .fai_path = fai_path };
+}
+
+fn expectComposition(expected: []const u8, report: []const u8) !void {
+    const start = std.mem.indexOf(u8, report, "Composition:\n") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings(expected, report[start..]);
 }
 
 // --- Type detection ---
 
-test "detectType classifies representative alphabets" {
+test "[unit] - [sequence type]: classifies representative alphabets" {
     const Case = struct {
         symbols: []const u8,
         expected: stats.SequenceType,
@@ -60,7 +104,7 @@ test "detectType classifies representative alphabets" {
     }
 }
 
-test "detectType uses a strict overflow-safe 90 percent boundary" {
+test "[edge] - [sequence type]: uses a strict overflow-safe 90 percent boundary" {
     const Case = struct {
         total: u64,
         nucleotide: u64,
@@ -93,10 +137,10 @@ test "detectType uses a strict overflow-safe 90 percent boundary" {
     }
 }
 
-test "detectType matches its threshold across deterministic fuzzy inputs" {
+test "[property] - [sequence type]: matches the threshold across generated counts" {
     const nucleotide_codes = "ACGTURYSWKMBDHVNacgturyswkmbdhvn";
     const protein_only_codes = "EFLPQXZJO*eflpqxzjo*";
-    var prng = std.Random.DefaultPrng.init(0x7a_fa_57_a7_5);
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
     const random = prng.random();
 
     for (0..4096) |i| {
@@ -110,7 +154,13 @@ test "detectType matches its threshold across deterministic fuzzy inputs" {
         else
             .protein;
 
-        try std.testing.expectEqual(expected, stats.detectType(&counts, total));
+        std.testing.expectEqual(expected, stats.detectType(&counts, total)) catch {
+            std.debug.print(
+                "sequence type mismatch: seed={d}, iteration={d}, total={d}, nucleotide={d}\n",
+                .{ std.testing.random_seed, i, total, nucleotide },
+            );
+            return error.TestExpectedEqual;
+        };
     }
 }
 
@@ -152,39 +202,34 @@ test "[cli] - [stats]: rejects invalid FASTA path counts" {
     );
 }
 
-test "[cli] - [stats index selection]: invalid zfi blocks a valid fai" {
+test "[cli] - [stats]: reports missing and corrupt indexes" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta = try utility.uniqueArtifactPath(allocator, "stats-invalid-zfi", "fa");
-    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta});
-    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta});
+    const fasta = try utility.writeFastaArtifact(allocator, "stats-index-errors", ">seq\nACGT\n");
     defer std.Io.Dir.cwd().deleteFile(io, fasta) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta});
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
-    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
 
-    {
-        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta, .{});
-        defer fasta_file.close(io);
-        try std.Io.File.writeStreamingAll(fasta_file, io, ">seq\nACGT\n");
-    }
-    {
-        const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{});
-        defer fai_file.close(io);
-        try std.Io.File.writeStreamingAll(fai_file, io, "seq\t4\t5\t4\t5\n");
-    }
+    const missing = try std.fmt.allocPrint(
+        allocator,
+        "error: no index found for {s}. Run 'z-fasta index {s}' first.\n",
+        .{ fasta, fasta },
+    );
+    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "stats", fasta }, 1, missing);
+
     {
         const zfi_file = try std.Io.Dir.cwd().createFile(io, zfi_path, .{});
         defer zfi_file.close(io);
         try std.Io.File.writeStreamingAll(zfi_file, io, "not a zfi index");
     }
 
-    const expected = try std.fmt.allocPrint(allocator, "error: corrupt index file for: {s}\n", .{fasta});
-    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "stats", fasta }, 1, expected);
+    const corrupt = try std.fmt.allocPrint(allocator, "error: corrupt index file for: {s}\n", .{fasta});
+    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "stats", fasta }, 1, corrupt);
 }
 
-test "stats renders the exact nucleotide report" {
+test "[cli] - [stats report]: renders the exact nucleotide report" {
     const expected =
         \\File:
         \\  path: tests/data/simple.fasta
@@ -234,7 +279,150 @@ test "stats renders the exact nucleotide report" {
     try std.testing.expectEqualStrings(expected, output);
 }
 
-test "stats renders the exact protein report" {
+test "[integration] - [stats report]: ZFI and FAI render identical mixed nucleotide statistics" {
+    const fasta_data = ">mixed\nacgtuACGTURYSWKMBDHVN?\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const paths = try writeSingleLineFaiFixture(
+        allocator,
+        "stats-index-parity",
+        "mixed",
+        "acgtuACGTURYSWKMBDHVN?",
+    );
+    const fasta_path = paths.fasta_path;
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fai_path) catch {};
+    {
+        const fasta_file = try std.Io.Dir.cwd().openFile(io, fasta_path, .{});
+        defer fasta_file.close(io);
+        const fasta_stat = try fasta_file.stat(io);
+        var index = try main.indexer.scanZfiData(fasta_data, true, allocator);
+        defer index.deinit(allocator);
+        try main.indexer.writeZfiIndexFile(
+            io,
+            zfi_path,
+            &index,
+            fasta_data.len,
+            main.index_format.timestampToNs(fasta_stat.mtime),
+        );
+    }
+
+    const expected_composition =
+        \\Composition:
+        \\  type: nucleotide_mixed_tu
+        \\  percent_denominator: total_symbols
+        \\  a: 2 9.09%
+        \\  c: 2 9.09%
+        \\  g: 2 9.09%
+        \\  t: 2 9.09%
+        \\  u: 2 9.09%
+        \\  n: 1 4.55%
+        \\  iupac_ambiguous: 10 45.45%
+        \\  invalid: 1 4.55%
+        \\  gc: 40.00%
+        \\  gc_skew: 0.000
+        \\  lowercase: 5 22.73%
+        \\
+    ;
+
+    const zfi_output = try runStatsAndCapture(allocator, fasta_path);
+    defer allocator.free(zfi_output);
+    try expectComposition(expected_composition, zfi_output);
+
+    try std.Io.Dir.cwd().deleteFile(io, zfi_path);
+    const fai_output = try runStatsAndCapture(allocator, fasta_path);
+    defer allocator.free(fai_output);
+    try expectComposition(expected_composition, fai_output);
+
+    const zfi_index = try std.fmt.allocPrint(allocator, "  index: {s}.zfi\n", .{fasta_path});
+    const fai_index = try std.fmt.allocPrint(allocator, "  index: {s}.fai\n", .{fasta_path});
+    const zfi_index_start = std.mem.indexOf(u8, zfi_output, zfi_index) orelse return error.TestExpectedEqual;
+    const fai_index_start = std.mem.indexOf(u8, fai_output, fai_index) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings(zfi_output[0..zfi_index_start], fai_output[0..fai_index_start]);
+    try std.testing.expectEqualStrings(
+        zfi_output[zfi_index_start + zfi_index.len ..],
+        fai_output[fai_index_start + fai_index.len ..],
+    );
+}
+
+test "[cli] - [stats report]: renders RNA and ambiguity-only nucleotide variants" {
+    const Case = struct {
+        stem: []const u8,
+        name: []const u8,
+        sequence: []const u8,
+        composition: []const u8,
+    };
+    const cases = [_]Case{
+        .{
+            .stem = "stats-rna",
+            .name = "rna",
+            .sequence = "ACcuUU",
+            .composition =
+            \\Composition:
+            \\  type: nucleotide_u
+            \\  percent_denominator: total_symbols
+            \\  a: 1 16.67%
+            \\  c: 2 33.33%
+            \\  g: 0 0.00%
+            \\  t: 0 0.00%
+            \\  u: 3 50.00%
+            \\  n: 0 0.00%
+            \\  iupac_ambiguous: 0 0.00%
+            \\  invalid: 0 0.00%
+            \\  gc: 33.33%
+            \\  gc_skew: -1.000
+            \\  lowercase: 2 33.33%
+            \\
+            ,
+        },
+        .{
+            .stem = "stats-ambiguity",
+            .name = "ambiguity",
+            .sequence = "RYSWKMBDHVNN",
+            .composition =
+            \\Composition:
+            \\  type: nucleotide
+            \\  percent_denominator: total_symbols
+            \\  a: 0 0.00%
+            \\  c: 0 0.00%
+            \\  g: 0 0.00%
+            \\  t: 0 0.00%
+            \\  u: 0 0.00%
+            \\  n: 2 16.67%
+            \\  iupac_ambiguous: 10 83.33%
+            \\  invalid: 0 0.00%
+            \\  gc: n/a
+            \\  gc_skew: n/a
+            \\  lowercase: 0 0.00%
+            \\
+            ,
+        },
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    for (cases) |case| {
+        const paths = try writeSingleLineFaiFixture(
+            allocator,
+            case.stem,
+            case.name,
+            case.sequence,
+        );
+        defer std.Io.Dir.cwd().deleteFile(io, paths.fasta_path) catch {};
+        defer std.Io.Dir.cwd().deleteFile(io, paths.fai_path) catch {};
+
+        const output = try runStatsAndCapture(allocator, paths.fasta_path);
+        defer allocator.free(output);
+        try expectComposition(case.composition, output);
+    }
+}
+
+test "[cli] - [stats report]: renders the exact protein report" {
     const expected =
         \\File:
         \\  path: tests/data/proteome.fasta
@@ -300,4 +488,59 @@ test "stats renders the exact protein report" {
     defer std.testing.allocator.free(output);
 
     try std.testing.expectEqualStrings(expected, output);
+}
+
+test "[cli] - [stats report]: counts the complete protein alphabet and exceptional symbols" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const paths = try writeSingleLineFaiFixture(
+        allocator,
+        "stats-protein-categories",
+        "protein",
+        "ARNDCEQGHILKMFPSTWYVBZJXUOar*?",
+    );
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fai_path) catch {};
+
+    const expected =
+        \\Composition:
+        \\  type: protein
+        \\  percent_denominator: total_symbols
+        \\  a_alanine: 2 6.67%
+        \\  r_arginine: 2 6.67%
+        \\  n_asparagine: 1 3.33%
+        \\  d_aspartate: 1 3.33%
+        \\  c_cysteine: 1 3.33%
+        \\  e_glutamate: 1 3.33%
+        \\  q_glutamine: 1 3.33%
+        \\  g_glycine: 1 3.33%
+        \\  h_histidine: 1 3.33%
+        \\  i_isoleucine: 1 3.33%
+        \\  l_leucine: 1 3.33%
+        \\  k_lysine: 1 3.33%
+        \\  m_methionine: 1 3.33%
+        \\  f_phenylalanine: 1 3.33%
+        \\  p_proline: 1 3.33%
+        \\  s_serine: 1 3.33%
+        \\  t_threonine: 1 3.33%
+        \\  w_tryptophan: 1 3.33%
+        \\  y_tyrosine: 1 3.33%
+        \\  v_valine: 1 3.33%
+        \\  b_asx: 1 3.33%
+        \\  z_glx: 1 3.33%
+        \\  j_xle: 1 3.33%
+        \\  x_unknown: 1 3.33%
+        \\  u_selenocysteine: 1 3.33%
+        \\  o_pyrrolysine: 1 3.33%
+        \\  stop: 1 3.33%
+        \\  invalid: 1 3.33%
+        \\  lowercase: 2 6.67%
+        \\
+    ;
+
+    const output = try runStatsAndCapture(allocator, paths.fasta_path);
+    defer allocator.free(output);
+    try expectComposition(expected, output);
 }

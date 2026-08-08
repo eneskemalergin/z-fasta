@@ -13,6 +13,9 @@ const expectCliFailure = utility.expectCliFailure;
 const expectCliSuccess = utility.expectCliSuccess;
 const expectUnknownOptionRejected = utility.expectUnknownOptionRejected;
 const uniqueArtifactPath = utility.uniqueArtifactPath;
+const writeFastaArtifact = utility.writeFastaArtifact;
+const writeZfi = utility.writeZfi;
+const captureExtractRegion = utility.captureExtractRegion;
 
 test "[integration] - [region resolution]: preserves indexed coordinate geometry" {
     var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta");
@@ -71,42 +74,6 @@ test "[integration] - [region resolution]: accepts a 200-byte identifier" {
 
 // --- Index-backed get fixtures ---
 
-fn writeFastaArtifact(allocator: std.mem.Allocator, stem: []const u8, data: []const u8) ![]const u8 {
-    const path = try uniqueArtifactPath(allocator, stem, "fa");
-    errdefer allocator.free(path);
-    errdefer std.Io.Dir.cwd().deleteFile(io, path) catch {};
-    const file = try std.Io.Dir.cwd().createFile(io, path, .{});
-    defer file.close(io);
-    try std.Io.File.writeStreamingAll(file, io, data);
-    return path;
-}
-
-fn writeZfi(allocator: std.mem.Allocator, fasta_path: []const u8, data: []const u8, enable_dedup: bool) !void {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var index = try main.indexer.scanZfiData(data, enable_dedup, arena.allocator());
-    defer index.deinit(arena.allocator());
-
-    const fasta_file = try std.Io.Dir.cwd().openFile(io, fasta_path, .{});
-    defer fasta_file.close(io);
-    const mtime_ns = main.index_format.timestampToNs((try fasta_file.stat(io)).mtime);
-
-    var zfi_path_buf: [4096]u8 = undefined;
-    const zfi_path = try std.fmt.bufPrint(&zfi_path_buf, "{s}.zfi", .{fasta_path});
-    try main.indexer.writeZfiIndexFile(io, zfi_path, &index, data.len, mtime_ns);
-}
-
-fn captureExtractRegion(allocator: std.mem.Allocator, fasta_path: []const u8, region: []const u8) ![]u8 {
-    var idx = try main.index_format.loadIndexChecked(allocator, io, fasta_path);
-    defer idx.deinit();
-
-    var out = std.Io.Writer.Allocating.init(allocator);
-    errdefer out.deinit();
-    main.getter.extractRegion(&idx, region, &out.writer);
-    return out.toOwnedSlice();
-}
-
 test "[property] - [get extraction]: zfi and fai match across uniform FASTA lines" {
     const data = @embedFile("data/simple.fasta");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -114,9 +81,9 @@ test "[property] - [get extraction]: zfi and fai match across uniform FASTA line
     const allocator = arena.allocator();
 
     const path = try writeFastaArtifact(allocator, "get-sam", data);
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
     const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{path});
     const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{path});
-    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
     defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
 
@@ -172,8 +139,8 @@ test "[integration] - [get extraction]: extracts across non-uniform FASTA lines"
     const allocator = arena.allocator();
 
     const path = try writeFastaArtifact(allocator, "get-messy", data);
-    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{path});
     defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{path});
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
 
     try writeZfi(allocator, path, data, true);
@@ -196,9 +163,9 @@ test "[cli] - [get]: selects the first empty identifier through zfi and fai" {
     const allocator = arena.allocator();
 
     const fasta_path = try writeFastaArtifact(allocator, "get-empty-name", data);
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
     const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
     const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
-    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
     defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
 
@@ -328,14 +295,14 @@ test "[cli] - [get names]: accepts the index name-length boundary in both format
     try expected.appendSlice(allocator, "\nA\n");
 
     const zfi_fasta = try writeFastaArtifact(allocator, "names-max-zfi", fasta.items);
-    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{zfi_fasta});
     defer std.Io.Dir.cwd().deleteFile(io, zfi_fasta) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{zfi_fasta});
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
     try writeZfi(allocator, zfi_fasta, fasta.items, true);
 
     const fai_fasta = try writeFastaArtifact(allocator, "names-max-fai", fasta.items);
-    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fai_fasta});
     defer std.Io.Dir.cwd().deleteFile(io, fai_fasta) catch {};
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fai_fasta});
     defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
     {
         const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{});
@@ -408,9 +375,9 @@ test "[cli] - [get index selection]: invalid zfi blocks a valid fai" {
     const allocator = arena.allocator();
 
     const fasta = try writeFastaArtifact(allocator, "invalid-zfi-cli", ">seq\nACGT\n");
+    defer std.Io.Dir.cwd().deleteFile(io, fasta) catch {};
     const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta});
     const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta});
-    defer std.Io.Dir.cwd().deleteFile(io, fasta) catch {};
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
     defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
 
@@ -490,8 +457,8 @@ test "[cli] - [get]: rejects invalid requests, missing names, and transform conf
     const allocator = arena.allocator();
 
     const fasta = try writeFastaArtifact(allocator, "get-cli-errors", @embedFile("data/simple.fasta"));
-    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta});
     defer std.Io.Dir.cwd().deleteFile(io, fasta) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta});
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
 
     {
