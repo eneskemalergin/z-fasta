@@ -10,6 +10,10 @@ const printErrorAndExit = index_format.printErrorAndExit;
 
 const SIMD_CHUNK_SIZE = 32;
 const SimdVec = @Vector(SIMD_CHUNK_SIZE, u8);
+const TAIL_CHUNK_SIZE = 8;
+const TailVec = @Vector(TAIL_CHUNK_SIZE, u8);
+const FINAL_CHUNK_SIZE = 4;
+const FinalVec = @Vector(FINAL_CHUNK_SIZE, u8);
 
 // ============================================================================
 // Stats computation
@@ -434,20 +438,24 @@ fn scanUniformRecord(reader: *BoundedFastaReader, rec: IndexRecord, comp: *Compo
     if (span_end > reader.source.size) return error.CorruptGeometry;
 
     var offset = rec.seq_offset;
+    var line_pos: usize = 0;
     while (offset < span_end) {
         const data = try reader.read(offset, span_end - offset);
 
         var pos: usize = 0;
         while (pos < data.len) {
-            const physical = offset - rec.seq_offset + pos;
-            const line_pos: usize = @intCast(physical % rec.line_bytes);
             if (line_pos >= rec.line_bases) {
-                pos += @min(data.len - pos, @as(usize, rec.line_bytes) - line_pos);
+                const skipped = @min(data.len - pos, @as(usize, rec.line_bytes) - line_pos);
+                pos += skipped;
+                line_pos += skipped;
+                if (line_pos == rec.line_bytes) line_pos = 0;
                 continue;
             }
             const bases = @min(data.len - pos, @as(usize, rec.line_bases) - line_pos);
             countCompositionSlice(data[pos..][0..bases], &comp.counts, &comp.total_bases, &comp.lowercase_count);
             pos += bases;
+            line_pos += bases;
+            if (line_pos == rec.line_bytes) line_pos = 0;
         }
         offset += data.len;
     }
@@ -552,6 +560,26 @@ fn countCompositionSlice(
         const lower_mask = (chunk >= a_vec) & (chunk <= z_vec);
         lowercase_count.* += @popCount(@as(u32, @bitCast(lower_mask)));
         pos += SIMD_CHUNK_SIZE;
+    }
+    while (pos + TAIL_CHUNK_SIZE <= data.len) {
+        const chunk: TailVec = data[pos..][0..TAIL_CHUNK_SIZE].*;
+        inline for (0..TAIL_CHUNK_SIZE) |j| {
+            counts[chunk[j]] += 1;
+        }
+        total_bases.* += TAIL_CHUNK_SIZE;
+        const lower_mask = (chunk >= @as(TailVec, @splat('a'))) & (chunk <= @as(TailVec, @splat('z')));
+        lowercase_count.* += @popCount(@as(u8, @bitCast(lower_mask)));
+        pos += TAIL_CHUNK_SIZE;
+    }
+    while (pos + FINAL_CHUNK_SIZE <= data.len) {
+        const chunk: FinalVec = data[pos..][0..FINAL_CHUNK_SIZE].*;
+        inline for (0..FINAL_CHUNK_SIZE) |j| {
+            counts[chunk[j]] += 1;
+        }
+        total_bases.* += FINAL_CHUNK_SIZE;
+        const lower_mask = (chunk >= @as(FinalVec, @splat('a'))) & (chunk <= @as(FinalVec, @splat('z')));
+        lowercase_count.* += @popCount(@as(u4, @bitCast(lower_mask)));
+        pos += FINAL_CHUNK_SIZE;
     }
     while (pos < data.len) : (pos += 1) {
         const byte = data[pos];
