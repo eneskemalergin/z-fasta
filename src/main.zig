@@ -378,7 +378,7 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     else
         .{ .positional = region_buf[0..region_count] };
 
-    getter.runGetWithOptions(io, path, .{
+    getter.runGetWithOptions(std.heap.page_allocator, io, path, .{
         .source = source,
         .honor_strand = honor_strand,
         .summary = summary,
@@ -428,7 +428,7 @@ fn runStatsCmd(io: std.Io, args: *std.process.Args.Iterator) void {
         printErrorAndExit("error: usage: z-fasta stats <file.fasta>\n", .{});
     };
 
-    stats.runStats(io, path);
+    stats.runStats(std.heap.page_allocator, io, path);
 }
 
 // ============================================================================

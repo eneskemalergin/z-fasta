@@ -8,104 +8,89 @@ const main = @import("main");
 const detectType = main.stats.detectType;
 const SequenceType = main.stats.SequenceType;
 
-// ============================================================================
-// detectType tests
-// ============================================================================
+// --- Type detection ---
 
-test "detectType - all ACGT is nucleotide" {
+fn countSymbols(symbols: []const u8) [256]u64 {
     var counts: [256]u64 = .{0} ** 256;
-    counts['A'] = 250;
-    counts['C'] = 250;
-    counts['G'] = 250;
-    counts['T'] = 250;
-    try std.testing.expectEqual(SequenceType.nucleotide, detectType(&counts, 1000));
+    for (symbols) |symbol| counts[symbol] += 1;
+    return counts;
 }
 
-test "detectType - ACGTN is nucleotide" {
-    var counts: [256]u64 = .{0} ** 256;
-    counts['A'] = 200;
-    counts['C'] = 200;
-    counts['G'] = 200;
-    counts['T'] = 200;
-    counts['N'] = 200;
-    try std.testing.expectEqual(SequenceType.nucleotide, detectType(&counts, 1000));
+test "detectType classifies representative alphabets" {
+    const Case = struct {
+        symbols: []const u8,
+        expected: SequenceType,
+    };
+    const cases = [_]Case{
+        .{ .symbols = "", .expected = .nucleotide },
+        .{ .symbols = "ACGTACGT", .expected = .nucleotide },
+        .{ .symbols = "acgtacgt", .expected = .nucleotide },
+        .{ .symbols = "ACGTURYSWKMBDHVNacgturyswkmbdhvn", .expected = .nucleotide },
+        .{ .symbols = "EFLPQXZJO*eflpqxzjo*", .expected = .protein },
+    };
+
+    for (cases) |case| {
+        const counts = countSymbols(case.symbols);
+
+        try std.testing.expectEqual(case.expected, detectType(&counts, case.symbols.len));
+    }
 }
 
-test "detectType - full IUPAC ambiguity alphabet is nucleotide" {
-    var counts: [256]u64 = .{0} ** 256;
-    const letters = "ACGTURYSWKMBDHVNacgturyswkmbdhvnu";
-    for (letters) |byte| counts[byte] += 1;
-    try std.testing.expectEqual(SequenceType.nucleotide, detectType(&counts, letters.len));
+test "detectType uses a strict overflow-safe 90 percent boundary" {
+    const Case = struct {
+        total: u64,
+        nucleotide: u64,
+        expected: SequenceType,
+    };
+    const cases = [_]Case{
+        .{ .total = 10, .nucleotide = 9, .expected = .protein },
+        .{ .total = 10, .nucleotide = 10, .expected = .nucleotide },
+        .{ .total = 11, .nucleotide = 10, .expected = .nucleotide },
+        .{ .total = 1000, .nucleotide = 900, .expected = .protein },
+        .{ .total = 1000, .nucleotide = 901, .expected = .nucleotide },
+        .{
+            .total = 2_300_000_000_000_000_000,
+            .nucleotide = 2_070_000_000_000_000_000,
+            .expected = .protein,
+        },
+        .{
+            .total = 2_300_000_000_000_000_000,
+            .nucleotide = 2_070_000_000_000_000_001,
+            .expected = .nucleotide,
+        },
+    };
+
+    for (cases) |case| {
+        var counts: [256]u64 = .{0} ** 256;
+        counts['A'] = case.nucleotide;
+        counts['L'] = case.total - case.nucleotide;
+
+        try std.testing.expectEqual(case.expected, detectType(&counts, case.total));
+    }
 }
 
-test "detectType - mixed amino acids is protein" {
-    var counts: [256]u64 = .{0} ** 256;
-    counts['M'] = 100;
-    counts['A'] = 100;
-    counts['L'] = 100;
-    counts['F'] = 100;
-    counts['P'] = 100;
-    counts['W'] = 100;
-    counts['H'] = 100;
-    counts['K'] = 100;
-    counts['D'] = 100;
-    counts['E'] = 100;
-    try std.testing.expectEqual(SequenceType.protein, detectType(&counts, 1000));
+test "detectType matches its threshold across deterministic fuzzy inputs" {
+    const nucleotide_codes = "ACGTURYSWKMBDHVNacgturyswkmbdhvn";
+    const protein_only_codes = "EFLPQXZJO*eflpqxzjo*";
+    var prng = std.Random.DefaultPrng.init(0x7a_fa_57_a7_5);
+    const random = prng.random();
+
+    for (0..4096) |i| {
+        const total = random.intRangeAtMost(u64, 1, 1_000_000);
+        const nucleotide = random.intRangeAtMost(u64, 0, total);
+        var counts: [256]u64 = .{0} ** 256;
+        counts[nucleotide_codes[i % nucleotide_codes.len]] = nucleotide;
+        counts[protein_only_codes[i % protein_only_codes.len]] = total - nucleotide;
+        const expected: SequenceType = if (@as(u128, nucleotide) * 10 > @as(u128, total) * 9)
+            .nucleotide
+        else
+            .protein;
+
+        try std.testing.expectEqual(expected, detectType(&counts, total));
+    }
 }
 
-test "detectType - below 90% threshold is protein" {
-    var counts: [256]u64 = .{0} ** 256;
-    counts['A'] = 200;
-    counts['C'] = 200;
-    counts['G'] = 200;
-    // A+C+G = 600 out of 700, which is 85.7% => protein.
-    // Use letters outside the IUPAC nucleotide alphabet for the remainder.
-    counts['L'] = 50;
-    counts['F'] = 50;
-    try std.testing.expectEqual(SequenceType.protein, detectType(&counts, 700));
-}
-
-test "detectType - exactly 91% is nucleotide" {
-    var counts: [256]u64 = .{0} ** 256;
-    counts['A'] = 910;
-    counts['L'] = 90;
-    // ACGTN = 910/1000 = 91% > 90%
-    try std.testing.expectEqual(SequenceType.nucleotide, detectType(&counts, 1000));
-}
-
-test "detectType - empty is nucleotide (default)" {
-    var counts: [256]u64 = .{0} ** 256;
-    try std.testing.expectEqual(SequenceType.nucleotide, detectType(&counts, 0));
-}
-
-test "detectType - lowercase nucleotides" {
-    var counts: [256]u64 = .{0} ** 256;
-    counts['a'] = 250;
-    counts['c'] = 250;
-    counts['g'] = 250;
-    counts['t'] = 250;
-    try std.testing.expectEqual(SequenceType.nucleotide, detectType(&counts, 1000));
-}
-
-test "detectType - large totals do not overflow the 90% threshold" {
-    var counts: [256]u64 = .{0} ** 256;
-    // total*9 and nuc*10 both overflow u64 at this scale; u128 keeps the compare correct.
-    const total: u64 = 2_300_000_000_000_000_000;
-    const nuc_hi: u64 = 2_070_000_000_000_000_001;
-    counts['A'] = nuc_hi;
-    counts['L'] = total - nuc_hi;
-    try std.testing.expectEqual(SequenceType.nucleotide, detectType(&counts, total));
-
-    counts = .{0} ** 256;
-    const nuc_lo: u64 = 2_070_000_000_000_000_000;
-    counts['A'] = nuc_lo;
-    counts['L'] = total - nuc_lo;
-    try std.testing.expectEqual(SequenceType.protein, detectType(&counts, total));
-}
-
-// ============================================================================
-// Integration: stats via process spawn
-// ============================================================================
+// --- CLI reports ---
 
 const ZFASTA_BIN = if (builtin.os.tag == .windows) "zig-out\\bin\\z-fasta.exe" else "zig-out/bin/z-fasta";
 
@@ -118,7 +103,7 @@ fn runStatsAndCapture(allocator: std.mem.Allocator, fasta_path: []const u8) ![]u
         .argv = &.{ ZFASTA_BIN, "stats", fasta_path },
         .stdout = .pipe,
     });
-    defer proc.kill(io);
+    errdefer proc.kill(io);
 
     var read_buf: [4096]u8 = undefined;
     var stdout_reader = proc.stdout.?.reader(io, &read_buf);
@@ -131,9 +116,8 @@ fn runStatsAndCapture(allocator: std.mem.Allocator, fasta_path: []const u8) ![]u
 }
 
 test "stats renders the exact nucleotide report" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const output = try runStatsAndCapture(arena.allocator(), "tests/data/simple.fasta");
+    const output = try runStatsAndCapture(std.testing.allocator, "tests/data/simple.fasta");
+    defer std.testing.allocator.free(output);
 
     const expected =
         \\File:
@@ -181,12 +165,36 @@ test "stats renders the exact nucleotide report" {
     try std.testing.expectEqualStrings(expected, output);
 }
 
-test "stats renders the exact complete protein field set" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const output = try runStatsAndCapture(arena.allocator(), "tests/data/proteome.fasta");
+test "stats renders the exact protein report" {
+    const output = try runStatsAndCapture(std.testing.allocator, "tests/data/proteome.fasta");
+    defer std.testing.allocator.free(output);
 
-    const composition =
+    const expected =
+        \\File:
+        \\  path: tests/data/proteome.fasta
+        \\  index: tests/data/proteome.fasta.zfi
+        \\  size_bytes: 187
+        \\
+        \\Lengths:
+        \\  indexed_records: 2
+        \\  total_symbols: 71
+        \\  shortest_length: 20
+        \\  shortest_name: sp|Q98765|ANOT_MOUSE
+        \\  longest_length: 51
+        \\  longest_name: sp|P12345|PROT_HUMAN
+        \\  mean: 35
+        \\  q1: 20
+        \\  median: 35
+        \\  q3: 51
+        \\  range: 31
+        \\
+        \\Nx:
+        \\  n50: 51
+        \\  l50: 1
+        \\  n90: 20
+        \\  l90: 2
+        \\  aun: 42.27
+        \\
         \\Composition:
         \\  type: protein
         \\  percent_denominator: total_symbols
@@ -221,7 +229,5 @@ test "stats renders the exact complete protein field set" {
         \\  lowercase: 0 0.00%
         \\
     ;
-    const start = std.mem.indexOf(u8, output, "Composition:\n") orelse return error.MissingComposition;
-
-    try std.testing.expectEqualStrings(composition, output[start..]);
+    try std.testing.expectEqualStrings(expected, output);
 }

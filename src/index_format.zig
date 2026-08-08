@@ -8,68 +8,63 @@ const std = @import("std");
 const builtin = @import("builtin");
 const platform = @import("platform.zig");
 
-// ============================================================================
-// Types - shared by indexer, getter, stats
-// ============================================================================
+// --- Types shared by indexer, getter, and stats ---
 
 /// ZFI binary format magic + header (`ZFI\x01` since first release; no users on a prior on-disk layout).
 pub const ZFI_MAGIC: [4]u8 = .{ 'Z', 'F', 'I', 0x01 };
 
 const NON_UNIFORM_WIDTH_FLAG: u8 = 1;
-const NAME_IN_ZFI_FLAG: u8 = 2;
-pub const name_in_zfi_flag = NAME_IN_ZFI_FLAG;
+/// Record flag indicating that its name is embedded in the `.zfi` name blob.
+pub const NAME_IN_ZFI_FLAG: u8 = 2;
 const SIDE_TABLE_OFFSET_BYTES = 5;
 const MAX_SIDE_TABLE_OFFSET = (1 << (SIDE_TABLE_OFFSET_BYTES * 8)) - 1;
 // Holds the maximum u16 name, four tabs, four maximum-width numeric fields,
 // and the line delimiter.
 const FAI_READER_BUFFER_BYTES: usize = 65_600;
 
-/// Maximum absolute side-table byte offset (`plan/docs/zfi-format.md`).
-pub const max_side_table_offset: u64 = MAX_SIDE_TABLE_OFFSET;
-
 pub const ZFI_NAME_FOOTER_MAGIC: [4]u8 = .{ 'Z', 'F', 'N', 'M' };
 
 /// On-disk sizes from the wire contract (must match `@sizeOf` under the frozen layout).
-pub const zfi_header_bytes: usize = 16;
-pub const zfi_index_record_bytes: usize = 40;
-pub const zfi_side_table_line_bytes: usize = 32;
+pub const ZFI_HEADER_BYTES: usize = 16;
+pub const ZFI_INDEX_RECORD_BYTES: usize = 40;
+pub const ZFI_SIDE_TABLE_LINE_BYTES: usize = 32;
 
 /// On-disk name-table footer size (4-byte magic + little-endian u64 length).
-pub const zfi_name_footer_bytes: usize = 12;
+pub const ZFI_NAME_FOOTER_BYTES: usize = 12;
 
 /// Trailing source-identity block (`ZFID` + FASTA mtime ns) written immediately
 /// before the name footer. Production writers always include it. Legacy files
 /// without it use the weaker mtime policy.
 pub const ZFI_SOURCE_ID_MAGIC: [4]u8 = .{ 'Z', 'F', 'I', 'D' };
-pub const zfi_source_id_bytes: usize = 12;
+pub const ZFI_SOURCE_ID_BYTES: usize = 12;
 
-pub fn encodeZfiNameFooter(name_blob_len: u64) [zfi_name_footer_bytes]u8 {
-    var out: [zfi_name_footer_bytes]u8 = undefined;
+pub fn encodeZfiNameFooter(name_blob_len: u64) [ZFI_NAME_FOOTER_BYTES]u8 {
+    var out: [ZFI_NAME_FOOTER_BYTES]u8 = undefined;
     @memcpy(out[0..4], &ZFI_NAME_FOOTER_MAGIC);
     std.mem.writeInt(u64, out[4..12], name_blob_len, .little);
     return out;
 }
 
-pub fn encodeZfiSourceId(source_mtime_ns: u64) [zfi_source_id_bytes]u8 {
-    var out: [zfi_source_id_bytes]u8 = undefined;
+pub fn encodeZfiSourceId(source_mtime_ns: u64) [ZFI_SOURCE_ID_BYTES]u8 {
+    var out: [ZFI_SOURCE_ID_BYTES]u8 = undefined;
     @memcpy(out[0..4], &ZFI_SOURCE_ID_MAGIC);
     std.mem.writeInt(u64, out[4..12], source_mtime_ns, .little);
     return out;
 }
 
 fn decodeZfiNameFooterBytes(footer_bytes: []const u8) ?u64 {
-    if (footer_bytes.len < zfi_name_footer_bytes) return null;
+    if (footer_bytes.len < ZFI_NAME_FOOTER_BYTES) return null;
     if (!std.mem.eql(u8, footer_bytes[0..4], &ZFI_NAME_FOOTER_MAGIC)) return null;
     return std.mem.readInt(u64, footer_bytes[4..12], .little);
 }
 
 fn decodeZfiSourceIdBytes(id_bytes: []const u8) ?u64 {
-    if (id_bytes.len < zfi_source_id_bytes) return null;
+    if (id_bytes.len < ZFI_SOURCE_ID_BYTES) return null;
     if (!std.mem.eql(u8, id_bytes[0..4], &ZFI_SOURCE_ID_MAGIC)) return null;
     return std.mem.readInt(u64, id_bytes[4..12], .little);
 }
 
-/// Legacy on-disk footer written before tight layout (16 bytes: magic + 4 pad + u64).
+// Legacy on-disk footer written before tight layout (16 bytes: magic + 4 pad + u64).
 const zfi_name_footer_legacy_bytes: usize = 16;
 
 /// Nanoseconds since epoch as stored in `.zfi` source-identity trailers.
@@ -77,35 +72,32 @@ pub fn timestampToNs(ts: std.Io.Timestamp) u64 {
     return @intCast(ts.nanoseconds);
 }
 
-/// Trailing layout after records/side tables:
-/// `[name blob][optional ZFID][ZFNM footer]`.
-/// `ZFID` sits *before* the footer so legacy loaders that seek `ZFNM` at EOF still work.
-pub const ZfiTrailingMeta = struct {
-    /// End of name blob (and of the side-table region when the blob is empty).
+// Trailing layout after records/side tables:
+// `[name blob][optional ZFID][ZFNM footer]`.
+// `ZFID` sits before the footer so legacy loaders that seek `ZFNM` at EOF still work.
+const ZfiTrailingMeta = struct {
+    // End of name blob (and of the side-table region when the blob is empty).
     payload_end: usize,
     name_blob_len: u64,
-    footer_bytes: usize,
     source_mtime_ns: ?u64,
 };
 
-pub fn parseZfiTrailingMeta(zfi_data: []const u8) ?ZfiTrailingMeta {
+fn parseZfiTrailingMeta(zfi_data: []const u8) ?ZfiTrailingMeta {
     const footer = parseZfiNameFooterAtEnd(zfi_data) orelse return null;
-    if (zfi_data.len < footer.footer_bytes) return null;
     const footer_start = zfi_data.len - footer.footer_bytes;
 
     var source_mtime_ns: ?u64 = null;
     var payload_end = footer_start;
-    if (footer_start >= zfi_source_id_bytes) {
-        if (decodeZfiSourceIdBytes(zfi_data[footer_start - zfi_source_id_bytes .. footer_start])) |mtime_ns| {
+    if (footer_start >= ZFI_SOURCE_ID_BYTES) {
+        if (decodeZfiSourceIdBytes(zfi_data[footer_start - ZFI_SOURCE_ID_BYTES .. footer_start])) |mtime_ns| {
             source_mtime_ns = mtime_ns;
-            payload_end = footer_start - zfi_source_id_bytes;
+            payload_end = footer_start - ZFI_SOURCE_ID_BYTES;
         }
     }
 
     return .{
         .payload_end = payload_end,
         .name_blob_len = footer.name_blob_len,
-        .footer_bytes = footer.footer_bytes,
         .source_mtime_ns = source_mtime_ns,
     };
 }
@@ -114,9 +106,9 @@ fn parseZfiNameFooterAtEnd(zfi_data: []const u8) ?struct {
     name_blob_len: u64,
     footer_bytes: usize,
 } {
-    if (zfi_data.len >= zfi_name_footer_bytes) {
-        if (decodeZfiNameFooterBytes(zfi_data[zfi_data.len - zfi_name_footer_bytes ..])) |name_blob_len| {
-            return .{ .name_blob_len = name_blob_len, .footer_bytes = zfi_name_footer_bytes };
+    if (zfi_data.len >= ZFI_NAME_FOOTER_BYTES) {
+        if (decodeZfiNameFooterBytes(zfi_data[zfi_data.len - ZFI_NAME_FOOTER_BYTES ..])) |name_blob_len| {
+            return .{ .name_blob_len = name_blob_len, .footer_bytes = ZFI_NAME_FOOTER_BYTES };
         }
     }
 
@@ -153,7 +145,7 @@ pub const SideTableLine = extern struct {
 ///
 /// For `.zfi` indexes, `name_offset` / `name_len` point into the embedded name blob.
 /// For full-map `.fai` loads, they point into the mapped `.fai` line. Streamed
-/// `.fai` loads keep copied names separately. Use `LoadedIndex.getRecordName` when
+/// `.fai` loads keep copied names separately. Use `LoadedIndex.recordName` when
 /// the index source is not already known.
 ///
 /// v0.3 stores non-uniform-width metadata in `_pad` so uniform records remain
@@ -169,6 +161,7 @@ pub const IndexRecord = extern struct {
     line_bases: u32,
     line_bytes: u32,
 
+    /// Caller assumes the record name range was validated against `data`.
     pub fn getName(self: IndexRecord, data: []const u8) []const u8 {
         return data[self.name_offset..][0..self.name_len];
     }
@@ -206,9 +199,9 @@ comptime {
     if (builtin.cpu.arch.endian() != .little) {
         @compileError(".zfi wire format requires little-endian (see plan/docs/zfi-format.md); big-endian codec not implemented");
     }
-    if (@sizeOf(ZfiHeader) != zfi_header_bytes) @compileError("ZfiHeader size drifted from wire contract");
-    if (@sizeOf(IndexRecord) != zfi_index_record_bytes) @compileError("IndexRecord size drifted from wire contract");
-    if (@sizeOf(SideTableLine) != zfi_side_table_line_bytes) @compileError("SideTableLine size drifted from wire contract");
+    if (@sizeOf(ZfiHeader) != ZFI_HEADER_BYTES) @compileError("ZfiHeader size drifted from wire contract");
+    if (@sizeOf(IndexRecord) != ZFI_INDEX_RECORD_BYTES) @compileError("IndexRecord size drifted from wire contract");
+    if (@sizeOf(SideTableLine) != ZFI_SIDE_TABLE_LINE_BYTES) @compileError("SideTableLine size drifted from wire contract");
     if (@offsetOf(ZfiHeader, "magic") != 0) @compileError("ZfiHeader.magic offset");
     if (@offsetOf(ZfiHeader, "record_count") != 4) @compileError("ZfiHeader.record_count offset");
     if (@offsetOf(ZfiHeader, "source_size") != 8) @compileError("ZfiHeader.source_size offset");
@@ -226,8 +219,8 @@ comptime {
 }
 
 /// Explicit little-endian header bytes (must match `asBytes` on little-endian hosts).
-pub fn encodeZfiHeader(header: ZfiHeader) [zfi_header_bytes]u8 {
-    var out: [zfi_header_bytes]u8 = undefined;
+pub fn encodeZfiHeader(header: ZfiHeader) [ZFI_HEADER_BYTES]u8 {
+    var out: [ZFI_HEADER_BYTES]u8 = undefined;
     @memcpy(out[0..4], &header.magic);
     std.mem.writeInt(u32, out[4..8], header.record_count, .little);
     std.mem.writeInt(u64, out[8..16], header.source_size, .little);
@@ -235,8 +228,8 @@ pub fn encodeZfiHeader(header: ZfiHeader) [zfi_header_bytes]u8 {
 }
 
 /// Explicit little-endian record bytes (must match `asBytes` on little-endian hosts).
-pub fn encodeIndexRecord(rec: IndexRecord) [zfi_index_record_bytes]u8 {
-    var out: [zfi_index_record_bytes]u8 = undefined;
+pub fn encodeIndexRecord(rec: IndexRecord) [ZFI_INDEX_RECORD_BYTES]u8 {
+    var out: [ZFI_INDEX_RECORD_BYTES]u8 = undefined;
     std.mem.writeInt(u64, out[0..8], rec.name_offset, .little);
     std.mem.writeInt(u16, out[8..10], rec.name_len, .little);
     @memcpy(out[10..16], &rec._pad);
@@ -248,8 +241,8 @@ pub fn encodeIndexRecord(rec: IndexRecord) [zfi_index_record_bytes]u8 {
 }
 
 /// Explicit little-endian side-table line bytes (must match `asBytes` on little-endian hosts).
-pub fn encodeSideTableLine(line: SideTableLine) [zfi_side_table_line_bytes]u8 {
-    var out: [zfi_side_table_line_bytes]u8 = undefined;
+pub fn encodeSideTableLine(line: SideTableLine) [ZFI_SIDE_TABLE_LINE_BYTES]u8 {
+    var out: [ZFI_SIDE_TABLE_LINE_BYTES]u8 = undefined;
     std.mem.writeInt(u64, out[0..8], line.base_start, .little);
     std.mem.writeInt(u64, out[8..16], line.byte_offset, .little);
     std.mem.writeInt(u64, out[16..24], line.line_bytes, .little);
@@ -268,28 +261,26 @@ pub const LoadMode = union(enum) {
 
 /// Loaded FASTA + index state (from `.zfi` or samtools-compatible `.fai`).
 ///
-/// Ownership (one owner each; `deinit(io)` is the only cleanup entry point):
-/// - **FASTA file and maps**: `fasta_file` remains open until `deinit`.
-///   `deinit` destroys the optional FASTA map and optional sidecar maps, then closes
-///   the FASTA file. Byte slices and typed views borrow from those maps.
+/// Ownership (one owner each; `deinit()` is the only cleanup entry point):
+/// - **FASTA file**: `fasta_file` remains open until `deinit`.
+/// - **Sidecar maps**: `deinit` destroys the optional `.zfi` / `.fai` maps. Byte
+///   slices and typed views borrow from those maps.
 /// - **Arena**: owns heap for streamed `.fai` record arrays and retained names,
 ///   plus `name_map` table storage. Reclaimed
 ///   only via `arena.deinit()` (do not `name_map.deinit()` on an arena-backed map).
 /// - **`name_map` keys**: borrowed from a sidecar map for full loads, or from
 ///   arena-owned `name_slices` for positional streamed `.fai` loads.
-/// - **`io`**: borrowed for destroy only; caller must keep it alive until `deinit`.
+/// - **`io`**: borrowed for reads and cleanup; caller must keep it alive until `deinit`.
 ///
-/// GET and stats load through this type and only call `deinit(io)`. Validator maps
-/// the FASTA independently, but uses this ownership model when it loads an index.
+/// GET and stats load through this type and only call `deinit()`. Validator maps
+/// the FASTA independently.
 pub const LoadedIndex = struct {
     io: std.Io,
     fasta_file: std.Io.File,
-    fasta_map: ?std.Io.File.MemoryMap,
     zfi_map: ?std.Io.File.MemoryMap = null,
     fai_map: ?std.Io.File.MemoryMap = null,
     records: []const IndexRecord,
-    name_map: std.StringHashMap(u32),
-    has_name_map: bool,
+    name_map: ?std.StringHashMapUnmanaged(u32) = null,
     /// Arena-owned names: one per retained positional record, or stats extrema only.
     name_slices: []const []const u8 = &.{},
     /// Record indices for the two extrema names retained by streamed FAI stats loads.
@@ -297,7 +288,6 @@ pub const LoadedIndex = struct {
     /// Borrow into `zfi_map` when `.zfi` embeds a name blob.
     name_blob: ?[]const u8 = null,
     fai_data: ?platform.MappedBytes = null,
-    fasta_data: []const u8,
     fasta_size: u64,
     zfi_data: ?platform.MappedBytes,
     zfi_side_start: usize = 0,
@@ -311,11 +301,14 @@ pub const LoadedIndex = struct {
         return if (self.source == .zfi) self.name_blob.? else self.fai_data.?;
     }
 
-    pub fn getRecordName(self: *const LoadedIndex, rec_idx: usize) []const u8 {
+    /// Returns a retained record name, or `null` when the selected load mode did
+    /// not retain that record's name.
+    pub fn recordName(self: *const LoadedIndex, rec_idx: usize) ?[]const u8 {
+        if (rec_idx >= self.records.len) return null;
         if (self.stats_name_indices) |indices| {
             if (rec_idx == indices[0]) return self.name_slices[0];
             if (rec_idx == indices[1]) return self.name_slices[1];
-            return "?";
+            return null;
         }
         if (self.name_slices.len > 0) {
             return self.name_slices[rec_idx];
@@ -323,30 +316,21 @@ pub const LoadedIndex = struct {
         const rec = self.records[rec_idx];
         if (self.source == .zfi) return rec.getName(self.name_blob.?);
         if (self.fai_data) |data| return rec.getName(data);
-        var it = self.name_map.iterator();
-        while (it.next()) |entry| {
-            if (@as(usize, entry.value_ptr.*) == rec_idx) {
-                return entry.key_ptr.*;
-            }
-        }
-        return "?";
+        return null;
     }
 
-    pub fn deinit(self: *LoadedIndex, io: std.Io) void {
-        if (self.fasta_map) |*m| m.destroy(io);
-        if (self.zfi_map) |*m| m.destroy(io);
-        if (self.fai_map) |*m| m.destroy(io);
-        // `name_map` table bytes are arena-owned. Keys borrow a sidecar map or
-        // arena-owned copied names. Do not call
-        // `name_map.deinit()`: Zig 0.16 ArenaAllocator.free is not safe for the
-        // HashMap's non-LIFO buffer free (crashes). `arena.deinit()` reclaims all.
+    pub fn deinit(self: *LoadedIndex) void {
+        if (self.zfi_map) |*m| m.destroy(self.io);
+        if (self.fai_map) |*m| m.destroy(self.io);
+        // `name_map` table bytes and copied names are arena-owned. The arena
+        // reclaims them together; individual container deinit calls are redundant.
         self.arena.deinit();
-        self.fasta_file.close(io);
+        self.fasta_file.close(self.io);
     }
 
     pub fn lookupName(self: *const LoadedIndex, name: []const u8) ?usize {
-        if (self.has_name_map) {
-            const rec_idx = self.name_map.get(name) orelse return null;
+        if (self.name_map) |name_map| {
+            const rec_idx = name_map.get(name) orelse return null;
             return rec_idx;
         }
 
@@ -408,60 +392,34 @@ pub const LoadIndexError = error{
     OutOfMemory,
 };
 
-// Internal result of tryLoadZfi / tryLoadFai before mapping onto LoadIndexError.
-//
-// `.not_found`, `.stale`, and `.corrupt` are success-typed tags, not Zig errors.
-// Returning them after mmap or arena allocation does not run errdefer. Loaders
-// therefore keep a `transferred` flag and free resources in a plain defer until
-// ownership moves into the returned LoadedIndex.
-const LoadAttempt = union(enum) {
-    loaded: LoadedIndex,
-    not_found,
-    stale,
-    corrupt,
-};
-
-// ============================================================================
-// Error helper (shared by main, getter, indexer)
-// ============================================================================
+// --- Shared error helper ---
 
 pub fn printErrorAndExit(comptime fmt: []const u8, args: anytype) noreturn {
     std.debug.print(fmt, args);
     std.process.exit(1);
 }
 
-// ============================================================================
-// Shared index loader
-// ============================================================================
+// --- Shared index loader ---
 
 /// Load the index for a FASTA file. A present `.zfi` is authoritative;
 /// `.fai` is considered only when `.zfi` is absent.
-/// The caller must call `deinit(io)` on the returned LoadedIndex.
-pub fn loadIndex(io: std.Io, fasta_path: []const u8) LoadedIndex {
-    return loadIndexWithMode(io, fasta_path, .lookup_full_map);
-}
-
-pub fn loadIndexWithMode(io: std.Io, fasta_path: []const u8, mode: LoadMode) LoadedIndex {
-    return switch (mode) {
-        .stats_scan => loadIndexWithAccess(io, fasta_path, mode, .file_backed),
-        else => loadIndexWithAccess(io, fasta_path, mode, .mapped),
-    };
+/// The caller must call `deinit()` on the returned LoadedIndex.
+pub fn loadIndex(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8) LoadedIndex {
+    return loadIndexOrExit(allocator, io, fasta_path, .lookup_full_map);
 }
 
 /// Load all stats metadata while keeping the FASTA descriptor-backed.
-pub fn loadIndexForStats(io: std.Io, fasta_path: []const u8) LoadedIndex {
-    return loadIndexWithAccess(io, fasta_path, .stats_scan, .file_backed);
+pub fn loadIndexForStats(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8) LoadedIndex {
+    return loadIndexOrExit(allocator, io, fasta_path, .stats_scan);
 }
 
 /// Keeps the FASTA open without retaining its contents in memory.
-pub fn loadIndexForGet(io: std.Io, fasta_path: []const u8, mode: LoadMode) LoadedIndex {
-    return loadIndexWithAccess(io, fasta_path, mode, .file_backed);
+pub fn loadIndexForGet(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, mode: LoadMode) LoadedIndex {
+    return loadIndexOrExit(allocator, io, fasta_path, mode);
 }
 
-const FastaAccess = enum { mapped, file_backed };
-
-fn loadIndexWithAccess(io: std.Io, fasta_path: []const u8, mode: LoadMode, access: FastaAccess) LoadedIndex {
-    return loadIndexCheckedWithAccess(io, fasta_path, mode, access) catch |err| switch (err) {
+fn loadIndexOrExit(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, mode: LoadMode) LoadedIndex {
+    return loadIndexCheckedWithMode(allocator, io, fasta_path, mode) catch |err| switch (err) {
         error.FileNotFound => printErrorAndExit("error: file not found: {s}\n", .{fasta_path}),
         error.AccessDenied => printErrorAndExit("error: access denied: {s}\n", .{fasta_path}),
         error.EmptyFile => printErrorAndExit("error: file is empty: {s}\n", .{fasta_path}),
@@ -479,31 +437,23 @@ fn loadIndexWithAccess(io: std.Io, fasta_path: []const u8, mode: LoadMode, acces
 }
 
 /// Load the index for a FASTA file with typed errors for testing.
-pub fn loadIndexChecked(io: std.Io, fasta_path: []const u8) LoadIndexError!LoadedIndex {
-    return loadIndexCheckedWithMode(io, fasta_path, .lookup_full_map);
+pub fn loadIndexChecked(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8) LoadIndexError!LoadedIndex {
+    return loadIndexCheckedWithMode(allocator, io, fasta_path, .lookup_full_map);
 }
 
-pub fn loadIndexCheckedWithMode(io: std.Io, fasta_path: []const u8, mode: LoadMode) LoadIndexError!LoadedIndex {
-    return switch (mode) {
-        .stats_scan => loadIndexCheckedWithAccess(io, fasta_path, mode, .file_backed),
-        else => loadIndexCheckedWithAccess(io, fasta_path, mode, .mapped),
-    };
-}
-
-fn loadIndexCheckedWithAccess(
+/// Loads one index mode while returning typed errors instead of exiting.
+pub fn loadIndexCheckedWithMode(
+    allocator: std.mem.Allocator,
     io: std.Io,
     fasta_path: []const u8,
     mode: LoadMode,
-    access: FastaAccess,
 ) LoadIndexError!LoadedIndex {
-    // Open FASTA file
     const fasta_file = std.Io.Dir.cwd().openFile(io, fasta_path, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.FileNotFound,
         error.AccessDenied => return error.AccessDenied,
         else => return error.Io,
     };
-    var fasta_transferred = false;
-    defer if (!fasta_transferred) fasta_file.close(io);
+    errdefer fasta_file.close(io);
 
     const fasta_stat = fasta_file.stat(io) catch return error.Io;
 
@@ -511,41 +461,17 @@ fn loadIndexCheckedWithAccess(
         return error.EmptyFile;
     }
 
-    var fasta_view: ?platform.FileView = if (access == .mapped)
-        try platform.FileView.mapFile(io, fasta_file, @intCast(fasta_stat.size))
-    else
-        null;
-    defer if (!fasta_transferred) {
-        if (fasta_view) |*view| view.destroy(io);
-    };
-
     // A present `.zfi` is authoritative, including when it is invalid.
     var zfi_path_buf: [4096]u8 = undefined;
     const zfi_path = std.fmt.bufPrint(&zfi_path_buf, "{s}.zfi", .{fasta_path}) catch return error.PathTooLong;
 
-    switch (try tryLoadZfi(io, zfi_path, fasta_file, &fasta_view, fasta_stat, mode)) {
-        .loaded => |result| {
-            fasta_transferred = true;
-            return result;
-        },
-        .stale => return error.StaleIndex,
-        .corrupt => return error.CorruptIndex,
-        .not_found => {},
-    }
+    if (try tryLoadZfi(allocator, io, zfi_path, fasta_file, fasta_stat, mode)) |loaded| return loaded;
 
     // Try `.fai` only when `.zfi` is absent.
     var fai_path_buf: [4096]u8 = undefined;
     const fai_path = std.fmt.bufPrint(&fai_path_buf, "{s}.fai", .{fasta_path}) catch return error.PathTooLong;
 
-    switch (try tryLoadFai(io, fai_path, fasta_file, &fasta_view, fasta_stat, mode)) {
-        .loaded => |result| {
-            fasta_transferred = true;
-            return result;
-        },
-        .stale => return error.StaleIndex,
-        .corrupt => return error.CorruptIndex,
-        .not_found => return error.NoIndexFound,
-    }
+    return (try tryLoadFai(allocator, io, fai_path, fasta_file, fasta_stat, mode)) orelse error.NoIndexFound;
 }
 
 // Partition name-blob / footer relative to the records region.
@@ -583,9 +509,9 @@ fn buildNameMapFast(
     allocator: std.mem.Allocator,
     records: []const IndexRecord,
     name_data: []const u8,
-) LoadIndexError!std.StringHashMap(u32) {
-    var name_map = std.StringHashMap(u32).init(allocator);
-    name_map.ensureTotalCapacity(@intCast(records.len)) catch return error.OutOfMemory;
+) LoadIndexError!std.StringHashMapUnmanaged(u32) {
+    var name_map: std.StringHashMapUnmanaged(u32) = .empty;
+    name_map.ensureTotalCapacity(allocator, @intCast(records.len)) catch return error.OutOfMemory;
     for (records, 0..) |rec, i| {
         const name = rec.getName(name_data);
         const entry = name_map.getOrPutAssumeCapacity(name);
@@ -595,15 +521,15 @@ fn buildNameMapFast(
 }
 
 fn tryLoadZfi(
+    backing_allocator: std.mem.Allocator,
     io: std.Io,
     zfi_path: []const u8,
     fasta_file: std.Io.File,
-    fasta_view: *?platform.FileView,
     fasta_stat: std.Io.File.Stat,
     mode: LoadMode,
-) LoadIndexError!LoadAttempt {
+) LoadIndexError!?LoadedIndex {
     const zfi_file = std.Io.Dir.cwd().openFile(io, zfi_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return .not_found,
+        error.FileNotFound => return null,
         error.AccessDenied => return error.AccessDenied,
         else => return error.Io,
     };
@@ -613,45 +539,42 @@ fn tryLoadZfi(
 
     // Check for 0-byte file before mmap (POSIX returns EINVAL)
     if (zfi_stat.size == 0) {
-        return .corrupt;
+        return error.CorruptIndex;
     }
 
     // Staleness: index file older than FASTA (both formats). `.fai` has no embedded
     // source size/mtime, so this plus "index not older" is its entire identity check.
     if (zfi_stat.mtime.nanoseconds < fasta_stat.mtime.nanoseconds) {
-        return .stale;
+        return error.StaleIndex;
     }
 
-    var zfi_view = platform.FileView.mapFile(io, zfi_file, @intCast(zfi_stat.size)) catch return error.MmapFailed;
-    // Free mmap on `.corrupt` / `.stale` / error until ownership moves into LoadedIndex.
-    var transferred = false;
-    defer if (!transferred) zfi_view.destroy(io);
+    var zfi_map = platform.mapFileReadOnly(io, zfi_file, @intCast(zfi_stat.size)) catch return error.MmapFailed;
+    errdefer zfi_map.destroy(io);
 
-    const fasta_data: []const u8 = if (fasta_view.*) |*view| view.bytes() else &.{};
-    const zfi_data = zfi_view.bytes();
+    const zfi_data: platform.MappedBytes = zfi_map.memory;
 
     // Validate minimum size for header
     if (zfi_data.len < @sizeOf(ZfiHeader)) {
-        return .corrupt;
+        return error.CorruptIndex;
     }
 
     // Validate magic
     const header: *const ZfiHeader = @ptrCast(@alignCast(zfi_data.ptr));
     if (!std.mem.eql(u8, &header.magic, &ZFI_MAGIC)) {
-        return .corrupt;
+        return error.CorruptIndex;
     }
 
     // Validate source file size (embedded identity).
     if (header.source_size != fasta_stat.size) {
-        return .stale;
+        return error.StaleIndex;
     }
 
     // Empty catalogs are not useful and match the `.fai` reject-empty policy.
-    if (header.record_count == 0) return .corrupt;
+    if (header.record_count == 0) return error.CorruptIndex;
 
     // Checked records extent before forming the typed record slice.
-    const records_end = zfiRecordsEnd(header.record_count) orelse return .corrupt;
-    if (zfi_data.len < records_end) return .corrupt;
+    const records_end = zfiRecordsEnd(header.record_count) orelse return error.CorruptIndex;
+    if (zfi_data.len < records_end) return error.CorruptIndex;
 
     const record_bytes = zfi_data[@sizeOf(ZfiHeader)..records_end];
     const records: []const IndexRecord = @as(
@@ -659,7 +582,7 @@ fn tryLoadZfi(
         @ptrCast(@alignCast(record_bytes.ptr)),
     )[0..header.record_count];
 
-    const name_layout = resolveZfiNameLayout(zfi_data, records_end, records) orelse return .corrupt;
+    const name_layout = resolveZfiNameLayout(zfi_data, records_end, records) orelse return error.CorruptIndex;
     const name_blob = name_layout.bytes;
 
     // Strong identity: production trailers store the FASTA mtime at index time.
@@ -668,7 +591,7 @@ fn tryLoadZfi(
     // index-mtime check above only.
     if (name_layout.source_mtime_ns) |stored_mtime| {
         if (stored_mtime != timestampToNs(fasta_stat.mtime)) {
-            return .stale;
+            return error.StaleIndex;
         }
     }
 
@@ -677,12 +600,11 @@ fn tryLoadZfi(
     const side_region_end = name_layout.start;
 
     if (!validateZfiRecords(records, fasta_stat.size, zfi_data, name_blob, side_region_start, side_region_end)) {
-        return .corrupt;
+        return error.CorruptIndex;
     }
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    // Free arena on error until ownership moves into LoadedIndex.
-    defer if (!transferred) arena.deinit();
+    var arena = std.heap.ArenaAllocator.init(backing_allocator);
+    errdefer arena.deinit();
     const allocator = arena.allocator();
 
     const build_name_map = switch (mode) {
@@ -691,46 +613,38 @@ fn tryLoadZfi(
         .stats_scan => false,
     };
 
-    var name_map: std.StringHashMap(u32) = undefined;
-    var has_name_map = false;
-    if (build_name_map) {
-        name_map = buildNameMapFast(allocator, records, name_blob) catch return error.OutOfMemory;
-        has_name_map = true;
-    } else {
-        name_map = std.StringHashMap(u32).init(allocator);
-    }
+    const name_map = if (build_name_map)
+        buildNameMapFast(allocator, records, name_blob) catch return error.OutOfMemory
+    else
+        null;
 
-    transferred = true;
-    return .{ .loaded = LoadedIndex{
+    return LoadedIndex{
         .io = io,
         .fasta_file = fasta_file,
-        .fasta_map = if (fasta_view.*) |view| view.map else null,
-        .zfi_map = zfi_view.map,
+        .zfi_map = zfi_map,
         .records = records,
         .name_map = name_map,
-        .has_name_map = has_name_map,
         .name_slices = &.{},
         .name_blob = name_blob,
-        .fasta_data = fasta_data,
         .fasta_size = fasta_stat.size,
         .zfi_data = zfi_data,
         .zfi_side_start = side_region_start,
         .zfi_side_end = side_region_end,
         .source = .zfi,
         .arena = arena,
-    } };
+    };
 }
 
 fn tryLoadFai(
+    backing_allocator: std.mem.Allocator,
     io: std.Io,
     fai_path: []const u8,
     fasta_file: std.Io.File,
-    fasta_view: *?platform.FileView,
     fasta_stat: std.Io.File.Stat,
     mode: LoadMode,
-) LoadIndexError!LoadAttempt {
+) LoadIndexError!?LoadedIndex {
     const fai_file = std.Io.Dir.cwd().openFile(io, fai_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return .not_found,
+        error.FileNotFound => return null,
         error.AccessDenied => return error.AccessDenied,
         else => return error.Io,
     };
@@ -741,44 +655,37 @@ fn tryLoadFai(
     // `.fai` identity is mtime-only: the text format has no source size or mtime field.
     // Same-size FASTA replacement is detected only when the FASTA mtime moves forward.
     if (fai_stat.mtime.nanoseconds < fasta_stat.mtime.nanoseconds) {
-        return .stale;
+        return error.StaleIndex;
     }
 
     if (fai_stat.size == 0) {
-        return .corrupt;
+        return error.CorruptIndex;
     }
 
-    const fasta_data: []const u8 = if (fasta_view.*) |*view| view.bytes() else &.{};
-
     switch (mode) {
-        .stats_scan => return loadFaiStreamed(io, fai_file, fasta_file, fasta_view, fasta_stat, .stats_scan),
-        .positional => |names| return loadFaiStreamed(io, fai_file, fasta_file, fasta_view, fasta_stat, .{ .matched = names }),
+        .stats_scan => return @as(?LoadedIndex, try loadFaiStreamed(backing_allocator, io, fai_file, fasta_file, fasta_stat, .stats_scan)),
+        .positional => |names| return @as(?LoadedIndex, try loadFaiStreamed(backing_allocator, io, fai_file, fasta_file, fasta_stat, .{ .matched = names })),
         .lookup_full_map => {},
     }
 
-    var fai_view = platform.FileView.mapFile(io, fai_file, @intCast(fai_stat.size)) catch return error.MmapFailed;
+    var fai_map = platform.mapFileReadOnly(io, fai_file, @intCast(fai_stat.size)) catch return error.MmapFailed;
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    // Free mmap + arena on `.corrupt` / error until ownership moves into LoadedIndex.
-    var transferred = false;
-    defer {
-        if (!transferred) {
-            fai_view.destroy(io);
-            arena.deinit();
-        }
-    }
+    errdefer fai_map.destroy(io);
+
+    var arena = std.heap.ArenaAllocator.init(backing_allocator);
+    errdefer arena.deinit();
     const allocator = arena.allocator();
 
-    const fai_data = fai_view.bytes();
+    const fai_data: platform.MappedBytes = fai_map.memory;
 
     // Newline count undercounts by one when the final `.fai` line has no trailing `\n`.
     var approx_records = std.mem.count(u8, fai_data, "\n");
     if (fai_data.len > 0 and fai_data[fai_data.len - 1] != '\n') {
-        approx_records = std.math.add(usize, approx_records, 1) catch return .corrupt;
+        approx_records = std.math.add(usize, approx_records, 1) catch return error.CorruptIndex;
     }
     // Reject sizes that would overflow the records allocation.
-    _ = std.math.mul(usize, approx_records, @sizeOf(IndexRecord)) catch return .corrupt;
-    if (approx_records == 0) return .corrupt;
+    _ = std.math.mul(usize, approx_records, @sizeOf(IndexRecord)) catch return error.CorruptIndex;
+    if (approx_records == 0) return error.CorruptIndex;
     const records = allocator.alloc(IndexRecord, approx_records) catch return error.OutOfMemory;
 
     var record_count: usize = 0;
@@ -787,17 +694,17 @@ fn tryLoadFai(
         const line_start = pos;
         const rel_eol = std.mem.indexOfScalar(u8, fai_data[pos..], '\n') orelse fai_data.len - pos;
         const line_len = rel_eol;
-        const line_end = std.math.add(usize, line_start, line_len) catch return .corrupt;
+        const line_end = std.math.add(usize, line_start, line_len) catch return error.CorruptIndex;
         // Advance past `\n` only when present; a final line may omit it.
         if (line_end < fai_data.len) {
-            pos = std.math.add(usize, line_end, 1) catch return .corrupt;
+            pos = std.math.add(usize, line_end, 1) catch return error.CorruptIndex;
         } else {
             pos = line_end;
         }
         if (line_len == 0) continue;
 
         const line = fai_data[line_start..][0..line_len];
-        const fields = parseFaiIndexLine(line) catch return .corrupt;
+        const fields = parseFaiIndexLine(line) catch return error.CorruptIndex;
 
         const rec = IndexRecord{
             .name_offset = line_start,
@@ -807,37 +714,33 @@ fn tryLoadFai(
             .line_bases = fields.line_bases,
             .line_bytes = fields.line_bytes,
         };
-        if (!isValidFaiRecordGeometry(rec, fasta_stat.size)) return .corrupt;
+        if (!isValidFaiRecordGeometry(rec, fasta_stat.size)) return error.CorruptIndex;
 
-        if (record_count >= records.len) return .corrupt;
+        if (record_count >= records.len) return error.CorruptIndex;
         records[record_count] = rec;
         record_count += 1;
     }
 
     if (record_count == 0) {
-        return .corrupt;
+        return error.CorruptIndex;
     }
 
     const loaded_records = records[0..record_count];
     const name_map = buildNameMapFast(allocator, loaded_records, fai_data) catch return error.OutOfMemory;
 
-    transferred = true;
-    return .{ .loaded = LoadedIndex{
+    return LoadedIndex{
         .io = io,
         .fasta_file = fasta_file,
-        .fasta_map = if (fasta_view.*) |view| view.map else null,
-        .fai_map = fai_view.map,
+        .fai_map = fai_map,
         .records = loaded_records,
         .name_map = name_map,
-        .has_name_map = true,
         .name_slices = &.{},
         .fai_data = fai_data,
-        .fasta_data = fasta_data,
         .fasta_size = fasta_stat.size,
         .zfi_data = null,
         .source = .fai,
         .arena = arena,
-    } };
+    };
 }
 
 const FaiStreamMode = union(enum) {
@@ -851,29 +754,24 @@ const FaiNameRef = struct {
 };
 
 fn loadFaiStreamed(
+    backing_allocator: std.mem.Allocator,
     io: std.Io,
     fai_file: std.Io.File,
     fasta_file: std.Io.File,
-    fasta_view: *?platform.FileView,
     fasta_stat: std.Io.File.Stat,
     mode: FaiStreamMode,
-) LoadIndexError!LoadAttempt {
-    const fasta_data: []const u8 = if (fasta_view.*) |*view| view.bytes() else &.{};
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    // Free arena on `.corrupt` / error until ownership moves into LoadedIndex.
-    var transferred = false;
-    defer if (!transferred) arena.deinit();
+) LoadIndexError!LoadedIndex {
+    var arena = std.heap.ArenaAllocator.init(backing_allocator);
+    errdefer arena.deinit();
     const allocator = arena.allocator();
 
     var records_list: std.ArrayListUnmanaged(IndexRecord) = .empty;
-    errdefer records_list.deinit(allocator);
     var slices_list: std.ArrayListUnmanaged([]const u8) = .empty;
-    errdefer slices_list.deinit(allocator);
-    var requested = std.StringHashMap(bool).init(std.heap.page_allocator);
-    defer requested.deinit();
+    var requested: std.StringHashMapUnmanaged(bool) = .empty;
+    defer requested.deinit(backing_allocator);
     switch (mode) {
         .matched => |names| {
-            requested.ensureTotalCapacity(@intCast(names.len)) catch return error.OutOfMemory;
+            requested.ensureTotalCapacity(backing_allocator, @intCast(names.len)) catch return error.OutOfMemory;
             for (names) |name| {
                 const entry = requested.getOrPutAssumeCapacity(name);
                 if (!entry.found_existing) entry.value_ptr.* = false;
@@ -897,10 +795,10 @@ fn loadFaiStreamed(
         const maybe_line = file_reader.interface.takeDelimiter('\n') catch return error.Io;
         const line = maybe_line orelse break;
         const current_offset = line_offset;
-        line_offset = std.math.add(u64, line_offset, line.len + 1) catch return .corrupt;
+        line_offset = std.math.add(u64, line_offset, line.len + 1) catch return error.CorruptIndex;
         if (line.len == 0) continue;
 
-        const fields = parseFaiIndexLine(line) catch return .corrupt;
+        const fields = parseFaiIndexLine(line) catch return error.CorruptIndex;
 
         const rec = IndexRecord{
             .name_offset = 0,
@@ -910,7 +808,7 @@ fn loadFaiStreamed(
             .line_bases = fields.line_bases,
             .line_bytes = fields.line_bytes,
         };
-        if (!isValidFaiRecordGeometry(rec, fasta_stat.size)) return .corrupt;
+        if (!isValidFaiRecordGeometry(rec, fasta_stat.size)) return error.CorruptIndex;
 
         saw_record = true;
         const retain = switch (mode) {
@@ -947,60 +845,56 @@ fn loadFaiStreamed(
         try records_list.append(allocator, rec);
     }
 
-    if (!saw_record) return .corrupt;
+    if (!saw_record) return error.CorruptIndex;
 
     const owned_records = records_list.toOwnedSlice(allocator) catch return error.OutOfMemory;
     const owned_slices = switch (mode) {
         .matched => slices_list.toOwnedSlice(allocator) catch return error.OutOfMemory,
         .stats_scan => blk: {
             const names = allocator.alloc([]const u8, 2) catch return error.OutOfMemory;
-            names[0] = try readFaiName(io, fai_file, allocator, shortest_ref);
+            names[0] = try readFaiName(allocator, io, fai_file, shortest_ref);
             names[1] = if (shortest_index == longest_index)
                 names[0]
             else
-                try readFaiName(io, fai_file, allocator, longest_ref);
+                try readFaiName(allocator, io, fai_file, longest_ref);
             break :blk names;
         },
     };
 
-    var name_map = std.StringHashMap(u32).init(allocator);
-    const has_name_map = switch (mode) {
-        .matched => true,
-        .stats_scan => false,
+    const name_map: ?std.StringHashMapUnmanaged(u32) = switch (mode) {
+        .matched => blk: {
+            var map: std.StringHashMapUnmanaged(u32) = .empty;
+            map.ensureTotalCapacity(allocator, @intCast(owned_slices.len)) catch return error.OutOfMemory;
+            for (owned_slices, 0..) |name, i| {
+                map.putAssumeCapacity(name, @intCast(i));
+            }
+            break :blk map;
+        },
+        .stats_scan => null,
     };
-    if (has_name_map) {
-        name_map.ensureTotalCapacity(@intCast(owned_slices.len)) catch return error.OutOfMemory;
-        for (owned_slices, 0..) |name, i| {
-            name_map.putAssumeCapacity(name, @intCast(i));
-        }
-    }
 
-    transferred = true;
-    return .{ .loaded = LoadedIndex{
+    return LoadedIndex{
         .io = io,
         .fasta_file = fasta_file,
-        .fasta_map = if (fasta_view.*) |view| view.map else null,
         .records = owned_records,
         .name_map = name_map,
-        .has_name_map = has_name_map,
         .name_slices = owned_slices,
         .stats_name_indices = switch (mode) {
             .matched => null,
             .stats_scan => .{ shortest_index, longest_index },
         },
         .fai_data = null,
-        .fasta_data = fasta_data,
         .fasta_size = fasta_stat.size,
         .zfi_data = null,
         .source = .fai,
         .arena = arena,
-    } };
+    };
 }
 
 fn readFaiName(
+    allocator: std.mem.Allocator,
     io: std.Io,
     fai_file: std.Io.File,
-    allocator: std.mem.Allocator,
     name_ref: FaiNameRef,
 ) LoadIndexError![]const u8 {
     const name = allocator.alloc(u8, name_ref.len) catch return error.OutOfMemory;
@@ -1034,9 +928,7 @@ fn parseFaiFieldU32(line: []const u8, field_start: *usize) LoadIndexError!u32 {
     return value;
 }
 
-// ============================================================================
-// FAI field parsing and uniform geometry checks
-// ============================================================================
+// --- FAI field parsing and uniform geometry checks ---
 
 // One parsed `.fai` text line. Shared by mmap and streaming loaders so a missing
 // terminal newline cannot make the two paths disagree on field values.

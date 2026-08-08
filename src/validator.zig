@@ -117,7 +117,7 @@ pub const Summary = struct {
     events: std.ArrayList(ValidateEvent),
     record_widths: std.ArrayList(u32),
     sequence_type: stats.SequenceType = .nucleotide,
-    /// Bases fed into `detectType` (capped at `stats.validate_type_sample_bases`).
+    /// Bases fed into `detectType` (capped at `stats.VALIDATE_TYPE_SAMPLE_BASES`).
     type_bases_sampled: u64 = 0,
     sequence_count: usize = 0,
     header_count: usize = 0,
@@ -165,8 +165,8 @@ const RecordState = struct {
 };
 
 pub fn runValidate(io: std.Io, fasta_path: []const u8, options: Options) void {
-    // Mapping ownership matches LoadedIndex: one FileView (or empty), destroyed here.
-    // Validation does not load an index; GET/stats use LoadedIndex.deinit(io) instead.
+    // Mapping ownership matches LoadedIndex: one MemoryMap (or empty), destroyed here.
+    // Validation does not load an index; GET/stats use LoadedIndex.deinit() instead.
     const file = std.Io.Dir.cwd().openFile(io, fasta_path, .{}) catch |err| switch (err) {
         error.FileNotFound => printErrorAndExit("error: file not found: {s}\n", .{fasta_path}),
         error.AccessDenied => printErrorAndExit("error: access denied: {s}\n", .{fasta_path}),
@@ -178,21 +178,19 @@ pub fn runValidate(io: std.Io, fasta_path: []const u8, options: Options) void {
         printErrorAndExit("error: failed to stat file: {s}\n", .{fasta_path});
     };
 
-    var fasta_view: ?platform.FileView = null;
-    defer if (fasta_view) |*view| view.destroy(io);
+    var fasta_map: ?std.Io.File.MemoryMap = null;
+    defer if (fasta_map) |*map| map.destroy(io);
 
     const data: []const u8 = if (stat.size == 0)
         &[_]u8{}
     else blk: {
-        fasta_view = platform.FileView.mapFile(io, file, @intCast(stat.size)) catch {
+        fasta_map = platform.mapFileReadOnly(io, file, @intCast(stat.size)) catch {
             printErrorAndExit("error: failed to mmap file: {s}\n", .{fasta_path});
         };
-        break :blk fasta_view.?.bytes();
+        break :blk fasta_map.?.memory;
     };
 
-    if (data.len > 0) {
-        platform.advise(data, .sequential);
-    }
+    if (fasta_map) |*map| platform.adviseSequential(map.memory);
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -542,7 +540,7 @@ fn scanSequenceLine(
         byte_counts[byte] += 1;
         if (first_byte_line[byte] == 0) first_byte_line[byte] = line_number;
 
-        if (type_total.* < stats.validate_type_sample_bases) {
+        if (type_total.* < stats.VALIDATE_TYPE_SAMPLE_BASES) {
             type_counts[byte] += 1;
             type_total.* += 1;
         }
@@ -852,7 +850,7 @@ fn writeJsonSummary(allocator: std.mem.Allocator, writer: anytype, summary: *con
             if (summary.truncated) "true" else "false",
             type_str,
             summary.type_bases_sampled,
-            stats.validate_type_sample_bases,
+            stats.VALIDATE_TYPE_SAMPLE_BASES,
         },
     );
     for (allKinds(), 0..) |kind, i| {

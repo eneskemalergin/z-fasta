@@ -1,4 +1,7 @@
 //! Assembly and proteome statistics from indexed FASTA files.
+//!
+//! Length statistics come from index metadata. Type and composition use one
+//! descriptor-owned bounded read window over indexed sequence spans.
 
 const std = @import("std");
 const index_format = @import("index_format.zig");
@@ -15,17 +18,22 @@ const TailVec = @Vector(TAIL_CHUNK_SIZE, u8);
 const FINAL_CHUNK_SIZE = 4;
 const FinalVec = @Vector(FINAL_CHUNK_SIZE, u8);
 
-// ============================================================================
-// Stats computation
-// ============================================================================
-
+/// Sequence class shared by stats, GET transformation guards, and validation.
 pub const SequenceType = enum { nucleotide, protein };
 
+/// Bases sampled per record for GET transformation guards.
+pub const GET_TYPE_SAMPLE_BASES: u64 = 256;
+
+/// Bases sampled across the file for validation alphabet selection.
+pub const VALIDATE_TYPE_SAMPLE_BASES: u64 = 100_000;
+
+// --- Stats computation ---
+
 const CompositionStats = struct {
-    counts: [256]u64,
-    total_bases: u64,
-    seq_type: SequenceType,
-    lowercase_count: u64,
+    counts: [256]u64 = .{0} ** 256,
+    total_bases: u64 = 0,
+    seq_type: SequenceType = .nucleotide,
+    lowercase_count: u64 = 0,
 };
 
 const LengthSummary = struct {
@@ -52,7 +60,7 @@ const NucleotideSummary = struct {
 };
 
 const ProteinSummary = struct {
-    categories: [protein_fields.len]u64,
+    categories: [PROTEIN_FIELDS.len]u64,
     stop: u64,
     invalid: u64,
 };
@@ -67,7 +75,7 @@ const ProteinField = struct {
     code: u8,
 };
 
-const protein_fields = [_]ProteinField{
+const PROTEIN_FIELDS = [_]ProteinField{
     .{ .key = "a_alanine", .code = 'A' },
     .{ .key = "r_arginine", .code = 'R' },
     .{ .key = "n_asparagine", .code = 'N' },
@@ -141,6 +149,7 @@ fn summarizeLengths(records: []const IndexRecord, lengths: []u64) !LengthSummary
         if (l90 == 0 and seen >= threshold_90) {
             n90 = lengths[i];
             l90 = rank;
+            break;
         }
     }
 
@@ -220,9 +229,9 @@ fn summarizeComposition(comp: *const CompositionStats) !CompositionSummary {
         } };
     }
 
-    var categories: [protein_fields.len]u64 = undefined;
+    var categories: [PROTEIN_FIELDS.len]u64 = undefined;
     var assigned: u128 = 0;
-    for (protein_fields, 0..) |field, i| {
+    for (PROTEIN_FIELDS, 0..) |field, i| {
         categories[i] = countLetter(comp, field.code);
         assigned += categories[i];
     }
@@ -270,7 +279,7 @@ fn writeNucleotide(writer: *std.Io.Writer, summary: NucleotideSummary, comp: *co
 
 fn writeProtein(writer: *std.Io.Writer, summary: ProteinSummary, comp: *const CompositionStats) !void {
     try writer.writeAll("  type: protein\n  percent_denominator: total_symbols\n");
-    for (protein_fields, summary.categories) |field, count| {
+    for (PROTEIN_FIELDS, summary.categories) |field, count| {
         try writeCountPercent(writer, field.key, count, comp.total_bases);
     }
     try writeCountPercent(writer, "stop", summary.stop, comp.total_bases);
@@ -291,18 +300,31 @@ fn writeReport(
     composition: CompositionSummary,
 ) !void {
     try writer.print(
-        "File:\n  path: {s}\n  index: {s}{s}\n  size_bytes: {d}\n\n" ++
-            "Lengths:\n  indexed_records: {d}\n  total_symbols: {d}\n" ++
+        "File:\n  path: {s}\n  index: {s}{s}\n  size_bytes: {d}\n\n",
+        .{ fasta_path, fasta_path, index_extension, fasta_size },
+    );
+    try writer.print(
+        "Lengths:\n  indexed_records: {d}\n  total_symbols: {d}\n" ++
             "  shortest_length: {d}\n  shortest_name: {s}\n" ++
             "  longest_length: {d}\n  longest_name: {s}\n" ++
-            "  mean: {d}\n  q1: {d}\n  median: {d}\n  q3: {d}\n  range: {d}\n\n" ++
-            "Nx:\n  n50: {d}\n  l50: {d}\n  n90: {d}\n  l90: {d}\n  aun: ",
+            "  mean: {d}\n  q1: {d}\n  median: {d}\n  q3: {d}\n  range: {d}\n\n",
         .{
-            fasta_path,                              fasta_path,    index_extension,                        fasta_size,   records.len,  summary.total_symbols,
-            records[summary.shortest_index].seq_len, shortest_name, records[summary.longest_index].seq_len, longest_name, summary.mean, summary.q1,
-            summary.median,                          summary.q3,    summary.range,                          summary.n50,  summary.l50,  summary.n90,
-            summary.l90,
+            records.len,
+            summary.total_symbols,
+            records[summary.shortest_index].seq_len,
+            shortest_name,
+            records[summary.longest_index].seq_len,
+            longest_name,
+            summary.mean,
+            summary.q1,
+            summary.median,
+            summary.q3,
+            summary.range,
         },
+    );
+    try writer.print(
+        "Nx:\n  n50: {d}\n  l50: {d}\n  n90: {d}\n  l90: {d}\n  aun: ",
+        .{ summary.n50, summary.l50, summary.n90, summary.l90 },
     );
     try writeFixedUnsigned(writer, summary.aun_numerator, summary.total_symbols, 2);
     try writer.writeAll("\n\nComposition:\n");
@@ -313,30 +335,31 @@ fn writeReport(
 }
 
 /// Run the stats command.
-pub fn runStats(io: std.Io, fasta_path: []const u8) void {
-    var idx = index_format.loadIndexForStats(io, fasta_path);
-    defer idx.deinit(io);
+pub fn runStats(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8) void {
+    var idx = index_format.loadIndexForStats(allocator, io, fasta_path);
+    defer idx.deinit();
 
     const records = idx.records;
-    const num_seqs = records.len;
+    const record_count = records.len;
 
-    if (num_seqs == 0) {
+    if (record_count == 0) {
         printErrorAndExit("error: no sequences in index\n", .{});
     }
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const lengths = allocator.alloc(u64, num_seqs) catch {
+    const lengths = allocator.alloc(u64, record_count) catch {
         printErrorAndExit("error: out of memory\n", .{});
     };
+    defer allocator.free(lengths);
     const summary = summarizeLengths(records, lengths) catch {
         printErrorAndExit("error: sequence length overflow\n", .{});
     };
-    const shortest_name = idx.getRecordName(summary.shortest_index);
-    const longest_name = idx.getRecordName(summary.longest_index);
-    const comp = scanComposition(&idx, allocator) catch |err| switch (err) {
+    const shortest_name = idx.recordName(summary.shortest_index) orelse {
+        printErrorAndExit("error: index does not retain the shortest record name\n", .{});
+    };
+    const longest_name = idx.recordName(summary.longest_index) orelse {
+        printErrorAndExit("error: index does not retain the longest record name\n", .{});
+    };
+    const comp = scanComposition(allocator, &idx) catch |err| switch (err) {
         error.OutOfMemory => printErrorAndExit("error: out of memory\n", .{}),
         error.ReadFailed => printErrorAndExit("error: failed to read FASTA\n", .{}),
         error.CorruptGeometry => printErrorAndExit("error: index sequence lengths do not match FASTA data\n", .{}),
@@ -367,27 +390,18 @@ pub fn runStats(io: std.Io, fasta_path: []const u8) void {
 
 const STATS_READ_BUFFER_BYTES: usize = 256 * 1024;
 
-const FastaSource = struct {
-    io: std.Io,
-    file: std.Io.File,
-    size: u64,
-};
-
-const StatsRecord = struct {
-    geometry: IndexRecord,
-    side_table: []const SideTableLine,
-};
-
 const ScanError = error{ OutOfMemory, ReadFailed, CorruptGeometry };
 
 const BoundedFastaReader = struct {
-    source: FastaSource,
+    io: std.Io,
+    file: std.Io.File,
+    file_size: u64,
     buffer: []u8,
     start: u64 = 0,
     len: usize = 0,
 
     fn read(self: *BoundedFastaReader, offset: u64, limit: u64) ScanError![]const u8 {
-        if (self.buffer.len == 0 or offset >= self.source.size or limit == 0) return error.CorruptGeometry;
+        if (self.buffer.len == 0 or offset >= self.file_size or limit == 0) return error.CorruptGeometry;
 
         const buffered_end = std.math.add(u64, self.start, self.len) catch return error.CorruptGeometry;
         if (offset >= self.start and offset < buffered_end) {
@@ -397,10 +411,10 @@ const BoundedFastaReader = struct {
             return self.buffer[relative..][0..take];
         }
 
-        const wanted: usize = @intCast(@min(@as(u64, self.buffer.len), self.source.size - offset));
+        const wanted: usize = @intCast(@min(@as(u64, self.buffer.len), self.file_size - offset));
         const got = std.Io.File.readPositionalAll(
-            self.source.file,
-            self.source.io,
+            self.file,
+            self.io,
             self.buffer[0..wanted],
             offset,
         ) catch return error.ReadFailed;
@@ -435,7 +449,7 @@ fn scanUniformRecord(reader: *BoundedFastaReader, rec: IndexRecord, comp: *Compo
     const last_offset = std.math.add(u64, line_offset, column) catch return error.CorruptGeometry;
     const span_len = std.math.add(u64, last_offset, 1) catch return error.CorruptGeometry;
     const span_end = std.math.add(u64, rec.seq_offset, span_len) catch return error.CorruptGeometry;
-    if (span_end > reader.source.size) return error.CorruptGeometry;
+    if (span_end > reader.file_size) return error.CorruptGeometry;
 
     var offset = rec.seq_offset;
     var line_pos: usize = 0;
@@ -452,7 +466,7 @@ fn scanUniformRecord(reader: *BoundedFastaReader, rec: IndexRecord, comp: *Compo
                 continue;
             }
             const bases = @min(data.len - pos, @as(usize, rec.line_bases) - line_pos);
-            countCompositionSlice(data[pos..][0..bases], &comp.counts, &comp.total_bases, &comp.lowercase_count);
+            countCompositionSlice(data[pos..][0..bases], comp);
             pos += bases;
             line_pos += bases;
             if (line_pos == rec.line_bytes) line_pos = 0;
@@ -476,7 +490,7 @@ fn scanSideTableRecord(reader: *BoundedFastaReader, lines: []const SideTableLine
             end = next_end;
             line_index += 1;
         }
-        if (end > reader.source.size) return error.CorruptGeometry;
+        if (end > reader.file_size) return error.CorruptGeometry;
 
         var offset = start;
         while (offset < end) {
@@ -487,34 +501,37 @@ fn scanSideTableRecord(reader: *BoundedFastaReader, lines: []const SideTableLine
     }
 }
 
-fn scanStatsRecord(reader: *BoundedFastaReader, record: StatsRecord, comp: *CompositionStats) ScanError!void {
-    if (record.geometry.seq_len == 0) return;
-    if (record.geometry.isUniformWidth()) {
-        try scanUniformRecord(reader, record.geometry, comp);
+fn scanRecord(
+    reader: *BoundedFastaReader,
+    rec: IndexRecord,
+    side_table: []const SideTableLine,
+    comp: *CompositionStats,
+) ScanError!void {
+    if (rec.seq_len == 0) return;
+    if (rec.isUniformWidth()) {
+        try scanUniformRecord(reader, rec, comp);
     } else {
-        try scanSideTableRecord(reader, record.side_table, comp);
+        try scanSideTableRecord(reader, side_table, comp);
     }
 }
 
-fn scanComposition(idx: *const LoadedIndex, allocator: std.mem.Allocator) ScanError!CompositionStats {
-    var comp = CompositionStats{
-        .counts = .{0} ** 256,
-        .total_bases = 0,
-        .seq_type = .nucleotide,
-        .lowercase_count = 0,
-    };
+fn scanComposition(allocator: std.mem.Allocator, idx: *const LoadedIndex) ScanError!CompositionStats {
+    var comp: CompositionStats = .{};
     var buffer: [STATS_READ_BUFFER_BYTES]u8 = undefined;
     var reader = BoundedFastaReader{
-        .source = .{ .io = idx.io, .file = idx.fasta_file, .size = idx.fasta_size },
+        .io = idx.io,
+        .file = idx.fasta_file,
+        .file_size = idx.fasta_size,
         .buffer = &buffer,
     };
 
     if (recordsInSeqOffsetOrder(idx.records)) {
         for (idx.records) |rec| {
-            try scanStatsRecord(&reader, .{ .geometry = rec, .side_table = idx.sideTableLines(rec) }, &comp);
+            try scanRecord(&reader, rec, idx.sideTableLines(rec), &comp);
         }
     } else {
         const indices = allocator.alloc(usize, idx.records.len) catch return error.OutOfMemory;
+        defer allocator.free(indices);
         for (indices, 0..) |*slot, i| slot.* = i;
         std.mem.sort(usize, indices, idx.records, struct {
             fn lessThan(records: []const IndexRecord, a: usize, b: usize) bool {
@@ -523,7 +540,7 @@ fn scanComposition(idx: *const LoadedIndex, allocator: std.mem.Allocator) ScanEr
         }.lessThan);
         for (indices) |rec_index| {
             const rec = idx.records[rec_index];
-            try scanStatsRecord(&reader, .{ .geometry = rec, .side_table = idx.sideTableLines(rec) }, &comp);
+            try scanRecord(&reader, rec, idx.sideTableLines(rec), &comp);
         }
     }
 
@@ -541,12 +558,7 @@ fn recordsInSeqOffsetOrder(records: []const IndexRecord) bool {
     return true;
 }
 
-fn countCompositionSlice(
-    data: []const u8,
-    counts: *[256]u64,
-    total_bases: *u64,
-    lowercase_count: *u64,
-) void {
+fn countCompositionSlice(data: []const u8, comp: *CompositionStats) void {
     const a_vec: SimdVec = @splat('a');
     const z_vec: SimdVec = @splat('z');
 
@@ -554,39 +566,39 @@ fn countCompositionSlice(
     while (pos + SIMD_CHUNK_SIZE <= data.len) {
         const chunk: SimdVec = data[pos..][0..SIMD_CHUNK_SIZE].*;
         inline for (0..SIMD_CHUNK_SIZE) |j| {
-            counts[chunk[j]] += 1;
+            comp.counts[chunk[j]] += 1;
         }
-        total_bases.* += SIMD_CHUNK_SIZE;
+        comp.total_bases += SIMD_CHUNK_SIZE;
         const lower_mask = (chunk >= a_vec) & (chunk <= z_vec);
-        lowercase_count.* += @popCount(@as(u32, @bitCast(lower_mask)));
+        comp.lowercase_count += @popCount(@as(u32, @bitCast(lower_mask)));
         pos += SIMD_CHUNK_SIZE;
     }
     while (pos + TAIL_CHUNK_SIZE <= data.len) {
         const chunk: TailVec = data[pos..][0..TAIL_CHUNK_SIZE].*;
         inline for (0..TAIL_CHUNK_SIZE) |j| {
-            counts[chunk[j]] += 1;
+            comp.counts[chunk[j]] += 1;
         }
-        total_bases.* += TAIL_CHUNK_SIZE;
+        comp.total_bases += TAIL_CHUNK_SIZE;
         const lower_mask = (chunk >= @as(TailVec, @splat('a'))) & (chunk <= @as(TailVec, @splat('z')));
-        lowercase_count.* += @popCount(@as(u8, @bitCast(lower_mask)));
+        comp.lowercase_count += @popCount(@as(u8, @bitCast(lower_mask)));
         pos += TAIL_CHUNK_SIZE;
     }
     while (pos + FINAL_CHUNK_SIZE <= data.len) {
         const chunk: FinalVec = data[pos..][0..FINAL_CHUNK_SIZE].*;
         inline for (0..FINAL_CHUNK_SIZE) |j| {
-            counts[chunk[j]] += 1;
+            comp.counts[chunk[j]] += 1;
         }
-        total_bases.* += FINAL_CHUNK_SIZE;
+        comp.total_bases += FINAL_CHUNK_SIZE;
         const lower_mask = (chunk >= @as(FinalVec, @splat('a'))) & (chunk <= @as(FinalVec, @splat('z')));
-        lowercase_count.* += @popCount(@as(u4, @bitCast(lower_mask)));
+        comp.lowercase_count += @popCount(@as(u4, @bitCast(lower_mask)));
         pos += FINAL_CHUNK_SIZE;
     }
     while (pos < data.len) : (pos += 1) {
         const byte = data[pos];
-        counts[byte] += 1;
-        total_bases.* += 1;
+        comp.counts[byte] += 1;
+        comp.total_bases += 1;
         if (byte >= 'a' and byte <= 'z') {
-            lowercase_count.* += 1;
+            comp.lowercase_count += 1;
         }
     }
 }
@@ -625,12 +637,6 @@ pub fn detectType(counts: *const [256]u64, total: u64) SequenceType {
     return .protein;
 }
 
-/// Bases sampled per record for GET `--rc` / `--complement-only` protein guard.
-pub const get_type_sample_bases: u64 = 256;
-
-/// Bases sampled across the file for validate alphabet selection.
-pub const validate_type_sample_bases: u64 = 100_000;
-
 test "recordsInSeqOffsetOrder detects sorted and unsorted offsets" {
     const sorted = [_]IndexRecord{
         .{ .seq_offset = 10, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
@@ -647,15 +653,15 @@ test "recordsInSeqOffsetOrder detects sorted and unsorted offsets" {
 }
 
 test "countCompositionSlice tallies composition and lowercase" {
-    var counts: [256]u64 = .{0} ** 256;
-    var total: u64 = 0;
-    var lowercase: u64 = 0;
-    countCompositionSlice("ACGTacgtNN", &counts, &total, &lowercase);
-    try std.testing.expectEqual(@as(u64, 10), total);
-    try std.testing.expectEqual(@as(u64, 4), lowercase);
-    try std.testing.expectEqual(@as(u64, 1), counts['A']);
-    try std.testing.expectEqual(@as(u64, 1), counts['a']);
-    try std.testing.expectEqual(@as(u64, 2), counts['N']);
+    var comp: CompositionStats = .{};
+
+    countCompositionSlice("ACGTacgtNN", &comp);
+
+    try std.testing.expectEqual(@as(u64, 10), comp.total_bases);
+    try std.testing.expectEqual(@as(u64, 4), comp.lowercase_count);
+    try std.testing.expectEqual(@as(u64, 1), comp.counts['A']);
+    try std.testing.expectEqual(@as(u64, 1), comp.counts['a']);
+    try std.testing.expectEqual(@as(u64, 2), comp.counts['N']);
 }
 
 test "bounded uniform reader handles LF CRLF and missing final newline" {
@@ -681,17 +687,15 @@ test "bounded uniform reader handles LF CRLF and missing final newline" {
         const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
         defer file.close(std.testing.io);
         try std.Io.File.writeStreamingAll(file, std.testing.io, case.bytes);
-        const source = FastaSource{ .io = std.testing.io, .file = file, .size = case.bytes.len };
-
         for (buffer_sizes) |buffer_size| {
-            var comp = CompositionStats{
-                .counts = .{0} ** 256,
-                .total_bases = 0,
-                .seq_type = .nucleotide,
-                .lowercase_count = 0,
-            };
+            var comp: CompositionStats = .{};
             var storage: [33]u8 = undefined;
-            var reader = BoundedFastaReader{ .source = source, .buffer = storage[0..buffer_size] };
+            var reader = BoundedFastaReader{
+                .io = std.testing.io,
+                .file = file,
+                .file_size = case.bytes.len,
+                .buffer = storage[0..buffer_size],
+            };
 
             try scanUniformRecord(&reader, case.record, &comp);
             try std.testing.expectEqual(@as(u64, 10), comp.total_bases);
@@ -711,17 +715,15 @@ test "bounded readers exclude headers gaps and adjacent record bytes" {
     const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
     defer file.close(std.testing.io);
     try std.Io.File.writeStreamingAll(file, std.testing.io, bytes);
-    const source = FastaSource{ .io = std.testing.io, .file = file, .size = bytes.len };
-
     for (buffer_sizes) |buffer_size| {
         var storage: [32]u8 = undefined;
-        var comp = CompositionStats{
-            .counts = .{0} ** 256,
-            .total_bases = 0,
-            .seq_type = .nucleotide,
-            .lowercase_count = 0,
+        var comp: CompositionStats = .{};
+        var reader = BoundedFastaReader{
+            .io = std.testing.io,
+            .file = file,
+            .file_size = bytes.len,
+            .buffer = storage[0..buffer_size],
         };
-        var reader = BoundedFastaReader{ .source = source, .buffer = storage[0..buffer_size] };
 
         try scanUniformRecord(
             &reader,
@@ -756,17 +758,15 @@ test "bounded side-table reader coalesces only adjacent owned spans" {
     const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
     defer file.close(std.testing.io);
     try std.Io.File.writeStreamingAll(file, std.testing.io, bytes);
-    const source = FastaSource{ .io = std.testing.io, .file = file, .size = bytes.len };
-
     for (buffer_sizes) |buffer_size| {
-        var comp = CompositionStats{
-            .counts = .{0} ** 256,
-            .total_bases = 0,
-            .seq_type = .nucleotide,
-            .lowercase_count = 0,
-        };
+        var comp: CompositionStats = .{};
         var storage: [7]u8 = undefined;
-        var reader = BoundedFastaReader{ .source = source, .buffer = storage[0..buffer_size] };
+        var reader = BoundedFastaReader{
+            .io = std.testing.io,
+            .file = file,
+            .file_size = bytes.len,
+            .buffer = storage[0..buffer_size],
+        };
 
         try scanSideTableRecord(&reader, &lines, &comp);
         try std.testing.expectEqual(@as(u64, 6), comp.total_bases);
@@ -782,15 +782,14 @@ test "bounded reader rejects geometry beyond the FASTA boundary" {
     const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
     defer file.close(std.testing.io);
     try std.Io.File.writeStreamingAll(file, std.testing.io, "ACGT");
-    const source = FastaSource{ .io = std.testing.io, .file = file, .size = 4 };
     var storage: [2]u8 = undefined;
-    var comp = CompositionStats{
-        .counts = .{0} ** 256,
-        .total_bases = 0,
-        .seq_type = .nucleotide,
-        .lowercase_count = 0,
+    var comp: CompositionStats = .{};
+    var reader = BoundedFastaReader{
+        .io = std.testing.io,
+        .file = file,
+        .file_size = 4,
+        .buffer = &storage,
     };
-    var reader = BoundedFastaReader{ .source = source, .buffer = &storage };
 
     try std.testing.expectError(
         error.CorruptGeometry,
@@ -818,10 +817,29 @@ test "length total overflow is rejected" {
     try std.testing.expectError(error.Overflow, summarizeLengths(&records, &lengths));
 }
 
+test "auN accumulation and formatting use u128" {
+    const length: u64 = 1 << 32;
+    const records = [_]IndexRecord{
+        .{ .seq_len = length, .line_bases = 1, .line_bytes = 2 },
+        .{ .seq_len = length, .line_bases = 1, .line_bytes = 2 },
+    };
+    var lengths: [2]u64 = undefined;
+    const summary = try summarizeLengths(&records, &lengths);
+    try std.testing.expectEqual(@as(u64, 1) << 33, summary.total_symbols);
+    try std.testing.expectEqual(@as(u128, 1) << 65, summary.aun_numerator);
+
+    var buffer: [32]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeFixedUnsigned(&writer, summary.aun_numerator, summary.total_symbols, 2);
+    try std.testing.expectEqualStrings("4294967296.00", writer.buffered());
+}
+
 test "fixed decimals use exact half-away rounding" {
     var buffer: [64]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try writeFixedUnsigned(&writer, 100, 32, 2);
+    try writer.writeByte(' ');
+    try writeFixedUnsigned(&writer, 200, 3, 2);
     try writer.writeByte(' ');
     try writeFixedUnsigned(&writer, 226, 16, 2);
     try writer.writeByte(' ');
@@ -829,7 +847,7 @@ test "fixed decimals use exact half-away rounding" {
     try writer.writeByte(' ');
     try writeFixedSigned(&writer, -1, 10_000, 3);
 
-    try std.testing.expectEqualStrings("3.13 14.13 -0.938 0.000", writer.buffered());
+    try std.testing.expectEqualStrings("3.13 66.67 14.13 -0.938 0.000", writer.buffered());
 }
 
 test "report writing propagates a full destination" {
@@ -851,12 +869,7 @@ test "report writing propagates a full destination" {
         .l90 = 1,
         .aun_numerator = 16,
     };
-    var comp = CompositionStats{
-        .counts = .{0} ** 256,
-        .total_bases = 4,
-        .seq_type = .nucleotide,
-        .lowercase_count = 0,
-    };
+    var comp: CompositionStats = .{ .total_bases = 4 };
     comp.counts['A'] = 4;
     var buffer: [1]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
@@ -879,12 +892,7 @@ test "report writing propagates a full destination" {
 }
 
 test "composition categories cannot exceed indexed symbols" {
-    var comp = CompositionStats{
-        .counts = .{0} ** 256,
-        .total_bases = 4,
-        .seq_type = .nucleotide,
-        .lowercase_count = 0,
-    };
+    var comp: CompositionStats = .{ .total_bases = 4 };
     comp.counts['A'] = 5;
 
     try std.testing.expectError(error.CompositionMismatch, summarizeComposition(&comp));

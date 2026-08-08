@@ -10,12 +10,20 @@ const ZFASTA_BIN = if (builtin.os.tag == .windows) "zig-out\\bin\\z-fasta.exe" e
 const validateFasta = main.validateFasta;
 const scanFaiData = main.indexer.scanFaiData;
 const index_read_buffer_size = main.indexer.index_read_buffer_size;
-const loadIndexChecked = main.index_format.loadIndexChecked;
 const IndexRecord = main.IndexRecord;
 const ZfiHeader = main.ZfiHeader;
 const ZFI_MAGIC = main.ZFI_MAGIC;
 const c = std.c;
 const io = std.testing.io;
+
+fn loadIndexChecked(test_io: std.Io, fasta_path: []const u8) main.index_format.LoadIndexError!main.index_format.LoadedIndex {
+    return main.index_format.loadIndexChecked(std.testing.allocator, test_io, fasta_path);
+}
+
+fn loadAndDeinitForAllocationCheck(allocator: std.mem.Allocator, fasta_path: []const u8, mode: main.index_format.LoadMode) !void {
+    var idx = try main.index_format.loadIndexCheckedWithMode(allocator, io, fasta_path, mode);
+    defer idx.deinit();
+}
 
 fn statMtimeNs(path: []const u8) !u64 {
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
@@ -40,8 +48,8 @@ fn writeFastaAndRawZfi(allocator: std.mem.Allocator, stem: []const u8, fasta: []
 
     var zfi_copy = try allocator.dupe(u8, zfi_bytes);
     defer allocator.free(zfi_copy);
-    const footer_len = main.index_format.zfi_name_footer_bytes;
-    const id_len = main.index_format.zfi_source_id_bytes;
+    const footer_len = main.index_format.ZFI_NAME_FOOTER_BYTES;
+    const id_len = main.index_format.ZFI_SOURCE_ID_BYTES;
     // Production layout: `[name blob][ZFID][ZFNM footer]`.
     if (zfi_copy.len >= footer_len + id_len) {
         const id_off = zfi_copy.len - footer_len - id_len;
@@ -555,7 +563,7 @@ test "writeZfiIndexFile creates valid production layout" {
     try std.testing.expect(index.records.items[0].nameInZfi());
     try std.testing.expectEqualStrings("seq", index.name_blob.items);
     try std.testing.expectEqual(
-        @as(u64, 16 + 40 + index.name_blob.items.len + main.index_format.zfi_name_footer_bytes + main.index_format.zfi_source_id_bytes),
+        @as(u64, 16 + 40 + index.name_blob.items.len + main.index_format.ZFI_NAME_FOOTER_BYTES + main.index_format.ZFI_SOURCE_ID_BYTES),
         stat.size,
     );
 }
@@ -678,7 +686,7 @@ test "scanZfiReader zfi loads record names" {
     defer std.Io.Dir.cwd().deleteFile(io, paths.zfi_path) catch {};
 
     var idx = try loadIndexChecked(io, paths.fasta_path);
-    defer idx.deinit(io);
+    defer idx.deinit();
     try std.testing.expectEqual(@as(?usize, 0), idx.lookupName("seq1"));
     try std.testing.expectEqual(@as(?usize, 1), idx.lookupName("seq2"));
 }
@@ -1057,9 +1065,9 @@ test "empty sequence name: ZFI loads and looks up like samtools FAI" {
     defer std.Io.Dir.cwd().deleteFile(io, paths.zfi_path) catch {};
 
     var idx = try loadIndexChecked(io, paths.fasta_path);
-    defer idx.deinit(io);
+    defer idx.deinit();
     try std.testing.expectEqual(@as(usize, 1), idx.records.len);
-    try std.testing.expectEqualStrings("", idx.getRecordName(0));
+    try std.testing.expectEqualStrings("", idx.recordName(0).?);
     try std.testing.expectEqual(@as(?usize, 0), idx.lookupName(""));
 }
 
@@ -1103,9 +1111,9 @@ test "empty sequence name: FAI text loads and resolves empty lookup" {
     }
 
     var idx = try loadIndexChecked(io, fasta_path);
-    defer idx.deinit(io);
+    defer idx.deinit();
     try std.testing.expectEqual(@as(usize, 1), idx.records.len);
-    try std.testing.expectEqualStrings("", idx.getRecordName(0));
+    try std.testing.expectEqualStrings("", idx.recordName(0).?);
     try std.testing.expectEqual(@as(?usize, 0), idx.lookupName(""));
 }
 
@@ -1314,6 +1322,84 @@ test "loadIndexChecked rejects zfi side table with empty line_count" {
     try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, paths.fasta_path));
 }
 
+test "loadIndexChecked rejects malformed zfi side table lines" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_data = ">seq\nAAA\nCCCC\nGG\n";
+    var index = try main.indexer.scanZfiData(fasta_data, true, allocator);
+    defer index.deinit(allocator);
+    const table_offset: usize = @intCast(index.records.items[0].sideTableOffset());
+
+    const Mutation = enum {
+        broken_base_prefix,
+        repeated_byte_offset,
+        line_past_fasta,
+        wrong_base_total,
+    };
+    const cases = [_]Mutation{
+        .broken_base_prefix,
+        .repeated_byte_offset,
+        .line_past_fasta,
+        .wrong_base_total,
+    };
+
+    for (cases) |case| {
+        const zfi_bytes = try main.indexer.zfiIndexToBytes(&index, fasta_data.len, 0, allocator);
+        defer allocator.free(zfi_bytes);
+        const line_count = std.mem.readInt(u64, zfi_bytes[table_offset..][0..8], .little);
+        try std.testing.expect(line_count >= 2);
+        const first_line = table_offset + @sizeOf(u64);
+        const second_line = first_line + @sizeOf(main.index_format.SideTableLine);
+        const last_line = first_line + (@as(usize, @intCast(line_count)) - 1) * @sizeOf(main.index_format.SideTableLine);
+
+        switch (case) {
+            .broken_base_prefix => std.mem.writeInt(u64, zfi_bytes[first_line..][0..8], 1, .little),
+            .repeated_byte_offset => {
+                const first_offset = std.mem.readInt(u64, zfi_bytes[first_line + 8 ..][0..8], .little);
+                std.mem.writeInt(u64, zfi_bytes[second_line + 8 ..][0..8], first_offset, .little);
+            },
+            .line_past_fasta => std.mem.writeInt(u64, zfi_bytes[first_line + 16 ..][0..8], fasta_data.len + 1, .little),
+            .wrong_base_total => {
+                const line_bases = std.mem.readInt(u64, zfi_bytes[last_line + 24 ..][0..8], .little);
+                std.mem.writeInt(u64, zfi_bytes[last_line + 24 ..][0..8], line_bases + 1, .little);
+            },
+        }
+
+        const paths = try writeFastaAndRawZfi(allocator, @tagName(case), fasta_data, zfi_bytes);
+        defer std.Io.Dir.cwd().deleteFile(io, paths.fasta_path) catch {};
+        defer std.Io.Dir.cwd().deleteFile(io, paths.zfi_path) catch {};
+
+        try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, paths.fasta_path));
+    }
+}
+
+test "loadIndexChecked rejects overlapping zfi side tables" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta_data = ">a\nAAA\nCCCC\nGG\n>b\nTT\nAAAA\nC\n";
+    var index = try main.indexer.scanZfiData(fasta_data, true, allocator);
+    defer index.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), index.records.items.len);
+    try std.testing.expect(!index.records.items[0].isUniformWidth());
+    try std.testing.expect(!index.records.items[1].isUniformWidth());
+
+    index.records.items[1].seq_offset = index.records.items[0].seq_offset;
+    index.records.items[1].seq_len = index.records.items[0].seq_len;
+    try index.records.items[1].markNonUniform(index.records.items[0].sideTableOffset());
+
+    const zfi_bytes = try main.indexer.zfiIndexToBytes(&index, fasta_data.len, 0, allocator);
+    defer allocator.free(zfi_bytes);
+    const paths = try writeFastaAndRawZfi(allocator, "zfi-side-overlap", fasta_data, zfi_bytes);
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, paths.zfi_path) catch {};
+
+    try std.testing.expectError(error.CorruptIndex, loadIndexChecked(io, paths.fasta_path));
+}
+
 test "loadIndexChecked rejects mixed nameInZfi flags" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1346,7 +1432,7 @@ test "loadIndexChecked rejects FASTA-backed zfi names" {
     const fasta_data = ">seq\nACGT\n";
     var index = try main.indexer.scanZfiData(fasta_data, true, allocator);
     defer index.deinit(allocator);
-    index.records.items[0]._pad[0] &= ~main.index_format.name_in_zfi_flag;
+    index.records.items[0]._pad[0] &= ~main.index_format.NAME_IN_ZFI_FLAG;
     index.records.items[0].name_offset = 1;
     index.name_blob.clearRetainingCapacity();
     const zfi_bytes = try main.indexer.zfiIndexToBytes(&index, fasta_data.len, 0, allocator);
@@ -1375,11 +1461,44 @@ test "loadIndexChecked accepts production zfi with side tables and name blob" {
     defer std.Io.Dir.cwd().deleteFile(io, paths.zfi_path) catch {};
 
     var idx = try loadIndexChecked(io, paths.fasta_path);
-    defer idx.deinit(io);
+    defer idx.deinit();
     try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.zfi, idx.source);
     try std.testing.expect(idx.name_blob != null);
     try std.testing.expectEqual(@as(usize, 1), idx.records.len);
-    try std.testing.expectEqualStrings("seq", idx.getRecordName(0));
+    try std.testing.expectEqualStrings("seq", idx.recordName(0).?);
+}
+
+test "index loaders release allocations on every out-of-memory path" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        loadAndDeinitForAllocationCheck,
+        .{ "tests/data/simple.fasta", main.index_format.LoadMode.lookup_full_map },
+    );
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const fasta_path = try uniqueArtifactPath(allocator, "fai-allocation-failures", "fa");
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    {
+        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+        defer fasta_file.close(io);
+        try std.Io.File.writeStreamingAll(fasta_file, io, ">a\nAAAA\n>b\nCC\n");
+    }
+    {
+        const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{});
+        defer fai_file.close(io);
+        try std.Io.File.writeStreamingAll(fai_file, io, "a\t4\t3\t4\t5\nb\t2\t11\t2\t3\n");
+    }
+
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        loadAndDeinitForAllocationCheck,
+        .{ fasta_path, main.index_format.LoadMode.stats_scan },
+    );
 }
 
 test "loadIndexCheckedWithMode selects first duplicate in zfi" {
@@ -1401,11 +1520,11 @@ test "loadIndexCheckedWithMode selects first duplicate in zfi" {
     defer index.deinit(allocator);
     try main.indexer.writeZfiIndexFile(io, zfi_path, &index, fasta_data.len, try statMtimeNs(fasta_path));
 
-    var full_map_idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .lookup_full_map);
-    defer full_map_idx.deinit(io);
+    var full_map_idx = try main.index_format.loadIndexCheckedWithMode(std.testing.allocator, io, fasta_path, .lookup_full_map);
+    defer full_map_idx.deinit();
     const requested = [_][]const u8{"dup"};
-    var positional_idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .{ .positional = &requested });
-    defer positional_idx.deinit(io);
+    var positional_idx = try main.index_format.loadIndexCheckedWithMode(std.testing.allocator, io, fasta_path, .{ .positional = &requested });
+    defer positional_idx.deinit();
 
     try std.testing.expectEqual(full_map_idx.lookupName("dup"), positional_idx.lookupName("dup"));
     try std.testing.expectEqual(@as(?usize, 0), positional_idx.lookupName("dup"));
@@ -1442,7 +1561,7 @@ test "loadIndexChecked uses valid zfi and rejects it when stale despite valid fa
 
     {
         var idx = try loadIndexChecked(io, fasta_path);
-        defer idx.deinit(io);
+        defer idx.deinit();
         try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.zfi, idx.source);
     }
 
@@ -1562,16 +1681,16 @@ test "loadIndexCheckedWithMode selects first duplicate in fai" {
     defer fai_file.close(io);
     try std.Io.File.writeStreamingAll(fai_file, io, "dup\t4\t5\t4\t5\ndup\t6\t15\t6\t7\n");
 
-    var full_map_idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .lookup_full_map);
-    defer full_map_idx.deinit(io);
+    var full_map_idx = try main.index_format.loadIndexCheckedWithMode(std.testing.allocator, io, fasta_path, .lookup_full_map);
+    defer full_map_idx.deinit();
     const requested = [_][]const u8{"dup"};
-    var positional_idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .{ .positional = &requested });
-    defer positional_idx.deinit(io);
+    var positional_idx = try main.index_format.loadIndexCheckedWithMode(std.testing.allocator, io, fasta_path, .{ .positional = &requested });
+    defer positional_idx.deinit();
 
     try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.fai, positional_idx.source);
-    try std.testing.expect(positional_idx.has_name_map);
+    try std.testing.expect(positional_idx.name_map != null);
     try std.testing.expectEqual(@as(usize, 1), positional_idx.records.len);
-    try std.testing.expectEqualStrings("dup", positional_idx.getRecordName(0));
+    try std.testing.expectEqualStrings("dup", positional_idx.recordName(0).?);
     try std.testing.expectEqual(full_map_idx.lookupName("dup"), positional_idx.lookupName("dup"));
     try std.testing.expectEqual(@as(?usize, 0), positional_idx.lookupName("dup"));
 }
@@ -1608,14 +1727,15 @@ test "positional fai loading retains first matches and validates the complete si
     const requested = [_][]const u8{ "wanted", "missing", "colon:name", "" };
     {
         var idx = try main.index_format.loadIndexCheckedWithMode(
+            std.testing.allocator,
             io,
             fasta_path,
             .{ .positional = requested[0..] },
         );
-        defer idx.deinit(io);
+        defer idx.deinit();
 
         try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.fai, idx.source);
-        try std.testing.expect(idx.has_name_map);
+        try std.testing.expect(idx.name_map != null);
         try std.testing.expectEqual(@as(usize, 3), idx.records.len);
         try std.testing.expectEqual(@as(usize, 3), idx.name_slices.len);
         try std.testing.expectEqual(@as(?usize, 0), idx.lookupName("wanted"));
@@ -1623,7 +1743,7 @@ test "positional fai loading retains first matches and validates the complete si
         try std.testing.expectEqual(@as(?usize, 2), idx.lookupName(""));
         try std.testing.expectEqual(@as(?usize, null), idx.lookupName("missing"));
         try std.testing.expectEqual(@as(u64, 4), idx.records[0].seq_len);
-        try std.testing.expectEqualStrings("wanted", idx.getRecordName(0));
+        try std.testing.expectEqualStrings("wanted", idx.recordName(0).?);
     }
 
     {
@@ -1639,6 +1759,7 @@ test "positional fai loading retains first matches and validates the complete si
     try std.testing.expectError(
         error.CorruptIndex,
         main.index_format.loadIndexCheckedWithMode(
+            std.testing.allocator,
             io,
             fasta_path,
             .{ .positional = requested[0..] },
@@ -1667,14 +1788,14 @@ test "full fai lookup borrows mapped names" {
         try std.Io.File.writeStreamingAll(fai_file, io, "seq\t4\t5\t4\t5\n");
     }
 
-    var idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .lookup_full_map);
-    defer idx.deinit(io);
+    var idx = try main.index_format.loadIndexCheckedWithMode(std.testing.allocator, io, fasta_path, .lookup_full_map);
+    defer idx.deinit();
     const mapped_name = idx.records[0].getName(idx.fai_data.?);
-    var names = idx.name_map.iterator();
+    var names = idx.name_map.?.iterator();
     const map_entry = names.next().?;
 
     try std.testing.expectEqual(@as(usize, 0), idx.name_slices.len);
-    try std.testing.expectEqual(mapped_name.ptr, idx.getRecordName(0).ptr);
+    try std.testing.expectEqual(mapped_name.ptr, idx.recordName(0).?.ptr);
     try std.testing.expectEqual(mapped_name.ptr, map_entry.key_ptr.*.ptr);
 }
 
@@ -1700,8 +1821,8 @@ test "loadIndexChecked retains FASTA descriptor for fai positional reads" {
     }
 
     const requested = [_][]const u8{"seq"};
-    var idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .{ .positional = &requested });
-    defer idx.deinit(io);
+    var idx = try main.index_format.loadIndexCheckedWithMode(std.testing.allocator, io, fasta_path, .{ .positional = &requested });
+    defer idx.deinit();
 
     var first_byte: [1]u8 = undefined;
     try std.testing.expectEqual(
@@ -1712,12 +1833,10 @@ test "loadIndexChecked retains FASTA descriptor for fai positional reads" {
 }
 
 test "GET loader keeps FASTA readable without mapping it" {
-    var zfi_idx = main.index_format.loadIndexForGet(io, "tests/data/simple.fasta", .lookup_full_map);
-    defer zfi_idx.deinit(io);
+    var zfi_idx = main.index_format.loadIndexForGet(std.testing.allocator, io, "tests/data/simple.fasta", .lookup_full_map);
+    defer zfi_idx.deinit();
 
     try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.zfi, zfi_idx.source);
-    try std.testing.expectEqual(null, zfi_idx.fasta_map);
-    try std.testing.expectEqual(@as(usize, 0), zfi_idx.fasta_data.len);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1739,12 +1858,10 @@ test "GET loader keeps FASTA readable without mapping it" {
         try std.Io.File.writeStreamingAll(fai_file, io, "seq\t4\t5\t4\t5\n");
     }
 
-    var fai_idx = main.index_format.loadIndexForGet(io, fasta_path, .lookup_full_map);
-    defer fai_idx.deinit(io);
+    var fai_idx = main.index_format.loadIndexForGet(std.testing.allocator, io, fasta_path, .lookup_full_map);
+    defer fai_idx.deinit();
 
     try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.fai, fai_idx.source);
-    try std.testing.expectEqual(null, fai_idx.fasta_map);
-    try std.testing.expectEqual(@as(usize, 0), fai_idx.fasta_data.len);
 
     var first_byte: [1]u8 = undefined;
     try std.testing.expectEqual(
@@ -1755,14 +1872,12 @@ test "GET loader keeps FASTA readable without mapping it" {
 }
 
 test "stats loader keeps zfi FASTA readable without mapping it" {
-    var idx = try main.index_format.loadIndexCheckedWithMode(io, "tests/data/simple.fasta", .stats_scan);
-    defer idx.deinit(io);
+    var idx = try main.index_format.loadIndexCheckedWithMode(std.testing.allocator, io, "tests/data/simple.fasta", .stats_scan);
+    defer idx.deinit();
 
     try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.zfi, idx.source);
-    try std.testing.expectEqual(null, idx.fasta_map);
-    try std.testing.expectEqual(@as(usize, 0), idx.fasta_data.len);
     try std.testing.expect(idx.zfi_map != null);
-    try std.testing.expectEqualStrings("seq1", idx.getRecordName(0));
+    try std.testing.expectEqualStrings("seq1", idx.recordName(0).?);
 
     var first_byte: [1]u8 = undefined;
     try std.testing.expectEqual(
@@ -1877,7 +1992,7 @@ test "loadIndexCheckedWithMode positional rejects impossible fai geometry" {
 
     try std.testing.expectError(
         error.CorruptIndex,
-        main.index_format.loadIndexCheckedWithMode(io, fasta_path, .{ .positional = &.{"seq1"} }),
+        main.index_format.loadIndexCheckedWithMode(std.testing.allocator, io, fasta_path, .{ .positional = &.{"seq1"} }),
     );
 }
 
@@ -1901,7 +2016,7 @@ test "stats loader rejects impossible fai geometry" {
 
     try std.testing.expectError(
         error.CorruptIndex,
-        main.index_format.loadIndexCheckedWithMode(io, fasta_path, .stats_scan),
+        main.index_format.loadIndexCheckedWithMode(std.testing.allocator, io, fasta_path, .stats_scan),
     );
 }
 
@@ -2003,36 +2118,35 @@ test "streamed fai loading accepts the maximum sequence name" {
 
     {
         var idx = try main.index_format.loadIndexCheckedWithMode(
+            std.testing.allocator,
             io,
             fasta_path,
             .{ .positional = &.{name} },
         );
-        defer idx.deinit(io);
+        defer idx.deinit();
 
         try std.testing.expectEqual(@as(usize, 1), idx.records.len);
-        try std.testing.expectEqualStrings(name, idx.getRecordName(0));
+        try std.testing.expectEqualStrings(name, idx.recordName(0).?);
     }
     {
-        var idx = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .stats_scan);
-        defer idx.deinit(io);
+        var idx = try main.index_format.loadIndexCheckedWithMode(std.testing.allocator, io, fasta_path, .stats_scan);
+        defer idx.deinit();
 
         try std.testing.expectEqual(@as(usize, 1), idx.records.len);
-        try std.testing.expectEqualStrings(name, idx.getRecordName(0));
-        try std.testing.expect(idx.fasta_map == null);
-        try std.testing.expectEqual(@as(usize, 0), idx.fasta_data.len);
+        try std.testing.expectEqualStrings(name, idx.recordName(0).?);
     }
 }
 
 fn expectFaiLoaderModesAgree(fasta_path: []const u8) !void {
-    var full = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .lookup_full_map);
-    defer full.deinit(io);
+    var full = try main.index_format.loadIndexCheckedWithMode(std.testing.allocator, io, fasta_path, .lookup_full_map);
+    defer full.deinit();
     const names = try std.testing.allocator.alloc([]const u8, full.records.len);
     defer std.testing.allocator.free(names);
-    for (names, 0..) |*name, i| name.* = full.getRecordName(i);
-    var positional = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .{ .positional = names });
-    defer positional.deinit(io);
-    var stats_scan = try main.index_format.loadIndexCheckedWithMode(io, fasta_path, .stats_scan);
-    defer stats_scan.deinit(io);
+    for (names, 0..) |*name, i| name.* = full.recordName(i).?;
+    var positional = try main.index_format.loadIndexCheckedWithMode(std.testing.allocator, io, fasta_path, .{ .positional = names });
+    defer positional.deinit();
+    var stats_scan = try main.index_format.loadIndexCheckedWithMode(std.testing.allocator, io, fasta_path, .stats_scan);
+    defer stats_scan.deinit();
 
     try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.fai, full.source);
     try std.testing.expectEqual(full.source, positional.source);
@@ -2040,8 +2154,6 @@ fn expectFaiLoaderModesAgree(fasta_path: []const u8) !void {
     try std.testing.expectEqual(full.records.len, positional.records.len);
     try std.testing.expectEqual(full.records.len, stats_scan.records.len);
     try std.testing.expectEqual(@as(usize, 2), stats_scan.name_slices.len);
-    try std.testing.expect(stats_scan.fasta_map == null);
-    try std.testing.expectEqual(@as(usize, 0), stats_scan.fasta_data.len);
 
     var shortest_index: usize = 0;
     var longest_index: usize = 0;
@@ -2050,8 +2162,8 @@ fn expectFaiLoaderModesAgree(fasta_path: []const u8) !void {
         if (rec.seq_len > full.records[longest_index].seq_len) longest_index = i;
     }
     try std.testing.expectEqual([2]usize{ shortest_index, longest_index }, stats_scan.stats_name_indices.?);
-    try std.testing.expectEqualStrings(full.getRecordName(shortest_index), stats_scan.getRecordName(shortest_index));
-    try std.testing.expectEqualStrings(full.getRecordName(longest_index), stats_scan.getRecordName(longest_index));
+    try std.testing.expectEqualStrings(full.recordName(shortest_index).?, stats_scan.recordName(shortest_index).?);
+    try std.testing.expectEqualStrings(full.recordName(longest_index).?, stats_scan.recordName(longest_index).?);
 
     for (full.records, 0..) |rec, i| {
         const streamed = positional.records[i];
@@ -2068,9 +2180,9 @@ fn expectFaiLoaderModesAgree(fasta_path: []const u8) !void {
         try std.testing.expectEqual(rec.line_bases, scanned.line_bases);
         try std.testing.expectEqual(rec.line_bytes, scanned.line_bytes);
 
-        try std.testing.expectEqualStrings(full.getRecordName(i), positional.getRecordName(i));
+        try std.testing.expectEqualStrings(full.recordName(i).?, positional.recordName(i).?);
         if (i != shortest_index and i != longest_index) {
-            try std.testing.expectEqualStrings("?", stats_scan.getRecordName(i));
+            try std.testing.expectEqual(null, stats_scan.recordName(i));
         }
     }
 }
@@ -2160,7 +2272,7 @@ test "loadIndexChecked accepts zfi when FASTA omits terminal newline" {
     try main.indexer.writeZfiIndexFile(io, zfi_path, &index, fasta_data.len, try statMtimeNs(fasta_path));
 
     var idx = try loadIndexChecked(io, fasta_path);
-    defer idx.deinit(io);
+    defer idx.deinit();
     try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.zfi, idx.source);
     try std.testing.expectEqual(@as(u64, 4), idx.records[0].seq_len);
 }
@@ -2387,8 +2499,8 @@ test "loadIndexChecked accepts legacy zfi without source-identity trailer" {
     defer allocator.free(zfi_bytes);
 
     // Strip production ZFID (between blob and footer): legacy weak identity.
-    const footer_len = main.index_format.zfi_name_footer_bytes;
-    const id_len = main.index_format.zfi_source_id_bytes;
+    const footer_len = main.index_format.ZFI_NAME_FOOTER_BYTES;
+    const id_len = main.index_format.ZFI_SOURCE_ID_BYTES;
     try std.testing.expect(zfi_bytes.len >= footer_len + id_len);
     const id_off = zfi_bytes.len - footer_len - id_len;
     try std.testing.expectEqualSlices(
@@ -2406,7 +2518,7 @@ test "loadIndexChecked accepts legacy zfi without source-identity trailer" {
     defer std.Io.Dir.cwd().deleteFile(io, paths.zfi_path) catch {};
 
     var idx = try loadIndexChecked(io, paths.fasta_path);
-    defer idx.deinit(io);
+    defer idx.deinit();
     try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.zfi, idx.source);
 }
 
@@ -2421,8 +2533,8 @@ test "loadIndexChecked accepts embedded names with legacy 16-byte footer" {
     const zfi_bytes = try main.indexer.zfiIndexToBytes(&index, fasta_data.len, 0, allocator);
     defer allocator.free(zfi_bytes);
 
-    const footer_len = main.index_format.zfi_name_footer_bytes;
-    const id_len = main.index_format.zfi_source_id_bytes;
+    const footer_len = main.index_format.ZFI_NAME_FOOTER_BYTES;
+    const id_len = main.index_format.ZFI_SOURCE_ID_BYTES;
     const payload_end = zfi_bytes.len - footer_len - id_len;
     const name_len_bytes: *const [8]u8 = @ptrCast(zfi_bytes[zfi_bytes.len - 8 ..].ptr);
     const name_blob_len = std.mem.readInt(u64, name_len_bytes, .little);
@@ -2440,9 +2552,9 @@ test "loadIndexChecked accepts embedded names with legacy 16-byte footer" {
     defer std.Io.Dir.cwd().deleteFile(io, paths.zfi_path) catch {};
 
     var idx = try loadIndexChecked(io, paths.fasta_path);
-    defer idx.deinit(io);
+    defer idx.deinit();
     try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.zfi, idx.source);
-    try std.testing.expectEqualStrings("seq1", idx.getRecordName(0));
+    try std.testing.expectEqualStrings("seq1", idx.recordName(0).?);
 }
 
 test "loadIndexChecked rejects zfi with wrong embedded source mtime" {

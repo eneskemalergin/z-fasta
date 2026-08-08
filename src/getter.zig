@@ -9,13 +9,10 @@ const bed_parser = @import("bed_parser.zig");
 const index_format = @import("index_format.zig");
 const stats = @import("stats.zig");
 
-const IndexRecord = index_format.IndexRecord;
 const LoadedIndex = index_format.LoadedIndex;
 const printErrorAndExit = index_format.printErrorAndExit;
 
-// ============================================================================
-// Region parsing
-// ============================================================================
+// --- Region parsing ---
 
 pub const Region = struct {
     name: []const u8,
@@ -87,7 +84,6 @@ const OwnedRequest = struct {
     name_len: u16,
     start: u64,
     end: u64,
-    is_full: bool,
     orientation: Orientation,
 
     fn parsed(self: OwnedRequest, names: []const u8) ParsedRequest {
@@ -98,7 +94,7 @@ const OwnedRequest = struct {
                 .name = names[name_offset..name_end],
                 .start = self.start,
                 .end = if (self.end == 0) null else self.end,
-                .is_full = self.is_full,
+                .is_full = self.end == 0,
             },
             .orientation = self.orientation,
         };
@@ -174,12 +170,12 @@ pub fn parseRegion(input: []const u8) Region {
     };
 }
 
-const RangeParsed = struct {
+const ParsedRange = struct {
     start: u64,
     end: ?u64,
 };
 
-fn parseRangeSuffix(suffix: []const u8) ?RangeParsed {
+fn parseRangeSuffix(suffix: []const u8) ?ParsedRange {
     // Expect: START-END or START-
     // Find the '-' separator
     const dash_pos = std.mem.indexOfScalar(u8, suffix, '-') orelse return null;
@@ -193,41 +189,34 @@ fn parseRangeSuffix(suffix: []const u8) ?RangeParsed {
 
     if (end_str.len == 0) {
         // NAME:START- form (to end of sequence)
-        return RangeParsed{ .start = start, .end = null };
+        return .{ .start = start, .end = null };
     }
 
     const end = std.fmt.parseInt(u64, end_str, 10) catch return null;
-    return RangeParsed{ .start = start, .end = end };
+    return .{ .start = start, .end = end };
 }
 
-// ============================================================================
-// Region resolution
-// ============================================================================
+// --- Region resolution ---
 
-/// A fully resolved, validated extraction request.
-/// Byte offset and length are pre-computed; no further index lookups are required.
+/// A validated extraction request with the record geometry needed for bounded reads.
 pub const ResolvedRegion = struct {
     name: []const u8, // sequence name for FASTA header
     start: u64, // 1-based inclusive (validated)
     display_end: u64, // end value for header (pre-clamp, samtools convention)
     is_full: bool, // true -> emit ">NAME", false -> emit ">NAME:start-display_end"
-    start_byte: u64, // absolute FASTA byte offset of the first base
     seq_offset: u64,
     num_bases: u64, // number of bases to extract
     line_bases: u32,
     line_bytes: u32,
     side_table: []const index_format.SideTableLine,
-    record_index: usize = 0,
-    sequence_type: ?stats.SequenceType = null,
+    record_index: usize,
     orientation: Orientation,
     annotate_transform: bool,
-    original_index: usize, // position in CLI argument list (preserves output order)
 };
 
 /// Resolve one region string against a loaded index.
-/// Validates coordinates and pre-computes the O(1) byte offset.
-/// Calls printErrorAndExit on any error (sequence not found, bad coordinates).
-pub fn resolveRegion(idx: *const LoadedIndex, region_str: []const u8, original_index: usize) ResolvedRegion {
+/// Calls `printErrorAndExit` when the name or coordinates are invalid.
+pub fn resolveRegion(idx: *const LoadedIndex, region_str: []const u8) ResolvedRegion {
     const region = parseRegion(region_str);
 
     const rec_idx = idx.lookupName(region.name) orelse {
@@ -238,7 +227,6 @@ pub fn resolveRegion(idx: *const LoadedIndex, region_str: []const u8, original_i
         idx,
         .{ .region = region, .orientation = .{} },
         rec_idx,
-        original_index,
         false,
     );
 }
@@ -247,7 +235,6 @@ fn resolveParsedRequest(
     idx: *const LoadedIndex,
     request: ParsedRequest,
     rec_idx: usize,
-    original_index: usize,
     annotate_transform: bool,
 ) ResolvedRegion {
     const rec = idx.records[rec_idx];
@@ -280,14 +267,12 @@ fn resolveParsedRequest(
     const num_bases = end - start + 1;
 
     const side_table = idx.sideTableLines(rec);
-    const start_byte = byteOffsetForBase(idx.fasta_data, rec, side_table, start - 1);
 
     return ResolvedRegion{
         .name = region.name,
         .start = start,
         .display_end = display_end,
         .is_full = region.is_full,
-        .start_byte = start_byte,
         .seq_offset = rec.seq_offset,
         .num_bases = num_bases,
         .line_bases = rec.line_bases,
@@ -296,52 +281,7 @@ fn resolveParsedRequest(
         .record_index = rec_idx,
         .orientation = request.orientation,
         .annotate_transform = annotate_transform,
-        .original_index = original_index,
     };
-}
-
-fn byteOffsetForBase(
-    fasta: []const u8,
-    rec: IndexRecord,
-    side_table: []const index_format.SideTableLine,
-    base_index: u64,
-) u64 {
-    if (side_table.len == 0) {
-        const line_number = base_index / rec.line_bases;
-        const column = base_index % rec.line_bases;
-        return rec.seq_offset + (line_number * rec.line_bytes) + column;
-    }
-
-    var lo: usize = 0;
-    var hi: usize = side_table.len;
-    while (lo < hi) {
-        const mid = lo + (hi - lo) / 2;
-        if (side_table[mid].base_start <= base_index) {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    const line_idx = if (lo == 0) 0 else lo - 1;
-    const line = side_table[line_idx];
-    const column = base_index - line.base_start;
-
-    if (fasta.len == 0) {
-        return std.math.add(u64, line.byte_offset, column) catch {
-            printErrorAndExit("error: corrupt non-uniform index side table\n", .{});
-        };
-    }
-
-    var seen: u64 = 0;
-    var pos: usize = @intCast(line.byte_offset);
-    const end = @min(fasta.len, pos + @as(usize, @intCast(line.line_bytes)));
-    while (pos < end) : (pos += 1) {
-        if (fasta[pos] <= ' ') continue;
-        if (seen == column) return @intCast(pos);
-        seen += 1;
-    }
-
-    printErrorAndExit("error: corrupt non-uniform index side table\n", .{});
 }
 
 fn detectRegionType(source: FastaSource, resolved: ResolvedRegion) stats.SequenceType {
@@ -353,7 +293,7 @@ fn detectRegionType(source: FastaSource, resolved: ResolvedRegion) stats.Sequenc
     var counts = [_]u64{0} ** 256;
     var total: u64 = 0;
     var skip = span.leading_bases;
-    var input: [fasta_input_buffer_bytes]u8 = undefined;
+    var input: [FASTA_INPUT_BUFFER_BYTES]u8 = undefined;
     var offset = span.start;
 
     while (offset < span.end and total < resolved.num_bases) {
@@ -379,9 +319,7 @@ fn detectRegionType(source: FastaSource, resolved: ResolvedRegion) stats.Sequenc
     return stats.detectType(&counts, total);
 }
 
-// ============================================================================
-// Sequence emission
-// ============================================================================
+// --- Sequence emission ---
 
 const FastaSource = struct {
     io: std.Io,
@@ -389,20 +327,20 @@ const FastaSource = struct {
     size: u64,
 };
 
-/// Writes a resolved region with standard 60-base wrapping.
-pub fn extractRegion(idx: *const LoadedIndex, region_str: []const u8, writer: anytype) void {
-    const resolved = resolveRegion(idx, region_str, 0);
-    var input_buffer: [fasta_input_buffer_bytes]u8 = undefined;
-    var output_buffer: [region_output_buffer_bytes]u8 = undefined;
-    emitRegion(resolved, .{
-        .io = idx.io,
-        .file = idx.fasta_file,
-        .size = idx.fasta_size,
-    }, &input_buffer, &output_buffer, writer);
+fn fastaSource(idx: *const LoadedIndex) FastaSource {
+    return .{ .io = idx.io, .file = idx.fasta_file, .size = idx.fasta_size };
 }
 
-const fasta_input_buffer_bytes: usize = 256 * 1024;
-const region_output_buffer_bytes: usize = 64 * 1024;
+/// Writes a resolved region with standard 60-base wrapping.
+pub fn extractRegion(idx: *const LoadedIndex, region_str: []const u8, writer: anytype) void {
+    const resolved = resolveRegion(idx, region_str);
+    var input_buffer: [FASTA_INPUT_BUFFER_BYTES]u8 = undefined;
+    var output_buffer: [REGION_OUTPUT_BUFFER_BYTES]u8 = undefined;
+    emitRegion(resolved, fastaSource(idx), &input_buffer, &output_buffer, writer);
+}
+
+const FASTA_INPUT_BUFFER_BYTES: usize = 256 * 1024;
+const REGION_OUTPUT_BUFFER_BYTES: usize = 64 * 1024;
 
 const DiskSpan = struct {
     start: u64,
@@ -810,8 +748,8 @@ fn emitResolvedBatch(
     writer: anytype,
 ) u64 {
     var total_bases: u64 = 0;
-    var shared: [fasta_input_buffer_bytes]u8 = undefined;
-    var output_buffer: [region_output_buffer_bytes]u8 = undefined;
+    var shared: [FASTA_INPUT_BUFFER_BYTES]u8 = undefined;
+    var output_buffer: [REGION_OUTPUT_BUFFER_BYTES]u8 = undefined;
     var i: usize = 0;
 
     while (i < resolved.len) {
@@ -841,7 +779,7 @@ fn emitResolvedBatch(
             shared_last_base = @max(shared_last_base, next_last_base);
         }
 
-        if (group_end > i + 1 or shared_end - shared_start <= shared.len) {
+        if (shared_end - shared_start <= shared.len) {
             if (shared_end > source.size) printErrorAndExit("error: read past end of FASTA\n", .{});
             const wanted: usize = @intCast(shared_end - shared_start);
             const got = std.Io.File.readPositionalAll(source.file, source.io, shared[0..wanted], shared_start) catch {
@@ -915,7 +853,6 @@ fn appendOwnedRequest(
     name: []const u8,
     start: u64,
     end: u64,
-    is_full: bool,
     orientation: Orientation,
 ) void {
     const owned_name = ownRequestName(allocator, workspace, name);
@@ -924,7 +861,6 @@ fn appendOwnedRequest(
         .name_len = owned_name.len,
         .start = start,
         .end = end,
-        .is_full = is_full,
         .orientation = orientation,
     }) catch {
         printErrorAndExit("error: out of memory\n", .{});
@@ -966,7 +902,6 @@ fn appendBedLineRequest(
                 region.chrom,
                 region.start1Based(),
                 region.end1BasedInclusive(),
-                false,
                 (if (honor_strand and region.strand == .minus) Orientation.reverseComplement() else Orientation{}).compose(global_orientation),
             );
         },
@@ -988,10 +923,15 @@ fn appendNamesLine(
             .{ line_number, MAX_REQUEST_NAME_BYTES },
         );
     }
-    appendOwnedRequest(allocator, workspace, name, 1, 0, true, orientation);
+    appendOwnedRequest(allocator, workspace, name, 1, 0, orientation);
 }
 
-fn appendCliRequests(requests: *std.ArrayList(ParsedRequest), region_strs: []const []const u8, orientation: Orientation, allocator: std.mem.Allocator) void {
+fn appendCliRequests(
+    allocator: std.mem.Allocator,
+    requests: *std.ArrayList(ParsedRequest),
+    region_strs: []const []const u8,
+    orientation: Orientation,
+) void {
     for (region_strs) |region_str| {
         requests.append(allocator, .{
             .region = parseRegion(region_str),
@@ -1010,8 +950,8 @@ fn writeSummary(writer: *std.Io.Writer, region_count: usize, total_bases: u64, e
 }
 
 fn processParsedRequests(
-    idx: *index_format.LoadedIndex,
     allocator: std.mem.Allocator,
+    idx: *index_format.LoadedIndex,
     request_entries: anytype,
     active_names: []const u8,
     annotate_transform: bool,
@@ -1046,24 +986,23 @@ fn processParsedRequests(
 
         last_name = request.region.name;
         last_rec_idx = rec_idx;
-        resolved[i] = resolveParsedRequest(idx, request, rec_idx, i, annotate_transform);
+        resolved[i] = resolveParsedRequest(idx, request, rec_idx, annotate_transform);
 
         if (request.orientation.complement) {
             const rec_type = if (last_typed_rec_idx == rec_idx)
                 last_type
             else blk: {
                 var sample = resolved[i];
-                sample.num_bases = @min(sample.num_bases, stats.get_type_sample_bases);
+                sample.num_bases = @min(sample.num_bases, stats.GET_TYPE_SAMPLE_BASES);
                 const detected = detectRegionType(source, sample);
                 last_typed_rec_idx = rec_idx;
                 last_type = detected;
                 break :blk detected;
             };
-            resolved[i].sequence_type = rec_type;
             if (rec_type == .protein) {
                 printErrorAndExit(
                     "error: reverse complement is not defined for protein sequences: {s} (classified from up to {d} bases)\n",
-                    .{ request.region.name, stats.get_type_sample_bases },
+                    .{ request.region.name, stats.GET_TYPE_SAMPLE_BASES },
                 );
             }
         }
@@ -1146,8 +1085,8 @@ fn processRequestReader(
         if (workspace.requests.items.len == 0) break;
 
         const batch = processParsedRequests(
-            idx,
             workspace.scratch.allocator(),
+            idx,
             workspace.requests.items,
             workspace.names.items,
             annotate_transform,
@@ -1201,25 +1140,27 @@ fn processRequestPath(
     return processRequestReader(allocator, idx, &file_reader.interface, source, name_reservation, annotate_transform, writer, fasta_source);
 }
 
-// ============================================================================
-// Public entry point
-// ============================================================================
+// --- Public entry point ---
 
-pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions) void {
+pub fn runGetWithOptions(
+    backing_allocator: std.mem.Allocator,
+    io: std.Io,
+    fasta_path: []const u8,
+    options: GetOptions,
+) void {
     const start_ns = if (options.summary) monotonicNs(io) else 0;
 
-    var input_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var input_arena = std.heap.ArenaAllocator.init(backing_allocator);
     defer input_arena.deinit();
     const allocator = input_arena.allocator();
 
     var requests = std.ArrayList(ParsedRequest).empty;
-    defer requests.deinit(allocator);
 
     // Positional requests are known before loading, so `.fai` retains only their
     // first matching records. Names and BED still require the complete lookup map.
     const load_mode: index_format.LoadMode = switch (options.source) {
         .positional => |region_strs| blk: {
-            appendCliRequests(&requests, region_strs, options.orientation, allocator);
+            appendCliRequests(allocator, &requests, region_strs, options.orientation);
             const names = allocator.alloc([]const u8, requests.items.len) catch {
                 printErrorAndExit("error: out of memory\n", .{});
             };
@@ -1230,59 +1171,41 @@ pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions
         },
         .names, .bed => .lookup_full_map,
     };
-    var idx = index_format.loadIndexForGet(io, fasta_path, load_mode);
-    defer idx.deinit(io);
+    var idx = index_format.loadIndexForGet(backing_allocator, io, fasta_path, load_mode);
+    defer idx.deinit();
 
-    const fasta_source = FastaSource{
-        .io = io,
-        .file = idx.fasta_file,
-        .size = idx.fasta_size,
-    };
+    const fasta_source = fastaSource(&idx);
 
     var out_buf: [65536]u8 = undefined;
     var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
     const writer = &stdout_fw.interface;
 
-    var totals = BatchStats{};
-
-    switch (options.source) {
-        .positional => {
-            const batch = processParsedRequests(&idx, allocator, requests.items, &.{}, options.annotate_transform, writer, fasta_source);
-            totals.region_count += batch.region_count;
-            totals.total_bases += batch.total_bases;
-        },
-        .names => |path| {
-            const batch = processRequestPath(
-                std.heap.page_allocator,
-                io,
-                &idx,
-                path,
-                .{ .names = options.orientation },
-                options.annotate_transform,
-                writer,
-                fasta_source,
-            );
-            totals.region_count += batch.region_count;
-            totals.total_bases += batch.total_bases;
-        },
-        .bed => |path| {
-            const batch = processRequestPath(
-                std.heap.page_allocator,
-                io,
-                &idx,
-                path,
-                .{ .bed = .{
-                    .honor_strand = options.honor_strand,
-                    .global_orientation = options.orientation,
-                } },
-                options.annotate_transform,
-                writer,
-                fasta_source,
-            );
-            totals.region_count += batch.region_count;
-            totals.total_bases += batch.total_bases;
-        },
-    }
+    const totals = switch (options.source) {
+        .positional => processParsedRequests(allocator, &idx, requests.items, &.{}, options.annotate_transform, writer, fasta_source),
+        .names => |path| processRequestPath(
+            backing_allocator,
+            io,
+            &idx,
+            path,
+            .{ .names = options.orientation },
+            options.annotate_transform,
+            writer,
+            fasta_source,
+        ),
+        .bed => |path| processRequestPath(
+            backing_allocator,
+            io,
+            &idx,
+            path,
+            .{ .bed = .{
+                .honor_strand = options.honor_strand,
+                .global_orientation = options.orientation,
+            } },
+            options.annotate_transform,
+            writer,
+            fasta_source,
+        ),
+    };
 
     if (totals.region_count == 0) {
         printErrorAndExit("error: no regions provided\n", .{});
@@ -1358,8 +1281,8 @@ test "request workspace includes the name that crosses its byte target" {
 
 test "processRequestReader handles names line endings and final line" {
     const test_io = std.testing.io;
-    var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
-    defer idx.deinit(test_io);
+    var idx = index_format.loadIndex(std.testing.allocator, test_io, "tests/data/simple.fasta");
+    defer idx.deinit();
     var reader = std.Io.Reader.fixed("# comment\r\n\r\nseq2\r\nseq1\nseq2");
     var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer writer.deinit();
@@ -1372,11 +1295,11 @@ test "processRequestReader handles names line endings and final line" {
         0,
         false,
         &writer.writer,
-        null,
+        fastaSource(&idx),
     );
 
     try std.testing.expectEqual(@as(usize, 3), result.region_count);
-    try std.testing.expectEqual(@as(u64, 60), result.total_bases);
+    try std.testing.expectEqual(@as(u64, 48), result.total_bases);
     try std.testing.expectEqualStrings(
         ">seq2\nGGGGCCCCAAAA\n>seq1\nACGTACGTACGTACGTACGTACGT\n>seq2\nGGGGCCCCAAAA\n",
         writer.written(),
@@ -1385,8 +1308,8 @@ test "processRequestReader handles names line endings and final line" {
 
 test "processRequestReader resets names at the request-count boundary" {
     const test_io = std.testing.io;
-    var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
-    defer idx.deinit(test_io);
+    var idx = index_format.loadIndex(std.testing.allocator, test_io, "tests/data/simple.fasta");
+    defer idx.deinit();
     var names = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer names.deinit();
     const request_count = NAMES_REQUEST_BATCH_SIZE + 1;
@@ -1403,7 +1326,7 @@ test "processRequestReader resets names at the request-count boundary" {
         0,
         false,
         &writer.writer,
-        null,
+        fastaSource(&idx),
     );
 
     const one_output = ">seq1\nACGTACGTACGTACGTACGTACGT\n";
@@ -1416,8 +1339,8 @@ test "processRequestReader resets names at the request-count boundary" {
 
 test "processRequestReader streams BED rows in source order" {
     const test_io = std.testing.io;
-    var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
-    defer idx.deinit(test_io);
+    var idx = index_format.loadIndex(std.testing.allocator, test_io, "tests/data/simple.fasta");
+    defer idx.deinit();
 
     const bed_data =
         "# comment\r\n" ++
@@ -1437,7 +1360,7 @@ test "processRequestReader streams BED rows in source order" {
         0,
         false,
         &writer.writer,
-        null,
+        fastaSource(&idx),
     );
 
     try std.testing.expectEqual(@as(usize, 3), result.region_count);
@@ -1450,8 +1373,8 @@ test "processRequestReader streams BED rows in source order" {
 
 test "processRequestReader preserves output at BED request boundaries" {
     const test_io = std.testing.io;
-    var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
-    defer idx.deinit(test_io);
+    var idx = index_format.loadIndex(std.testing.allocator, test_io, "tests/data/simple.fasta");
+    defer idx.deinit();
 
     const counts = [_]usize{
         BED_REQUEST_BATCH_SIZE - 1,
@@ -1485,7 +1408,7 @@ test "processRequestReader preserves output at BED request boundaries" {
             0,
             false,
             &output.writer,
-            null,
+            fastaSource(&idx),
         );
 
         const expected_bases: u64 = count + @as(usize, @intFromBool(count > BED_REQUEST_BATCH_SIZE)) * 4;

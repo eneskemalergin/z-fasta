@@ -66,6 +66,15 @@ pub fn build(b: *std.Build) void {
     // CLI subprocess tests spawn zig-out/bin/z-fasta; keep it current with this suite.
     run_test_get.step.dependOn(b.getInstallStep());
 
+    const run_test_getter_unit = b.addRunArtifact(b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/getter.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"getter.test."},
+    }));
+
     const run_test_stats = b.addRunArtifact(b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/test_stats.zig"),
@@ -112,6 +121,7 @@ pub fn build(b: *std.Build) void {
         const gen_test_index = b.addRunArtifact(exe);
         gen_test_index.addArgs(&.{ "index", fasta_path });
         run_test_get.step.dependOn(&gen_test_index.step);
+        run_test_getter_unit.step.dependOn(&gen_test_index.step);
         run_test_stats.step.dependOn(&gen_test_index.step);
     }
 
@@ -133,6 +143,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_test_index.step);
     test_step.dependOn(&run_test_get.step);
+    test_step.dependOn(&run_test_getter_unit.step);
     test_step.dependOn(&run_test_stats.step);
     test_step.dependOn(&run_test_complement.step);
     test_step.dependOn(&run_test_bed_parser.step);

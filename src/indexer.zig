@@ -190,7 +190,7 @@ pub const FastaRecordEmit = struct {
     uses_uniform_formula: bool,
     /// Incremental side-table bytes for `.zfi` (line count plus `SideTableLine` rows).
     side_table: []const u8 = &.{},
-    /// When true, `record` already has blob-relative `name_offset`/`name_len` and `name_in_zfi_flag`
+    /// When true, `record` already has blob-relative `name_offset`/`name_len` and `NAME_IN_ZFI_FLAG`
     /// (`.zfi` blob-backed `NameDedup`); skip `embedZfiName`.
     name_embedded: bool = false,
 };
@@ -465,7 +465,7 @@ fn embedZfiName(
     rec.name_offset = name_blob.items.len;
     rec.name_len = @intCast(name.len);
     try name_blob.appendSlice(allocator, name);
-    rec._pad[0] |= index_format.name_in_zfi_flag;
+    rec._pad[0] |= index_format.NAME_IN_ZFI_FLAG;
 }
 
 pub fn scanZfiReader(
@@ -928,7 +928,7 @@ const ChunkParseState = struct {
             if (seen.bindsToBlob()) {
                 name_offset = seen.last_offset;
                 out_name_len = seen.last_len;
-                name_pad[0] = index_format.name_in_zfi_flag;
+                name_pad[0] = index_format.NAME_IN_ZFI_FLAG;
                 name_embedded = true;
             }
         }

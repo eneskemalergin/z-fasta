@@ -230,7 +230,7 @@ test "validate --json --summary reports sequence type sample fields" {
     try std.testing.expectEqualStrings("nucleotide", parsed.value.object.get("sequence_type").?.string);
     try std.testing.expectEqual(@as(i64, 4), parsed.value.object.get("type_bases_sampled").?.integer);
     try std.testing.expectEqual(
-        @as(i64, @intCast(main.stats.validate_type_sample_bases)),
+        @as(i64, @intCast(main.stats.VALIDATE_TYPE_SAMPLE_BASES)),
         parsed.value.object.get("type_sample_cap").?.integer,
     );
 }
@@ -429,8 +429,8 @@ fn writeZfiForData(allocator: std.mem.Allocator, fasta_path: []const u8, data: [
 }
 
 fn captureExtractRegion(allocator: std.mem.Allocator, fasta_path: []const u8, region: []const u8) ![]u8 {
-    var idx = try main.index_format.loadIndexChecked(io, fasta_path);
-    defer idx.deinit(io);
+    var idx = try main.index_format.loadIndexChecked(std.testing.allocator, io, fasta_path);
+    defer idx.deinit();
 
     var out = std.Io.Writer.Allocating.init(allocator);
     main.getter.extractRegion(&idx, region, &out.writer);
