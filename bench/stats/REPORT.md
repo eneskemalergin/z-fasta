@@ -10,14 +10,15 @@ This report times `z-fasta stats` against clean-FASTA peers on the shared REAL d
 
 **What is timed**
 
-- **Full stats (peers):** `z-fasta stats` with `.zfi` (lengths + composition scan) vs noodles / rust-bio wrappers, seqkit `stats -a`, and seqtk `comp` (nucleotide only; hatched reference).
-- **Scaling:** complete stats and composition peers: wall / RSS / page faults vs file size and vs sequence count (absolute facets + min->max x slopes; x tables in details).
+- **Complete stats:** `z-fasta stats` through `.zfi` and `.fai` vs noodles and rust-bio wrappers that emit the same agreed fields.
+- **Partial references:** SeqKit `stats -a` covers assembly summaries and selected DNA composition; Seqtk `comp` covers per-record A/C/G/T/N composition on nucleotide data.
+- **Scaling:** the two z-fasta formats plus the two complete Rust peers; partial references are intentionally excluded.
 
 **Index policy:** sidecars are preloaded once. Timed commands only run `stats` / peer tools; index *build* is outside this wall (see `bench/index/REPORT.md`).
 
-Correctness reported **95** passing checks before perf (see `bench/stats/run.sh`).
+Correctness reported **57** passing checks before perf (see `bench/stats/run.sh`).
 
-Correctness values (N50, GC, ...) are gated by verify against BioPython (`bench/stats/oracle.py`), not re-tabulated here.
+Correctness values are gated by the independent exact oracle in `bench/stats/oracle.py`, not re-tabulated here.
 
 ## What each tool reports
 
@@ -25,41 +26,40 @@ Correctness values (N50, GC, ...) are gated by verify against BioPython (`bench/
 
 ### Assembly metrics (lengths / index)
 
-| Metric | z-fasta | noodles | rust-bio | seqkit `-a` | seqtk `comp` |
+| Metric | z-fasta | noodles | rust-bio | SeqKit `stats -a` | Seqtk `comp` |
 | --- | --- | --- | --- | --- | --- |
-| Sequences / total bases | yes | yes | yes | yes | totals |
-| Min / max / mean / median | yes | yes | yes | yes | - |
-| N50 / L50 | yes | yes | yes | yes | - |
-| N90 / L90 / AU | yes | yes | yes | - | - |
-| Shortest / longest names | yes | yes | yes | - | - |
+| Records / total symbols | yes | yes | yes | yes | per-record lengths |
+| Shortest / longest / mean / quartiles / median / range | yes | yes | yes | lengths except range | no |
+| N50 / L50 / N90 / L90 / auN | yes | yes | yes | N50/L50 only | no |
+| Shortest / longest names | yes | yes | yes | no | record names only |
 
 ### Composition (sequence scan)
 
-| Metric | z-fasta | noodles | rust-bio | seqkit `-a` | seqtk `comp` |
+| Metric | z-fasta | noodles | rust-bio | SeqKit `stats -a` | Seqtk `comp` |
 | --- | --- | --- | --- | --- | --- |
-| GC / GC skew / soft-mask | yes | yes | yes | GC | partial |
-| A / C / G / T / N / Other | yes | yes | yes | - | yes |
-| Top amino acids (protein) | yes | yes | yes | - | - |
+| Nucleotide type / canonical bases / ambiguity / invalid | yes | yes | yes | type, N/gap totals | A/C/G/T/N plus other columns |
+| GC / GC skew / lowercase | yes | yes | yes | GC only | GC derivable, no skew/lowercase |
+| Complete protein symbols / stop / invalid / lowercase | yes | yes | yes | type only | no |
 
-**How to read the benches:** Peers are compared against complete stats where their reported fields overlap. seqkit also reports Q1/Q3/gaps/Q20 (FASTA/Q QC); those are out of scope for z-fasta. Wrappers are clean-FASTA peers only (no messy / side-table path).
+**How to read the benches:** Noodles and rust-bio are equivalent-work peers. SeqKit and Seqtk are useful ecosystem references but do less work and are never used for dominance claims. Wrappers are clean-FASTA peers only; messy side-table behavior is a z-fasta correctness gate.
 
 Oracle: [`bench/stats/oracle.py`](oracle.py). Verify: [`bench/stats/run.sh`](run.sh) correctness (`run_tests`).
 
 ## Run Provenance
 
-- **Timestamp:** `20260801_094735`
+- **Timestamp:** `20260807-step7`
 - **Runner:** zebrac (warm)
-- **zebrac:** zebrac 0.6.0
-- **z-fasta:** z-fasta 0.3.0
-- **Samples:** runs=5, warmup=5, duration_ms=5000
-- **Metadata:** `metadata_20260801_094735.jsonl`
+- **zebrac:** zebrac 0.6.1
+- **z-fasta:** z-fasta 0.3.1
+- **Samples:** runs=7, warmup=5, duration_ms=2000
+- **Metadata:** `metadata_20260807-step7.jsonl`
 - **Index preload:** True (build time not included in stats wall)
 
 **Sections**
 
-- `perf_full` -> `perf_full_20260801_094735`
-- `scale_size` -> `scale_size_20260801_094735`
-- `scale_seqs_fixed` -> `scale_seqs_fixed_20260801_094735`
+- `perf_full` -> `perf_full_20260807-step7`
+- `scale_size` -> `scale_size_20260807-step7`
+- `scale_seqs_fixed` -> `scale_seqs_fixed_20260807-step7`
 
 **Peer versions**
 
@@ -69,14 +69,13 @@ Oracle: [`bench/stats/oracle.py`](oracle.py). Verify: [`bench/stats/run.sh`](run
 - **rustbio:** rust-bio 2.2 (custom indexer wrapper)
 - **samtools:** samtools 1.13
 
-**Data used** (human reference files in `bench/shared/data/`; fetch with `bench/shared/download_data.sh`):
-- **Genome** (`REAL_Genome.fa`): Homo sapiens GRCh38 primary assembly (Ensembl release 113). 194 sequences, 3.10 Gbp total, 2.93 GiB on disk.
-- **Transcriptome** (`REAL_Transcriptome.fa`): Homo sapiens GENCODE v46 transcript sequences. 254,070 transcripts, 444 Mbp total, 458.7 MiB on disk.
-- **Proteome** (`REAL_Proteome.fasta`): Homo sapiens UniProt reference proteome UP000005640. 20,652 proteins, 11.5 M residues total, 13.1 MiB on disk.
+- **Genome:** Homo sapiens GRCh38 primary assembly (Ensembl release 113).
+- **Transcriptome:** Homo sapiens GENCODE v46 transcript sequences.
+- **Proteome:** Homo sapiens UniProt reference proteome UP000005640.
 
 ## Performance: Full stats
 
-Peers re-parse the FASTA. z-fasta full loads `.zfi`, emits length metrics from the index, then mmap-scans sequence bytes for composition. Baseline for ratios: **z-fasta full**. **Figure facets** are wall time, peak RSS, and minor page faults; **x-axis** is dataset; **bar color** is tool (GET RC layout).
+Peers re-parse the FASTA. z-fasta loads one selected sidecar and performs a bounded FASTA scan for composition. Baseline for ratios: **z-fasta (.zfi)**. **Figure facets** are wall time, peak RSS, and minor page faults; **x-axis** is dataset; **bar color** is tool (GET RC layout).
 
 ## Wall time
 
@@ -84,27 +83,30 @@ Zebrac mean wall time (seconds) for one `stats` / peer process with stdout disca
 
 **Table 1:** Mean ± stddev by dataset and tool.
 
-| dataset       | z-fasta       | noodles       | rust-bio      | seqkit         | seqtk (comp)   |
-|:--------------|:--------------|:--------------|:--------------|:---------------|:---------------|
-| Genome        | 5.149±0.024 s | 6.080±0.028 s | 6.844±0.032 s | 17.418±0.019 s | 14.737±0.012 s |
-| Transcriptome | 0.870±0.009 s | 1.069±0.013 s | 1.107±0.005 s | 2.390±0.003 s  | 2.310±0.007 s  |
-| Proteome      | 0.026±0.002 s | 0.036±0.000 s | 0.036±0.000 s | 0.063±0.002 s  |             |
+| dataset       | z-fasta (.zfi)   | z-fasta (.fai)   | noodles       | rust-bio      | seqkit stats -a (partial)   | seqtk comp (partial)   |
+|:--------------|:-----------------|:-----------------|:--------------|:--------------|:----------------------------|:-----------------------|
+| Genome        | 2.752±0.014 s    | 2.757±0.019 s    | 6.119±0.043 s | 7.083±0.075 s | 17.777±0.218 s              | 15.000±0.150 s         |
+| Transcriptome | 0.382±0.002 s    | 0.416±0.003 s    | 1.107±0.018 s | 1.153±0.015 s | 2.403±0.003 s               | 2.373±0.039 s          |
+| Proteome      | 0.012±0.000 s    | 0.015±0.001 s    | 0.037±0.000 s | 0.037±0.000 s | 0.060±0.001 s               |                     |
 
-<details><summary><strong>Table 2:</strong> Time x = peer wall / z-fasta full. Same ratios as bar labels.</summary>
+<details><summary><strong>Table 2:</strong> Time x = lane wall / z-fasta .zfi. Same ratios as bar labels.</summary>
 
-| Dataset       | z-fasta vs   | z-fasta   | Peer     | Time x   |
-|:--------------|:-------------|:----------|:---------|:---------|
-| Genome        | noodles      | 5.1491s   | 6.0805s  | 1.18x    |
-| Genome        | rust-bio     | 5.1491s   | 6.8439s  | 1.33x    |
-| Genome        | seqkit       | 5.1491s   | 17.4182s | 3.38x    |
-| Genome        | seqtk (comp) | 5.1491s   | 14.7372s | 2.86x    |
-| Transcriptome | noodles      | 0.8698s   | 1.0687s  | 1.23x    |
-| Transcriptome | rust-bio     | 0.8698s   | 1.1068s  | 1.27x    |
-| Transcriptome | seqkit       | 0.8698s   | 2.3897s  | 2.75x    |
-| Transcriptome | seqtk (comp) | 0.8698s   | 2.3097s  | 2.66x    |
-| Proteome      | noodles      | 0.0257s   | 0.0355s  | 1.38x    |
-| Proteome      | rust-bio     | 0.0257s   | 0.0358s  | 1.39x    |
-| Proteome      | seqkit       | 0.0257s   | 0.0633s  | 2.46x    |
+| Dataset       | z-fasta vs                | z-fasta   | Peer     | Time x   |
+|:--------------|:--------------------------|:----------|:---------|:---------|
+| Genome        | z-fasta (.fai)            | 2.7519s   | 2.7565s  | 1.00x    |
+| Genome        | noodles                   | 2.7519s   | 6.1190s  | 2.22x    |
+| Genome        | rust-bio                  | 2.7519s   | 7.0825s  | 2.57x    |
+| Genome        | seqkit stats -a (partial) | 2.7519s   | 17.7775s | 6.46x    |
+| Genome        | seqtk comp (partial)      | 2.7519s   | 15.0002s | 5.45x    |
+| Transcriptome | z-fasta (.fai)            | 0.3819s   | 0.4155s  | 1.09x    |
+| Transcriptome | noodles                   | 0.3819s   | 1.1070s  | 2.90x    |
+| Transcriptome | rust-bio                  | 0.3819s   | 1.1527s  | 3.02x    |
+| Transcriptome | seqkit stats -a (partial) | 0.3819s   | 2.4032s  | 6.29x    |
+| Transcriptome | seqtk comp (partial)      | 0.3819s   | 2.3725s  | 6.21x    |
+| Proteome      | z-fasta (.fai)            | 0.0123s   | 0.0155s  | 1.25x    |
+| Proteome      | noodles                   | 0.0123s   | 0.0370s  | 3.00x    |
+| Proteome      | rust-bio                  | 0.0123s   | 0.0369s  | 2.99x    |
+| Proteome      | seqkit stats -a (partial) | 0.0123s   | 0.0596s  | 4.83x    |
 
 </details>
 
@@ -116,27 +118,30 @@ Peak RSS from zebrac samples for the same full-stats commands.
 
 **Table 3:** Mean ± stddev by dataset and tool.
 
-| dataset       | z-fasta       | noodles      | rust-bio     | seqkit        | seqtk (comp)   |
-|:--------------|:--------------|:-------------|:-------------|:--------------|:---------------|
-| Genome        | 3006.0±0.1 MB | 239.4±0.0 MB | 239.4±0.1 MB | 1138.2±0.9 MB | 239.4±0.1 MB   |
-| Transcriptome | 496.0±0.2 MB  | 89.8±0.1 MB  | 90.5±0.0 MB  | 20.5±4.1 MB   | 3.4±0.1 MB     |
-| Proteome      | 16.5±0.0 MB   | 5.1±0.1 MB   | 5.1±0.0 MB   | 25.3±4.5 MB   |             |
+| dataset       | z-fasta (.zfi)   | z-fasta (.fai)   | noodles      | rust-bio     | seqkit stats -a (partial)   | seqtk comp (partial)   |
+|:--------------|:-----------------|:-----------------|:-------------|:-------------|:----------------------------|:-----------------------|
+| Genome        | 3.2±0.1 MB       | 3.2±0.1 MB       | 239.1±0.0 MB | 239.4±0.1 MB | 1137.9±1.1 MB               | 239.4±0.1 MB           |
+| Transcriptome | 14.7±0.0 MB      | 23.7±0.1 MB      | 87.8±0.2 MB  | 88.5±0.1 MB  | 18.0±0.6 MB                 | 3.2±0.1 MB             |
+| Proteome      | 3.2±0.1 MB       | 3.3±0.0 MB       | 5.1±0.0 MB   | 5.1±0.0 MB   | 17.9±0.4 MB                 |                     |
 
-<details><summary><strong>Table 4:</strong> RSS x = peer peak RSS / z-fasta full.</summary>
+<details><summary><strong>Table 4:</strong> RSS x = lane peak RSS / z-fasta .zfi.</summary>
 
-| Dataset       | z-fasta vs   | z-fasta   | Peer      | RSS x   |
-|:--------------|:-------------|:----------|:----------|:--------|
-| Genome        | noodles      | 3006.0 MB | 239.4 MB  | 0.080x  |
-| Genome        | rust-bio     | 3006.0 MB | 239.4 MB  | 0.080x  |
-| Genome        | seqkit       | 3006.0 MB | 1138.2 MB | 0.379x  |
-| Genome        | seqtk (comp) | 3006.0 MB | 239.4 MB  | 0.080x  |
-| Transcriptome | noodles      | 496.0 MB  | 89.8 MB   | 0.181x  |
-| Transcriptome | rust-bio     | 496.0 MB  | 90.5 MB   | 0.183x  |
-| Transcriptome | seqkit       | 496.0 MB  | 20.5 MB   | 0.041x  |
-| Transcriptome | seqtk (comp) | 496.0 MB  | 3.4 MB    | 0.007x  |
-| Proteome      | noodles      | 16.5 MB   | 5.1 MB    | 0.309x  |
-| Proteome      | rust-bio     | 16.5 MB   | 5.1 MB    | 0.309x  |
-| Proteome      | seqkit       | 16.5 MB   | 25.3 MB   | 1.53x   |
+| Dataset       | z-fasta vs                | z-fasta   | Peer      | RSS x   |
+|:--------------|:--------------------------|:----------|:----------|:--------|
+| Genome        | z-fasta (.fai)            | 3.2 MB    | 3.2 MB    | 0.983x  |
+| Genome        | noodles                   | 3.2 MB    | 239.1 MB  | 73.6x   |
+| Genome        | rust-bio                  | 3.2 MB    | 239.4 MB  | 73.7x   |
+| Genome        | seqkit stats -a (partial) | 3.2 MB    | 1137.9 MB | 350x    |
+| Genome        | seqtk comp (partial)      | 3.2 MB    | 239.4 MB  | 73.7x   |
+| Transcriptome | z-fasta (.fai)            | 14.7 MB   | 23.7 MB   | 1.61x   |
+| Transcriptome | noodles                   | 14.7 MB   | 87.8 MB   | 5.96x   |
+| Transcriptome | rust-bio                  | 14.7 MB   | 88.5 MB   | 6.01x   |
+| Transcriptome | seqkit stats -a (partial) | 14.7 MB   | 18.0 MB   | 1.23x   |
+| Transcriptome | seqtk comp (partial)      | 14.7 MB   | 3.2 MB    | 0.220x  |
+| Proteome      | z-fasta (.fai)            | 3.2 MB    | 3.3 MB    | 1.01x   |
+| Proteome      | noodles                   | 3.2 MB    | 5.1 MB    | 1.59x   |
+| Proteome      | rust-bio                  | 3.2 MB    | 5.1 MB    | 1.58x   |
+| Proteome      | seqkit stats -a (partial) | 3.2 MB    | 17.9 MB   | 5.56x   |
 
 </details>
 
@@ -148,27 +153,30 @@ Minor page faults for the same full-stats commands.
 
 **Table 5:** Mean ± stddev by dataset and tool.
 
-| dataset       | z-fasta   | noodles   | rust-bio   | seqkit     | seqtk (comp)   |
-|:--------------|:----------|:----------|:-----------|:-----------|:---------------|
-| Genome        | 24376±3   | 754907±2  | 754910±3   | 290078±230 | 61101±2        |
-| Transcriptome | 10942±2   | 25945±3   | 26112±2    | 3723±1120  | 406±2          |
-| Proteome      | 857±4     | 1285±2    | 1263±2     | 5101±1054  |             |
+| dataset       | z-fasta (.zfi)   | z-fasta (.fai)   | noodles   | rust-bio   | seqkit stats -a (partial)   | seqtk comp (partial)   |
+|:--------------|:-----------------|:-----------------|:----------|:-----------|:----------------------------|:-----------------------|
+| Genome        | 372±3            | 377±2            | 754918±2  | 754921±3   | 290078±93                   | 61115±3                |
+| Transcriptome | 880±3            | 6245±3           | 25457±2   | 25622±4    | 3398±104                    | 421±2                  |
+| Proteome      | 419±2            | 886±2            | 1255±3    | 1231±2     | 3085±100                    |                     |
 
-<details><summary><strong>Table 6:</strong> Faults x = peer minor faults / z-fasta full.</summary>
+<details><summary><strong>Table 6:</strong> Faults x = lane minor faults / z-fasta .zfi.</summary>
 
-| Dataset       | z-fasta vs   |   z-fasta |   Peer | Faults x   |
-|:--------------|:-------------|----------:|-------:|:-----------|
-| Genome        | noodles      |     24376 | 754907 | 31.0x      |
-| Genome        | rust-bio     |     24376 | 754910 | 31.0x      |
-| Genome        | seqkit       |     24376 | 290078 | 11.9x      |
-| Genome        | seqtk (comp) |     24376 |  61101 | 2.51x      |
-| Transcriptome | noodles      |     10942 |  25945 | 2.37x      |
-| Transcriptome | rust-bio     |     10942 |  26112 | 2.39x      |
-| Transcriptome | seqkit       |     10942 |   3723 | 0.340x     |
-| Transcriptome | seqtk (comp) |     10942 |    406 | 0.037x     |
-| Proteome      | noodles      |       857 |   1285 | 1.50x      |
-| Proteome      | rust-bio     |       857 |   1263 | 1.47x      |
-| Proteome      | seqkit       |       857 |   5101 | 5.95x      |
+| Dataset       | z-fasta vs                |   z-fasta |   Peer | Faults x   |
+|:--------------|:--------------------------|----------:|-------:|:-----------|
+| Genome        | z-fasta (.fai)            |       372 |    377 | 1.01x      |
+| Genome        | noodles                   |       372 | 754918 | 2028x      |
+| Genome        | rust-bio                  |       372 | 754921 | 2028x      |
+| Genome        | seqkit stats -a (partial) |       372 | 290078 | 779x       |
+| Genome        | seqtk comp (partial)      |       372 |  61115 | 164x       |
+| Transcriptome | z-fasta (.fai)            |       880 |   6245 | 7.09x      |
+| Transcriptome | noodles                   |       880 |  25457 | 28.9x      |
+| Transcriptome | rust-bio                  |       880 |  25622 | 29.1x      |
+| Transcriptome | seqkit stats -a (partial) |       880 |   3398 | 3.86x      |
+| Transcriptome | seqtk comp (partial)      |       880 |    421 | 0.479x     |
+| Proteome      | z-fasta (.fai)            |       419 |    886 | 2.11x      |
+| Proteome      | noodles                   |       419 |   1255 | 2.99x      |
+| Proteome      | rust-bio                  |       419 |   1231 | 2.93x      |
+| Proteome      | seqkit stats -a (partial) |       419 |   3085 | 7.36x      |
 
 </details>
 
@@ -184,214 +192,148 @@ Minor page faults for the same full-stats commands.
 - **X-axis:** Genome, Transcriptome, Proteome.
 - **Bar colors:** one lane per tool (legend below figure).
 - **Bar labels (rotated):** `1x` on z-fasta; peers = peer / z-fasta. Same ratio rules on wall, RSS, and page faults.
-- **Hatched bars:** seqtk `comp` (composition-only reference; omitted on Proteome).
-- Gold = z-fasta full (`.zfi`). Error bars = 1σ across measured samples.
+- **Hatched bars:** partial-coverage SeqKit and Seqtk references; not equivalent-work dominance comparisons.
+- Gold = z-fasta (`.zfi`); orange = z-fasta (`.fai`). Error bars show standard deviation.
 
 <div style="margin: 1.5em 0"></div>
 
 ## Scaling: file size
 
-Synthetic FASTAs under `bench/shared/cache/scaling/` (generated on demand). Indexes preloaded; timed work is complete `stats` / peers only. Two figures per sweep: absolute wall / RSS / faults, then whether the x vs z-fasta gap grows from the smallest fixture to the largest. Per-point x values stay in the collapsible tables.
+Synthetic FASTAs under `bench/shared/cache/scaling/` (generated on demand). Indexes are preloaded; timed work is complete `stats` only. Two figures per sweep: absolute wall / RSS / faults, then whether the x vs z-fasta gap grows from the smallest fixture to the largest. Per-point x values stay in the collapsible tables.
 
 **Table 7:** Mean ± stddev wall time by File size (MB) and tool.
 
-| File size (MB)   | z-fasta       | z-fasta (fai)   | noodles       | rust-bio      | seqkit        | seqtk (comp)   |
-|:-----------------|:--------------|:----------------|:--------------|:--------------|:--------------|:---------------|
-| 1 MB             | 3.57±0.09 ms  | 3.68±0.07 ms    | 3.57±0.04 ms  | 3.70±0.06 ms  | 0.028±0.002 s | 5.10±0.03 ms   |
-| 5 MB             | 9.41±0.06 ms  | 9.70±0.11 ms    | 8.09±0.12 ms  | 8.81±0.07 ms  | 0.050±0.004 s | 0.016±0.000 s  |
-| 10 MB            | 0.017±0.000 s | 0.017±0.000 s   | 0.015±0.003 s | 0.015±0.000 s | 0.078±0.003 s | 0.029±0.000 s  |
-| 25 MB            | 0.039±0.000 s | 0.039±0.000 s   | 0.032±0.003 s | 0.036±0.003 s | 0.160±0.004 s | 0.067±0.000 s  |
-| 50 MB            | 0.076±0.000 s | 0.076±0.000 s   | 0.063±0.007 s | 0.067±0.002 s | 0.297±0.003 s | 0.132±0.001 s  |
-| 100 MB           | 0.148±0.000 s | 0.150±0.002 s   | 0.120±0.003 s | 0.133±0.006 s | 0.572±0.006 s | 0.263±0.002 s  |
-| 250 MB           | 0.367±0.001 s | 0.368±0.000 s   | 0.295±0.007 s | 0.336±0.005 s | 1.393±0.003 s | 0.653±0.001 s  |
-| 500 MB           | 0.732±0.001 s | 0.732±0.001 s   | 0.578±0.009 s | 0.651±0.014 s | 2.771±0.002 s | 1.310±0.022 s  |
-| 1000 MB          | 1.460±0.001 s | 1.466±0.013 s   | 1.163±0.015 s | 1.304±0.014 s | 5.604±0.016 s | 2.603±0.006 s  |
+| File size (MB)   | z-fasta (.zfi)   | z-fasta (.fai)   | noodles       | rust-bio      |
+|:-----------------|:-----------------|:-----------------|:--------------|:--------------|
+| 1 MB             | 3.30±0.22 ms     | 3.29±0.24 ms     | 3.95±0.11 ms  | 4.08±0.17 ms  |
+| 5 MB             | 6.12±0.12 ms     | 6.08±0.26 ms     | 9.22±1.57 ms  | 9.49±0.16 ms  |
+| 10 MB            | 9.74±0.16 ms     | 9.69±0.21 ms     | 0.014±0.000 s | 0.016±0.000 s |
+| 25 MB            | 0.021±0.000 s    | 0.021±0.000 s    | 0.035±0.005 s | 0.037±0.003 s |
+| 50 MB            | 0.039±0.001 s    | 0.039±0.001 s    | 0.063±0.005 s | 0.069±0.002 s |
+| 100 MB           | 0.074±0.000 s    | 0.075±0.000 s    | 0.119±0.003 s | 0.140±0.005 s |
+| 250 MB           | 0.182±0.001 s    | 0.184±0.002 s    | 0.299±0.012 s | 0.342±0.009 s |
+| 500 MB           | 0.360±0.001 s    | 0.361±0.002 s    | 0.594±0.018 s | 0.679±0.012 s |
 
 <details><summary><strong>Table 8:</strong> Time x = peer / z-fasta at each point.</summary>
 
-| File size (MB)   | z-fasta vs    | z-fasta   | Peer    | Time x   |
-|:-----------------|:--------------|:----------|:--------|:---------|
-| 1 MB             | z-fasta (fai) | 0.0036s   | 0.0037s | 1.03x    |
-| 1 MB             | noodles       | 0.0036s   | 0.0036s | 0.999x   |
-| 1 MB             | rust-bio      | 0.0036s   | 0.0037s | 1.04x    |
-| 1 MB             | seqkit        | 0.0036s   | 0.0276s | 7.75x    |
-| 1 MB             | seqtk (comp)  | 0.0036s   | 0.0051s | 1.43x    |
-| 5 MB             | z-fasta (fai) | 0.0094s   | 0.0097s | 1.03x    |
-| 5 MB             | noodles       | 0.0094s   | 0.0081s | 0.860x   |
-| 5 MB             | rust-bio      | 0.0094s   | 0.0088s | 0.936x   |
-| 5 MB             | seqkit        | 0.0094s   | 0.0499s | 5.31x    |
-| 5 MB             | seqtk (comp)  | 0.0094s   | 0.0156s | 1.66x    |
-| 10 MB            | z-fasta (fai) | 0.0169s   | 0.0170s | 1.01x    |
-| 10 MB            | noodles       | 0.0169s   | 0.0150s | 0.890x   |
-| 10 MB            | rust-bio      | 0.0169s   | 0.0152s | 0.899x   |
-| 10 MB            | seqkit        | 0.0169s   | 0.0780s | 4.62x    |
-| 10 MB            | seqtk (comp)  | 0.0169s   | 0.0286s | 1.70x    |
-| 25 MB            | z-fasta (fai) | 0.0394s   | 0.0391s | 0.993x   |
-| 25 MB            | noodles       | 0.0394s   | 0.0323s | 0.822x   |
-| 25 MB            | rust-bio      | 0.0394s   | 0.0362s | 0.920x   |
-| 25 MB            | seqkit        | 0.0394s   | 0.1598s | 4.06x    |
-| 25 MB            | seqtk (comp)  | 0.0394s   | 0.0675s | 1.71x    |
-| 50 MB            | z-fasta (fai) | 0.0756s   | 0.0756s | 1.00x    |
-| 50 MB            | noodles       | 0.0756s   | 0.0626s | 0.828x   |
-| 50 MB            | rust-bio      | 0.0756s   | 0.0669s | 0.885x   |
-| 50 MB            | seqkit        | 0.0756s   | 0.2966s | 3.92x    |
-| 50 MB            | seqtk (comp)  | 0.0756s   | 0.1325s | 1.75x    |
-| 100 MB           | z-fasta (fai) | 0.1484s   | 0.1498s | 1.01x    |
-| 100 MB           | noodles       | 0.1484s   | 0.1204s | 0.811x   |
-| 100 MB           | rust-bio      | 0.1484s   | 0.1335s | 0.900x   |
-| 100 MB           | seqkit        | 0.1484s   | 0.5716s | 3.85x    |
-| 100 MB           | seqtk (comp)  | 0.1484s   | 0.2631s | 1.77x    |
-| 250 MB           | z-fasta (fai) | 0.3668s   | 0.3676s | 1.00x    |
-| 250 MB           | noodles       | 0.3668s   | 0.2951s | 0.804x   |
-| 250 MB           | rust-bio      | 0.3668s   | 0.3362s | 0.916x   |
-| 250 MB           | seqkit        | 0.3668s   | 1.3934s | 3.80x    |
-| 250 MB           | seqtk (comp)  | 0.3668s   | 0.6529s | 1.78x    |
-| 500 MB           | z-fasta (fai) | 0.7319s   | 0.7320s | 1.00x    |
-| 500 MB           | noodles       | 0.7319s   | 0.5782s | 0.790x   |
-| 500 MB           | rust-bio      | 0.7319s   | 0.6509s | 0.889x   |
-| 500 MB           | seqkit        | 0.7319s   | 2.7707s | 3.79x    |
-| 500 MB           | seqtk (comp)  | 0.7319s   | 1.3099s | 1.79x    |
-| 1000 MB          | z-fasta (fai) | 1.4596s   | 1.4663s | 1.00x    |
-| 1000 MB          | noodles       | 1.4596s   | 1.1632s | 0.797x   |
-| 1000 MB          | rust-bio      | 1.4596s   | 1.3036s | 0.893x   |
-| 1000 MB          | seqkit        | 1.4596s   | 5.6040s | 3.84x    |
-| 1000 MB          | seqtk (comp)  | 1.4596s   | 2.6029s | 1.78x    |
+| File size (MB)   | z-fasta vs     | z-fasta   | Peer    | Time x   |
+|:-----------------|:---------------|:----------|:--------|:---------|
+| 1 MB             | z-fasta (.fai) | 0.0033s   | 0.0033s | 0.997x   |
+| 1 MB             | noodles        | 0.0033s   | 0.0040s | 1.20x    |
+| 1 MB             | rust-bio       | 0.0033s   | 0.0041s | 1.24x    |
+| 5 MB             | z-fasta (.fai) | 0.0061s   | 0.0061s | 0.993x   |
+| 5 MB             | noodles        | 0.0061s   | 0.0092s | 1.51x    |
+| 5 MB             | rust-bio       | 0.0061s   | 0.0095s | 1.55x    |
+| 10 MB            | z-fasta (.fai) | 0.0097s   | 0.0097s | 0.995x   |
+| 10 MB            | noodles        | 0.0097s   | 0.0142s | 1.46x    |
+| 10 MB            | rust-bio       | 0.0097s   | 0.0160s | 1.64x    |
+| 25 MB            | z-fasta (.fai) | 0.0209s   | 0.0210s | 1.01x    |
+| 25 MB            | noodles        | 0.0209s   | 0.0353s | 1.69x    |
+| 25 MB            | rust-bio       | 0.0209s   | 0.0372s | 1.78x    |
+| 50 MB            | z-fasta (.fai) | 0.0390s   | 0.0387s | 0.992x   |
+| 50 MB            | noodles        | 0.0390s   | 0.0633s | 1.62x    |
+| 50 MB            | rust-bio       | 0.0390s   | 0.0694s | 1.78x    |
+| 100 MB           | z-fasta (.fai) | 0.0743s   | 0.0746s | 1.00x    |
+| 100 MB           | noodles        | 0.0743s   | 0.1191s | 1.60x    |
+| 100 MB           | rust-bio       | 0.0743s   | 0.1396s | 1.88x    |
+| 250 MB           | z-fasta (.fai) | 0.1818s   | 0.1836s | 1.01x    |
+| 250 MB           | noodles        | 0.1818s   | 0.2992s | 1.65x    |
+| 250 MB           | rust-bio       | 0.1818s   | 0.3419s | 1.88x    |
+| 500 MB           | z-fasta (.fai) | 0.3603s   | 0.3612s | 1.00x    |
+| 500 MB           | noodles        | 0.3603s   | 0.5943s | 1.65x    |
+| 500 MB           | rust-bio       | 0.3603s   | 0.6790s | 1.88x    |
 
 </details>
 
 <details><summary><strong>Table 9:</strong> Peak RSS (MB) by File size (MB).</summary>
 
-| File size (MB)   | z-fasta       | z-fasta (fai)   | noodles     | rust-bio    | seqkit      | seqtk (comp)   |
-|:-----------------|:--------------|:----------------|:------------|:------------|:------------|:---------------|
-| 1 MB             | 3.4±0.1 MB    | 3.3±0.0 MB      | 3.4±0.1 MB  | 3.4±0.1 MB  | 23.1±5.0 MB | 3.4±0.1 MB     |
-| 5 MB             | 5.8±0.0 MB    | 5.8±0.0 MB      | 3.4±0.1 MB  | 3.4±0.0 MB  | 21.4±4.8 MB | 3.4±0.0 MB     |
-| 10 MB            | 10.8±0.0 MB   | 10.8±0.0 MB     | 3.4±0.1 MB  | 3.4±0.1 MB  | 20.7±4.6 MB | 3.3±0.0 MB     |
-| 25 MB            | 26.0±0.0 MB   | 26.0±0.0 MB     | 3.4±0.0 MB  | 3.4±0.0 MB  | 21.4±4.9 MB | 3.4±0.1 MB     |
-| 50 MB            | 51.3±0.0 MB   | 51.3±0.0 MB     | 3.4±0.1 MB  | 3.3±0.0 MB  | 22.4±4.6 MB | 3.4±0.1 MB     |
-| 100 MB           | 101.8±0.0 MB  | 101.8±0.0 MB    | 3.4±0.1 MB  | 3.4±0.1 MB  | 21.3±3.2 MB | 3.4±0.1 MB     |
-| 250 MB           | 253.7±0.1 MB  | 253.8±0.0 MB    | 4.4±0.0 MB  | 4.5±0.1 MB  | 25.2±4.0 MB | 4.5±0.1 MB     |
-| 500 MB           | 506.8±0.0 MB  | 506.8±0.0 MB    | 6.9±0.0 MB  | 6.9±0.0 MB  | 27.4±0.8 MB | 6.9±0.1 MB     |
-| 1000 MB          | 1013.0±0.0 MB | 1013.0±0.0 MB   | 11.9±0.1 MB | 11.9±0.1 MB | 57.5±0.8 MB | 12.0±0.1 MB    |
+| File size (MB)   | z-fasta (.zfi)   | z-fasta (.fai)   | noodles    | rust-bio   |
+|:-----------------|:-----------------|:-----------------|:-----------|:-----------|
+| 1 MB             | 3.3±0.0 MB       | 3.2±0.1 MB       | 3.2±0.1 MB | 3.2±0.1 MB |
+| 5 MB             | 3.2±0.1 MB       | 3.2±0.1 MB       | 3.1±0.1 MB | 3.2±0.1 MB |
+| 10 MB            | 3.2±0.1 MB       | 3.3±0.1 MB       | 3.2±0.1 MB | 3.2±0.1 MB |
+| 25 MB            | 3.3±0.1 MB       | 3.3±0.0 MB       | 3.2±0.1 MB | 3.2±0.1 MB |
+| 50 MB            | 3.3±0.1 MB       | 3.2±0.1 MB       | 3.2±0.1 MB | 3.2±0.1 MB |
+| 100 MB           | 3.2±0.1 MB       | 3.3±0.1 MB       | 3.3±0.0 MB | 3.2±0.1 MB |
+| 250 MB           | 3.3±0.1 MB       | 3.3±0.1 MB       | 4.4±0.0 MB | 4.4±0.0 MB |
+| 500 MB           | 3.3±0.1 MB       | 3.2±0.1 MB       | 6.8±0.1 MB | 6.9±0.1 MB |
 
 </details>
 
 <details><summary><strong>Table 10:</strong> RSS x = peer / z-fasta.</summary>
 
-| File size (MB)   | z-fasta vs    | z-fasta   | Peer      | RSS x   |
-|:-----------------|:--------------|:----------|:----------|:--------|
-| 1 MB             | z-fasta (fai) | 3.4 MB    | 3.3 MB    | 0.995x  |
-| 1 MB             | noodles       | 3.4 MB    | 3.4 MB    | 1.01x   |
-| 1 MB             | rust-bio      | 3.4 MB    | 3.4 MB    | 1.01x   |
-| 1 MB             | seqkit        | 3.4 MB    | 23.1 MB   | 6.87x   |
-| 1 MB             | seqtk (comp)  | 3.4 MB    | 3.4 MB    | 1.01x   |
-| 5 MB             | z-fasta (fai) | 5.8 MB    | 5.8 MB    | 0.999x  |
-| 5 MB             | noodles       | 5.8 MB    | 3.4 MB    | 0.586x  |
-| 5 MB             | rust-bio      | 5.8 MB    | 3.4 MB    | 0.588x  |
-| 5 MB             | seqkit        | 5.8 MB    | 21.4 MB   | 3.70x   |
-| 5 MB             | seqtk (comp)  | 5.8 MB    | 3.4 MB    | 0.580x  |
-| 10 MB            | z-fasta (fai) | 10.8 MB   | 10.8 MB   | 0.999x  |
-| 10 MB            | noodles       | 10.8 MB   | 3.4 MB    | 0.313x  |
-| 10 MB            | rust-bio      | 10.8 MB   | 3.4 MB    | 0.317x  |
-| 10 MB            | seqkit        | 10.8 MB   | 20.7 MB   | 1.92x   |
-| 10 MB            | seqtk (comp)  | 10.8 MB   | 3.3 MB    | 0.308x  |
-| 25 MB            | z-fasta (fai) | 26.0 MB   | 26.0 MB   | 1.000x  |
-| 25 MB            | noodles       | 26.0 MB   | 3.4 MB    | 0.130x  |
-| 25 MB            | rust-bio      | 26.0 MB   | 3.4 MB    | 0.130x  |
-| 25 MB            | seqkit        | 26.0 MB   | 21.4 MB   | 0.822x  |
-| 25 MB            | seqtk (comp)  | 26.0 MB   | 3.4 MB    | 0.132x  |
-| 50 MB            | z-fasta (fai) | 51.3 MB   | 51.3 MB   | 1.000x  |
-| 50 MB            | noodles       | 51.3 MB   | 3.4 MB    | 0.067x  |
-| 50 MB            | rust-bio      | 51.3 MB   | 3.3 MB    | 0.065x  |
-| 50 MB            | seqkit        | 51.3 MB   | 22.4 MB   | 0.436x  |
-| 50 MB            | seqtk (comp)  | 51.3 MB   | 3.4 MB    | 0.066x  |
-| 100 MB           | z-fasta (fai) | 101.8 MB  | 101.8 MB  | 1.000x  |
-| 100 MB           | noodles       | 101.8 MB  | 3.4 MB    | 0.034x  |
-| 100 MB           | rust-bio      | 101.8 MB  | 3.4 MB    | 0.034x  |
-| 100 MB           | seqkit        | 101.8 MB  | 21.3 MB   | 0.210x  |
-| 100 MB           | seqtk (comp)  | 101.8 MB  | 3.4 MB    | 0.033x  |
-| 250 MB           | z-fasta (fai) | 253.7 MB  | 253.8 MB  | 1.00x   |
-| 250 MB           | noodles       | 253.7 MB  | 4.4 MB    | 0.017x  |
-| 250 MB           | rust-bio      | 253.7 MB  | 4.5 MB    | 0.018x  |
-| 250 MB           | seqkit        | 253.7 MB  | 25.2 MB   | 0.099x  |
-| 250 MB           | seqtk (comp)  | 253.7 MB  | 4.5 MB    | 0.018x  |
-| 500 MB           | z-fasta (fai) | 506.8 MB  | 506.8 MB  | 1.000x  |
-| 500 MB           | noodles       | 506.8 MB  | 6.9 MB    | 0.014x  |
-| 500 MB           | rust-bio      | 506.8 MB  | 6.9 MB    | 0.014x  |
-| 500 MB           | seqkit        | 506.8 MB  | 27.4 MB   | 0.054x  |
-| 500 MB           | seqtk (comp)  | 506.8 MB  | 6.9 MB    | 0.014x  |
-| 1000 MB          | z-fasta (fai) | 1013.0 MB | 1013.0 MB | 1.000x  |
-| 1000 MB          | noodles       | 1013.0 MB | 11.9 MB   | 0.012x  |
-| 1000 MB          | rust-bio      | 1013.0 MB | 11.9 MB   | 0.012x  |
-| 1000 MB          | seqkit        | 1013.0 MB | 57.5 MB   | 0.057x  |
-| 1000 MB          | seqtk (comp)  | 1013.0 MB | 12.0 MB   | 0.012x  |
+| File size (MB)   | z-fasta vs     | z-fasta   | Peer   | RSS x   |
+|:-----------------|:---------------|:----------|:-------|:--------|
+| 1 MB             | z-fasta (.fai) | 3.3 MB    | 3.2 MB | 0.970x  |
+| 1 MB             | noodles        | 3.3 MB    | 3.2 MB | 0.975x  |
+| 1 MB             | rust-bio       | 3.3 MB    | 3.2 MB | 0.969x  |
+| 5 MB             | z-fasta (.fai) | 3.2 MB    | 3.2 MB | 0.996x  |
+| 5 MB             | noodles        | 3.2 MB    | 3.1 MB | 0.967x  |
+| 5 MB             | rust-bio       | 3.2 MB    | 3.2 MB | 0.979x  |
+| 10 MB            | z-fasta (.fai) | 3.2 MB    | 3.3 MB | 1.01x   |
+| 10 MB            | noodles        | 3.2 MB    | 3.2 MB | 1.000x  |
+| 10 MB            | rust-bio       | 3.2 MB    | 3.2 MB | 0.997x  |
+| 25 MB            | z-fasta (.fai) | 3.3 MB    | 3.3 MB | 1.01x   |
+| 25 MB            | noodles        | 3.3 MB    | 3.2 MB | 0.982x  |
+| 25 MB            | rust-bio       | 3.3 MB    | 3.2 MB | 0.996x  |
+| 50 MB            | z-fasta (.fai) | 3.3 MB    | 3.2 MB | 0.992x  |
+| 50 MB            | noodles        | 3.3 MB    | 3.2 MB | 0.973x  |
+| 50 MB            | rust-bio       | 3.3 MB    | 3.2 MB | 0.986x  |
+| 100 MB           | z-fasta (.fai) | 3.2 MB    | 3.3 MB | 1.03x   |
+| 100 MB           | noodles        | 3.2 MB    | 3.3 MB | 1.03x   |
+| 100 MB           | rust-bio       | 3.2 MB    | 3.2 MB | 1.02x   |
+| 250 MB           | z-fasta (.fai) | 3.3 MB    | 3.3 MB | 1.00x   |
+| 250 MB           | noodles        | 3.3 MB    | 4.4 MB | 1.35x   |
+| 250 MB           | rust-bio       | 3.3 MB    | 4.4 MB | 1.37x   |
+| 500 MB           | z-fasta (.fai) | 3.3 MB    | 3.2 MB | 0.989x  |
+| 500 MB           | noodles        | 3.3 MB    | 6.8 MB | 2.09x   |
+| 500 MB           | rust-bio       | 3.3 MB    | 6.9 MB | 2.12x   |
 
 </details>
 
 <details><summary><strong>Table 11:</strong> Minor page faults by File size (MB).</summary>
 
-| File size (MB)   | z-fasta   | z-fasta (fai)   | noodles   | rust-bio   | seqkit    | seqtk (comp)   |
-|:-----------------|:----------|:----------------|:----------|:-----------|:----------|:---------------|
-| 1 MB             | 313±2     | 323±3           | 300±3     | 304±3      | 4601±1501 | 308±1          |
-| 5 MB             | 346±2     | 356±2           | 313±4     | 312±1      | 4082±1419 | 319±2          |
-| 10 MB            | 389±2     | 397±2           | 357±2     | 354±4      | 4091±1269 | 350±2          |
-| 25 MB            | 513±3     | 520±3           | 426±2     | 432±3      | 4138±1344 | 385±4          |
-| 50 MB            | 718±2     | 725±3           | 558±3     | 560±2      | 4317±1274 | 449±4          |
-| 100 MB           | 1128±3    | 1138±2          | 810±3     | 814±3      | 4007±1137 | 575±2          |
-| 250 MB           | 2355±3    | 2362±3          | 1585±3    | 1581±3     | 5204±1061 | 959±4          |
-| 500 MB           | 4403±3    | 4415±2          | 2865±2    | 2860±2     | 5761±122  | 1603±1         |
-| 1000 MB          | 8506±3    | 8514±3          | 5422±3    | 5418±1     | 13296±176 | 2881±3         |
+| File size (MB)   | z-fasta (.zfi)   | z-fasta (.fai)   | noodles   | rust-bio   |
+|:-----------------|:-----------------|:-----------------|:----------|:-----------|
+| 1 MB             | 373±2            | 375±3            | 311±4     | 314±4      |
+| 5 MB             | 372±3            | 373±3            | 320±3     | 324±3      |
+| 10 MB            | 372±4            | 376±2            | 365±1     | 364±4      |
+| 25 MB            | 372±3            | 374±4            | 436±3     | 440±2      |
+| 50 MB            | 371±3            | 376±3            | 565±2     | 570±2      |
+| 100 MB           | 371±2            | 375±2            | 823±2     | 825±4      |
+| 250 MB           | 373±3            | 375±3            | 1594±3    | 1592±4     |
+| 500 MB           | 372±3            | 377±4            | 2873±3    | 2873±3     |
 
 </details>
 
 <details><summary><strong>Table 12:</strong> Faults x = peer / z-fasta.</summary>
 
-| File size (MB)   | z-fasta vs    |   z-fasta |   Peer | Faults x   |
-|:-----------------|:--------------|----------:|-------:|:-----------|
-| 1 MB             | z-fasta (fai) |       313 |    323 | 1.03x      |
-| 1 MB             | noodles       |       313 |    300 | 0.958x     |
-| 1 MB             | rust-bio      |       313 |    304 | 0.971x     |
-| 1 MB             | seqkit        |       313 |   4601 | 14.7x      |
-| 1 MB             | seqtk (comp)  |       313 |    308 | 0.986x     |
-| 5 MB             | z-fasta (fai) |       346 |    356 | 1.03x      |
-| 5 MB             | noodles       |       346 |    313 | 0.904x     |
-| 5 MB             | rust-bio      |       346 |    312 | 0.902x     |
-| 5 MB             | seqkit        |       346 |   4082 | 11.8x      |
-| 5 MB             | seqtk (comp)  |       346 |    319 | 0.921x     |
-| 10 MB            | z-fasta (fai) |       389 |    397 | 1.02x      |
-| 10 MB            | noodles       |       389 |    357 | 0.917x     |
-| 10 MB            | rust-bio      |       389 |    354 | 0.909x     |
-| 10 MB            | seqkit        |       389 |   4091 | 10.5x      |
-| 10 MB            | seqtk (comp)  |       389 |    350 | 0.899x     |
-| 25 MB            | z-fasta (fai) |       513 |    520 | 1.01x      |
-| 25 MB            | noodles       |       513 |    426 | 0.831x     |
-| 25 MB            | rust-bio      |       513 |    432 | 0.843x     |
-| 25 MB            | seqkit        |       513 |   4138 | 8.07x      |
-| 25 MB            | seqtk (comp)  |       513 |    385 | 0.751x     |
-| 50 MB            | z-fasta (fai) |       718 |    725 | 1.01x      |
-| 50 MB            | noodles       |       718 |    558 | 0.777x     |
-| 50 MB            | rust-bio      |       718 |    560 | 0.779x     |
-| 50 MB            | seqkit        |       718 |   4317 | 6.01x      |
-| 50 MB            | seqtk (comp)  |       718 |    449 | 0.625x     |
-| 100 MB           | z-fasta (fai) |      1128 |   1138 | 1.01x      |
-| 100 MB           | noodles       |      1128 |    810 | 0.718x     |
-| 100 MB           | rust-bio      |      1128 |    814 | 0.722x     |
-| 100 MB           | seqkit        |      1128 |   4007 | 3.55x      |
-| 100 MB           | seqtk (comp)  |      1128 |    575 | 0.510x     |
-| 250 MB           | z-fasta (fai) |      2355 |   2362 | 1.00x      |
-| 250 MB           | noodles       |      2355 |   1585 | 0.673x     |
-| 250 MB           | rust-bio      |      2355 |   1581 | 0.671x     |
-| 250 MB           | seqkit        |      2355 |   5204 | 2.21x      |
-| 250 MB           | seqtk (comp)  |      2355 |    959 | 0.407x     |
-| 500 MB           | z-fasta (fai) |      4403 |   4415 | 1.00x      |
-| 500 MB           | noodles       |      4403 |   2865 | 0.651x     |
-| 500 MB           | rust-bio      |      4403 |   2860 | 0.649x     |
-| 500 MB           | seqkit        |      4403 |   5761 | 1.31x      |
-| 500 MB           | seqtk (comp)  |      4403 |   1603 | 0.364x     |
-| 1000 MB          | z-fasta (fai) |      8506 |   8514 | 1.00x      |
-| 1000 MB          | noodles       |      8506 |   5422 | 0.637x     |
-| 1000 MB          | rust-bio      |      8506 |   5418 | 0.637x     |
-| 1000 MB          | seqkit        |      8506 |  13296 | 1.56x      |
-| 1000 MB          | seqtk (comp)  |      8506 |   2881 | 0.339x     |
+| File size (MB)   | z-fasta vs     |   z-fasta |   Peer | Faults x   |
+|:-----------------|:---------------|----------:|-------:|:-----------|
+| 1 MB             | z-fasta (.fai) |       373 |    375 | 1.01x      |
+| 1 MB             | noodles        |       373 |    311 | 0.835x     |
+| 1 MB             | rust-bio       |       373 |    314 | 0.842x     |
+| 5 MB             | z-fasta (.fai) |       372 |    373 | 1.00x      |
+| 5 MB             | noodles        |       372 |    320 | 0.861x     |
+| 5 MB             | rust-bio       |       372 |    324 | 0.873x     |
+| 10 MB            | z-fasta (.fai) |       372 |    376 | 1.01x      |
+| 10 MB            | noodles        |       372 |    365 | 0.982x     |
+| 10 MB            | rust-bio       |       372 |    364 | 0.977x     |
+| 25 MB            | z-fasta (.fai) |       372 |    374 | 1.01x      |
+| 25 MB            | noodles        |       372 |    436 | 1.17x      |
+| 25 MB            | rust-bio       |       372 |    440 | 1.18x      |
+| 50 MB            | z-fasta (.fai) |       371 |    376 | 1.01x      |
+| 50 MB            | noodles        |       371 |    565 | 1.52x      |
+| 50 MB            | rust-bio       |       371 |    570 | 1.53x      |
+| 100 MB           | z-fasta (.fai) |       371 |    375 | 1.01x      |
+| 100 MB           | noodles        |       371 |    823 | 2.22x      |
+| 100 MB           | rust-bio       |       371 |    825 | 2.22x      |
+| 250 MB           | z-fasta (.fai) |       373 |    375 | 1.00x      |
+| 250 MB           | noodles        |       373 |   1594 | 4.28x      |
+| 250 MB           | rust-bio       |       373 |   1592 | 4.27x      |
+| 500 MB           | z-fasta (.fai) |       372 |    377 | 1.01x      |
+| 500 MB           | noodles        |       372 |   2873 | 7.72x      |
+| 500 MB           | rust-bio       |       372 |   2873 | 7.72x      |
 
 </details>
 
@@ -404,8 +346,8 @@ Synthetic FASTAs under `bench/shared/cache/scaling/` (generated on demand). Inde
 **Reading Figure 2**
 
 - **Facets:** wall time | peak RSS | minor page faults (log-log).
-- **X:** File size (MB). Gold = z-fasta (`.zfi`); diamond = z-fasta (`.fai`); dashed = seqtk (comp).
-- RSS is log-scaled so peer lines stay readable next to mmap-full.
+- **X:** File size (MB). Gold circle = `.zfi`; orange diamond = `.fai`.
+- RSS is log-scaled to show both index formats clearly.
 - Per-point x vs z-fasta: open the Time / RSS / Faults x tables above.
 
 <div style="margin: 1.5em 0"></div>
@@ -423,117 +365,81 @@ Synthetic FASTAs under `bench/shared/cache/scaling/` (generated on demand). Inde
 
 ## Scaling: sequence count (fixed 1024 bp)
 
-Synthetic FASTAs under `bench/shared/cache/scaling/` (generated on demand). Indexes preloaded; timed work is complete `stats` / peers only. Two figures per sweep: absolute wall / RSS / faults, then whether the x vs z-fasta gap grows from the smallest fixture to the largest. Per-point x values stay in the collapsible tables.
+Synthetic FASTAs under `bench/shared/cache/scaling/` (generated on demand). Indexes are preloaded; timed work is complete `stats` only. Two figures per sweep: absolute wall / RSS / faults, then whether the x vs z-fasta gap grows from the smallest fixture to the largest. Per-point x values stay in the collapsible tables.
 
 **Table 13:** Mean ± stddev wall time by Sequence count and tool.
 
-| Sequence count   | z-fasta       | z-fasta (fai)   | noodles       | rust-bio      | seqkit        | seqtk (comp)   |
-|:-----------------|:--------------|:----------------|:--------------|:--------------|:--------------|:---------------|
-| 100,000          | 0.163±0.000 s | 0.182±0.002 s   | 0.197±0.000 s | 0.197±0.002 s | 0.568±0.005 s | 0.366±0.003 s  |
-| 250,000          | 0.428±0.001 s | 0.471±0.003 s   | 0.527±0.002 s | 0.519±0.001 s | 1.381±0.010 s | 0.910±0.003 s  |
-| 500,000          | 0.862±0.002 s | 0.950±0.002 s   | 1.089±0.003 s | 1.062±0.008 s | 2.732±0.004 s | 1.822±0.009 s  |
-| 1,000,000        | 1.746±0.007 s | 1.904±0.004 s   | 2.231±0.009 s | 2.162±0.009 s | 5.448±0.022 s | 3.639±0.010 s  |
+|   Sequence count | z-fasta (.zfi)   | z-fasta (.fai)   | noodles       | rust-bio      |
+|-----------------:|:-----------------|:-----------------|:--------------|:--------------|
+|          100,000 | 0.076±0.000 s    | 0.087±0.001 s    | 0.203±0.001 s | 0.207±0.008 s |
+|          250,000 | 0.186±0.001 s    | 0.215±0.001 s    | 0.557±0.006 s | 0.543±0.011 s |
+|          500,000 | 0.374±0.001 s    | 0.421±0.004 s    | 1.151±0.023 s | 1.131±0.010 s |
 
 <details><summary><strong>Table 14:</strong> Time x = peer / z-fasta at each point.</summary>
 
-| Sequence count   | z-fasta vs    | z-fasta   | Peer    | Time x   |
-|:-----------------|:--------------|:----------|:--------|:---------|
-| 100,000          | z-fasta (fai) | 0.1629s   | 0.1816s | 1.12x    |
-| 100,000          | noodles       | 0.1629s   | 0.1972s | 1.21x    |
-| 100,000          | rust-bio      | 0.1629s   | 0.1969s | 1.21x    |
-| 100,000          | seqkit        | 0.1629s   | 0.5682s | 3.49x    |
-| 100,000          | seqtk (comp)  | 0.1629s   | 0.3661s | 2.25x    |
-| 250,000          | z-fasta (fai) | 0.4276s   | 0.4712s | 1.10x    |
-| 250,000          | noodles       | 0.4276s   | 0.5269s | 1.23x    |
-| 250,000          | rust-bio      | 0.4276s   | 0.5186s | 1.21x    |
-| 250,000          | seqkit        | 0.4276s   | 1.3811s | 3.23x    |
-| 250,000          | seqtk (comp)  | 0.4276s   | 0.9103s | 2.13x    |
-| 500,000          | z-fasta (fai) | 0.8623s   | 0.9498s | 1.10x    |
-| 500,000          | noodles       | 0.8623s   | 1.0888s | 1.26x    |
-| 500,000          | rust-bio      | 0.8623s   | 1.0616s | 1.23x    |
-| 500,000          | seqkit        | 0.8623s   | 2.7323s | 3.17x    |
-| 500,000          | seqtk (comp)  | 0.8623s   | 1.8220s | 2.11x    |
-| 1,000,000        | z-fasta (fai) | 1.7457s   | 1.9044s | 1.09x    |
-| 1,000,000        | noodles       | 1.7457s   | 2.2314s | 1.28x    |
-| 1,000,000        | rust-bio      | 1.7457s   | 2.1623s | 1.24x    |
-| 1,000,000        | seqkit        | 1.7457s   | 5.4483s | 3.12x    |
-| 1,000,000        | seqtk (comp)  | 1.7457s   | 3.6387s | 2.08x    |
+|   Sequence count | z-fasta vs     | z-fasta   | Peer    | Time x   |
+|-----------------:|:---------------|:----------|:--------|:---------|
+|          100,000 | z-fasta (.fai) | 0.0762s   | 0.0867s | 1.14x    |
+|          100,000 | noodles        | 0.0762s   | 0.2033s | 2.67x    |
+|          100,000 | rust-bio       | 0.0762s   | 0.2070s | 2.72x    |
+|          250,000 | z-fasta (.fai) | 0.1865s   | 0.2148s | 1.15x    |
+|          250,000 | noodles        | 0.1865s   | 0.5572s | 2.99x    |
+|          250,000 | rust-bio       | 0.1865s   | 0.5431s | 2.91x    |
+|          500,000 | z-fasta (.fai) | 0.3744s   | 0.4209s | 1.12x    |
+|          500,000 | noodles        | 0.3744s   | 1.1506s | 3.07x    |
+|          500,000 | rust-bio       | 0.3744s   | 1.1311s | 3.02x    |
 
 </details>
 
 <details><summary><strong>Table 15:</strong> Peak RSS (MB) by Sequence count.</summary>
 
-| Sequence count   | z-fasta       | z-fasta (fai)   | noodles      | rust-bio     | seqkit      | seqtk (comp)   |
-|:-----------------|:--------------|:----------------|:-------------|:-------------|:------------|:---------------|
-| 100,000          | 111.4±0.0 MB  | 124.5±0.1 MB    | 15.1±0.1 MB  | 15.0±0.1 MB  | 21.8±5.3 MB | 3.4±0.0 MB     |
-| 250,000          | 286.7±0.0 MB  | 316.5±0.1 MB    | 41.9±0.1 MB  | 41.9±0.0 MB  | 19.5±3.7 MB | 3.4±0.1 MB     |
-| 500,000          | 573.1±0.1 MB  | 639.2±0.1 MB    | 81.6±0.1 MB  | 81.5±0.2 MB  | 19.3±4.1 MB | 3.3±0.0 MB     |
-| 1,000,000        | 1145.6±0.2 MB | 1253.5±0.1 MB   | 161.1±0.2 MB | 161.1±0.1 MB | 19.7±4.3 MB | 3.4±0.0 MB     |
+|   Sequence count | z-fasta (.zfi)   | z-fasta (.fai)   | noodles     | rust-bio    |
+|-----------------:|:-----------------|:-----------------|:------------|:------------|
+|          100,000 | 5.4±0.0 MB       | 8.8±0.0 MB       | 15.1±0.1 MB | 15.0±0.1 MB |
+|          250,000 | 12.2±0.0 MB      | 23.5±0.0 MB      | 41.7±0.1 MB | 41.8±0.1 MB |
+|          500,000 | 23.7±0.0 MB      | 35.0±0.0 MB      | 81.5±0.2 MB | 81.5±0.1 MB |
 
 </details>
 
 <details><summary><strong>Table 16:</strong> RSS x = peer / z-fasta.</summary>
 
-| Sequence count   | z-fasta vs    | z-fasta   | Peer      | RSS x   |
-|:-----------------|:--------------|:----------|:----------|:--------|
-| 100,000          | z-fasta (fai) | 111.4 MB  | 124.5 MB  | 1.12x   |
-| 100,000          | noodles       | 111.4 MB  | 15.1 MB   | 0.135x  |
-| 100,000          | rust-bio      | 111.4 MB  | 15.0 MB   | 0.134x  |
-| 100,000          | seqkit        | 111.4 MB  | 21.8 MB   | 0.196x  |
-| 100,000          | seqtk (comp)  | 111.4 MB  | 3.4 MB    | 0.030x  |
-| 250,000          | z-fasta (fai) | 286.7 MB  | 316.5 MB  | 1.10x   |
-| 250,000          | noodles       | 286.7 MB  | 41.9 MB   | 0.146x  |
-| 250,000          | rust-bio      | 286.7 MB  | 41.9 MB   | 0.146x  |
-| 250,000          | seqkit        | 286.7 MB  | 19.5 MB   | 0.068x  |
-| 250,000          | seqtk (comp)  | 286.7 MB  | 3.4 MB    | 0.012x  |
-| 500,000          | z-fasta (fai) | 573.1 MB  | 639.2 MB  | 1.12x   |
-| 500,000          | noodles       | 573.1 MB  | 81.6 MB   | 0.142x  |
-| 500,000          | rust-bio      | 573.1 MB  | 81.5 MB   | 0.142x  |
-| 500,000          | seqkit        | 573.1 MB  | 19.3 MB   | 0.034x  |
-| 500,000          | seqtk (comp)  | 573.1 MB  | 3.3 MB    | 0.006x  |
-| 1,000,000        | z-fasta (fai) | 1145.6 MB | 1253.5 MB | 1.09x   |
-| 1,000,000        | noodles       | 1145.6 MB | 161.1 MB  | 0.141x  |
-| 1,000,000        | rust-bio      | 1145.6 MB | 161.1 MB  | 0.141x  |
-| 1,000,000        | seqkit        | 1145.6 MB | 19.7 MB   | 0.017x  |
-| 1,000,000        | seqtk (comp)  | 1145.6 MB | 3.4 MB    | 0.003x  |
+|   Sequence count | z-fasta vs     | z-fasta   | Peer    | RSS x   |
+|-----------------:|:---------------|:----------|:--------|:--------|
+|          100,000 | z-fasta (.fai) | 5.4 MB    | 8.8 MB  | 1.61x   |
+|          100,000 | noodles        | 5.4 MB    | 15.1 MB | 2.76x   |
+|          100,000 | rust-bio       | 5.4 MB    | 15.0 MB | 2.75x   |
+|          250,000 | z-fasta (.fai) | 12.2 MB   | 23.5 MB | 1.93x   |
+|          250,000 | noodles        | 12.2 MB   | 41.7 MB | 3.42x   |
+|          250,000 | rust-bio       | 12.2 MB   | 41.8 MB | 3.43x   |
+|          500,000 | z-fasta (.fai) | 23.7 MB   | 35.0 MB | 1.48x   |
+|          500,000 | noodles        | 23.7 MB   | 81.5 MB | 3.44x   |
+|          500,000 | rust-bio       | 23.7 MB   | 81.5 MB | 3.44x   |
 
 </details>
 
 <details><summary><strong>Table 17:</strong> Minor page faults by Sequence count.</summary>
 
-| Sequence count   | z-fasta   | z-fasta (fai)   | noodles   | rust-bio   | seqkit    | seqtk (comp)   |
-|:-----------------|:----------|:----------------|:----------|:-----------|:----------|:---------------|
-| 100,000          | 2919±2    | 7249±2          | 4430±2    | 4399±3     | 4074±1291 | 307±3          |
-| 250,000          | 9232±3    | 19251±2         | 13047±3   | 13012±4    | 3584±1079 | 308±1          |
-| 500,000          | 18154±3   | 39956±1         | 25798±3   | 25763±4    | 3531±1146 | 306±2          |
-| 1,000,000        | 36001±3   | 73317±4         | 51300±2   | 51259±1    | 3465±1109 | 306±4          |
+|   Sequence count | z-fasta (.zfi)   | z-fasta (.fai)   | noodles   | rust-bio   |
+|-----------------:|:-----------------|:-----------------|:----------|:-----------|
+|          100,000 | 573±2            | 2415±3           | 4441±2    | 4412±3     |
+|          250,000 | 866±3            | 6198±3           | 13055±3   | 13023±3    |
+|          500,000 | 1360±2           | 9128±3           | 25806±3   | 25768±3    |
 
 </details>
 
 <details><summary><strong>Table 18:</strong> Faults x = peer / z-fasta.</summary>
 
-| Sequence count   | z-fasta vs    |   z-fasta |   Peer | Faults x   |
-|:-----------------|:--------------|----------:|-------:|:-----------|
-| 100,000          | z-fasta (fai) |      2919 |   7249 | 2.48x      |
-| 100,000          | noodles       |      2919 |   4430 | 1.52x      |
-| 100,000          | rust-bio      |      2919 |   4399 | 1.51x      |
-| 100,000          | seqkit        |      2919 |   4074 | 1.40x      |
-| 100,000          | seqtk (comp)  |      2919 |    307 | 0.105x     |
-| 250,000          | z-fasta (fai) |      9232 |  19251 | 2.09x      |
-| 250,000          | noodles       |      9232 |  13047 | 1.41x      |
-| 250,000          | rust-bio      |      9232 |  13012 | 1.41x      |
-| 250,000          | seqkit        |      9232 |   3584 | 0.388x     |
-| 250,000          | seqtk (comp)  |      9232 |    308 | 0.033x     |
-| 500,000          | z-fasta (fai) |     18154 |  39956 | 2.20x      |
-| 500,000          | noodles       |     18154 |  25798 | 1.42x      |
-| 500,000          | rust-bio      |     18154 |  25763 | 1.42x      |
-| 500,000          | seqkit        |     18154 |   3531 | 0.195x     |
-| 500,000          | seqtk (comp)  |     18154 |    306 | 0.017x     |
-| 1,000,000        | z-fasta (fai) |     36001 |  73317 | 2.04x      |
-| 1,000,000        | noodles       |     36001 |  51300 | 1.42x      |
-| 1,000,000        | rust-bio      |     36001 |  51259 | 1.42x      |
-| 1,000,000        | seqkit        |     36001 |   3465 | 0.096x     |
-| 1,000,000        | seqtk (comp)  |     36001 |    306 | 0.009x     |
+|   Sequence count | z-fasta vs     |   z-fasta |   Peer | Faults x   |
+|-----------------:|:---------------|----------:|-------:|:-----------|
+|          100,000 | z-fasta (.fai) |       573 |   2415 | 4.22x      |
+|          100,000 | noodles        |       573 |   4441 | 7.76x      |
+|          100,000 | rust-bio       |       573 |   4412 | 7.71x      |
+|          250,000 | z-fasta (.fai) |       866 |   6198 | 7.15x      |
+|          250,000 | noodles        |       866 |  13055 | 15.1x      |
+|          250,000 | rust-bio       |       866 |  13023 | 15.0x      |
+|          500,000 | z-fasta (.fai) |      1360 |   9128 | 6.71x      |
+|          500,000 | noodles        |      1360 |  25806 | 19.0x      |
+|          500,000 | rust-bio       |      1360 |  25768 | 18.9x      |
 
 </details>
 
@@ -546,8 +452,8 @@ Synthetic FASTAs under `bench/shared/cache/scaling/` (generated on demand). Inde
 **Reading Figure 4**
 
 - **Facets:** wall time | peak RSS | minor page faults (log-log).
-- **X:** Sequence count. Gold = z-fasta (`.zfi`); diamond = z-fasta (`.fai`); dashed = seqtk (comp).
-- RSS is log-scaled so peer lines stay readable next to mmap-full.
+- **X:** Sequence count. Gold circle = `.zfi`; orange diamond = `.fai`.
+- RSS is log-scaled to show both index formats clearly.
 - Per-point x vs z-fasta: open the Time / RSS / Faults x tables above.
 
 <div style="margin: 1.5em 0"></div>

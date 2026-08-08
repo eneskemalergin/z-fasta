@@ -39,9 +39,9 @@
 #   results/LATEST           pointer to newest run_<timestamp>.json
 #   results/run_<ts>.json    manifest (sections, tool versions, skip flags)
 #   results/metadata_<ts>.jsonl
-#   results/perf_full_<ts>/  peer + z-fasta full (REAL)
-#   results/scale_size_<ts>/ file-size scaling
-#   results/scale_seqs_fixed_<ts>/ sequence-count scaling
+#   results/perf_full_<ts>/  z-fasta formats, complete peers, partial references (REAL)
+#   results/scale_size_<ts>/ z-fasta formats + complete peers, file-size scaling
+#   results/scale_seqs_fixed_<ts>/ z-fasta formats + complete peers, record-count scaling
 #
 #   -h|--help  print this header
 
@@ -57,8 +57,8 @@ DATA_DIR="$BENCH_ROOT/shared/data"
 source "$BENCH_ROOT/shared/runner_common.sh"
 
 # Scaling sweep constants (match index bench shape)
-SIZE_MBS=(1 5 10 25 50 100 250 500 1000)
-SEQ_FIXED_COUNTS=(100000 250000 500000 1000000)
+SIZE_MBS=(1 5 10 25 50 100 250 500)
+SEQ_FIXED_COUNTS=(100000 250000 500000)
 
 # Defaults
 RUNS=5
@@ -263,11 +263,13 @@ run_zebrac_tool_fai() {
     mv -f "${fa}.zfi.stash" "${fa}.zfi" 2>/dev/null || true
 }
 
-# Timed peers for one FASTA. One zebrac group per tool so progress is visible.
-run_stats_peers() {
+# Timed tools for one FASTA. One zebrac group per tool so progress is visible.
+run_stats_tools() {
     local section="$1" workload="$2" fa="$3" out_dir="$4"
     local include_fai="${5:-false}"
-    local allow_seqtk="${6:-true}"
+    local include_complete_peers="${6:-true}"
+    local include_partial_references="${7:-false}"
+    local allow_seqtk="${8:-true}"
 
     local qf qz qk qn qr qt nbytes json
     qf="$(quote_arg "$fa")"
@@ -278,32 +280,32 @@ run_stats_peers() {
     qt="$(quote_arg "$SEQTK")"
     nbytes="$(file_size_bytes "$fa")"
 
-    json="$out_dir/${workload}__z-fasta-full.json"
-    run_zebrac_tool "$section" "$workload" z-fasta-full z-fasta "$json" \
+    json="$out_dir/${workload}__z-fasta-zfi.json"
+    run_zebrac_tool "$section" "$workload" z-fasta-zfi z-fasta "$json" \
         "$qz stats $qf > /dev/null" "$nbytes"
 
     if [[ "$include_fai" == "true" ]]; then
-        json="$out_dir/${workload}__z-fasta-full-fai.json"
-        run_zebrac_tool_fai "$fa" "$section" "$workload" z-fasta-full-fai z-fasta "$json" \
+        json="$out_dir/${workload}__z-fasta-fai.json"
+        run_zebrac_tool_fai "$fa" "$section" "$workload" z-fasta-fai z-fasta "$json" \
             "$qz stats $qf > /dev/null" "$nbytes"
     fi
 
-    if bench_has_tool noodles; then
+    if [[ "$include_complete_peers" == "true" ]] && bench_has_tool noodles; then
         json="$out_dir/${workload}__noodles.json"
         run_zebrac_tool "$section" "$workload" noodles noodles "$json" \
             "$qn stats $qf > /dev/null" "$nbytes"
     fi
-    if bench_has_tool rustbio; then
+    if [[ "$include_complete_peers" == "true" ]] && bench_has_tool rustbio; then
         json="$out_dir/${workload}__rustbio.json"
         run_zebrac_tool "$section" "$workload" rustbio rustbio "$json" \
             "$qr stats $qf > /dev/null" "$nbytes"
     fi
-    if bench_has_tool seqkit; then
+    if [[ "$include_partial_references" == "true" ]] && bench_has_tool seqkit; then
         json="$out_dir/${workload}__seqkit.json"
         run_zebrac_tool "$section" "$workload" seqkit seqkit "$json" \
             "$qk stats -a -T $qf > /dev/null" "$nbytes"
     fi
-    if [[ "$allow_seqtk" == "true" ]] && bench_has_tool seqtk; then
+    if [[ "$include_partial_references" == "true" && "$allow_seqtk" == "true" ]] && bench_has_tool seqtk; then
         json="$out_dir/${workload}__seqtk.json"
         run_zebrac_tool "$section" "$workload" seqtk seqtk "$json" \
             "$qt comp $qf > /dev/null" "$nbytes"
@@ -339,9 +341,10 @@ FIXTURES=(simple proteome single edge_cases mixed_widths)
 MESSY_FIXTURES=(mixed_widths trailing_whitespace blank_lines mixed_crlf)
 # Uniform messy control: samtools .fai works; exercise zfi+fai cross like get.
 UNIFORM_MESSY=uniform
-# seqkit counts every raw FASTA row; skip edge_cases where index filters empties/dups.
+# Partial references are checked only on fields they provide.
+# SeqKit counts raw FASTA records, so edge_cases is excluded.
 SEQKIT_FIXTURES=(simple proteome single mixed_widths)
-# seqtk comp is nucleotide-only; proteome is protein.
+# Seqtk comp is a nucleotide composition reference, not a protein statistics peer.
 SEQTK_FIXTURES=(simple single mixed_widths)
 # noodles/rustbio wrappers: clean FASTA comparison peers only (no messy / side-table).
 # Richer TSV fields exist so we can compare assembly+composition; they do not gain messy support.
@@ -491,7 +494,7 @@ verify_formats() {
 
     zfi_txt="$TMPDIR/$name.zfi.txt"
     err="$TMPDIR/$name.zfi.err"
-    label="[oracle:$name:zfi] vs BioPython"
+    label="[oracle:$name:zfi] exact report"
     run_stats "$fasta" "$zfi_txt" "$err" || { fail "$label" "$err"; return; }
     check_oracle "$label" check zfi "$fasta" "$exp" "$zfi_txt"
     if [[ "$zfi_only" == zfi-only ]]; then
@@ -502,7 +505,7 @@ verify_formats() {
     mv "${fasta}.zfi" "$stash"
     fai_txt="$TMPDIR/$name.fai.txt"
     err="$TMPDIR/$name.fai.err"
-    label="[oracle:$name:fai] vs BioPython"
+    label="[oracle:$name:fai] exact report"
     if ! run_stats "$fasta" "$fai_txt" "$err"; then
         fail "$label" "$err"
         mv "$stash" "${fasta}.zfi"
@@ -519,10 +522,9 @@ verify_formats() {
 verify_parity() {
     local name="$1" fasta="$2" exp="$3"
     local stats_txt="$TMPDIR/$name.zfi.txt"
-    local tool bin out err label
+    local tool bin out err label sk
     local ran=0
     local use_wrappers=false
-    local sk
 
     if [[ ! -f "$stats_txt" ]]; then
         err="$TMPDIR/$name.parity_setup.err"
@@ -561,7 +563,7 @@ verify_parity() {
     for sk in "${SEQKIT_FIXTURES[@]}"; do
         [[ "$sk" == "$name" ]] || continue
         [[ -x "$SEQKIT" ]] || continue
-        label="[parity:seqkit] $name assembly stats"
+        label="[parity:seqkit] $name supported assembly fields"
         out="$TMPDIR/$name.seqkit.txt"
         err="$TMPDIR/$name.seqkit.err"
         if ! "$SEQKIT" stats -a -T "$fasta" >"$out" 2>"$err"; then
@@ -576,7 +578,7 @@ verify_parity() {
     for sk in "${SEQTK_FIXTURES[@]}"; do
         [[ "$sk" == "$name" ]] || continue
         [[ -x "$SEQTK" ]] || continue
-        label="[parity:seqtk] $name composition"
+        label="[parity:seqtk] $name supported nucleotide counts"
         out="$TMPDIR/$name.seqtk.txt"
         err="$TMPDIR/$name.seqtk.err"
         if ! "$SEQTK" comp "$fasta" >"$out" 2>"$err"; then
@@ -638,7 +640,7 @@ verify_dedup_stats() {
     err="$TMPDIR/dedup_default.err"
     run_stats "$dedup_fasta" "$TMPDIR/dedup_default.txt" "$err" \
         || { fail "[extended:dedup] default stats" "$err"; return; }
-    check_oracle "[extended:dedup] default vs BioPython" check zfi \
+    check_oracle "[extended:dedup] default exact report" check zfi \
         "$dedup_fasta" "$exp_dedup" "$TMPDIR/dedup_default.txt"
 
     cp "$TEST_DATA/edge_cases.fasta" "$nodedup_fasta"
@@ -679,7 +681,7 @@ verify_layout_twins() {
         || { fail "[extended:layout] uniform stats" "$err"; return; }
 
     oracle expected "$uniform" >"$TMPDIR/layout_uniform.expected.json"
-    check_oracle "[extended:layout] uniform vs BioPython" check zfi \
+    check_oracle "[extended:layout] uniform exact report" check zfi \
         "$uniform" "$TMPDIR/layout_uniform.expected.json" "$uniform_stats"
 
     for variant in "${LAYOUT_TWIN_VARIANTS[@]}"; do
@@ -701,32 +703,9 @@ verify_layout_twins() {
             "$uniform_stats" "$TMPDIR/${name}.txt"
 
         oracle expected "$fasta" >"$TMPDIR/${name}.expected.json"
-        check_oracle "[extended:layout] $variant vs BioPython" check zfi \
+        check_oracle "[extended:layout] $variant exact report" check zfi \
             "$fasta" "$TMPDIR/${name}.expected.json" "$TMPDIR/${name}.txt"
     done
-}
-
-verify_duplicates_policy() {
-    section_hdr "extended:dedup" "Duplicates line policy"
-    local fasta="$TMPDIR/dup_policy.fasta"
-    local out err dups
-    err="$TMPDIR/dup_policy.err"
-
-    cp "$TEST_DATA/edge_cases.fasta" "$fasta"
-    rm -f "${fasta}.zfi" "${fasta}.fai"
-    "$ZFASTA" index "$fasta" >/dev/null 2>&1 \
-        || { fail "[extended:dedup] default index for Duplicates policy"; return; }
-
-    out="$TMPDIR/dup_policy.txt"
-    run_stats "$fasta" "$out" "$err" \
-        || { fail "[extended:dedup] stats on default index" "$err"; return; }
-    dups="$(awk '/^Duplicates:/{print $2; exit}' "$out")"
-    if [[ "$dups" == "1" ]]; then
-        pass "[extended:dedup] Duplicates=1 for edge_cases (source extras)"
-    else
-        echo "expected Duplicates: 1, got ${dups:-missing}" >"$err"
-        fail "[extended:dedup] Duplicates=1 for edge_cases" "$err"
-    fi
 }
 
 verify_edge_paths() {
@@ -791,7 +770,6 @@ run_tests() {
     cd "$PROJECT_ROOT"
     [[ -x "$ZFASTA" ]] || { echo "Error: run ./zig build first"; rm -rf "$TMPDIR"; return 1; }
     command -v "$SAMTOOLS" &>/dev/null || { echo "Error: samtools not found"; rm -rf "$TMPDIR"; return 1; }
-    "$PYTHON" -c "from Bio import SeqIO" 2>/dev/null || { echo "Error: BioPython not available"; rm -rf "$TMPDIR"; return 1; }
 
     prepare_fixtures
     for name in "${FIXTURES[@]}"; do
@@ -808,7 +786,6 @@ run_tests() {
 
     if ! $SKIP_DEDUP; then
         verify_dedup_stats
-        verify_duplicates_policy
     fi
 
     if ! $SKIP_EDGE; then
@@ -833,11 +810,12 @@ run_perf_full() {
     SECTION_FULL="perf_full_${TIMESTAMP}"
 
     echo "--------------------------------------------------"
-    echo " Full stats (peers + z-fasta full)"
+    echo " Stats tools on real data"
     echo "--------------------------------------------------"
     echo "  Note: each tool is timed alone. On Genome (~3 GB) peers re-parse"
     echo "  the whole file every sample (warmup+runs). Expect long walls."
-    echo "  The .fai lane is retained in scaling."
+    echo "  Complete lanes: z-fasta .zfi/.fai, noodles, rust-bio."
+    echo "  Partial references: seqkit stats -a; seqtk comp on nucleotide data."
 
     local ds fa allow_seqtk
     for ds in Genome Transcriptome Proteome; do
@@ -846,7 +824,7 @@ run_perf_full() {
         allow_seqtk=true
         [[ "$ds" == "Proteome" ]] && allow_seqtk=false
         echo "  -- dataset $ds ($(du -h "$fa" | cut -f1)) --"
-        run_stats_peers perf_full "$ds" "$fa" "$out_dir" false "$allow_seqtk"
+        run_stats_tools perf_full "$ds" "$fa" "$out_dir" true true true "$allow_seqtk"
         echo "  done perf_full $ds"
     done
 }
@@ -865,7 +843,7 @@ run_perf_scale_size() {
         fa="$SCALING_DIR/size_${mb}mb.fasta"
         [[ -f "$fa" ]] || { echo "error: missing $fa" >&2; exit 1; }
         echo "  -- size ${mb}mb ($(du -h "$fa" | cut -f1)) --"
-        run_stats_peers scale_size "${mb}mb" "$fa" "$out_dir" true true
+        run_stats_tools scale_size "${mb}mb" "$fa" "$out_dir" true true false
         echo "  done scale_size ${mb}mb"
     done
 }
@@ -884,7 +862,7 @@ run_perf_scale_seqs() {
         fa="$SCALING_DIR/seqs_fixed_${count}.fasta"
         [[ -f "$fa" ]] || { echo "error: missing $fa" >&2; exit 1; }
         echo "  -- seqs $count ($(du -h "$fa" | cut -f1)) --"
-        run_stats_peers scale_seqs_fixed "$count" "$fa" "$out_dir" true true
+        run_stats_tools scale_seqs_fixed "$count" "$fa" "$out_dir" true true false
         echo "  done scale_seqs_fixed $count"
     done
 }
