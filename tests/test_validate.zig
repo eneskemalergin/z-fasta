@@ -3,13 +3,14 @@
 //! Also covers validator/indexer agreement on `tests/data/validator_indexer_agreement.fasta`.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const main = @import("main");
+const utility = @import("utility.zig");
 
 const io = std.testing.io;
 const validator = main.validator;
 
-const ZFASTA_BIN = if (builtin.os.tag == .windows) "zig-out\\bin\\z-fasta.exe" else "zig-out/bin/z-fasta";
+const ZFASTA_BIN = utility.ZFASTA_BIN;
+const expectCliResult = utility.expectCliResult;
 
 fn countKind(summary: *const validator.Summary, kind: validator.Kind) usize {
     var count: usize = 0;
@@ -61,15 +62,8 @@ fn readTestFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return data;
 }
 
-fn uniqueArtifactPath(allocator: std.mem.Allocator, stem: []const u8) ![]u8 {
-    try std.Io.Dir.cwd().createDirPath(io, "zig-cache/test-artifacts");
-    const now = std.Io.Clock.Timestamp.now(io, .awake);
-    const nanos: u64 = @intCast(now.raw.toNanoseconds());
-    return std.fmt.allocPrint(allocator, "zig-cache/test-artifacts/{s}-{d}.fa", .{ stem, nanos });
-}
-
 fn writeFastaArtifact(allocator: std.mem.Allocator, stem: []const u8, data: []const u8) ![]u8 {
-    const path = try uniqueArtifactPath(allocator, stem);
+    const path = try utility.uniqueArtifactPath(allocator, stem, "fa");
     errdefer allocator.free(path);
     errdefer std.Io.Dir.cwd().deleteFile(io, path) catch {};
     const file = try std.Io.Dir.cwd().createFile(io, path, .{});
@@ -184,6 +178,78 @@ fn zfiEmbeddedName(index: *const main.indexer.ZfiIndex, rec_idx: usize) []const 
 }
 
 // --- Unit tests ---
+
+test "[cli] - [validate]: rejects unknown options regardless of position" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const fasta = "tests/data/simple.fasta";
+
+    try expectCliResult(
+        allocator,
+        &.{ ZFASTA_BIN, "validate", "--not-a-flag", fasta },
+        1,
+        "",
+        "error: unknown option: --not-a-flag\n",
+    );
+    try expectCliResult(
+        allocator,
+        &.{ ZFASTA_BIN, "validate", fasta, "--not-a-flag" },
+        1,
+        "",
+        "error: unknown option: --not-a-flag\n",
+    );
+}
+
+test "[cli] - [validate]: rejects invalid option combinations and paths" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const cases = [_]struct { argv: []const []const u8, stderr: []const u8 }{
+        .{
+            .argv = &.{ ZFASTA_BIN, "validate", "--summary", "tests/data/simple.fasta" },
+            .stderr = "error: validate --summary requires --json\n",
+        },
+        .{
+            .argv = &.{ ZFASTA_BIN, "validate", "--fix-format-only", "tests/data/simple.fasta" },
+            .stderr = "error: validate --fix-format-only requires --fix\n",
+        },
+        .{
+            .argv = &.{ ZFASTA_BIN, "validate", "-o", "zig-cache/test-artifacts/unused.fasta", "tests/data/simple.fasta" },
+            .stderr = "error: validate -o requires --fix\n",
+        },
+        .{
+            .argv = &.{ ZFASTA_BIN, "validate" },
+            .stderr = "error: usage: z-fasta validate [options] <file.fasta>\n",
+        },
+        .{
+            .argv = &.{ ZFASTA_BIN, "validate", "tests/data/definitely-missing-cli-failure.fasta" },
+            .stderr = "error: file not found: tests/data/definitely-missing-cli-failure.fasta\n",
+        },
+    };
+    for (cases) |case| {
+        try expectCliResult(allocator, case.argv, 1, "", case.stderr);
+    }
+}
+
+test "[cli] - [validate]: warnings use exit 2 and exact stdout" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const path = try writeFastaArtifact(allocator, "cli-validate-warn", ">empty_rec\n");
+    defer allocator.free(path);
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    try expectCliResult(
+        allocator,
+        &.{ ZFASTA_BIN, "validate", path },
+        2,
+        "WARNING: line 1: empty sequence 'empty_rec'\n",
+        "",
+    );
+}
 
 test "validateData reports duplicate and empty sequence" {
     var summary = try validator.validateData(std.testing.allocator, ">dup\nAAAA\n>dup\n", .{});
@@ -685,7 +751,7 @@ test "validate --fix succeeds after event list truncation" {
     try std.testing.expect(summary.truncated);
 
     const in_path = try writeFastaArtifact(allocator, "validate-fix-truncated-in", input.items);
-    const out_path = try uniqueArtifactPath(allocator, "validate-fix-truncated-out");
+    const out_path = try utility.uniqueArtifactPath(allocator, "validate-fix-truncated-out", "fa");
     defer std.Io.Dir.cwd().deleteFile(io, in_path) catch {};
     defer std.Io.Dir.cwd().deleteFile(io, out_path) catch {};
 

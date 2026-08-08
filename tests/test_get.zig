@@ -1,167 +1,53 @@
-//! GET unit and CLI tests: region parsing, extraction, and failure-path subprocess checks.
+//! GET integration and CLI tests: region resolution, extraction, and failure paths.
 //!
 //! Includes indexed extraction and exact-exit CLI failure contracts.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const main = @import("main");
-const parseRegion = main.getter.parseRegion;
+const utility = @import("utility.zig");
 const resolveRegion = main.getter.resolveRegion;
 const io = std.testing.io;
 
-const ZFASTA_BIN = if (builtin.os.tag == .windows) "zig-out\\bin\\z-fasta.exe" else "zig-out/bin/z-fasta";
+const ZFASTA_BIN = utility.ZFASTA_BIN;
+const expectCliFailure = utility.expectCliFailure;
+const expectCliSuccess = utility.expectCliSuccess;
+const expectUnknownOptionRejected = utility.expectUnknownOptionRejected;
+const uniqueArtifactPath = utility.uniqueArtifactPath;
 
-// --- Region parsing tests ---
+test "[integration] - [region resolution]: preserves indexed coordinate geometry" {
+    var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta");
+    defer idx.deinit();
 
-test "parseRegion recognizes names and coordinate suffixes" {
     const Case = struct {
-        input: []const u8,
-        name: []const u8,
-        start: u64 = 1,
-        end: ?u64 = null,
-        is_full: bool = true,
+        request: []const u8,
+        start: u64,
+        display_end: u64,
+        num_bases: u64,
+        is_full: bool = false,
     };
     const cases = [_]Case{
-        .{ .input = "chr1", .name = "chr1" },
-        .{ .input = "", .name = "" },
-        .{ .input = "chr1:100-200", .name = "chr1", .start = 100, .end = 200, .is_full = false },
-        .{ .input = "chr1:100-", .name = "chr1", .start = 100, .is_full = false },
-        .{
-            .input = "chromosome:GRCh38:1:1:248956422:1:100-200",
-            .name = "chromosome:GRCh38:1:1:248956422:1",
-            .start = 100,
-            .end = 200,
-            .is_full = false,
-        },
-        .{
-            .input = "chromosome:GRCh38:1:1:248956422:1",
-            .name = "chromosome:GRCh38:1:1:248956422:1",
-        },
-        .{ .input = "sp|P12345|PROT_NAME:1-50", .name = "sp|P12345|PROT_NAME", .end = 50, .is_full = false },
-        .{ .input = "chr1:1-1", .name = "chr1", .end = 1, .is_full = false },
-        .{ .input = "chr1:1000000-2000000", .name = "chr1", .start = 1_000_000, .end = 2_000_000, .is_full = false },
-        .{ .input = "KI270394.1:1-100", .name = "KI270394.1", .end = 100, .is_full = false },
-        .{ .input = "1:1", .name = "1:1" },
-        .{ .input = "chr1.1.2.3", .name = "chr1.1.2.3" },
+        .{ .request = "seq1", .start = 1, .display_end = 24, .num_bases = 24, .is_full = true },
+        .{ .request = "seq1:1-12", .start = 1, .display_end = 12, .num_bases = 12 },
+        .{ .request = "seq1:1-9999", .start = 1, .display_end = 9999, .num_bases = 24 },
+        .{ .request = "seq1:1-1", .start = 1, .display_end = 1, .num_bases = 1 },
+        .{ .request = "seq1:13-", .start = 13, .display_end = 24, .num_bases = 12 },
+        .{ .request = "seq1:24-24", .start = 24, .display_end = 24, .num_bases = 1 },
+        .{ .request = "seq1:1-24", .start = 1, .display_end = 24, .num_bases = 24 },
     };
 
     for (cases) |case| {
-        const region = parseRegion(case.input);
+        const resolved = resolveRegion(&idx, case.request);
 
-        try std.testing.expectEqualStrings(case.name, region.name);
-        try std.testing.expectEqual(case.start, region.start);
-        try std.testing.expectEqual(case.end, region.end);
-        try std.testing.expectEqual(case.is_full, region.is_full);
+        try std.testing.expectEqualStrings("seq1", resolved.name);
+        try std.testing.expectEqual(case.start, resolved.start);
+        try std.testing.expectEqual(case.display_end, resolved.display_end);
+        try std.testing.expectEqual(case.num_bases, resolved.num_bases);
+        try std.testing.expectEqual(case.is_full, resolved.is_full);
+        try std.testing.expectEqual(idx.records[0].seq_offset, resolved.seq_offset);
     }
 }
 
-// --- Index loading tests ---
-
-test "loadIndex - .zfi file" {
-    var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta");
-    defer idx.deinit();
-
-    var first_byte: [1]u8 = undefined;
-    try std.testing.expectEqual(
-        @as(usize, 1),
-        try std.Io.File.readPositionalAll(idx.fasta_file, io, &first_byte, 0),
-    );
-    try std.testing.expectEqual(@as(u8, '>'), first_byte[0]);
-
-    try std.testing.expectEqual(@as(usize, 2), idx.records.len);
-    try std.testing.expectEqual(@as(u64, 24), idx.records[0].seq_len);
-    try std.testing.expectEqual(@as(u64, 12), idx.records[1].seq_len);
-
-    const seq1_idx = idx.lookupName("seq1");
-    try std.testing.expect(seq1_idx != null);
-    try std.testing.expectEqual(@as(usize, 0), seq1_idx.?);
-
-    const seq2_idx = idx.lookupName("seq2");
-    try std.testing.expect(seq2_idx != null);
-    try std.testing.expectEqual(@as(usize, 1), seq2_idx.?);
-
-    try std.testing.expectEqual(@as(?usize, null), idx.lookupName("nonexistent"));
-}
-
-// --- Multi-region resolution tests ---
-
-test "resolveRegion - single region, full sequence" {
-    var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta");
-    defer idx.deinit();
-
-    const r = resolveRegion(&idx, "seq1");
-
-    try std.testing.expectEqualStrings("seq1", r.name);
-    try std.testing.expect(r.is_full);
-    try std.testing.expectEqual(@as(u64, 24), r.num_bases);
-}
-
-test "resolveRegion - single region, sub-range" {
-    var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta");
-    defer idx.deinit();
-
-    const r = resolveRegion(&idx, "seq1:1-12");
-
-    try std.testing.expectEqualStrings("seq1", r.name);
-    try std.testing.expect(!r.is_full);
-    try std.testing.expectEqual(@as(u64, 12), r.num_bases);
-    try std.testing.expectEqual(@as(u64, 1), r.start);
-    try std.testing.expectEqual(@as(u64, 12), r.display_end);
-}
-
-test "resolveRegion - end clamped silently" {
-    var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta");
-    defer idx.deinit();
-
-    const r = resolveRegion(&idx, "seq1:1-9999");
-
-    try std.testing.expectEqual(@as(u64, 24), r.num_bases);
-    try std.testing.expectEqual(@as(u64, 9999), r.display_end);
-}
-
-test "resolveRegion - first base resolves one symbol" {
-    var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta");
-    defer idx.deinit();
-
-    const r = resolveRegion(&idx, "seq1:1-1");
-
-    try std.testing.expectEqual(@as(u64, 1), r.num_bases);
-}
-
-// --- resolveRegion edge cases ---
-
-test "resolveRegion - open-ended region (NAME:START-) uses seq_len as end" {
-    var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta");
-    defer idx.deinit();
-
-    const r = resolveRegion(&idx, "seq1:13-");
-
-    try std.testing.expect(!r.is_full);
-    try std.testing.expectEqual(@as(u64, 12), r.num_bases);
-    try std.testing.expectEqual(@as(u64, 24), r.display_end);
-}
-
-test "resolveRegion - last-base region" {
-    var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta");
-    defer idx.deinit();
-
-    const r = resolveRegion(&idx, "seq1:24-24");
-
-    try std.testing.expectEqual(@as(u64, 1), r.num_bases);
-}
-
-test "resolveRegion - full and explicit ranges preserve geometry" {
-    var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta");
-    defer idx.deinit();
-
-    const r_full = resolveRegion(&idx, "seq1");
-    const r_range = resolveRegion(&idx, "seq1:1-24");
-
-    try std.testing.expectEqual(r_full.seq_offset, r_range.seq_offset);
-    try std.testing.expectEqual(r_full.num_bases, r_range.num_bases);
-}
-
-test "resolveRegion - proteome pipe-delimited name" {
+test "[integration] - [region resolution]: accepts a pipe-delimited protein identifier" {
     var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/proteome.fasta");
     defer idx.deinit();
 
@@ -171,7 +57,7 @@ test "resolveRegion - proteome pipe-delimited name" {
     try std.testing.expectEqual(@as(u64, 10), r.num_bases);
 }
 
-test "resolveRegion - long header name (200-char sequence name)" {
+test "[integration] - [region resolution]: accepts a 200-byte identifier" {
     var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/edge_cases.fasta");
     defer idx.deinit();
 
@@ -185,19 +71,10 @@ test "resolveRegion - long header name (200-char sequence name)" {
 
 // --- Index-backed get fixtures ---
 
-fn uniqueArtifactPath(allocator: std.mem.Allocator, stem: []const u8, ext: []const u8) ![]u8 {
-    try std.Io.Dir.cwd().createDirPath(io, "zig-cache/test-artifacts");
-    const now = std.Io.Clock.Timestamp.now(io, .awake);
-    const nanos: u64 = @intCast(now.raw.toNanoseconds());
-    return std.fmt.allocPrint(allocator, "zig-cache/test-artifacts/{s}-{d}.{s}", .{
-        stem,
-        nanos,
-        ext,
-    });
-}
-
 fn writeFastaArtifact(allocator: std.mem.Allocator, stem: []const u8, data: []const u8) ![]const u8 {
     const path = try uniqueArtifactPath(allocator, stem, "fa");
+    errdefer allocator.free(path);
+    errdefer std.Io.Dir.cwd().deleteFile(io, path) catch {};
     const file = try std.Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
     try std.Io.File.writeStreamingAll(file, io, data);
@@ -230,7 +107,7 @@ fn captureExtractRegion(allocator: std.mem.Allocator, fasta_path: []const u8, re
     return out.toOwnedSlice();
 }
 
-test "get extracts a region across uniform FASTA lines" {
+test "[property] - [get extraction]: zfi and fai match across uniform FASTA lines" {
     const data = @embedFile("data/simple.fasta");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -238,21 +115,38 @@ test "get extracts a region across uniform FASTA lines" {
 
     const path = try writeFastaArtifact(allocator, "get-sam", data);
     const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{path});
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{path});
     defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
 
     try writeZfi(allocator, path, data, true);
 
-    const got = try captureExtractRegion(allocator, path, "seq1:10-15");
+    const zfi_output = try captureExtractRegion(allocator, path, "seq1:10-15");
     const expected =
         \\>seq1:10-15
         \\CGTACG
         \\
     ;
-    try std.testing.expectEqualStrings(expected, got);
+    try std.testing.expectEqualStrings(expected, zfi_output);
+
+    try std.Io.Dir.cwd().deleteFile(io, zfi_path);
+    {
+        const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{});
+        defer fai_file.close(io);
+        try std.Io.File.writeStreamingAll(
+            fai_file,
+            io,
+            "seq1\t24\t20\t12\t13\nseq2\t12\t69\t12\t13\n",
+        );
+    }
+    const fai_output = try captureExtractRegion(allocator, path, "seq1:10-15");
+
+    try std.testing.expectEqualStrings(expected, fai_output);
+    try std.testing.expectEqualStrings(zfi_output, fai_output);
 }
 
-test "get preserves lowercase and nonstandard sequence bytes" {
+test "[integration] - [get extraction]: preserves lowercase and nonstandard bytes" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -264,7 +158,7 @@ test "get preserves lowercase and nonstandard sequence bytes" {
     try std.testing.expectEqualStrings(">nonstandard\nACG*-NACGT\n", nonstandard);
 }
 
-test "get on messy mixed_widths after indexing" {
+test "[integration] - [get extraction]: extracts across non-uniform FASTA lines" {
     const data =
         \\>mixed_widths internal line widths vary
         \\AAAACCCCGGGG
@@ -295,7 +189,7 @@ test "get on messy mixed_widths after indexing" {
     try std.testing.expectEqualStrings(expected, output);
 }
 
-test "CLI get selects the first empty identifier through zfi and fai" {
+test "[cli] - [get]: selects the first empty identifier through zfi and fai" {
     const data = ">\nAAAA\n>\nCCCCCC\n";
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -320,96 +214,7 @@ test "CLI get selects the first empty identifier through zfi and fai" {
     try expectCliSuccess(allocator, &.{ ZFASTA_BIN, "get", fasta_path, "" }, ">\nAAAA\n");
 }
 
-// Hard CLI failures require exact exit code and stderr with no partial stdout.
-fn expectCliFailure(
-    allocator: std.mem.Allocator,
-    argv: []const []const u8,
-    exit_code: u8,
-    expected_stderr: []const u8,
-) !void {
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const spawn_io = threaded.io();
-
-    const result = try std.process.run(allocator, spawn_io, .{
-        .argv = argv,
-        .stdout_limit = .limited(64 * 1024),
-        .stderr_limit = .limited(64 * 1024),
-    });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-
-    switch (result.term) {
-        .exited => |code| try std.testing.expectEqual(exit_code, code),
-        else => return error.ChildProcessFailed,
-    }
-    try std.testing.expectEqual(@as(usize, 0), result.stdout.len);
-    try std.testing.expectEqualStrings(expected_stderr, result.stderr);
-}
-
-fn expectCliSuccess(allocator: std.mem.Allocator, argv: []const []const u8, expected_stdout: []const u8) !void {
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-
-    const result = try std.process.run(allocator, threaded.io(), .{
-        .argv = argv,
-        .stdout_limit = .limited(128 * 1024),
-        .stderr_limit = .limited(64 * 1024),
-    });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-
-    switch (result.term) {
-        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
-        else => return error.ChildProcessFailed,
-    }
-    try std.testing.expectEqualStrings(expected_stdout, result.stdout);
-    try std.testing.expectEqual(@as(usize, 0), result.stderr.len);
-}
-
-// Usage failures must reproduce the top-level help on stderr exactly.
-fn expectCliUsageFailure(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const spawn_io = threaded.io();
-
-    const help = try std.process.run(allocator, spawn_io, .{
-        .argv = &.{ ZFASTA_BIN, "--help" },
-        .stdout_limit = .limited(64 * 1024),
-        .stderr_limit = .limited(64 * 1024),
-    });
-    defer allocator.free(help.stdout);
-    defer allocator.free(help.stderr);
-    switch (help.term) {
-        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
-        else => return error.ChildProcessFailed,
-    }
-    try std.testing.expectEqual(@as(usize, 0), help.stderr.len);
-    try std.testing.expect(help.stdout.len > 0);
-
-    const result = try std.process.run(allocator, spawn_io, .{
-        .argv = argv,
-        .stdout_limit = .limited(64 * 1024),
-        .stderr_limit = .limited(64 * 1024),
-    });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-
-    switch (result.term) {
-        .exited => |code| try std.testing.expectEqual(@as(u8, 1), code),
-        else => return error.ChildProcessFailed,
-    }
-    try std.testing.expectEqual(@as(usize, 0), result.stdout.len);
-    try std.testing.expectEqualStrings(help.stdout, result.stderr);
-}
-
-fn expectUnknownOptionRejected(allocator: std.mem.Allocator, argv: []const []const u8, unknown: []const u8) !void {
-    const expected = try std.fmt.allocPrint(allocator, "error: unknown option: {s}\n", .{unknown});
-    defer allocator.free(expected);
-    try expectCliFailure(allocator, argv, 1, expected);
-}
-
-test "get help describes the request source contract" {
+test "[cli] - [get help]: describes the request source contract" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -439,32 +244,7 @@ const GET_USAGE_STDERR =
     \\
 ;
 
-test "index rejects unknown options before and after FASTA path" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-    const fasta = "tests/data/simple.fasta";
-    const unknown = "--not-a-flag";
-
-    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "index", unknown, fasta }, unknown);
-    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "index", fasta, unknown }, unknown);
-    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "index", "-z", fasta }, "-z");
-    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "index", "--low-mem", fasta }, "--low-mem");
-}
-
-test "index rejects multiple FASTA paths" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    try expectCliFailure(
-        arena.allocator(),
-        &.{ ZFASTA_BIN, "index", "tests/data/simple.fasta", "tests/data/single.fasta" },
-        1,
-        "error: index accepts exactly one FASTA path\n",
-    );
-}
-
-test "get rejects unknown options before, between, and after positionals" {
+test "[cli] - [get]: rejects unknown options regardless of position" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -478,7 +258,7 @@ test "get rejects unknown options before, between, and after positionals" {
     try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "get", fasta, "--bed", "tests/data/simple.bed", "--chunk-size=-1" }, "--chunk-size=-1");
 }
 
-test "get rejects repeated request source flags" {
+test "[cli] - [get]: rejects repeated request source flags" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -498,7 +278,7 @@ test "get rejects repeated request source flags" {
     );
 }
 
-test "get rejects mixed request source families" {
+test "[cli] - [get]: rejects mixed request source families" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -510,7 +290,7 @@ test "get rejects mixed request source families" {
     try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", fasta, "--names", "ids.txt", "--bed", "regions.bed" }, 1, expected);
 }
 
-test "get rejects strand handling outside BED input" {
+test "[cli] - [get]: rejects strand handling outside BED input" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -521,7 +301,7 @@ test "get rejects strand handling outside BED input" {
     try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", fasta, "--names", "ids.txt", "--honor-strand" }, 1, expected);
 }
 
-test "names accepts the index name-length boundary in both formats" {
+test "[cli] - [get names]: accepts the index name-length boundary in both formats" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -570,7 +350,7 @@ test "names accepts the index name-length boundary in both formats" {
     try expectCliSuccess(allocator, &.{ ZFASTA_BIN, "get", fai_fasta, "--names", names_path }, expected.items);
 }
 
-test "names rejects a request name above the index limit" {
+test "[cli] - [get names]: rejects a request name above the index limit" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -593,65 +373,17 @@ test "names rejects a request name above the index limit" {
     );
 }
 
-test "stats rejects unknown options before and after FASTA path" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-    const fasta = "tests/data/simple.fasta";
-    const unknown = "--not-a-flag";
-
-    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "stats", unknown, fasta }, unknown);
-    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "stats", fasta, unknown }, unknown);
-    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "stats", "--index-only", fasta }, "--index-only");
-}
-
-test "stats rejects multiple FASTA paths" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    try expectCliFailure(
-        arena.allocator(),
-        &.{ ZFASTA_BIN, "stats", "tests/data/simple.fasta", "tests/data/single.fasta" },
-        1,
-        "error: stats accepts exactly one FASTA path\n",
-    );
-}
-
-test "validate rejects unknown options before and after FASTA path" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-    const fasta = "tests/data/simple.fasta";
-    const unknown = "--not-a-flag";
-
-    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "validate", unknown, fasta }, unknown);
-    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "validate", fasta, unknown }, unknown);
-}
-
-test "CLI failures: missing command and missing subcommand args print usage on stderr" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    try expectCliUsageFailure(allocator, &.{ZFASTA_BIN});
-    try expectCliUsageFailure(allocator, &.{ ZFASTA_BIN, "index" });
-    try expectCliUsageFailure(allocator, &.{ ZFASTA_BIN, "not-a-command" });
-}
-
-test "CLI failures: missing FASTA path is exit 1 with exact stderr" {
+test "[cli] - [get]: missing FASTA path returns an exact error" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
     const missing = "tests/data/definitely-missing-cli-failure.fasta";
     const expected = "error: file not found: tests/data/definitely-missing-cli-failure.fasta\n";
 
-    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "index", missing }, 1, expected);
-    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "stats", missing }, 1, expected);
-    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "validate", missing }, 1, expected);
     try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", missing, "seq1" }, 1, expected);
 }
 
-test "get validates FASTA and sidecar before opening a request source" {
+test "[cli] - [get]: validates FASTA and sidecar before request input" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -670,7 +402,7 @@ test "get validates FASTA and sidecar before opening a request source" {
     );
 }
 
-test "CLI failures: invalid present zfi blocks valid fai for get and stats" {
+test "[cli] - [get index selection]: invalid zfi blocks a valid fai" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -696,10 +428,9 @@ test "CLI failures: invalid present zfi blocks valid fai for get and stats" {
     const expected = try std.fmt.allocPrint(allocator, "error: corrupt index file for: {s}\n", .{fasta});
     try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", fasta, "seq" }, 1, expected);
     try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", fasta, "--names", "missing.txt" }, 1, expected);
-    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "stats", fasta }, 1, expected);
 }
 
-test "streamed names failures suppress summary and expose only valid output prefixes" {
+test "[cli] - [get names]: failures preserve only valid output prefixes" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -747,12 +478,13 @@ test "streamed names failures suppress summary and expose only valid output pref
     try std.testing.expect(result.stdout.len > 0);
     try std.testing.expectEqualStrings("error: sequence not found: missing\n", result.stderr);
     const one_output = ">seq1\nACGTACGTACGTACGTACGTACGT\n";
+    try std.testing.expect(result.stdout.len <= one_output.len * 65536);
     for (result.stdout, 0..) |byte, i| {
         try std.testing.expectEqual(one_output[i % one_output.len], byte);
     }
 }
 
-test "CLI failures: get usage, conflicts, and missing sequence" {
+test "[cli] - [get]: rejects invalid requests, missing names, and transform conflicts" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -788,6 +520,24 @@ test "CLI failures: get usage, conflicts, and missing sequence" {
     );
     try expectCliFailure(
         allocator,
+        &.{ ZFASTA_BIN, "get", fasta, "seq1:0-1" },
+        1,
+        "error: start position must be >= 1\n",
+    );
+    try expectCliFailure(
+        allocator,
+        &.{ ZFASTA_BIN, "get", fasta, "seq1:25-25" },
+        1,
+        "error: start position 25 exceeds sequence length 24\n",
+    );
+    try expectCliFailure(
+        allocator,
+        &.{ ZFASTA_BIN, "get", fasta, "seq1:10-9" },
+        1,
+        "error: end position must be >= start position\n",
+    );
+    try expectCliFailure(
+        allocator,
         &.{ ZFASTA_BIN, "get", fasta, "seq1", "--annotate-rc" },
         1,
         "error: --annotate-rc requires a transform or --strand-aware BED input\n",
@@ -800,7 +550,7 @@ test "CLI failures: get usage, conflicts, and missing sequence" {
     );
 }
 
-test "BED annotations describe final composed orientation" {
+test "[cli] - [get BED]: annotations describe the composed orientation" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -827,69 +577,4 @@ test "BED annotations describe final composed orientation" {
         &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--bed", bed_path, "--strand-aware", "--rc", "--annotate-rc" },
         ">seq1:1-5 (reverse complement)\nTACGT\n>seq1:1-5\nACGTA\n",
     );
-}
-
-test "CLI failures: stats and validate usage errors" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    try expectCliFailure(
-        allocator,
-        &.{ ZFASTA_BIN, "stats" },
-        1,
-        "error: usage: z-fasta stats <file.fasta>\n",
-    );
-    try expectCliFailure(
-        allocator,
-        &.{ ZFASTA_BIN, "validate", "--summary", "tests/data/simple.fasta" },
-        1,
-        "error: validate --summary requires --json\n",
-    );
-    try expectCliFailure(
-        allocator,
-        &.{ ZFASTA_BIN, "validate", "--fix-format-only", "tests/data/simple.fasta" },
-        1,
-        "error: validate --fix-format-only requires --fix\n",
-    );
-    try expectCliFailure(
-        allocator,
-        &.{ ZFASTA_BIN, "validate", "-o", "zig-cache/test-artifacts/unused.fasta", "tests/data/simple.fasta" },
-        1,
-        "error: validate -o requires --fix\n",
-    );
-    try expectCliFailure(
-        allocator,
-        &.{ ZFASTA_BIN, "validate" },
-        1,
-        "error: usage: z-fasta validate [options] <file.fasta>\n",
-    );
-}
-
-test "CLI validate warnings: exit 2, empty stderr, exact WARNING stdout" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const path = try writeFastaArtifact(allocator, "cli-validate-warn", ">empty_rec\n");
-    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
-
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const spawn_io = threaded.io();
-
-    const result = try std.process.run(allocator, spawn_io, .{
-        .argv = &.{ ZFASTA_BIN, "validate", path },
-        .stdout_limit = .limited(64 * 1024),
-        .stderr_limit = .limited(64 * 1024),
-    });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-
-    switch (result.term) {
-        .exited => |code| try std.testing.expectEqual(@as(u8, 2), code),
-        else => return error.ChildProcessFailed,
-    }
-    try std.testing.expectEqual(@as(usize, 0), result.stderr.len);
-    try std.testing.expectEqualStrings("WARNING: line 1: empty sequence 'empty_rec'\n", result.stdout);
 }

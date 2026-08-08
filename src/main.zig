@@ -515,3 +515,47 @@ test "transform flags reject conflicting modes" {
         );
     }
 }
+
+test "[cli] - [dispatch]: invalid invocations print help on stderr" {
+    const zfasta_bin = if (builtin.os.tag == .windows) "zig-out\\bin\\z-fasta.exe" else "zig-out/bin/z-fasta";
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const help = try std.process.run(allocator, io, .{
+        .argv = &.{ zfasta_bin, "--help" },
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    });
+    defer allocator.free(help.stdout);
+    defer allocator.free(help.stderr);
+    switch (help.term) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        else => return error.ChildProcessFailed,
+    }
+    try std.testing.expectEqual(@as(usize, 0), help.stderr.len);
+    try std.testing.expect(help.stdout.len > 0);
+
+    const cases = [_][]const []const u8{
+        &.{zfasta_bin},
+        &.{ zfasta_bin, "index" },
+        &.{ zfasta_bin, "not-a-command" },
+    };
+    for (cases) |argv| {
+        const result = try std.process.run(allocator, io, .{
+            .argv = argv,
+            .stdout_limit = .limited(64 * 1024),
+            .stderr_limit = .limited(64 * 1024),
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+
+        switch (result.term) {
+            .exited => |code| try std.testing.expectEqual(@as(u8, 1), code),
+            else => return error.ChildProcessFailed,
+        }
+        try std.testing.expectEqual(@as(usize, 0), result.stdout.len);
+        try std.testing.expectEqualStrings(help.stdout, result.stderr);
+    }
+}

@@ -3,11 +3,14 @@
 //! Exercises complete stats output against fixture FASTAs.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const main = @import("main");
+const utility = @import("utility.zig");
 const stats = main.stats;
+const io = std.testing.io;
 
-const ZFASTA_BIN = if (builtin.os.tag == .windows) "zig-out\\bin\\z-fasta.exe" else "zig-out/bin/z-fasta";
+const ZFASTA_BIN = utility.ZFASTA_BIN;
+const expectCliFailure = utility.expectCliFailure;
+const expectUnknownOptionRejected = utility.expectUnknownOptionRejected;
 
 fn countSymbols(symbols: []const u8) [256]u64 {
     var counts: [256]u64 = .{0} ** 256;
@@ -112,6 +115,74 @@ test "detectType matches its threshold across deterministic fuzzy inputs" {
 }
 
 // --- CLI reports ---
+
+test "[cli] - [stats]: rejects unknown options regardless of position" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const fasta = "tests/data/simple.fasta";
+
+    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "stats", "--not-a-flag", fasta }, "--not-a-flag");
+    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "stats", fasta, "--not-a-flag" }, "--not-a-flag");
+    try expectUnknownOptionRejected(allocator, &.{ ZFASTA_BIN, "stats", "--index-only", fasta }, "--index-only");
+}
+
+test "[cli] - [stats]: rejects invalid FASTA path counts" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try expectCliFailure(
+        allocator,
+        &.{ ZFASTA_BIN, "stats" },
+        1,
+        "error: usage: z-fasta stats <file.fasta>\n",
+    );
+    try expectCliFailure(
+        allocator,
+        &.{ ZFASTA_BIN, "stats", "tests/data/simple.fasta", "tests/data/single.fasta" },
+        1,
+        "error: stats accepts exactly one FASTA path\n",
+    );
+    try expectCliFailure(
+        allocator,
+        &.{ ZFASTA_BIN, "stats", "tests/data/definitely-missing-cli-failure.fasta" },
+        1,
+        "error: file not found: tests/data/definitely-missing-cli-failure.fasta\n",
+    );
+}
+
+test "[cli] - [stats index selection]: invalid zfi blocks a valid fai" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fasta = try utility.uniqueArtifactPath(allocator, "stats-invalid-zfi", "fa");
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta});
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta});
+    defer std.Io.Dir.cwd().deleteFile(io, fasta) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    {
+        const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta, .{});
+        defer fasta_file.close(io);
+        try std.Io.File.writeStreamingAll(fasta_file, io, ">seq\nACGT\n");
+    }
+    {
+        const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{});
+        defer fai_file.close(io);
+        try std.Io.File.writeStreamingAll(fai_file, io, "seq\t4\t5\t4\t5\n");
+    }
+    {
+        const zfi_file = try std.Io.Dir.cwd().createFile(io, zfi_path, .{});
+        defer zfi_file.close(io);
+        try std.Io.File.writeStreamingAll(zfi_file, io, "not a zfi index");
+    }
+
+    const expected = try std.fmt.allocPrint(allocator, "error: corrupt index file for: {s}\n", .{fasta});
+    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "stats", fasta }, 1, expected);
+}
 
 test "stats renders the exact nucleotide report" {
     const expected =
