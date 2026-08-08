@@ -260,7 +260,7 @@ pub fn encodeSideTableLine(line: SideTableLine) [zfi_side_table_line_bytes]u8 {
 /// Result of loading an index (from .zfi or .fai)
 pub const LoadMode = union(enum) {
     lookup_full_map,
-    /// Stats composition: retain every indexed record and its name.
+    /// Stats composition: retain every record and only the two report names for streamed FAI.
     stats_scan,
     /// Positional GET: retain only the first sidecar record for each requested name.
     positional: []const []const u8,
@@ -272,11 +272,11 @@ pub const LoadMode = union(enum) {
 /// - **FASTA file and maps**: `fasta_file` remains open until `deinit`.
 ///   `deinit` destroys the optional FASTA map and optional sidecar maps, then closes
 ///   the FASTA file. Byte slices and typed views borrow from those maps.
-/// - **Arena**: owns heap for streamed `.fai` record arrays and copied names,
+/// - **Arena**: owns heap for streamed `.fai` record arrays and retained names,
 ///   plus `name_map` table storage. Reclaimed
 ///   only via `arena.deinit()` (do not `name_map.deinit()` on an arena-backed map).
 /// - **`name_map` keys**: borrowed from a sidecar map for full loads, or from
-///   arena-owned `name_slices` for streamed `.fai` loads.
+///   arena-owned `name_slices` for positional streamed `.fai` loads.
 /// - **`io`**: borrowed for destroy only; caller must keep it alive until `deinit`.
 ///
 /// GET and stats load through this type and only call `deinit(io)`. Validator maps
@@ -290,8 +290,10 @@ pub const LoadedIndex = struct {
     records: []const IndexRecord,
     name_map: std.StringHashMap(u32),
     has_name_map: bool,
-    /// Arena-owned name per record index when names were copied into the arena.
+    /// Arena-owned names: one per retained positional record, or stats extrema only.
     name_slices: []const []const u8 = &.{},
+    /// Record indices for the two extrema names retained by streamed FAI stats loads.
+    stats_name_indices: ?[2]usize = null,
     /// Borrow into `zfi_map` when `.zfi` embeds a name blob.
     name_blob: ?[]const u8 = null,
     fai_data: ?platform.MappedBytes = null,
@@ -310,6 +312,11 @@ pub const LoadedIndex = struct {
     }
 
     pub fn getRecordName(self: *const LoadedIndex, rec_idx: usize) []const u8 {
+        if (self.stats_name_indices) |indices| {
+            if (rec_idx == indices[0]) return self.name_slices[0];
+            if (rec_idx == indices[1]) return self.name_slices[1];
+            return "?";
+        }
         if (self.name_slices.len > 0) {
             return self.name_slices[rec_idx];
         }
@@ -341,6 +348,13 @@ pub const LoadedIndex = struct {
         if (self.has_name_map) {
             const rec_idx = self.name_map.get(name) orelse return null;
             return rec_idx;
+        }
+
+        if (self.stats_name_indices) |indices| {
+            for (self.name_slices, indices) |retained, rec_idx| {
+                if (std.mem.eql(u8, retained, name)) return rec_idx;
+            }
+            return null;
         }
 
         if (self.name_slices.len > 0) {
@@ -831,6 +845,11 @@ const FaiStreamMode = union(enum) {
     stats_scan,
 };
 
+const FaiNameRef = struct {
+    offset: u64,
+    len: usize,
+};
+
 fn loadFaiStreamed(
     io: std.Io,
     fai_file: std.Io.File,
@@ -866,10 +885,19 @@ fn loadFaiStreamed(
     var io_buf: [FAI_READER_BUFFER_BYTES]u8 = undefined;
     var file_reader = fai_file.reader(io, &io_buf);
     var saw_record = false;
+    var line_offset: u64 = 0;
+    var shortest_ref: FaiNameRef = undefined;
+    var longest_ref: FaiNameRef = undefined;
+    var shortest_index: usize = 0;
+    var longest_index: usize = 0;
+    var shortest_len: u64 = 0;
+    var longest_len: u64 = 0;
 
     while (true) {
         const maybe_line = file_reader.interface.takeDelimiter('\n') catch return error.Io;
         const line = maybe_line orelse break;
+        const current_offset = line_offset;
+        line_offset = std.math.add(u64, line_offset, line.len + 1) catch return .corrupt;
         if (line.len == 0) continue;
 
         const fields = parseFaiIndexLine(line) catch return .corrupt;
@@ -896,15 +924,44 @@ fn loadFaiStreamed(
         };
         if (!retain) continue;
 
-        const name = allocator.dupe(u8, line[0..fields.name_end]) catch return error.OutOfMemory;
-        try slices_list.append(allocator, name);
+        const rec_index = records_list.items.len;
+        switch (mode) {
+            .matched => {
+                const name = allocator.dupe(u8, line[0..fields.name_end]) catch return error.OutOfMemory;
+                try slices_list.append(allocator, name);
+            },
+            .stats_scan => {
+                const name_ref = FaiNameRef{ .offset = current_offset, .len = fields.name_end };
+                if (rec_index == 0 or rec.seq_len < shortest_len) {
+                    shortest_ref = name_ref;
+                    shortest_index = rec_index;
+                    shortest_len = rec.seq_len;
+                }
+                if (rec_index == 0 or rec.seq_len > longest_len) {
+                    longest_ref = name_ref;
+                    longest_index = rec_index;
+                    longest_len = rec.seq_len;
+                }
+            },
+        }
         try records_list.append(allocator, rec);
     }
 
     if (!saw_record) return .corrupt;
 
     const owned_records = records_list.toOwnedSlice(allocator) catch return error.OutOfMemory;
-    const owned_slices = slices_list.toOwnedSlice(allocator) catch return error.OutOfMemory;
+    const owned_slices = switch (mode) {
+        .matched => slices_list.toOwnedSlice(allocator) catch return error.OutOfMemory,
+        .stats_scan => blk: {
+            const names = allocator.alloc([]const u8, 2) catch return error.OutOfMemory;
+            names[0] = try readFaiName(io, fai_file, allocator, shortest_ref);
+            names[1] = if (shortest_index == longest_index)
+                names[0]
+            else
+                try readFaiName(io, fai_file, allocator, longest_ref);
+            break :blk names;
+        },
+    };
 
     var name_map = std.StringHashMap(u32).init(allocator);
     const has_name_map = switch (mode) {
@@ -927,6 +984,10 @@ fn loadFaiStreamed(
         .name_map = name_map,
         .has_name_map = has_name_map,
         .name_slices = owned_slices,
+        .stats_name_indices = switch (mode) {
+            .matched => null,
+            .stats_scan => .{ shortest_index, longest_index },
+        },
         .fai_data = null,
         .fasta_data = fasta_data,
         .fasta_size = fasta_stat.size,
@@ -934,6 +995,19 @@ fn loadFaiStreamed(
         .source = .fai,
         .arena = arena,
     } };
+}
+
+fn readFaiName(
+    io: std.Io,
+    fai_file: std.Io.File,
+    allocator: std.mem.Allocator,
+    name_ref: FaiNameRef,
+) LoadIndexError![]const u8 {
+    const name = allocator.alloc(u8, name_ref.len) catch return error.OutOfMemory;
+    if (name.len == 0) return name;
+    const got = std.Io.File.readPositionalAll(fai_file, io, name, name_ref.offset) catch return error.Io;
+    if (got != name.len) return error.CorruptIndex;
+    return name;
 }
 
 fn parseFaiFieldU64(line: []const u8, field_start: *usize) LoadIndexError!u64 {

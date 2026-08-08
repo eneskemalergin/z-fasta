@@ -2039,9 +2039,19 @@ fn expectFaiLoaderModesAgree(fasta_path: []const u8) !void {
     try std.testing.expectEqual(full.source, stats_scan.source);
     try std.testing.expectEqual(full.records.len, positional.records.len);
     try std.testing.expectEqual(full.records.len, stats_scan.records.len);
-    try std.testing.expectEqual(full.records.len, stats_scan.name_slices.len);
+    try std.testing.expectEqual(@as(usize, 2), stats_scan.name_slices.len);
     try std.testing.expect(stats_scan.fasta_map == null);
     try std.testing.expectEqual(@as(usize, 0), stats_scan.fasta_data.len);
+
+    var shortest_index: usize = 0;
+    var longest_index: usize = 0;
+    for (full.records[1..], 1..) |rec, i| {
+        if (rec.seq_len < full.records[shortest_index].seq_len) shortest_index = i;
+        if (rec.seq_len > full.records[longest_index].seq_len) longest_index = i;
+    }
+    try std.testing.expectEqual([2]usize{ shortest_index, longest_index }, stats_scan.stats_name_indices.?);
+    try std.testing.expectEqualStrings(full.getRecordName(shortest_index), stats_scan.getRecordName(shortest_index));
+    try std.testing.expectEqualStrings(full.getRecordName(longest_index), stats_scan.getRecordName(longest_index));
 
     for (full.records, 0..) |rec, i| {
         const streamed = positional.records[i];
@@ -2059,7 +2069,9 @@ fn expectFaiLoaderModesAgree(fasta_path: []const u8) !void {
         try std.testing.expectEqual(rec.line_bytes, scanned.line_bytes);
 
         try std.testing.expectEqualStrings(full.getRecordName(i), positional.getRecordName(i));
-        try std.testing.expectEqualStrings(full.getRecordName(i), stats_scan.getRecordName(i));
+        if (i != shortest_index and i != longest_index) {
+            try std.testing.expectEqualStrings("?", stats_scan.getRecordName(i));
+        }
     }
 }
 
@@ -2075,12 +2087,12 @@ test "fai loaders agree when index omits terminal newline" {
 
     const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
     defer fasta_file.close(io);
-    try std.Io.File.writeStreamingAll(fasta_file, io, ">s1\nACGT\n>s2\nGGGG\n");
+    try std.Io.File.writeStreamingAll(fasta_file, io, ">s1\nACGT\n>s2\nGGGGGG\n>s3\nCCCCC\n");
 
-    // Two records; final `.fai` line has no trailing `\n`.
+    // Three records with distinct extrema; final `.fai` line has no trailing `\n`.
     const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
     defer fai_file.close(io);
-    try std.Io.File.writeStreamingAll(fai_file, io, "s1\t4\t4\t4\t5\ns2\t4\t13\t4\t5");
+    try std.Io.File.writeStreamingAll(fai_file, io, "s1\t4\t4\t4\t5\ns2\t6\t13\t6\t7\ns3\t5\t24\t5\t6");
 
     try expectFaiLoaderModesAgree(fasta_path);
 }
