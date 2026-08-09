@@ -857,7 +857,7 @@ fn appendBedLineRequest(
     honor_strand: bool,
     global_orientation: Orientation,
 ) void {
-    const parsed = bed_parser.parseBedLine(line, line_number) catch |err| switch (err) {
+    const parsed = bed_parser.parseBedLine(line) catch |err| switch (err) {
         error.MissingChrom => printErrorAndExit("error: invalid BED line {d}: missing chrom\n", .{line_number}),
         error.MissingStart => printErrorAndExit("error: invalid BED line {d}: missing start\n", .{line_number}),
         error.MissingEnd => printErrorAndExit("error: invalid BED line {d}: missing end\n", .{line_number}),
@@ -882,9 +882,9 @@ fn appendBedLineRequest(
                 allocator,
                 workspace,
                 region.chrom,
-                region.start1Based(),
-                region.end1BasedInclusive(),
-                (if (honor_strand and region.strand == .minus) Orientation.reverseComplement() else Orientation{}).compose(global_orientation),
+                region.start_1based,
+                region.end_1based,
+                (if (honor_strand and region.strand == .reverse) Orientation.reverseComplement() else Orientation{}).compose(global_orientation),
             );
         },
     }

@@ -517,6 +517,92 @@ test "[cli] - [get]: rejects invalid requests, missing names, and transform conf
     );
 }
 
+test "[cli] - [get BED]: converts coordinates and skips metadata lines" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const bed_path = try uniqueArtifactPath(allocator, "bed-parser-success", "bed");
+    defer std.Io.Dir.cwd().deleteFile(io, bed_path) catch {};
+    {
+        const bed_file = try std.Io.Dir.cwd().createFile(io, bed_path, .{});
+        defer bed_file.close(io);
+        try std.Io.File.writeStreamingAll(
+            bed_file,
+            io,
+            "track name=ignored\n# ignored\nbrowser position chr1:1-10\nseq1\t0\t1\nseq1\t5\t9\r\n",
+        );
+    }
+
+    try expectCliSuccess(
+        allocator,
+        &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--bed", bed_path },
+        ">seq1:1-1\nA\n>seq1:6-9\nCGTA\n",
+    );
+}
+
+test "[cli] - [get BED]: reports parser boundary errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const bed_path = try uniqueArtifactPath(allocator, "bed-parser-failures", "bed");
+    defer std.Io.Dir.cwd().deleteFile(io, bed_path) catch {};
+    const Case = struct {
+        line: []const u8,
+        expected: []const u8,
+    };
+    const cases = [_]Case{
+        .{ .line = "\t0\t1\n", .expected = "error: invalid BED line 1: missing chrom\n" },
+        .{ .line = "seq1\n", .expected = "error: invalid BED line 1: missing start\n" },
+        .{ .line = "seq1\t0\n", .expected = "error: invalid BED line 1: missing end\n" },
+        .{ .line = "seq1\t-0\t10\n", .expected = "error: invalid BED line 1: invalid start\n" },
+        .{ .line = "seq1\t+1\t10\n", .expected = "error: invalid BED line 1: invalid start\n" },
+        .{ .line = "seq1\t1_0\t20\n", .expected = "error: invalid BED line 1: invalid start\n" },
+        .{ .line = "seq1\t18446744073709551616\t20\n", .expected = "error: invalid BED line 1: invalid start\n" },
+        .{ .line = "seq1\t0\t+10\n", .expected = "error: invalid BED line 1: invalid end\n" },
+        .{ .line = "seq1\t0\t1_0\n", .expected = "error: invalid BED line 1: invalid end\n" },
+        .{ .line = "seq1\t0\t18446744073709551616\n", .expected = "error: invalid BED line 1: invalid end\n" },
+        .{ .line = "seq1\t10\t10\n", .expected = "error: invalid BED line 1: end must be greater than start\n" },
+        .{ .line = "seq1\t10\t9\n", .expected = "error: invalid BED line 1: end must be greater than start\n" },
+        .{
+            .line = "seq1\t18446744073709551614\t18446744073709551615\n",
+            .expected = "error: start position 18446744073709551615 exceeds sequence length 24\n",
+        },
+    };
+
+    for (cases) |case| {
+        {
+            const bed_file = try std.Io.Dir.cwd().createFile(io, bed_path, .{ .truncate = true });
+            defer bed_file.close(io);
+            try std.Io.File.writeStreamingAll(bed_file, io, case.line);
+        }
+        try expectCliFailure(
+            allocator,
+            &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--bed", bed_path },
+            1,
+            case.expected,
+        );
+    }
+
+    {
+        const bed_file = try std.Io.Dir.cwd().createFile(io, bed_path, .{ .truncate = true });
+        defer bed_file.close(io);
+        try std.Io.File.writeStreamingAll(bed_file, io, "seq1\t0\t1\tname\t0\t?\n");
+    }
+    try expectCliSuccess(
+        allocator,
+        &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--bed", bed_path },
+        ">seq1:1-1\nA\n",
+    );
+    try expectCliFailure(
+        allocator,
+        &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--bed", bed_path, "--strand-aware" },
+        1,
+        "error: invalid BED line 1: invalid strand\n",
+    );
+}
+
 test "[cli] - [get BED]: annotations describe the composed orientation" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
