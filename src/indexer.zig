@@ -1308,8 +1308,8 @@ fn sourceMetadataMatches(before: std.Io.File.Stat, after: std.Io.File.Stat) bool
     return before.size == after.size and before.mtime.nanoseconds == after.mtime.nanoseconds;
 }
 
-fn sourcePathUnchanged(io: std.Io, path: []const u8, before: std.Io.File.Stat) !bool {
-    const after = std.Io.Dir.cwd().statFile(io, path, .{}) catch |err| switch (err) {
+fn sourcePathUnchanged(io: std.Io, dir: std.Io.Dir, path: []const u8, before: std.Io.File.Stat) !bool {
+    const after = dir.statFile(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => return error.SourceStatFailed,
     };
@@ -1402,7 +1402,7 @@ pub fn runIndex(
         tmp_fw.interface.flush() catch return error.FaiSpoolWriteFailed;
         if (record_count == 0) return error.NoValidSequences;
 
-        if (!try sourcePathUnchanged(io, path, stat)) return error.SourceChanged;
+        if (!try sourcePathUnchanged(io, std.Io.Dir.cwd(), path, stat)) return error.SourceChanged;
 
         const tmp_size = (spool.file.stat(io) catch return error.FaiSpoolReadFailed).size;
         var offset: u64 = 0;
@@ -1459,7 +1459,7 @@ pub fn runIndex(
         return error.ZfiWriteFailed;
     file_fw.flush() catch return error.ZfiWriteFailed;
 
-    if (!try sourcePathUnchanged(io, path, stat)) return error.SourceChanged;
+    if (!try sourcePathUnchanged(io, cwd, path, stat)) return error.SourceChanged;
 
     atomic_file.replace(io) catch return error.ZfiFinalizeFailed;
 
@@ -1722,11 +1722,5 @@ test "[integration] - [source identity]: detects path replacement" {
         try std.Io.File.writeStreamingAll(replacement, std.testing.io, ">seq\nA\n");
     }
 
-    var path_buf: [128]u8 = undefined;
-    const source_path = try std.fmt.bufPrint(
-        &path_buf,
-        ".zig-cache/tmp/{s}/source.fa",
-        .{tmp.sub_path},
-    );
-    try std.testing.expect(!try sourcePathUnchanged(std.testing.io, source_path, before));
+    try std.testing.expect(!try sourcePathUnchanged(std.testing.io, tmp.dir, "source.fa", before));
 }
