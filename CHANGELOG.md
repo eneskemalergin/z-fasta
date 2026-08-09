@@ -6,7 +6,7 @@ All notable changes to z-fasta will be documented in this file.
 
 ## Unreleased
 
-Single-path performance and memory cleanup across `index`, `get`, and `stats`. No `.zfi` format change. **Re-index not required.**
+Single-path performance and memory cleanup across `index`, `get`, and `stats`, with CLI and validation hardening. No `.zfi` format change. **Re-index not required.**
 
 ### Changed
 
@@ -43,13 +43,23 @@ Single-path performance and memory cleanup across `index`, `get`, and `stats`. N
 
 ### Fixed
 
+- **CLI and Get**
+  - `index` and `stats` reject extra FASTA paths. `validate` rejects `-o` and `--fix-format-only` unless `--fix` is present.
+  - BED coordinates require unsigned decimal fields, and large grouped GET requests fall back to bounded per-region reads when they exceed the shared buffer.
+
 - **Index**
   - Indexing rejects a detected source size or modification-time change before publishing `.zfi` or replaying `.fai` output.
+  - Sequence lines above the index geometry limit fail cleanly, `.zfi` publication uses independent atomic files, and loaders reject overlapping non-uniform side-table spans.
   - `.fai` stdout write and flush failures return an error, and temporary output is cleaned after handled success or failure.
 
 - **Stats**
   - `auN`, percentages, and GC skew use overflow-safe integer arithmetic and exact rounding.
   - Invalid index geometry, mismatched sequence totals, read failures, and write failures now stop cleanly.
+
+- **Validate**
+  - `--fix` writes atomically and refuses output paths that resolve to the input file.
+  - Counts, remaining warnings, and fix blockers stay complete after the 10000-event report cap.
+  - Final sequence lines wider than the established width are reported, and B, Z, and J are accepted protein ambiguity codes.
 
 ## [0.3.1] - 2026-08-02
 
