@@ -1708,19 +1708,15 @@ test "[integration] - [source identity]: detects path replacement" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const before = blk: {
-        const original = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
-        defer original.close(std.testing.io);
-        try std.Io.File.writeStreamingAll(original, std.testing.io, ">seq\nAAAA\n");
-        break :blk try original.stat(std.testing.io);
-    };
+    const original = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
+    try std.Io.File.writeStreamingAll(original, std.testing.io, ">seq\nAAAA\n");
+    const before = try original.stat(std.testing.io);
+    original.close(std.testing.io);
 
     try tmp.dir.rename("source.fa", tmp.dir, "old.fa", std.testing.io);
-    {
-        const replacement = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
-        defer replacement.close(std.testing.io);
-        try std.Io.File.writeStreamingAll(replacement, std.testing.io, ">seq\nA\n");
-    }
+    const replacement = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
+    try std.Io.File.writeStreamingAll(replacement, std.testing.io, ">seq\nA\n");
+    replacement.close(std.testing.io);
 
     try std.testing.expect(!try sourcePathUnchanged(std.testing.io, tmp.dir, "source.fa", before));
 }
