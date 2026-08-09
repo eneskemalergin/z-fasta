@@ -4,6 +4,14 @@ This is the benchmarking framework for z-fasta. It is used to benchmark the perf
 
 Note: [Zebrac](https://github.com/eneskemalergin/zebrac) is a linux-only tool that is similar to `hyperfine`, but also measures RSS, page faults, and more. For performance benches, it is the only tool used here. I added the binary under `tools/`; it is not a dependency of z-fasta, and it does not work on platforms other than Linux for now.
 
+## Published reports
+
+- [Index benchmark report](index/REPORT.md)
+- [GET benchmark report](get/REPORT.md)
+- [Stats benchmark report](stats/REPORT.md)
+
+Each report owns its module's methods, field coverage, correctness checks, measurements, and figures.
+
 ## How to run
 
 Each suite has one entrypoint: `bash bench/<index|get|stats>/run.sh`. That script runs correctness first, then optional zebrac perf, then writes `REPORT.md`. For suite-specific flags, pass `--help` to that script.
@@ -11,7 +19,7 @@ Each suite has one entrypoint: `bash bench/<index|get|stats>/run.sh`. That scrip
 ```bash
 bash bench/shared/download_data.sh   # ~4 GB REAL_* datasets, once
 bash bench/shared/install_tools.sh   # peer tools + zebrac
-./zig build -Doptimize=ReleaseFast
+zig build -Doptimize=ReleaseFast
 
 # Full suite (correctness + perf + report)
 bash bench/index/run.sh

@@ -2,7 +2,13 @@
   <img src="https://github.com/eneskemalergin/z-fasta/blob/main/assets/logo-readme.svg?raw=1" alt="z-fasta" width="220">
 </p>
 
-<h1 align="center">FASTA work without the toolchain sprawl</h1>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/eneskemalergin/z-fasta/blob/main/assets/tagline-dark.svg?raw=1">
+    <source media="(prefers-color-scheme: light)" srcset="https://github.com/eneskemalergin/z-fasta/blob/main/assets/tagline-light.svg?raw=1">
+    <img src="https://github.com/eneskemalergin/z-fasta/blob/main/assets/tagline-light.svg?raw=1" alt="Lightning FASTA work without the toolchain sprawl" width="900">
+  </picture>
+</p>
 
 <p align="center"><strong>Index, extract, validate, and inspect uncompressed FASTA with one static executable.</strong></p>
 
