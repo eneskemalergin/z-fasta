@@ -1,12 +1,8 @@
 //! CLI entry and subcommand dispatcher for `index`, `get`, `stats`, and `validate`.
-//!
-//! Re-exports core modules for tests. Argument parsing, usage text, and routing live here;
-//! indexing, extraction, stats, and validation logic live in the sibling modules.
 
 const std = @import("std");
 const builtin = @import("builtin");
 
-// --- Module imports ---
 pub const index_format = @import("index_format.zig");
 pub const indexer = @import("indexer.zig");
 pub const getter = @import("getter.zig");
@@ -93,7 +89,12 @@ const ParsedTransformFlags = struct {
     annotate_transform: bool,
 };
 
-fn parseTransformFlags(rc: bool, complement_only: bool, reverse_only: bool, annotate_transform: bool) ParseTransformFlagsError!ParsedTransformFlags {
+fn parseTransformFlags(
+    rc: bool,
+    complement_only: bool,
+    reverse_only: bool,
+    annotate_transform: bool,
+) ParseTransformFlagsError!ParsedTransformFlags {
     var selected: usize = 0;
     if (rc) selected += 1;
     if (complement_only) selected += 1;
@@ -244,6 +245,10 @@ fn runIndex(io: std.Io, environ: std.process.Environ, args: *std.process.Args.It
             "error: sequence name exceeds {d} bytes: {s}\n",
             .{ indexer.MAX_INDEX_NAME_LEN, path },
         ),
+        error.SequenceLineTooLong => printErrorAndExit(
+            "error: sequence line exceeds the index format limit: {s}\n",
+            .{path},
+        ),
         error.NonUniformFai => printErrorAndExit(
             "error: cannot emit .fai for non-uniform sequence layout; run 'z-fasta index' (default) to write .zfi\n",
             .{},
@@ -269,6 +274,10 @@ fn runIndex(io: std.Io, environ: std.process.Environ, args: *std.process.Args.It
         error.StdoutFlushFailed => printErrorAndExit("error: failed to flush FAI stdout\n", .{}),
         error.SourceChanged => printErrorAndExit(
             "error: source changed while indexing: {s}\n",
+            .{path},
+        ),
+        error.UnsupportedTimestamp => printErrorAndExit(
+            "error: source modification time predates the Unix epoch: {s}\n",
             .{path},
         ),
         error.OutputPathTooLong => printErrorAndExit("error: path too long\n", .{}),
@@ -487,7 +496,7 @@ fn parsePositiveUsize(raw: []const u8, comptime flag: []const u8) usize {
     return parsed;
 }
 
-test "transform flags select the requested orientation" {
+test "[unit] - [get transform flags]: selects the requested orientation" {
     const rc = try parseTransformFlags(true, false, false, false);
     const complement_only = try parseTransformFlags(false, true, false, true);
     const reverse_only = try parseTransformFlags(false, false, true, false);
@@ -501,11 +510,12 @@ test "transform flags select the requested orientation" {
     try std.testing.expect(!reverse_only.orientation.complement);
 }
 
-test "transform flags reject conflicting modes" {
+test "[failure] - [get transform flags]: rejects conflicting modes" {
     const conflicts = [_][3]bool{
         .{ true, true, false },
         .{ true, false, true },
         .{ false, true, true },
+        .{ true, true, true },
     };
 
     for (conflicts) |flags| {
@@ -516,7 +526,7 @@ test "transform flags reject conflicting modes" {
     }
 }
 
-test "[cli] - [dispatch]: invalid invocations print help on stderr" {
+test "[cli] - [dispatch]: writes help and rejects missing or unknown commands" {
     const zfasta_bin = if (builtin.os.tag == .windows) "zig-out\\bin\\z-fasta.exe" else "zig-out/bin/z-fasta";
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -535,7 +545,7 @@ test "[cli] - [dispatch]: invalid invocations print help on stderr" {
         else => return error.ChildProcessFailed,
     }
     try std.testing.expectEqual(@as(usize, 0), help.stderr.len);
-    try std.testing.expect(help.stdout.len > 0);
+    try std.testing.expectEqualStrings(USAGE, help.stdout);
 
     const cases = [_][]const []const u8{
         &.{zfasta_bin},

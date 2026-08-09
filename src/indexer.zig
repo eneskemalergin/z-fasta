@@ -19,22 +19,17 @@ const ZFI_MAGIC = index_format.ZFI_MAGIC;
 const SIMD_CHUNK_SIZE = 32;
 const SimdVec = @Vector(SIMD_CHUNK_SIZE, u8);
 const STRIDE_VECTOR_LEN = std.simd.suggestVectorLength(u8) orelse 1;
-// Processes 256 lines per proof batch without additional storage.
 const STRIDE_VALIDATION_BLOCK_LINES = 256;
-// The input payload occupies this fixed stack buffer regardless of FASTA size.
 pub const INDEX_READ_BUFFER_SIZE = 1 * 1024 * 1024;
 const FILE_IO_BUF_SIZE = 8 * 1024;
-// Each output and replay stage uses one fixed stack buffer of this size.
 const INDEX_OUTPUT_BUFFER_SIZE = 64 * 1024;
-// Output paths longer than this fail without allocating from sequence-derived input.
-const INDEX_PATH_BUFFER_SIZE = 4096;
+const INDEX_PATH_BUFFER_SIZE = std.Io.Dir.max_path_bytes;
 // Catalogs start modestly and grow with records or names, never sequence payload bytes.
 const ZFI_INITIAL_RECORD_CAPACITY = 4096;
 const DEDUP_INITIAL_CAPACITY: u32 = 16384;
 const FAI_SPOOL_NAME_BUFFER_SIZE = 64;
 const FAI_U64_DECIMAL_DIGITS = 20;
 const FAI_SUFFIX_BUFFER_SIZE = 4 * (1 + FAI_U64_DECIMAL_DIGITS) + 1;
-// Exclusive creation retries only random name collisions within one directory.
 const FAI_SPOOL_CREATE_ATTEMPTS = 16;
 pub const MAX_INDEX_NAME_LEN = std.math.maxInt(u16);
 
@@ -51,14 +46,9 @@ pub const IndexOptions = struct {
 };
 
 // Offset into a name blob for `.zfi` catalog dedup (one store for map and output).
-const NameBlobRef = struct { off: u32, len: u32 };
+const NameBlobRef = struct { offset: u32, len: u32 };
 
-/// First-wins name set for indexing. Discarding a record requires full-string equality,
-/// even when different names produce the same hash.
-///
-/// FAI stores stable keys in a child arena. `.zfi` stores offsets into `name_blob` so
-/// deduplication and output share one name copy.
-pub fn NameDedupWith(comptime Context: type) type {
+fn NameDedupWith(comptime Context: type) type {
     return struct {
         map: std.HashMap([]const u8, void, Context, std.hash_map.default_max_load_percentage),
         key_arena: ?std.heap.ArenaAllocator = null,
@@ -72,14 +62,14 @@ pub fn NameDedupWith(comptime Context: type) type {
         const BlobHashContext = struct {
             blob: *std.ArrayList(u8),
             pub fn hash(self: @This(), key: NameBlobRef) u64 {
-                return std.hash_map.hashString(self.blob.items[key.off..][0..key.len]);
+                return std.hash_map.hashString(self.blob.items[key.offset..][0..key.len]);
             }
             pub fn eql(self: @This(), a: NameBlobRef, b: NameBlobRef) bool {
                 if (a.len != b.len) return false;
                 return std.mem.eql(
                     u8,
-                    self.blob.items[a.off..][0..a.len],
-                    self.blob.items[b.off..][0..b.len],
+                    self.blob.items[a.offset..][0..a.len],
+                    self.blob.items[b.offset..][0..b.len],
                 );
             }
         };
@@ -98,7 +88,7 @@ pub fn NameDedupWith(comptime Context: type) type {
             }
             pub fn eql(self: @This(), name: []const u8, ref: NameBlobRef) bool {
                 if (name.len != ref.len) return false;
-                return std.mem.eql(u8, name, self.blob.items[ref.off..][0..ref.len]);
+                return std.mem.eql(u8, name, self.blob.items[ref.offset..][0..ref.len]);
             }
         };
 
@@ -147,11 +137,11 @@ pub fn NameDedupWith(comptime Context: type) type {
         // Returns true when `name` was already observed (caller should skip the record).
         pub fn observe(self: *Self, name: []const u8) !bool {
             if (self.name_blob) |blob| {
-                var rm = &(self.ref_map orelse return error.OutOfMemory);
+                var rm = &(self.ref_map orelse unreachable);
                 const lookup = SliceLookup{ .blob = blob };
                 const gop = try rm.getOrPutAdapted(name, lookup);
                 if (gop.found_existing) {
-                    self.last_offset = gop.key_ptr.off;
+                    self.last_offset = gop.key_ptr.offset;
                     self.last_len = @intCast(gop.key_ptr.len);
                     return true;
                 }
@@ -160,12 +150,12 @@ pub fn NameDedupWith(comptime Context: type) type {
                     _ = rm.removeByPtr(gop.key_ptr);
                     return err;
                 };
-                gop.key_ptr.* = .{ .off = off, .len = @intCast(name.len) };
+                gop.key_ptr.* = .{ .offset = off, .len = @intCast(name.len) };
                 self.last_offset = off;
                 self.last_len = @intCast(name.len);
                 return false;
             }
-            const arena = &(self.key_arena orelse return error.OutOfMemory);
+            const arena = &(self.key_arena orelse unreachable);
             const gop = try self.map.getOrPut(name);
             if (gop.found_existing) return true;
             // Replace the temporary lookup key with an arena-owned copy (stable until deinit).
@@ -179,6 +169,8 @@ pub fn NameDedupWith(comptime Context: type) type {
     };
 }
 
+/// First-wins name set whose decisions use full-string equality despite hash collisions.
+/// FAI owns stable keys in a child arena; `.zfi` shares names with its output blob.
 pub const NameDedup = NameDedupWith(std.hash_map.StringContext);
 
 /// One parsed FASTA record passed to reader emit callbacks.
@@ -572,7 +564,6 @@ fn writeZfiIndex(
     try writer.writeAll(&index_format.encodeZfiNameFooter(index.name_blob.items.len));
 }
 
-/// Writes a `ZfiIndex` to a `.zfi` file via `writeZfiIndex`.
 pub fn writeZfiIndexFile(
     io: std.Io,
     path: []const u8,
@@ -589,7 +580,7 @@ pub fn writeZfiIndexFile(
     try file_fw.flush();
 }
 
-/// Serializes a `ZfiIndex` with the same bytes as `writeZfiIndexFile`.
+/// Caller owns the returned production-layout bytes.
 pub fn zfiIndexToBytes(
     index: *const ZfiIndex,
     source_size: u64,
@@ -853,7 +844,7 @@ const ChunkParseState = struct {
         self.pending_pre_lf_ends_with_cr = false;
     }
 
-    fn appendPendingFragment(self: *ChunkParseState, fragment: []const u8, fragment_file_offset: u64) void {
+    fn appendPendingFragment(self: *ChunkParseState, fragment: []const u8, fragment_file_offset: u64) !void {
         if (!self.in_pending_line) {
             self.in_pending_line = true;
             self.pending_line_bases = 0;
@@ -862,9 +853,14 @@ const ChunkParseState = struct {
             self.pending_pre_lf_ends_with_cr = false;
             self.pending_line_file_offset = fragment_file_offset;
         }
-        self.pending_line_bases += countBasesInLineSlice(fragment, 0, fragment.len);
-        self.pending_line_bytes += @intCast(fragment.len);
-        self.pending_pre_lf_bytes = self.pending_line_bytes;
+        const fragment_bases = countBasesInLineSlice(fragment, 0, fragment.len);
+        const next_bases = std.math.add(u32, self.pending_line_bases, fragment_bases) catch
+            return error.SequenceLineTooLong;
+        const next_bytes = std.math.add(u32, self.pending_line_bytes, @intCast(fragment.len)) catch
+            return error.SequenceLineTooLong;
+        self.pending_line_bases = next_bases;
+        self.pending_line_bytes = next_bytes;
+        self.pending_pre_lf_bytes = next_bytes;
         if (fragment.len > 0) {
             self.pending_pre_lf_ends_with_cr = fragment[fragment.len - 1] == '\r';
         }
@@ -872,6 +868,9 @@ const ChunkParseState = struct {
 
     fn commitPendingLine(self: *ChunkParseState, has_lf: bool) !void {
         if (!self.in_pending_line and self.pending_line_bytes == 0) return;
+        if (!has_lf and self.pending_line_bytes == std.math.maxInt(u32)) {
+            return error.SequenceLineTooLong;
+        }
         if (self.pending_line_bases > 0) self.noteSeqOffset(self.pending_line_file_offset);
         var content_len = if (has_lf) self.pending_pre_lf_bytes else self.pending_line_bytes;
         if (content_len > 0 and self.pending_pre_lf_ends_with_cr) {
@@ -989,12 +988,13 @@ fn processChunkBytes(
     if (state.in_pending_line) {
         const nl = findNextNewline(data, 0, data.len);
         if (nl >= data.len) {
-            state.appendPendingFragment(data, file_offset);
+            try state.appendPendingFragment(data, file_offset);
             return;
         }
 
-        state.appendPendingFragment(data[0..nl], file_offset);
-        state.pending_line_bytes += 1;
+        try state.appendPendingFragment(data[0..nl], file_offset);
+        state.pending_line_bytes = std.math.add(u32, state.pending_line_bytes, 1) catch
+            return error.SequenceLineTooLong;
         try state.commitPendingLine(true);
         i = nl + 1;
     }
@@ -1082,7 +1082,7 @@ fn processChunkBytes(
             if (data.len - i < line_bytes) {
                 // A partial chunk has no complete line when LF is absent.
                 if (findNextNewline(data, i, data.len) >= data.len) {
-                    state.appendPendingFragment(
+                    try state.appendPendingFragment(
                         data[i..],
                         file_offset + @as(u64, @intCast(i)),
                     );
@@ -1094,7 +1094,7 @@ fn processChunkBytes(
         const line_start = i;
         const nl = findNextNewline(data, i, data.len);
         if (nl >= data.len) {
-            state.appendPendingFragment(
+            try state.appendPendingFragment(
                 data[line_start..],
                 file_offset + @as(u64, @intCast(line_start)),
             );
@@ -1390,6 +1390,7 @@ pub fn runIndex(
             allocator,
         ) catch |err| switch (err) {
             error.HeaderTooLong,
+            error.SequenceLineTooLong,
             error.NotFasta,
             error.NonUniformFai,
             error.FaiSpoolWriteFailed,
@@ -1426,12 +1427,7 @@ pub fn runIndex(
     const zfi_path = std.fmt.bufPrint(&zfi_path_buf, "{s}.zfi", .{path}) catch
         return error.OutputPathTooLong;
 
-    var zfi_tmp_buf: [INDEX_PATH_BUFFER_SIZE]u8 = undefined;
-    const zfi_tmp_path = std.fmt.bufPrint(&zfi_tmp_buf, "{s}.zfi.tmp", .{path}) catch
-        return error.OutputPathTooLong;
-
     const cwd = std.Io.Dir.cwd();
-    cwd.deleteFile(io, zfi_tmp_path) catch {};
 
     var zfi_index = scanZfiReaderWithOptions(
         &file_reader.interface,
@@ -1439,7 +1435,12 @@ pub fn runIndex(
         .{ .enable_dedup = options.enable_dedup, .require_initial_header = true },
         allocator,
     ) catch |err| switch (err) {
-        error.HeaderTooLong, error.NotFasta, error.SourceReadFailed, error.OutOfMemory => return err,
+        error.HeaderTooLong,
+        error.SequenceLineTooLong,
+        error.NotFasta,
+        error.SourceReadFailed,
+        error.OutOfMemory,
+        => return err,
         error.MissingSideTable => return error.ProcessingFailed,
         else => return error.ProcessingFailed,
     };
@@ -1447,22 +1448,25 @@ pub fn runIndex(
 
     if (zfi_index.records.items.len == 0) return error.NoValidSequences;
 
+    const source_mtime_ns = index_format.timestampToNs(stat.mtime) catch return error.UnsupportedTimestamp;
+    var atomic_file = cwd.createFileAtomic(io, zfi_path, .{ .replace = true }) catch
+        return error.ZfiWriteFailed;
+    defer atomic_file.deinit(io);
+
+    var out_buf: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
+    var file_fw = atomic_file.file.writer(io, &out_buf);
+    writeZfiIndex(&file_fw.interface, &zfi_index, stat.size, source_mtime_ns) catch
+        return error.ZfiWriteFailed;
+    file_fw.flush() catch return error.ZfiWriteFailed;
+
     if (!try sourcePathUnchanged(io, path, stat)) return error.SourceChanged;
 
-    writeZfiIndexFile(io, zfi_tmp_path, &zfi_index, stat.size, index_format.timestampToNs(stat.mtime)) catch {
-        cwd.deleteFile(io, zfi_tmp_path) catch {};
-        return error.ZfiWriteFailed;
-    };
-
-    cwd.rename(zfi_tmp_path, cwd, zfi_path, io) catch {
-        cwd.deleteFile(io, zfi_tmp_path) catch {};
-        return error.ZfiFinalizeFailed;
-    };
+    atomic_file.replace(io) catch return error.ZfiFinalizeFailed;
 
     std.debug.print("wrote {s} ({d} sequences)\n", .{ zfi_path, zfi_index.records.items.len });
 }
 
-test "stride block validation matches scalar for structural mutations" {
+test "[property] - [stride scanner]: matches scalar structural boundaries" {
     const line_bases: u32 = 4;
     const line_count = 520;
     const target_line = 256;
@@ -1511,7 +1515,7 @@ test "stride block validation matches scalar for structural mutations" {
     }
 }
 
-test "FAI suffix formatter matches std.fmt at field boundaries" {
+test "[property] - [FAI formatter]: matches standard formatting at integer boundaries" {
     const cases = [_]IndexRecord{
         .{
             .name_offset = 0,
@@ -1561,7 +1565,7 @@ test "FAI suffix formatter matches std.fmt at field boundaries" {
     }
 }
 
-test "initial FASTA validation is an explicit scan option" {
+test "[unit] - [FASTA scanner]: gates initial-header validation by option" {
     const data = "not-fasta\n";
     var read_buf: [4]u8 = undefined;
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -1592,7 +1596,33 @@ test "initial FASTA validation is an explicit scan option" {
     );
 }
 
-test "name deduplication remains exact under hash collisions" {
+test "[failure] - [FASTA scanner]: rejects sequence lines above u32 geometry" {
+    var state = ChunkParseState{
+        .allocator = std.testing.allocator,
+        .in_pending_line = true,
+        .pending_line_bases = std.math.maxInt(u32),
+    };
+    try std.testing.expectError(error.SequenceLineTooLong, state.appendPendingFragment("A", 0));
+
+    state.pending_line_bases = 0;
+    state.pending_line_bytes = std.math.maxInt(u32);
+    const Ctx = struct {
+        fn emit(_: *@This(), _: FastaRecordEmit) !void {
+            unreachable;
+        }
+    };
+    var ctx = Ctx{};
+    var record_count: u32 = 0;
+    try std.testing.expectError(
+        error.SequenceLineTooLong,
+        processChunkBytes(&state, "\n", 0, null, null, &ctx, Ctx.emit, &record_count),
+    );
+
+    state.pending_line_bases = 1;
+    try std.testing.expectError(error.SequenceLineTooLong, state.commitPendingLine(false));
+}
+
+test "[property] - [name deduplication]: remains exact under hash collisions" {
     const CollisionContext = struct {
         pub fn hash(_: @This(), _: []const u8) u64 {
             return 0;
@@ -1616,7 +1646,7 @@ test "name deduplication remains exact under hash collisions" {
     try std.testing.expectEqual(@as(usize, 3), seen.map.count());
 }
 
-test "reader failures map to SourceReadFailed" {
+test "[failure] - [FASTA scanner]: maps reader failures to SourceReadFailed" {
     var reader: std.Io.Reader = .failing;
     var read_buf: [4]u8 = undefined;
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -1634,7 +1664,7 @@ test "reader failures map to SourceReadFailed" {
     );
 }
 
-test "FAI writer failures map to FaiSpoolWriteFailed" {
+test "[failure] - [FAI scanner]: maps writer failures to FaiSpoolWriteFailed" {
     var reader = std.Io.Reader.fixed(">seq\nA\n");
     var read_buf: [4]u8 = undefined;
     var writer: std.Io.Writer = .failing;
@@ -1651,41 +1681,46 @@ test "FAI writer failures map to FaiSpoolWriteFailed" {
     );
 }
 
-test "FAI spools use independent exclusive files and clean up" {
+test "[integration] - [FAI spool]: uses exclusive files and cleans them" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
-    var first = tryCreateFaiSpool(std.testing.io, tmp.dir, false) orelse
-        return error.TestUnexpectedResult;
-    var second = tryCreateFaiSpool(std.testing.io, tmp.dir, false) orelse {
-        first.deinit(std.testing.io);
-        return error.TestUnexpectedResult;
-    };
-    try std.testing.expect(!std.mem.eql(
-        u8,
-        first.name[0..first.name_len],
-        second.name[0..second.name_len],
-    ));
+    {
+        var first = tryCreateFaiSpool(std.testing.io, tmp.dir, false) orelse
+            return error.TestUnexpectedResult;
+        defer first.deinit(std.testing.io);
+        var second = tryCreateFaiSpool(std.testing.io, tmp.dir, false) orelse
+            return error.TestUnexpectedResult;
+        defer second.deinit(std.testing.io);
 
-    first.deinit(std.testing.io);
-    second.deinit(std.testing.io);
+        try std.testing.expect(!std.mem.eql(
+            u8,
+            first.name[0..first.name_len],
+            second.name[0..second.name_len],
+        ));
+    }
+
     var entries = tmp.dir.iterate();
     try std.testing.expectEqual(null, try entries.next(std.testing.io));
 }
 
-test "source metadata check observes path replacement" {
+test "[integration] - [source identity]: detects path replacement" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const original = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
-    try std.Io.File.writeStreamingAll(original, std.testing.io, ">seq\nAAAA\n");
-    const before = try original.stat(std.testing.io);
-    original.close(std.testing.io);
+    const before = blk: {
+        const original = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
+        defer original.close(std.testing.io);
+        try std.Io.File.writeStreamingAll(original, std.testing.io, ">seq\nAAAA\n");
+        break :blk try original.stat(std.testing.io);
+    };
 
     try tmp.dir.rename("source.fa", tmp.dir, "old.fa", std.testing.io);
-    const replacement = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
-    try std.Io.File.writeStreamingAll(replacement, std.testing.io, ">seq\nA\n");
-    replacement.close(std.testing.io);
+    {
+        const replacement = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
+        defer replacement.close(std.testing.io);
+        try std.Io.File.writeStreamingAll(replacement, std.testing.io, ">seq\nA\n");
+    }
 
     var path_buf: [128]u8 = undefined;
     const source_path = try std.fmt.bufPrint(

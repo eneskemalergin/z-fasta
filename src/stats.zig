@@ -27,8 +27,6 @@ pub const GET_TYPE_SAMPLE_BASES: u64 = 256;
 /// Bases sampled across the file for validation alphabet selection.
 pub const VALIDATE_TYPE_SAMPLE_BASES: u64 = 100_000;
 
-// --- Stats computation ---
-
 const CompositionStats = struct {
     counts: [256]u64 = .{0} ** 256,
     total_bases: u64 = 0,
@@ -334,6 +332,8 @@ fn writeReport(
     }
 }
 
+/// Loads indexed FASTA statistics, writes the exact report to stdout, and exits
+/// through the shared CLI diagnostic path on failure.
 pub fn runStats(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8) void {
     var idx = index_format.loadIndexForStats(allocator, io, fasta_path);
     defer idx.deinit();
@@ -379,7 +379,18 @@ pub fn runStats(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8
         .fai => ".fai",
     };
 
-    writeReport(writer, fasta_path, index_ext, idx.fasta_size, records, summary, shortest_name, longest_name, &comp, composition) catch {
+    writeReport(
+        writer,
+        fasta_path,
+        index_ext,
+        idx.fasta_size,
+        records,
+        summary,
+        shortest_name,
+        longest_name,
+        &comp,
+        composition,
+    ) catch {
         printErrorAndExit("error: write failed\n", .{});
     };
     stdout_fw.flush() catch {
@@ -474,7 +485,11 @@ fn scanUniformRecord(reader: *BoundedFastaReader, rec: IndexRecord, comp: *Compo
     }
 }
 
-fn scanSideTableRecord(reader: *BoundedFastaReader, lines: []const SideTableLine, comp: *CompositionStats) ScanError!void {
+fn scanSideTableRecord(
+    reader: *BoundedFastaReader,
+    lines: []const SideTableLine,
+    comp: *CompositionStats,
+) ScanError!void {
     if (lines.len == 0) return error.CorruptGeometry;
 
     var line_index: usize = 0;
@@ -602,16 +617,15 @@ fn countCompositionSlice(data: []const u8, comp: *CompositionStats) void {
     }
 }
 
-/// Detect if sequences are nucleotide or protein from composition counts.
+/// Detects whether represented sequence counts are nucleotide or protein.
 ///
 /// Shared by stats (full-file counts), GET (per-record sample), and validate
 /// (prefix sample). Threshold: nucleotide if IUPAC nuc letters are strictly
-/// more than 90% of counted bases (`nuc * 10 > total * 9`).
+/// more than 90% of counted bases (`nuc * 10 > total * 9`). The caller supplies
+/// `total` for the same sample represented by `counts`. Empty samples are nucleotide.
 pub fn detectType(counts: *const [256]u64, total: u64) SequenceType {
     if (total == 0) return .nucleotide;
 
-    // Sum the full IUPAC nucleotide alphabet (case-insensitive):
-    // A C G T U R Y S W K M B D H V N
     const nuc_count = counts['A'] + counts['a'] +
         counts['C'] + counts['c'] +
         counts['G'] + counts['g'] +
@@ -647,7 +661,7 @@ fn testIndexRecord(seq_offset: u64, seq_len: u64, line_bases: u32, line_bytes: u
     };
 }
 
-test "recordsInSeqOffsetOrder detects sorted and unsorted offsets" {
+test "[unit] - [stats scan order]: detects sorted and unsorted offsets" {
     const sorted = [_]IndexRecord{
         testIndexRecord(10, 1, 1, 2),
         testIndexRecord(20, 1, 1, 2),
@@ -662,7 +676,7 @@ test "recordsInSeqOffsetOrder detects sorted and unsorted offsets" {
     try std.testing.expect(!recordsInSeqOffsetOrder(&unsorted));
 }
 
-test "composition SIMD matches scalar counts at every tail length" {
+test "[property] - [stats composition]: SIMD matches scalar counts at every tail length" {
     var data: [512]u8 = undefined;
     for (&data, 0..) |*byte, i| byte.* = @truncate(i);
 
@@ -683,7 +697,7 @@ test "composition SIMD matches scalar counts at every tail length" {
     }
 }
 
-test "bounded uniform reader handles LF CRLF and missing final newline" {
+test "[integration] - [stats composition]: scans uniform line-ending variants" {
     const Case = struct {
         bytes: []const u8,
         record: IndexRecord,
@@ -726,7 +740,7 @@ test "bounded uniform reader handles LF CRLF and missing final newline" {
     }
 }
 
-test "bounded readers exclude headers gaps and adjacent record bytes" {
+test "[integration] - [stats composition]: excludes bytes outside indexed spans" {
     const bytes = ">one\nAC\nGT\n>two\nTT\n";
     const buffer_sizes = [_]usize{ 3, 32 };
     var tmp = std.testing.tmpDir(.{});
@@ -764,7 +778,7 @@ test "bounded readers exclude headers gaps and adjacent record bytes" {
     }
 }
 
-test "bounded side-table reader coalesces only adjacent owned spans" {
+test "[integration] - [stats composition]: coalesces only adjacent side-table spans" {
     const bytes = "AC\nGT\nignored\nnn\r\n";
     const lines = [_]SideTableLine{
         .{ .base_start = 0, .byte_offset = 0, .line_bytes = 3, .line_bases = 2 },
@@ -795,7 +809,7 @@ test "bounded side-table reader coalesces only adjacent owned spans" {
     }
 }
 
-test "bounded reader rejects invalid uniform geometry" {
+test "[failure] - [stats composition]: rejects invalid uniform geometry" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
@@ -822,13 +836,34 @@ test "bounded reader rejects invalid uniform geometry" {
     }
 }
 
-test "median arithmetic is overflow safe" {
+test "[failure] - [stats composition]: propagates positional read failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{ .read = true });
+    std.Io.File.writeStreamingAll(file, std.testing.io, "A") catch |err| {
+        file.close(std.testing.io);
+        return err;
+    };
+    file.close(std.testing.io);
+
+    var storage: [1]u8 = undefined;
+    var reader = BoundedFastaReader{
+        .io = std.testing.io,
+        .file = file,
+        .file_size = 1,
+        .buffer = &storage,
+    };
+
+    try std.testing.expectError(error.ReadFailed, reader.read(0, 1));
+}
+
+test "[edge] - [stats lengths]: computes a near-maximum median without overflow" {
     const near_max = [_]u64{ std.math.maxInt(u64) - 1, std.math.maxInt(u64) };
 
     try std.testing.expectEqual(std.math.maxInt(u64) - 1, medianSorted(&near_max));
 }
 
-test "length total overflow is rejected" {
+test "[failure] - [stats lengths]: rejects total-symbol overflow" {
     const records = [_]IndexRecord{
         testIndexRecord(0, std.math.maxInt(u64), 1, 2),
         testIndexRecord(0, 1, 1, 2),
@@ -838,7 +873,7 @@ test "length total overflow is rejected" {
     try std.testing.expectError(error.Overflow, summarizeLengths(&records, &lengths));
 }
 
-test "auN accumulation and formatting use u128" {
+test "[edge] - [stats lengths]: accumulates and formats auN above u64" {
     const length: u64 = 1 << 32;
     const records = [_]IndexRecord{
         testIndexRecord(0, length, 1, 2),
@@ -855,7 +890,7 @@ test "auN accumulation and formatting use u128" {
     try std.testing.expectEqualStrings("4294967296.00", writer.buffered());
 }
 
-test "fixed decimals use exact half-away rounding" {
+test "[unit] - [stats formatting]: rounds fixed decimals exactly" {
     var buffer: [64]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try writeFixedUnsigned(&writer, 100, 32, 2);
@@ -871,7 +906,7 @@ test "fixed decimals use exact half-away rounding" {
     try std.testing.expectEqualStrings("3.13 66.67 14.13 -0.938 0.000", writer.buffered());
 }
 
-test "report writing propagates a full destination" {
+test "[failure] - [stats report]: propagates a full destination" {
     const records = [_]IndexRecord{
         testIndexRecord(0, 4, 4, 5),
     };
@@ -912,9 +947,15 @@ test "report writing propagates a full destination" {
     );
 }
 
-test "composition categories cannot exceed indexed symbols" {
-    var comp: CompositionStats = .{ .total_bases = 4 };
-    comp.counts['A'] = 5;
+test "[failure] - [stats composition]: rejects categories above total symbols" {
+    const sequence_types = [_]SequenceType{ .nucleotide, .protein };
+    for (sequence_types) |sequence_type| {
+        var comp: CompositionStats = .{
+            .total_bases = 4,
+            .seq_type = sequence_type,
+        };
+        comp.counts['A'] = 5;
 
-    try std.testing.expectError(error.CompositionMismatch, summarizeComposition(&comp));
+        try std.testing.expectError(error.CompositionMismatch, summarizeComposition(&comp));
+    }
 }

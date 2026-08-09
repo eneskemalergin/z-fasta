@@ -307,7 +307,7 @@ test "[integration] - [stats report]: ZFI and FAI render identical mixed nucleot
             zfi_path,
             &index,
             fasta_data.len,
-            main.index_format.timestampToNs(fasta_stat.mtime),
+            try main.index_format.timestampToNs(fasta_stat.mtime),
         );
     }
 

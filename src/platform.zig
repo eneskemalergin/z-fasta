@@ -3,9 +3,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+/// Read-only mapped bytes aligned for platform mapping APIs. The corresponding
+/// `MemoryMap` owns the lifetime.
 pub const MappedBytes = []align(std.heap.page_size_min) const u8;
 
-/// Maps a file read-only without prefaulting pages on POSIX.
+/// Maps exactly `len` nonzero bytes read-only without prefaulting pages on POSIX.
 ///
 /// Zig 0.16's Windows `NtCreateSection` path requires `.populate = true`; false
 /// produces `STATUS_INVALID_PARAMETER`. Call `MemoryMap.destroy` when finished.
@@ -28,7 +30,7 @@ pub fn adviseSequential(memory: MappedBytes) void {
     ) catch {};
 }
 
-test "read-only mapping exposes file contents" {
+test "[integration] - [read-only mapping]: exposes file contents" {
     const contents = "mapped bytes";
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -39,5 +41,7 @@ test "read-only mapping exposes file contents" {
 
     var map = try mapFileReadOnly(std.testing.io, file, contents.len);
     defer map.destroy(std.testing.io);
+    adviseSequential(map.memory);
+
     try std.testing.expectEqualStrings(contents, map.memory);
 }

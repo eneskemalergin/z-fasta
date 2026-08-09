@@ -410,7 +410,7 @@ test "[cli] - [index]: rejects multiple and nonexistent FASTA paths" {
     );
 }
 
-test "[cli] - [index]: writes ZFI and applies duplicate-name policy" {
+test "[cli] - [index]: atomically replaces ZFI and applies duplicate-name policy" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -420,7 +420,8 @@ test "[cli] - [index]: writes ZFI and applies duplicate-name policy" {
     const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
     const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{zfi_path});
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
-    defer std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, tmp_path) catch {};
+    try std.Io.Dir.cwd().createDir(io, tmp_path, .default_dir);
     const dedup_message = try std.fmt.allocPrint(allocator, "wrote {s} (1 sequences)\n", .{zfi_path});
     try expectCliResult(allocator, &.{ ZFASTA_BIN, "index", fasta_path }, 0, "", dedup_message);
     {
@@ -439,7 +440,7 @@ test "[cli] - [index]: writes ZFI and applies duplicate-name policy" {
         try std.testing.expectEqual(@as(u64, 1), idx.records[0].seq_len);
         try std.testing.expectEqual(@as(u64, 2), idx.records[1].seq_len);
     }
-    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, tmp_path, .{}));
+    try std.Io.Dir.cwd().access(io, tmp_path, .{});
 }
 
 test "[unit] - [FASTA scanner]: records names and fixed-width geometry" {
@@ -604,6 +605,17 @@ test "[unit] - [ZFI format]: retains frozen wire sizes" {
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(ZfiHeader));
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(IndexRecord));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(main.index_format.SideTableLine));
+}
+
+test "[failure] - [ZFI source identity]: rejects a pre-epoch timestamp" {
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        try main.index_format.timestampToNs(std.Io.Timestamp.fromNanoseconds(0)),
+    );
+    try std.testing.expectError(
+        error.TimestampOutOfRange,
+        main.index_format.timestampToNs(std.Io.Timestamp.fromNanoseconds(-1)),
+    );
 }
 
 test "[property] - [ZFI format]: encoders match the frozen little-endian layout" {
@@ -1345,12 +1357,14 @@ test "[failure] - [ZFI loader]: rejects malformed side-table lines" {
     const Mutation = enum {
         broken_base_prefix,
         repeated_byte_offset,
+        overlapping_line_span,
         line_past_fasta,
         wrong_base_total,
     };
     const cases = [_]Mutation{
         .broken_base_prefix,
         .repeated_byte_offset,
+        .overlapping_line_span,
         .line_past_fasta,
         .wrong_base_total,
     };
@@ -1369,6 +1383,11 @@ test "[failure] - [ZFI loader]: rejects malformed side-table lines" {
             .repeated_byte_offset => {
                 const first_offset = std.mem.readInt(u64, zfi_bytes[first_line + 8 ..][0..8], .little);
                 std.mem.writeInt(u64, zfi_bytes[second_line + 8 ..][0..8], first_offset, .little);
+            },
+            .overlapping_line_span => {
+                const first_offset = std.mem.readInt(u64, zfi_bytes[first_line + 8 ..][0..8], .little);
+                const first_bytes = std.mem.readInt(u64, zfi_bytes[first_line + 16 ..][0..8], .little);
+                std.mem.writeInt(u64, zfi_bytes[second_line + 8 ..][0..8], first_offset + first_bytes - 1, .little);
             },
             .line_past_fasta => std.mem.writeInt(u64, zfi_bytes[first_line + 16 ..][0..8], fasta_data.len + 1, .little),
             .wrong_base_total => {
@@ -1967,9 +1986,9 @@ test "[failure] - [FAI loader]: rejects names above the u16 limit" {
     const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
     defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
 
-    var fai_buf: std.ArrayListUnmanaged(u8) = .empty;
+    var fai_buf: std.ArrayList(u8) = .empty;
     defer fai_buf.deinit(allocator);
-    try fai_buf.appendNTimes(allocator, 'N', 65536);
+    try fai_buf.appendNTimes(allocator, 'N', 65_600);
     try fai_buf.appendSlice(allocator, "\t4\t6\t4\t5\n");
 
     const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
@@ -1977,6 +1996,19 @@ test "[failure] - [FAI loader]: rejects names above the u16 limit" {
     try std.Io.File.writeStreamingAll(fai_file, io, fai_buf.items);
 
     try std.testing.expectError(error.CorruptIndex, loadIndexChecked(std.testing.allocator, io, fasta_path));
+    try std.testing.expectError(
+        error.CorruptIndex,
+        main.index_format.loadIndexCheckedWithMode(
+            std.testing.allocator,
+            io,
+            fasta_path,
+            .{ .positional = &.{"seq1"} },
+        ),
+    );
+    try std.testing.expectError(
+        error.CorruptIndex,
+        main.index_format.loadIndexCheckedWithMode(std.testing.allocator, io, fasta_path, .stats_scan),
+    );
 }
 
 test "[edge] - [FAI loader]: streamed modes accept the maximum sequence name" {

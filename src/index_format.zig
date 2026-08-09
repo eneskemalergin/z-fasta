@@ -10,7 +10,7 @@ const platform = @import("platform.zig");
 
 // --- Types shared by indexer, getter, and stats ---
 
-/// ZFI binary format magic + header (`ZFI\x01` since first release; no users on a prior on-disk layout).
+/// Four-byte magic and version for the supported `.zfi` wire format.
 pub const ZFI_MAGIC: [4]u8 = .{ 'Z', 'F', 'I', 0x01 };
 
 const NON_UNIFORM_WIDTH_FLAG: u8 = 1;
@@ -38,6 +38,7 @@ pub const ZFI_NAME_FOOTER_BYTES: usize = 12;
 pub const ZFI_SOURCE_ID_MAGIC: [4]u8 = .{ 'Z', 'F', 'I', 'D' };
 pub const ZFI_SOURCE_ID_BYTES: usize = 12;
 
+/// Encodes the trailing name-blob length in the frozen little-endian layout.
 pub fn encodeZfiNameFooter(name_blob_len: u64) [ZFI_NAME_FOOTER_BYTES]u8 {
     var out: [ZFI_NAME_FOOTER_BYTES]u8 = undefined;
     @memcpy(out[0..4], &ZFI_NAME_FOOTER_MAGIC);
@@ -45,6 +46,7 @@ pub fn encodeZfiNameFooter(name_blob_len: u64) [ZFI_NAME_FOOTER_BYTES]u8 {
     return out;
 }
 
+/// Encodes the source modification time in the frozen little-endian layout.
 pub fn encodeZfiSourceId(source_mtime_ns: u64) [ZFI_SOURCE_ID_BYTES]u8 {
     var out: [ZFI_SOURCE_ID_BYTES]u8 = undefined;
     @memcpy(out[0..4], &ZFI_SOURCE_ID_MAGIC);
@@ -67,16 +69,15 @@ fn decodeZfiSourceIdBytes(id_bytes: []const u8) ?u64 {
 // Legacy on-disk footer written before tight layout (16 bytes: magic + 4 pad + u64).
 const ZFI_NAME_FOOTER_LEGACY_BYTES: usize = 16;
 
-/// Nanoseconds since epoch as stored in `.zfi` source-identity trailers.
-pub fn timestampToNs(ts: std.Io.Timestamp) u64 {
-    return @intCast(ts.nanoseconds);
+/// Converts a non-negative timestamp to the unsigned `.zfi` representation.
+pub fn timestampToNs(ts: std.Io.Timestamp) error{TimestampOutOfRange}!u64 {
+    return std.math.cast(u64, ts.nanoseconds) orelse error.TimestampOutOfRange;
 }
 
 // Trailing layout after records/side tables:
 // `[name blob][optional ZFID][ZFNM footer]`.
 // `ZFID` sits before the footer so legacy loaders that seek `ZFNM` at EOF still work.
 const ZfiTrailingMeta = struct {
-    // End of name blob (and of the side-table region when the blob is empty).
     payload_end: usize,
     name_blob_len: u64,
     source_mtime_ns: ?u64,
@@ -124,6 +125,7 @@ fn parseZfiNameFooterAtEnd(zfi_data: []const u8) ?struct {
     return null;
 }
 
+/// Frozen 16-byte `.zfi` header.
 pub const ZfiHeader = extern struct {
     magic: [4]u8,
     record_count: u32,
@@ -141,17 +143,15 @@ pub const SideTableLine = extern struct {
     line_bases: u64,
 };
 
-/// Index record for ZFI output (40 bytes padded).
+/// Frozen 40-byte record shared by `.zfi` and normalized in-memory `.fai` loads.
 ///
 /// For `.zfi` indexes, `name_offset` / `name_len` point into the embedded name blob.
 /// For full-map `.fai` loads, they point into the mapped `.fai` line. Streamed
 /// `.fai` loads keep copied names separately. Use `LoadedIndex.recordName` when
 /// the index source is not already known.
 ///
-/// v0.3 stores non-uniform-width metadata in `_pad` so uniform records remain
-/// byte-identical to v0.2 records. `_pad[0] & 1 == 0` means the classic O(1)
-/// line formula applies. Non-uniform records store a 40-bit little-endian
-/// absolute `.zfi` side-table offset in `_pad[1..6]`.
+/// `_pad[0] & 1 == 0` selects the uniform O(1) line formula. Non-uniform records
+/// store a 40-bit little-endian absolute side-table offset in `_pad[1..6]`.
 pub const IndexRecord = extern struct {
     name_offset: u64,
     name_len: u16,
@@ -161,7 +161,8 @@ pub const IndexRecord = extern struct {
     line_bases: u32,
     line_bytes: u32,
 
-    /// Caller assumes the record name range was validated against `data`.
+    /// Caller assumes the record name range was validated against `data`; violating
+    /// this is undefined behavior.
     pub fn getName(self: IndexRecord, data: []const u8) []const u8 {
         return data[self.name_offset..][0..self.name_len];
     }
@@ -182,6 +183,7 @@ pub const IndexRecord = extern struct {
         return offset;
     }
 
+    /// Marks the record non-uniform or returns `SideTableOffsetTooLarge`.
     pub fn markNonUniform(self: *IndexRecord, offset: u64) !void {
         if (offset > MAX_SIDE_TABLE_OFFSET) return error.SideTableOffsetTooLarge;
         const preserve = self._pad[0] & NAME_IN_ZFI_FLAG;
@@ -250,7 +252,7 @@ pub fn encodeSideTableLine(line: SideTableLine) [ZFI_SIDE_TABLE_LINE_BYTES]u8 {
     return out;
 }
 
-/// Result of loading an index (from .zfi or .fai)
+/// Selects the records, names, and lookup state retained by a loader.
 pub const LoadMode = union(enum) {
     lookup_full_map,
     /// Stats composition: retain every record and only the two report names for streamed FAI.
@@ -319,6 +321,7 @@ pub const LoadedIndex = struct {
         return null;
     }
 
+    /// Releases all mappings, arena allocations, and the FASTA descriptor.
     pub fn deinit(self: *LoadedIndex) void {
         if (self.zfi_map) |*m| m.destroy(self.io);
         if (self.fai_map) |*m| m.destroy(self.io);
@@ -328,6 +331,7 @@ pub const LoadedIndex = struct {
         self.fasta_file.close(self.io);
     }
 
+    /// Returns the first retained record whose name exactly matches `name`.
     pub fn lookupName(self: *const LoadedIndex, name: []const u8) ?usize {
         if (self.name_map) |name_map| {
             const rec_idx = name_map.get(name) orelse return null;
@@ -358,6 +362,7 @@ pub const LoadedIndex = struct {
         return null;
     }
 
+    /// Returns borrowed lines for a loaded non-uniform record, or empty if unavailable.
     pub fn sideTableLines(self: *const LoadedIndex, rec: IndexRecord) []const SideTableLine {
         if (rec.isUniformWidth()) return &.{};
         const zfi = self.zfi_data orelse return &.{};
@@ -586,7 +591,8 @@ fn tryLoadZfi(
     // mtime was touched forward. Legacy files without a trailer keep the weaker
     // index-mtime check above only.
     if (name_layout.source_mtime_ns) |stored_mtime| {
-        if (stored_mtime != timestampToNs(fasta_stat.mtime)) {
+        const source_mtime = timestampToNs(fasta_stat.mtime) catch return error.StaleIndex;
+        if (stored_mtime != source_mtime) {
             return error.StaleIndex;
         }
     }
@@ -711,7 +717,7 @@ fn tryLoadFai(
             .line_bases = fields.line_bases,
             .line_bytes = fields.line_bytes,
         };
-        if (!isValidFaiRecordGeometry(rec, fasta_stat.size)) return error.CorruptIndex;
+        if (!isValidUniformSequenceGeometry(rec, fasta_stat.size)) return error.CorruptIndex;
 
         if (record_count >= records.len) return error.CorruptIndex;
         records[record_count] = rec;
@@ -762,8 +768,8 @@ fn loadFaiStreamed(
     errdefer arena.deinit();
     const allocator = arena.allocator();
 
-    var records_list: std.ArrayListUnmanaged(IndexRecord) = .empty;
-    var slices_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    var records_list: std.ArrayList(IndexRecord) = .empty;
+    var slices_list: std.ArrayList([]const u8) = .empty;
     var requested: std.StringHashMapUnmanaged(bool) = .empty;
     defer requested.deinit(backing_allocator);
     switch (mode) {
@@ -789,7 +795,10 @@ fn loadFaiStreamed(
     var longest_len: u64 = 0;
 
     while (true) {
-        const maybe_line = file_reader.interface.takeDelimiter('\n') catch return error.Io;
+        const maybe_line = file_reader.interface.takeDelimiter('\n') catch |err| switch (err) {
+            error.ReadFailed => return error.Io,
+            error.StreamTooLong => return error.CorruptIndex,
+        };
         const line = maybe_line orelse break;
         const current_offset = line_offset;
         line_offset = std.math.add(u64, line_offset, line.len + 1) catch return error.CorruptIndex;
@@ -805,7 +814,7 @@ fn loadFaiStreamed(
             .line_bases = fields.line_bases,
             .line_bytes = fields.line_bytes,
         };
-        if (!isValidFaiRecordGeometry(rec, fasta_stat.size)) return error.CorruptIndex;
+        if (!isValidUniformSequenceGeometry(rec, fasta_stat.size)) return error.CorruptIndex;
 
         saw_record = true;
         const retain = switch (mode) {
@@ -981,11 +990,6 @@ fn parseFaiAsciiU32(text: []const u8) ?u32 {
     return std.math.cast(u32, wide);
 }
 
-// Samtools `.fai` is always uniform-width; dense `.zfi` records use the same layout.
-fn isValidFaiRecordGeometry(rec: IndexRecord, fasta_len: u64) bool {
-    return isValidUniformSequenceGeometry(rec, fasta_len);
-}
-
 // Shared by `.fai` loaders and uniform `.zfi` metadata checks.
 //
 // Reject zero or impossible `line_bases` / `line_bytes`, `seq_offset` past EOF, and
@@ -1064,8 +1068,8 @@ const ParsedSideTable = struct {
 // Validate one non-uniform record's side table before creating typed line pointers.
 //
 // The table must sit in `[side_region_start, side_region_end)`, be 8-byte aligned,
-// and describe `rec.seq_len` bases starting at `rec.seq_offset`. Line byte offsets
-// must strictly increase; checked arithmetic rejects wraps before any slice.
+// and describe `rec.seq_len` bases starting at `rec.seq_offset`. Line byte ranges
+// must be ordered and non-overlapping; checked arithmetic rejects wraps before any slice.
 fn parseSideTable(
     zfi_data: platform.MappedBytes,
     rec: IndexRecord,
@@ -1097,21 +1101,22 @@ fn parseSideTable(
     )[0..@intCast(line_count)];
 
     var expected_base_start: u64 = 0;
-    var previous_byte_offset: u64 = 0;
+    var previous_byte_end: u64 = 0;
     for (lines, 0..) |line, i| {
         if (line.base_start != expected_base_start) return null;
         if (line.line_bases == 0 or line.line_bytes == 0) return null;
         if (line.line_bytes < line.line_bases) return null;
-        if (line.byte_offset > fasta_len or line.line_bytes > fasta_len - line.byte_offset) return null;
+        const byte_end = std.math.add(u64, line.byte_offset, line.line_bytes) catch return null;
+        if (byte_end > fasta_len) return null;
         if (i == 0) {
             // Writer invariant: first base-bearing line begins at seq_offset.
             if (line.byte_offset != rec.seq_offset) return null;
-        } else if (line.byte_offset <= previous_byte_offset) {
+        } else if (line.byte_offset < previous_byte_end) {
             return null;
         }
 
         expected_base_start = std.math.add(u64, expected_base_start, line.line_bases) catch return null;
-        previous_byte_offset = line.byte_offset;
+        previous_byte_end = byte_end;
     }
 
     if (expected_base_start != rec.seq_len) return null;

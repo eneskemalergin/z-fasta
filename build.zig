@@ -1,11 +1,11 @@
-//! Product build: z-fasta exe (ReleaseFast + strip by default) and unit/integration tests.
+//! Builds the z-fasta executable and its unit, integration, and CLI test suites.
 
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    // Ship path is ReleaseFast + strip. ReleaseSmall slows .text; reject it.
+    // ReleaseSmall regresses the text hot path; ReleaseFast is the supported ship mode.
     if (optimize == .ReleaseSmall) {
         std.debug.print(
             "error: ReleaseSmall is unsupported; use -Doptimize=ReleaseFast (strips by default)\n",
@@ -13,7 +13,7 @@ pub fn build(b: *std.Build) void {
         );
         std.process.exit(1);
     }
-    // Zig auto-strips only ReleaseSmall; RF needs an explicit strip flag.
+    // ReleaseFast does not enable stripping automatically.
     const strip = b.option(bool, "strip", "Strip debug info") orelse (optimize != .Debug);
 
     const exe = b.addExecutable(.{
@@ -49,10 +49,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "main", .module = main_module }},
     });
-    // Required for this suite on current Zig/OS (same as test_validate).
+    // Timestamp tests call POSIX time functions through std.c.
     test_index_module.link_libc = true;
     const run_test_index = b.addRunArtifact(b.addTest(.{ .root_module = test_index_module }));
-    // CLI subprocess tests spawn zig-out/bin/z-fasta; keep it current with this suite.
+    // CLI-bearing suites spawn the installed path, so keep it current.
     run_test_index.step.dependOn(b.getInstallStep());
 
     const run_test_get = b.addRunArtifact(b.addTest(.{
@@ -63,10 +63,10 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "main", .module = main_module }},
         }),
     }));
-    // CLI subprocess tests spawn zig-out/bin/z-fasta; keep it current with this suite.
     run_test_get.step.dependOn(b.getInstallStep());
 
     const run_test_main_unit = b.addRunArtifact(b.addTest(.{ .root_module = main_module }));
+    run_test_main_unit.step.dependOn(b.getInstallStep());
 
     const run_test_indexer_unit = b.addRunArtifact(b.addTest(.{
         .root_module = b.createModule(.{
@@ -86,46 +86,34 @@ pub fn build(b: *std.Build) void {
     }));
     run_test_stats.step.dependOn(b.getInstallStep());
 
-    // Messy correctness FASTAs live in gitignored cache; materialize before tests that read them.
-    const gen_messy_fixtures = b.addSystemCommand(&.{
-        "python3",
-        "bench/shared/generate_messy.py",
-        "--fixtures",
-    });
+    // Generate ignored sidecars so tests also pass on a clean checkout.
+    const gen_simple_index = b.addRunArtifact(exe);
+    gen_simple_index.addArgs(&.{ "index", "tests/data/simple.fasta" });
+    run_test_index.step.dependOn(&gen_simple_index.step);
+    run_test_get.step.dependOn(&gen_simple_index.step);
+    run_test_main_unit.step.dependOn(&gen_simple_index.step);
+    run_test_stats.step.dependOn(&gen_simple_index.step);
 
-    // GET and stats subprocess tests load sidecars from tests/data. Generate them
-    // with the selected build mode so `zig build test` works on a clean checkout.
-    const test_fasta_paths = [_][]const u8{
-        "tests/data/simple.fasta",
-        "tests/data/proteome.fasta",
-        "tests/data/single.fasta",
-        "tests/data/edge_cases.fasta",
-        "tests/data/mixed_widths.fasta",
-    };
-    for (test_fasta_paths) |fasta_path| {
-        const gen_test_index = b.addRunArtifact(exe);
-        gen_test_index.addArgs(&.{ "index", fasta_path });
-        run_test_get.step.dependOn(&gen_test_index.step);
-        run_test_main_unit.step.dependOn(&gen_test_index.step);
-        run_test_stats.step.dependOn(&gen_test_index.step);
-    }
+    const gen_proteome_index = b.addRunArtifact(exe);
+    gen_proteome_index.addArgs(&.{ "index", "tests/data/proteome.fasta" });
+    run_test_get.step.dependOn(&gen_proteome_index.step);
+    run_test_stats.step.dependOn(&gen_proteome_index.step);
 
-    const test_validate_module = b.createModule(.{
-        .root_source_file = b.path("tests/test_validate.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "main", .module = main_module }},
-    });
-    // Required for this suite on current Zig/OS (same as test_index).
-    test_validate_module.link_libc = true;
-    const run_test_validate = b.addRunArtifact(b.addTest(.{ .root_module = test_validate_module }));
-    // CLI subprocess tests spawn zig-out/bin/z-fasta; keep it current with this suite.
+    const gen_edge_cases_index = b.addRunArtifact(exe);
+    gen_edge_cases_index.addArgs(&.{ "index", "tests/data/edge_cases.fasta" });
+    run_test_get.step.dependOn(&gen_edge_cases_index.step);
+
+    const run_test_validate = b.addRunArtifact(b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/test_validate.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "main", .module = main_module }},
+        }),
+    }));
     run_test_validate.step.dependOn(b.getInstallStep());
 
-    run_test_index.step.dependOn(&gen_messy_fixtures.step);
-    run_test_validate.step.dependOn(&gen_messy_fixtures.step);
-
-    const test_step = b.step("test", "Run unit tests");
+    const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_test_index.step);
     test_step.dependOn(&run_test_get.step);
     test_step.dependOn(&run_test_main_unit.step);

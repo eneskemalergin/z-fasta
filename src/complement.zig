@@ -1,6 +1,4 @@
-//! IUPAC complement and reverse-complement lookup tables (comptime 256-byte maps).
-//!
-//! Used by GET transforms (`--rc`, `--complement-only`, `--reverse-only`).
+//! IUPAC byte complementation for GET transforms.
 
 const std = @import("std");
 
@@ -36,7 +34,7 @@ fn buildComplementTable() [256]u8 {
 
 const IUPAC_COMPLEMENT_TABLE: [256]u8 = buildComplementTable();
 
-/// Return the IUPAC complement for one base.
+/// Returns the IUPAC complement for one byte.
 /// Unknown bytes pass through unchanged.
 pub fn complement(byte: u8) u8 {
     return IUPAC_COMPLEMENT_TABLE[byte];
@@ -46,8 +44,7 @@ pub fn complement(byte: u8) u8 {
 pub fn complementInto(dst: []u8, src: []const u8) void {
     std.debug.assert(dst.len == src.len);
     var i: usize = 0;
-    // Process 32-byte chunks with a table lookup per lane (no branch on base).
-    while (i + 32 <= src.len) : (i += 32) {
+    while (src.len - i >= 32) : (i += 32) {
         inline for (0..32) |j| {
             dst[i + j] = IUPAC_COMPLEMENT_TABLE[src[i + j]];
         }
@@ -57,22 +54,10 @@ pub fn complementInto(dst: []u8, src: []const u8) void {
     }
 }
 
-test "complement handles standard bases" {
-    try std.testing.expectEqual(@as(u8, 'T'), complement('A'));
-    try std.testing.expectEqual(@as(u8, 'A'), complement('T'));
-    try std.testing.expectEqual(@as(u8, 'G'), complement('C'));
-    try std.testing.expectEqual(@as(u8, 'C'), complement('G'));
-}
-
-test "complement handles lowercase bases" {
-    try std.testing.expectEqual(@as(u8, 't'), complement('a'));
-    try std.testing.expectEqual(@as(u8, 'a'), complement('t'));
-    try std.testing.expectEqual(@as(u8, 'g'), complement('c'));
-    try std.testing.expectEqual(@as(u8, 'c'), complement('g'));
-}
-
-test "complement handles IUPAC ambiguity codes" {
+test "[unit] - [complement]: maps IUPAC symbols and preserves other bytes" {
     const pairs = [_][2]u8{
+        .{ 'A', 'T' },
+        .{ 'C', 'G' },
         .{ 'R', 'Y' },
         .{ 'W', 'W' },
         .{ 'S', 'S' },
@@ -88,25 +73,26 @@ test "complement handles IUPAC ambiguity codes" {
         try std.testing.expectEqual(std.ascii.toLower(pair[1]), complement(std.ascii.toLower(pair[0])));
         try std.testing.expectEqual(std.ascii.toLower(pair[0]), complement(std.ascii.toLower(pair[1])));
     }
-}
-
-test "complement maps uracil to adenine" {
     try std.testing.expectEqual(@as(u8, 'A'), complement('U'));
     try std.testing.expectEqual(@as(u8, 'a'), complement('u'));
+
+    for ([_]u8{ 0, '-', 'X', 'x', 0xff }) |byte| {
+        try std.testing.expectEqual(byte, complement(byte));
+    }
 }
 
-test "complement leaves unknown bytes unchanged" {
-    try std.testing.expectEqual(@as(u8, '-'), complement('-'));
-    try std.testing.expectEqual(@as(u8, 'X'), complement('X'));
-    try std.testing.expectEqual(@as(u8, 'x'), complement('x'));
-}
+test "[property] - [complementInto]: matches scalar mapping across chunk boundaries" {
+    const alphabet = "ACGTRYSWKMBDHVNacgtryswkmbdhvnUu-Xx";
+    var src: [97]u8 = undefined;
+    for (&src, 0..) |*byte, i| byte.* = alphabet[i % alphabet.len];
 
-test "complementInto handles an unrolled chunk and tail" {
-    const src: [33]u8 = @splat('A');
-    const expected: [33]u8 = @splat('T');
-    var dst: [33]u8 = undefined;
+    for (0..src.len + 1) |len| {
+        var dst: [src.len]u8 = @splat(0xff);
+        complementInto(dst[0..len], src[0..len]);
 
-    complementInto(&dst, &src);
-
-    try std.testing.expectEqualSlices(u8, &expected, &dst);
+        for (src[0..len], dst[0..len]) |input, actual| {
+            try std.testing.expectEqual(complement(input), actual);
+        }
+        if (len < dst.len) try std.testing.expectEqual(@as(u8, 0xff), dst[len]);
+    }
 }

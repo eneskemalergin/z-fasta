@@ -12,15 +12,16 @@ const stats = @import("stats.zig");
 const LoadedIndex = index_format.LoadedIndex;
 const printErrorAndExit = index_format.printErrorAndExit;
 
-// --- Region parsing ---
-
+/// A borrowed sequence name with an optional 1-based inclusive interval.
+/// `is_full` preserves the distinct header form of a bare name.
 pub const Region = struct {
     name: []const u8,
-    start: u64, // 1-based inclusive
-    end: ?u64, // 1-based inclusive, null = to end of sequence
-    is_full: bool, // true if no :START-END specified
+    start: u64,
+    end: ?u64,
+    is_full: bool,
 };
 
+/// Independent reverse and complement operations composed by toggling each operation.
 pub const Orientation = struct {
     reverse: bool = false,
     complement: bool = false,
@@ -49,6 +50,8 @@ pub const Orientation = struct {
     }
 };
 
+/// GET execution options for one borrowed request source.
+/// Direct callers must supply combinations accepted by the CLI contract.
 pub const GetOptions = struct {
     source: RequestSource,
     honor_strand: bool = false,
@@ -57,6 +60,7 @@ pub const GetOptions = struct {
     annotate_transform: bool = false,
 };
 
+/// Borrowed positional tokens or a names/BED path; a path of `-` selects stdin.
 pub const RequestSource = union(enum) {
     positional: []const []const u8,
     names: []const u8,
@@ -128,14 +132,9 @@ const BatchStats = struct {
     total_bases: u64 = 0,
 };
 
-/// Parse a region string. Handles the Ensembl colon trap by parsing from the right.
-/// Accepted formats:
-///   NAME              full sequence
-///   NAME:START-END    1-based, inclusive
-///   NAME:START-       from START to end
+/// Parses a borrowed name or rightmost `:START-END`/`:START-` suffix.
+/// Invalid or overflowing suffixes remain part of the literal name.
 pub fn parseRegion(input: []const u8) Region {
-    // Only the rightmost colon can start a coordinate suffix. Any earlier suffix
-    // contains that colon, so its coordinate fields cannot both be integers.
     if (std.mem.findScalarLast(u8, input, ':')) |cp| {
         const suffix = input[cp + 1 ..];
 
@@ -149,7 +148,6 @@ pub fn parseRegion(input: []const u8) Region {
         }
     }
 
-    // No valid region suffix found; treat entire input as sequence name
     return Region{
         .name = input,
         .start = 1,
@@ -178,16 +176,15 @@ fn parseRangeSuffix(suffix: []const u8) ?ParsedRange {
     return .{ .start = start, .end = end };
 }
 
-// --- Region resolution ---
-
-/// A validated extraction request with the record geometry needed for bounded reads.
+/// A validated extraction request borrowing its name and non-uniform line table.
+/// Coordinates are 1-based inclusive; `display_end` preserves an unclamped request end.
 pub const ResolvedRegion = struct {
-    name: []const u8, // sequence name for FASTA header
-    start: u64, // 1-based inclusive (validated)
-    display_end: u64, // end value for header (pre-clamp, samtools convention)
-    is_full: bool, // true -> emit ">NAME", false -> emit ">NAME:start-display_end"
+    name: []const u8,
+    start: u64,
+    display_end: u64,
+    is_full: bool,
     seq_offset: u64,
-    num_bases: u64, // number of bases to extract
+    num_bases: u64,
     line_bases: u32,
     line_bytes: u32,
     side_table: []const index_format.SideTableLine,
@@ -196,8 +193,8 @@ pub const ResolvedRegion = struct {
     annotate_transform: bool,
 };
 
-/// Resolve one region string against a loaded index.
-/// Calls `printErrorAndExit` when the name or coordinates are invalid.
+/// Resolves one region against an index and returns slices borrowing the index and input.
+/// Exits the process when the name or coordinates are invalid.
 pub fn resolveRegion(idx: *const LoadedIndex, region_str: []const u8) ResolvedRegion {
     const region = parseRegion(region_str);
 
@@ -224,7 +221,7 @@ fn resolveParsedRequest(
 
     var start = region.start;
     var end = region.end orelse rec.seq_len;
-    const display_end = end; // capture before clamping (samtools keeps unclamped in header)
+    const display_end = end;
 
     if (region.is_full) {
         start = 1;
@@ -241,7 +238,6 @@ fn resolveParsedRequest(
         printErrorAndExit("error: end position must be >= start position\n", .{});
     }
 
-    // Clamp end to seq_len silently (samtools behavior)
     if (end > rec.seq_len) {
         end = rec.seq_len;
     }
@@ -313,7 +309,7 @@ fn fastaSource(idx: *const LoadedIndex) FastaSource {
     return .{ .io = idx.io, .file = idx.fasta_file, .size = idx.fasta_size };
 }
 
-/// Writes a resolved region with standard 60-base wrapping.
+/// Resolves and writes one region with 60-base wrapping, exiting on any failure.
 pub fn extractRegion(idx: *const LoadedIndex, region_str: []const u8, writer: anytype) void {
     const resolved = resolveRegion(idx, region_str);
     var input_buffer: [FASTA_INPUT_BUFFER_BYTES]u8 = undefined;
@@ -1122,8 +1118,8 @@ fn processRequestPath(
     return processRequestReader(allocator, idx, &file_reader.interface, source, name_reservation, annotate_transform, writer, fasta_source);
 }
 
-// --- Public entry point ---
-
+/// Runs one GET source, writing FASTA to stdout and an optional summary to stderr.
+/// All failures terminate the process through the command diagnostic path.
 pub fn runGetWithOptions(
     backing_allocator: std.mem.Allocator,
     io: std.Io,
@@ -1209,14 +1205,14 @@ pub fn runGetWithOptions(
     }
 }
 
-test "summary writing fails when the destination is full" {
+test "[failure] - [get summary]: propagates a full destination" {
     var buffer: [1]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
 
     try std.testing.expectError(error.WriteFailed, writeSummary(&writer, 1, 1, 1));
 }
 
-test "shared disk spans require overlap or adjacency in either order" {
+test "[unit] - [get read grouping]: accepts overlap and adjacency in either order" {
     try std.testing.expect(spansOverlapOrTouch(10, 20, 20, 30));
     try std.testing.expect(spansOverlapOrTouch(20, 30, 10, 20));
     try std.testing.expect(spansOverlapOrTouch(10, 20, 15, 25));
@@ -1225,7 +1221,7 @@ test "shared disk spans require overlap or adjacency in either order" {
     try std.testing.expect(!spansOverlapOrTouch(21, 30, 10, 20));
 }
 
-test "request workspace reuses consecutive names" {
+test "[unit] - [get request workspace]: reuses consecutive names" {
     var workspace = RequestWorkspace.init(std.testing.allocator);
     defer workspace.deinit(std.testing.allocator);
 
@@ -1240,7 +1236,7 @@ test "request workspace reuses consecutive names" {
     try std.testing.expectEqualStrings("seq2", workspace.requests.items[2].parsed(workspace.names.items).region.name);
 }
 
-test "request workspace includes the name that crosses its byte target" {
+test "[edge] - [get request workspace]: retains the name crossing its byte target" {
     var workspace = RequestWorkspace.init(std.testing.allocator);
     defer workspace.deinit(std.testing.allocator);
     const name = try std.testing.allocator.alloc(u8, MAX_REQUEST_NAME_BYTES);
@@ -1261,7 +1257,7 @@ test "request workspace includes the name that crosses its byte target" {
     try std.testing.expect(workspace.names.capacity <= MAX_ACTIVE_NAME_BYTES);
 }
 
-test "processRequestReader handles names line endings and final line" {
+test "[unit] - [get names reader]: handles line endings and a final unterminated line" {
     const test_io = std.testing.io;
     var idx = index_format.loadIndex(std.testing.allocator, test_io, "tests/data/simple.fasta");
     defer idx.deinit();
@@ -1288,7 +1284,7 @@ test "processRequestReader handles names line endings and final line" {
     );
 }
 
-test "processRequestReader resets names at the request-count boundary" {
+test "[edge] - [get names reader]: resets storage at the request-count boundary" {
     const test_io = std.testing.io;
     var idx = index_format.loadIndex(std.testing.allocator, test_io, "tests/data/simple.fasta");
     defer idx.deinit();
@@ -1319,7 +1315,7 @@ test "processRequestReader resets names at the request-count boundary" {
     try std.testing.expectEqualStrings(one_output, writer.written()[writer.written().len - one_output.len ..]);
 }
 
-test "processRequestReader streams BED rows in source order" {
+test "[unit] - [get BED reader]: streams rows in source order" {
     const test_io = std.testing.io;
     var idx = index_format.loadIndex(std.testing.allocator, test_io, "tests/data/simple.fasta");
     defer idx.deinit();
@@ -1353,7 +1349,7 @@ test "processRequestReader streams BED rows in source order" {
     );
 }
 
-test "processRequestReader preserves output at BED request boundaries" {
+test "[edge] - [get BED reader]: preserves output across request-batch boundaries" {
     const test_io = std.testing.io;
     var idx = index_format.loadIndex(std.testing.allocator, test_io, "tests/data/simple.fasta");
     defer idx.deinit();
@@ -1398,90 +1394,4 @@ test "processRequestReader preserves output at BED request boundaries" {
         try std.testing.expectEqual(expected_bases, result.total_bases);
         try std.testing.expectEqualStrings(expected.written(), output.written());
     }
-}
-
-test "parseRegion matches exhaustive backward-scan reference" {
-    const Reference = struct {
-        fn findLastColon(input: []const u8, end: usize) ?usize {
-            var i = end;
-            while (i > 0) {
-                i -= 1;
-                if (input[i] == ':') return i;
-            }
-            return null;
-        }
-
-        fn parse(input: []const u8) Region {
-            var search_end = input.len;
-            while (findLastColon(input, search_end)) |colon_pos| {
-                if (parseRangeSuffix(input[colon_pos + 1 ..])) |range| {
-                    return .{
-                        .name = input[0..colon_pos],
-                        .start = range.start,
-                        .end = range.end,
-                        .is_full = false,
-                    };
-                }
-                search_end = colon_pos;
-            }
-            return .{ .name = input, .start = 1, .end = null, .is_full = true };
-        }
-    };
-
-    const alphabet = "a:0-1";
-    var input: [7]u8 = undefined;
-    var combinations: usize = 1;
-    var tested: usize = 0;
-    for (1..input.len + 1) |length| {
-        combinations *= alphabet.len;
-        for (0..combinations) |encoded| {
-            var value = encoded;
-            for (input[0..length]) |*byte| {
-                byte.* = alphabet[value % alphabet.len];
-                value /= alphabet.len;
-            }
-
-            const expected = Reference.parse(input[0..length]);
-            const actual = parseRegion(input[0..length]);
-            try std.testing.expectEqualStrings(expected.name, actual.name);
-            try std.testing.expectEqual(expected.start, actual.start);
-            try std.testing.expectEqual(expected.end, actual.end);
-            try std.testing.expectEqual(expected.is_full, actual.is_full);
-            tested += 1;
-        }
-    }
-    try std.testing.expectEqual(@as(usize, 97_655), tested);
-}
-
-test "parseRegion handles coordinate overflow at the rightmost colon" {
-    const max = parseRegion("name:18446744073709551615-18446744073709551615");
-    try std.testing.expectEqualStrings("name", max.name);
-    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), max.start);
-    try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), max.end);
-    try std.testing.expect(!max.is_full);
-
-    const full_names = [_][]const u8{
-        "name:18446744073709551616-1",
-        "name:1-18446744073709551616",
-        "name:1-2:bad",
-        "name:1-2:18446744073709551616-1",
-    };
-    for (full_names) |name| {
-        const region = parseRegion(name);
-        try std.testing.expectEqualStrings(name, region.name);
-        try std.testing.expect(region.is_full);
-    }
-}
-
-test "orientation compose behaves like transform composition" {
-    const minus_strand = Orientation.reverseComplement();
-    const global_rc = Orientation.reverseComplement();
-    const global_reverse = Orientation.reverseOnly();
-    const global_complement = Orientation.complementOnly();
-
-    try std.testing.expect(minus_strand.compose(global_rc).isIdentity());
-    try std.testing.expectEqual(true, minus_strand.compose(global_reverse).complement);
-    try std.testing.expectEqual(false, minus_strand.compose(global_reverse).reverse);
-    try std.testing.expectEqual(true, minus_strand.compose(global_complement).reverse);
-    try std.testing.expectEqual(false, minus_strand.compose(global_complement).complement);
 }

@@ -5,6 +5,7 @@
 const std = @import("std");
 const main = @import("main");
 const utility = @import("utility.zig");
+const parseRegion = main.getter.parseRegion;
 const resolveRegion = main.getter.resolveRegion;
 const io = std.testing.io;
 
@@ -16,6 +17,62 @@ const uniqueArtifactPath = utility.uniqueArtifactPath;
 const writeFastaArtifact = utility.writeFastaArtifact;
 const writeZfi = utility.writeZfi;
 const captureExtractRegion = utility.captureExtractRegion;
+
+test "[unit] - [region parser]: distinguishes literal names and rightmost coordinate suffixes" {
+    const Case = struct {
+        input: []const u8,
+        name: []const u8,
+        start: u64 = 1,
+        end: ?u64 = null,
+        is_full: bool = true,
+    };
+    const max = std.math.maxInt(u64);
+    const cases = [_]Case{
+        .{ .input = "seq1", .name = "seq1" },
+        .{ .input = "seq1:3-8", .name = "seq1", .start = 3, .end = 8, .is_full = false },
+        .{ .input = "seq1:3-", .name = "seq1", .start = 3, .is_full = false },
+        .{ .input = ":1-2", .name = "", .end = 2, .is_full = false },
+        .{
+            .input = "chromosome:GRCh38:1:1:248956422:1",
+            .name = "chromosome:GRCh38:1:1:248956422:1",
+        },
+        .{
+            .input = "chromosome:GRCh38:1:1:248956422:1:100-200",
+            .name = "chromosome:GRCh38:1:1:248956422:1",
+            .start = 100,
+            .end = 200,
+            .is_full = false,
+        },
+        .{ .input = "name:1-2:bad", .name = "name:1-2:bad" },
+        .{ .input = "name:18446744073709551616-1", .name = "name:18446744073709551616-1" },
+        .{ .input = "name:1-18446744073709551616", .name = "name:1-18446744073709551616" },
+        .{
+            .input = "name:18446744073709551615-18446744073709551615",
+            .name = "name",
+            .start = max,
+            .end = max,
+            .is_full = false,
+        },
+    };
+
+    for (cases) |case| {
+        const region = parseRegion(case.input);
+        try std.testing.expectEqualStrings(case.name, region.name);
+        try std.testing.expectEqual(case.start, region.start);
+        try std.testing.expectEqual(case.end, region.end);
+        try std.testing.expectEqual(case.is_full, region.is_full);
+    }
+}
+
+test "[unit] - [get orientation]: composes independent reverse and complement operations" {
+    const reverse_complement = main.getter.Orientation.reverseComplement();
+    const reverse = main.getter.Orientation.reverseOnly();
+    const complement = main.getter.Orientation.complementOnly();
+
+    try std.testing.expect(reverse_complement.compose(reverse_complement).isIdentity());
+    try std.testing.expectEqual(complement, reverse_complement.compose(reverse));
+    try std.testing.expectEqual(reverse, reverse_complement.compose(complement));
+}
 
 test "[integration] - [region resolution]: preserves indexed coordinate geometry" {
     var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta");

@@ -52,6 +52,17 @@ fn fixAndFreeForAllocationCheck(allocator: std.mem.Allocator, data: []const u8) 
     defer allocator.free(fixed);
 }
 
+fn renderAndFreeForAllocationCheck(allocator: std.mem.Allocator, name: []const u8) !void {
+    const json = try validator.renderJsonEvent(allocator, .{
+        .level = .error_level,
+        .kind = .duplicate_name,
+        .line = 2,
+        .name = name,
+        .first_line = 1,
+    });
+    defer allocator.free(json);
+}
+
 fn fuzzValidator(_: void, smith: *std.testing.Smith) !void {
     var storage: [512]u8 = undefined;
     const data = storage[0..smith.slice(&storage)];
@@ -367,6 +378,11 @@ test "[failure] - [validate operations]: release partial allocations" {
         fixAndFreeForAllocationCheck,
         .{">seq\nAAAA \n"},
     );
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        renderAndFreeForAllocationCheck,
+        .{"seq\"\\\xff"},
+    );
 }
 
 test "[fuzz] - [validate scan]: returns bounded summaries and idempotent allowed fixes" {
@@ -553,7 +569,7 @@ test "[property] - [validate alphabets]: accepts representative nucleotide and p
         .{ .sequence = "ACGTNRYWSMKHBVDacgtnrywsmkhbvd", .sequence_type = .nucleotide },
         .{ .sequence = "ACGUNRYWSMKHBVDacgunrywsmkhbvd", .sequence_type = .nucleotide },
         .{ .sequence = "ACGTUacgtu", .sequence_type = .nucleotide },
-        .{ .sequence = "EFILPQXO*-efilpqxo", .sequence_type = .protein },
+        .{ .sequence = "EFILPQBZJXUO*-efilpqbzjxuo", .sequence_type = .protein },
     };
 
     for (cases) |case| {
@@ -609,9 +625,10 @@ test "[cli] - [validate JSON summary]: returns the complete stable schema" {
 }
 
 test "[edge] - [validate scan]: reports missing terminal newline and invalid nucleotide byte" {
-    var summary = try validator.validateData(std.testing.allocator, ">seq\nACGTZ", .{});
+    var summary = try validator.validateData(std.testing.allocator, ">seq\nACGTACGTAC?", .{});
     defer summary.deinit(std.testing.allocator);
 
+    try std.testing.expectEqual(main.stats.SequenceType.nucleotide, summary.sequence_type);
     try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .missing_terminal_newline));
     try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .invalid_character));
 }
@@ -704,7 +721,7 @@ test "[failure] - [validate fix]: rejects errors outside the format-only contrac
     defer none.deinit(std.testing.allocator);
     try std.testing.expectEqual(.no_sequences, validator.fixRejection(&none, .{}).?);
 
-    var bad = try validator.validateData(std.testing.allocator, ">seq\nACGTZ\n", .{});
+    var bad = try validator.validateData(std.testing.allocator, ">seq\nACGT?\n", .{});
     defer bad.deinit(std.testing.allocator);
     try std.testing.expectEqual(.invalid_character, validator.fixRejection(&bad, .{}).?);
     try std.testing.expect(validator.fixRejection(&bad, .{ .fix_format_only = true }) == null);
@@ -715,14 +732,14 @@ test "[failure] - [validate fix]: rejects errors outside the format-only contrac
 }
 
 test "[property] - [validate format-only fix]: preserves invalid sequence characters" {
-    const broken = ">seq\nACGTZ\n";
+    const broken = ">seq\nACGT?\n";
     var summary = try validator.validateData(std.testing.allocator, broken, .{});
     defer summary.deinit(std.testing.allocator);
     try std.testing.expect(validator.fixRejection(&summary, .{ .fix_format_only = true }) == null);
 
     const fixed = try validator.fixData(std.testing.allocator, broken, summary.record_widths.items);
     defer std.testing.allocator.free(fixed);
-    try std.testing.expect(std.mem.indexOf(u8, fixed, "ACGTZ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fixed, "ACGT?") != null);
 
     var after = try validator.validateData(std.testing.allocator, fixed, .{});
     defer after.deinit(std.testing.allocator);
@@ -730,17 +747,21 @@ test "[property] - [validate format-only fix]: preserves invalid sequence charac
 }
 
 test "[property] - [validate fix]: preserves empty-record warnings" {
-    const broken = ">empty\n";
-    var summary = try validator.validateData(std.testing.allocator, broken, .{});
-    defer summary.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .empty_sequence));
+    const cases = [_][]const u8{ ">empty\n", ">empty" };
+    for (cases) |broken| {
+        var summary = try validator.validateData(std.testing.allocator, broken, .{});
+        defer summary.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .empty_sequence));
 
-    const fixed = try validator.fixData(std.testing.allocator, broken, summary.record_widths.items);
-    defer std.testing.allocator.free(fixed);
+        const fixed = try validator.fixData(std.testing.allocator, broken, summary.record_widths.items);
+        defer std.testing.allocator.free(fixed);
+        try std.testing.expectEqualStrings(">empty\n", fixed);
 
-    var after = try validator.validateData(std.testing.allocator, fixed, .{});
-    defer after.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 1), countKind(&after, .empty_sequence));
+        var after = try validator.validateData(std.testing.allocator, fixed, .{});
+        defer after.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), countKind(&after, .empty_sequence));
+        try std.testing.expectEqual(@as(usize, 0), countKind(&after, .missing_terminal_newline));
+    }
 }
 
 // --- Fix and cross-module contracts ---
@@ -797,7 +818,7 @@ test "[cli] - [validate format-only fix]: preserves invalid bytes while normal f
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const in_path = try writeFastaArtifact(allocator, "validate-format-only-in", ">seq\nACGTZ \n");
+    const in_path = try writeFastaArtifact(allocator, "validate-format-only-in", ">seq\nACGT? \n");
     defer std.Io.Dir.cwd().deleteFile(io, in_path) catch {};
     const rejected_path = try utility.uniqueArtifactPath(allocator, "validate-fix-rejected", "fa");
     defer std.Io.Dir.cwd().deleteFile(io, rejected_path) catch {};
@@ -821,11 +842,11 @@ test "[cli] - [validate format-only fix]: preserves invalid bytes while normal f
         &.{ ZFASTA_BIN, "validate", "--fix", "--fix-format-only", "-o", fixed_path, in_path },
         1,
         "WARNING: line 2: trailing whitespace on sequence line in 'seq'\n" ++
-            "ERROR: line 2: invalid sequence character 0x5a\n",
+            "ERROR: line 2: invalid sequence character 0x3f\n",
         "",
     );
     const fixed = try readTestFile(allocator, fixed_path);
-    try std.testing.expectEqualStrings(">seq\nACGTZ\n", fixed);
+    try std.testing.expectEqualStrings(">seq\nACGT?\n", fixed);
 }
 
 test "[cli] - [validate fix]: rejects an aliased input path without modifying it" {
