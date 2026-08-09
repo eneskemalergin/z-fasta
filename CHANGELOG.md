@@ -4,9 +4,13 @@
 
 All notable changes to z-fasta will be documented in this file.
 
-## Unreleased
+## [0.3.1] - 2026-08-09
 
-Single-path performance and memory cleanup across `index`, `get`, and `stats`, with CLI and validation hardening. No `.zfi` format change. **Re-index not required.**
+This release targets a polished, optimized z-fasta, with its crowded README moved to github-wiki and applied many optimizations, all the while unsued or uselss clutter removed. Single-path performance and memory cleanup across `index`, `get`, and `stats`, with CLI and validation hardening. No `.zfi` format change. **Re-index not required.**
+
+### Added
+
+- A tracked project Wiki now owns installation, workflows, behavior, limits, recipes, troubleshooting, and contributor guidance. Wiki changes are validated and synchronized automatically.
 
 ### Changed
 
@@ -34,12 +38,18 @@ Single-path performance and memory cleanup across `index`, `get`, and `stats`, w
   - GET correctness passes 418 checks. Performance compares `.zfi` and `.fai` across positional, multi-region, BED, and reverse-complement work without obsolete chunk-mode lanes.
   - Stats correctness passes 57 permanent checks across `.zfi`, `.fai`, noodles, rust-bio, SeqKit, and Seqtk. Performance compares the complete `.zfi` and `.fai` report with complete Rust peers; SeqKit and Seqtk remain explicitly labeled partial references.
 
+- **Project maintenance**
+  - The README is now a concise project and performance overview; detailed usage lives in the Wiki.
+  - Test suites share deterministic fixture helpers, isolate mutable sidecars, and cover expanded parser, index, GET, stats, and validate edge cases.
+  - Routine CI and tagged releases target Linux and macOS on x86_64 and arm64.
+
 ### Removed
 
 - `index --low-mem`. Bare `index` now provides the same bounded sequence-memory behavior.
 - `get --chunk-size`, including its all-memory `-1` mode. BED input now has one streaming path.
 - `stats --index-only`. It produced a partial report that was not comparable with normal stats work; `stats` now has one complete mode, and the old flag follows the normal unknown-option error path.
 - The Stats `Duplicates` section and source-header duplicate count. `validate` owns duplicate-name reporting, while `stats` reports the population retained by the selected index.
+- Native Windows release archives. Windows users can run the Linux release through WSL.
 
 ### Fixed
 

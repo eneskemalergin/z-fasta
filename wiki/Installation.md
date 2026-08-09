@@ -10,10 +10,8 @@ Open the [z-fasta Releases page](https://github.com/eneskemalergin/z-fasta/relea
 - `z-fasta_0.3.1_linux_arm64.tar.gz`
 - `z-fasta_0.3.1_macos_x86_64.tar.gz`
 - `z-fasta_0.3.1_macos_arm64.tar.gz`
-- `z-fasta_0.3.1_windows_x86_64.zip`
-- `z-fasta_0.3.1_windows_arm64.zip`
 
-Extract the archive and place `z-fasta` or `z-fasta.exe` in a directory on your `PATH`.
+Extract the archive and place `z-fasta` in a directory on your `PATH`.
 
 ### Linux and macOS
 
@@ -32,14 +30,11 @@ mv z-fasta "$HOME/.local/bin/z-fasta"
 
 Make sure `$HOME/.local/bin` is on your `PATH`.
 
-### Windows PowerShell
+### Windows through WSL
 
-```powershell
-Expand-Archive .\z-fasta_0.3.1_windows_x86_64.zip -DestinationPath .\z-fasta
-.\z-fasta\z-fasta.exe --version
-```
+I would like to support Windows properly, but keeping the native builds reliable currently takes more time than I can justify. I would rather be honest about that than publish an executable I cannot support well. I am sorry for the extra step.
 
-Add the extracted directory to your user `PATH` to call `z-fasta.exe` without its full path.
+For now, install [Windows Subsystem for Linux](https://learn.microsoft.com/windows/wsl/install), open its Linux shell, and use the Linux archive matching the WSL architecture. Run the Linux installation and verification commands above inside WSL.
 
 > [!IMPORTANT]
 > Confirm that `z-fasta --version` prints the release you intended to install before building indexes used by a pipeline.
@@ -58,11 +53,7 @@ zig build -Doptimize=ReleaseFast
 
 The first command must print `0.16.0`. Other Zig versions are not part of the supported source-build contract.
 
-The executable is written to `zig-out/bin/z-fasta` or `zig-out/bin/z-fasta.exe`. On Windows PowerShell, verify the source build with:
-
-```powershell
-.\zig-out\bin\z-fasta.exe --version
-```
+The executable is written to `zig-out/bin/z-fasta`.
 
 Run the test suite when you are building a development checkout:
 

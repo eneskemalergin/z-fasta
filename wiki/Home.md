@@ -53,7 +53,7 @@ reference.fa
 
 ## Why use z-fasta?
 
-- One dependency-free executable for Linux, macOS, and Windows on x86_64 and arm64.
+- One dependency-free executable for Linux and macOS on x86_64 and arm64.
 - Default `.zfi` indexes embed names, source identity, and side tables for messy records.
 - Positional GET behavior is checked for byte equality with `samtools faidx` on the verified path.
 - BED, names, reverse-complement, and messy-layout extraction have dedicated correctness coverage.
@@ -62,7 +62,7 @@ reference.fa
 
 ## Know the boundary
 
-I intentionally keep z-fasta focused on uncompressed FASTA. It does not accept FASTQ, gzip-compressed FASTA, or BGZF. If your workflow starts outside that boundary, [Choosing a FASTA tool](Choosing-a-FASTA-Tool) will save you time.
+I intentionally keep z-fasta focused on uncompressed FASTA. FASTQ is coming as a separate project, z-fastq, with the same focus on speed, low memory use, and portability. Supporting gzip or BGZF well would require real work on deflate performance, and I have not been able to justify that work yet. If your workflow starts outside that boundary, [Choosing a FASTA tool](Choosing-a-FASTA-Tool) will save you time.
 
 ## The reading path I recommend
 

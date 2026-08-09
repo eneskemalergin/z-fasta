@@ -54,9 +54,17 @@ It removes spaces and tabs only from sequence-line ends, joins sequence content,
 
 No. It requires `-o` and refuses a destination that resolves to the input.
 
+## Does z-fasta support FASTQ?
+
+No. FASTQ is coming as a separate project, z-fastq, built around the same priorities: speed, low memory use, and portability.
+
 ## Does z-fasta support compressed FASTA?
 
-No. Current input is uncompressed FASTA only.
+No. Current input is uncompressed FASTA only. I have not invested the time required to optimize deflate or write a separate decompressor for this project.
+
+## Does z-fasta publish Windows binaries?
+
+No. I would like to support Windows properly, but keeping native builds reliable currently takes more time than I can justify. For now, use the Linux release through Windows Subsystem for Linux. I am sorry for the extra step.
 
 ## Can I extract BED12 blocks?
 

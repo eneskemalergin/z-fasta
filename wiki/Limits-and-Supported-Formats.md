@@ -7,7 +7,7 @@ z-fasta has a deliberately narrow input contract. Check this page before buildin
 - Uncompressed FASTA input.
 - `.zfi` default indexes.
 - Five-column FASTA `.fai` compatibility indexes.
-- Linux, macOS, and Windows.
+- Linux and macOS.
 - x86_64 and arm64 release archives.
 - DNA, RNA, protein, lowercase, and IUPAC symbols.
 - LF, CRLF, missing final newline, and non-uniform layout through `.zfi` side tables.
@@ -17,6 +17,7 @@ z-fasta has a deliberately narrow input contract. Check this page before buildin
 - FASTQ.
 - gzip-compressed FASTA.
 - BGZF FASTA.
+- Native Windows releases. Use the Linux release through WSL.
 - Remote URLs as FASTA paths.
 - Automatic index creation during GET or stats.
 - BED12 block concatenation.
@@ -25,6 +26,8 @@ z-fasta has a deliberately narrow input contract. Check this page before buildin
 
 > [!NOTE]
 > Use samtools, bedtools, SeqKit, or another suitable tool when a workflow needs compressed FASTA, FASTQ, BED12 blocks, GFF/VCF intervals, or broader format conversion. See [Choosing a FASTA tool](Choosing-a-FASTA-Tool).
+
+FASTQ is coming as a separate project, z-fastq, built around the same priorities: speed, low memory use, and portability. Supporting gzip or BGZF well would mean investing real time in Zig's deflate path or writing an efficient implementation myself. I have not been able to justify that work yet, but I would be happy to revisit it if enough people need it.
 
 ## Input limits
 

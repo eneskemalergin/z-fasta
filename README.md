@@ -21,18 +21,26 @@
 
 ---
 
-z-fasta focuses on four common FASTA jobs and keeps their behavior in one CLI:
+I built z-fasta around the four FASTA jobs I use most. One CLI, no runtime dependencies. I kept the scope small on purpose:
 
 - `index`: Build the default `.zfi` index or emit a samtools-compatible `.fai` for representable FASTA.
 - `get`: Extract records, regions, names files, or BED intervals with optional strand and orientation transforms.
 - `validate`: Report structural, alphabet, header, and layout problems, with supported repair to a separate file.
 - `stats`: Report indexed length, Nx, DNA, RNA, or protein statistics through a bounded sequence scan.
 
-The boundary is deliberate: uncompressed FASTA in, FASTA or reports out. FASTQ, gzip, and BGZF are not supported.
+z-fasta accepts uncompressed FASTA and writes FASTA or reports. It does not currently handle FASTQ, gzip, or BGZF.
+
+## A few honest tradeoffs
+
+I would like to support Windows properly. Right now, keeping the native builds reliable takes more time than I can justify, and I would rather be honest about that than publish an executable I cannot support well. If you use Windows, you can still run z-fasta through WSL with the Linux release. I am sorry for the extra step.
+
+FASTQ is coming as a separate project, z-fastq, built around the same priorities: speed, low memory use, and portability (Please look forward to it).
+
+Compressed FASTA is a different tradeoff. Supporting gzip or BGZF well would mean investing real time in Zig's deflate path or writing an efficient implementation myself. I have not been able to justify that work yet, but I would be happy to revisit it if enough people need it. (Might actuall work on it over z-fastq since there working on compressed files is a lot common, when I crack a optimized implementation will move it here)
 
 ## Start
 
-Download a binary from [Releases](https://github.com/eneskemalergin/z-fasta/releases), or [build from source with Zig 0.16.0](https://github.com/eneskemalergin/z-fasta/wiki/Installation).
+Grab a binary from [Releases](https://github.com/eneskemalergin/z-fasta/releases), or [build it from source with Zig 0.16.0](https://github.com/eneskemalergin/z-fasta/wiki/Installation).
 
 ```bash
 z-fasta validate reference.fa
@@ -44,6 +52,8 @@ z-fasta stats reference.fa
 Work through the [five-minute example](https://github.com/eneskemalergin/z-fasta/wiki/Getting-Started), then keep the [command cheat sheet](https://github.com/eneskemalergin/z-fasta/wiki/Command-Cheat-Sheet) nearby.
 
 ## Documentation
+
+The Wiki holds the details that would otherwise bury this page:
 
 [Indexing](https://github.com/eneskemalergin/z-fasta/wiki/Indexing) | [Extraction](https://github.com/eneskemalergin/z-fasta/wiki/Extracting-Sequences) | [BED and strand](https://github.com/eneskemalergin/z-fasta/wiki/BED-and-Strand-Workflows) | [Validation](https://github.com/eneskemalergin/z-fasta/wiki/Validation-and-Repair) | [Statistics](https://github.com/eneskemalergin/z-fasta/wiki/Statistics)
 
