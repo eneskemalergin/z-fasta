@@ -4,9 +4,9 @@
 
 All notable changes to z-fasta will be documented in this file.
 
-## [0.3.1] - 2026-08-09
+## [0.3.2] - 2026-08-08
 
-This release targets a polished, optimized z-fasta, with its crowded README moved to github-wiki and applied many optimizations, all the while unsued or uselss clutter removed. Single-path performance and memory cleanup across `index`, `get`, and `stats`, with CLI and validation hardening. No `.zfi` format change. **Re-index not required.**
+This release moves detailed documentation into a tracked GitHub Wiki and consolidates single-path performance and memory improvements across `index`, `get`, and `stats`, with CLI and validation hardening. Obsolete modes and unsupported native Windows release lanes are removed. No `.zfi` format change. **Re-index not required.**
 
 ### Added
 

@@ -11,7 +11,7 @@ pub const validator = @import("validator.zig");
 
 const printErrorAndExit = index_format.printErrorAndExit;
 
-const VERSION = "0.3.1";
+const VERSION = "0.3.2";
 const STRAND_AWARE_FLAG = "--strand-aware";
 const STRAND_AWARE_ALIAS = "--honor-strand";
 const RC_FLAG = "--rc";
