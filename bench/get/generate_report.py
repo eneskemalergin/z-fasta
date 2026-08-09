@@ -15,48 +15,22 @@ import pandas as pd
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 RESULTS_DIR = SCRIPT_DIR / "results"
-PROJECT_ROOT = SCRIPT_DIR.parent.parent
 
 DATASET_ORDER = ["Genome", "Transcriptome", "Proteome"]
 
-# Shared ratio helpers live in index/generate_report.py and require an explicit baseline
-# tool id (index uses z-fasta-fai; get's headline lane is default .zfi get).
 BASELINE = "z-fasta-default"
-
-# Chart/table order: z-fasta first, then Rust peers, then samtools/bedtools, then reference lanes.
-TOOL_ORDER = [
-    "z-fasta-default",
-    "z-fasta-fai",
-    "z-fasta-chunk-all",
-    "z-fasta-chunk-1",
-    "z-fasta-rc",
-    "z-fasta-complement-only",
-    "z-fasta-reverse-only",
-    "noodles",
-    "rustbio-custom-get",
-    "samtools",
-    "bedtools",
-    "seqtk-reference",
-    "fastahack",
-    "fastahack-reference",
-    "noodles-rc",
-    "rustbio-custom-get-rc",
-]
+BASELINE_LABEL = "z-fasta (.zfi)"
 
 # Positional charts: indexed tools + reference seqtk + fastahack on full_seq.
 POS_CHART_TOOLS = [
     "z-fasta-default",
+    "z-fasta-fai",
     "noodles",
     "rustbio-custom-get",
     "samtools",
     "fastahack",
     "seqtk-reference",
 ]
-
-POS_TABLE_TOOLS = POS_CHART_TOOLS
-
-# Back-compat alias
-POS_HEADLINE_TOOLS = POS_TABLE_TOOLS
 
 REGION_LABELS = {
     "100bp": "100 bp",
@@ -71,43 +45,27 @@ REFERENCE_TOOLS = frozenset({"seqtk-reference", "fastahack-reference"})
 # so it does not blend with the three transform modes.
 RC_BASELINE_TOOLS = frozenset({"z-fasta-default"})
 
-POS_EXCLUDE = frozenset(
-    {
-        "z-fasta-fai",
-        "z-fasta-chunk-all",
-        "z-fasta-chunk-1",
-        "z-fasta-rc",
-        "noodles-rc",
-        "rustbio-custom-get-rc",
-    }
-)
-
-MODE_POS_TOOLS = ["z-fasta-default", "z-fasta-fai"]
-
 # BED batch: 1 kbp per row (see run.sh / verify bed fixtures).
 BED_BASES_PER_ROW = 1000
 BED_ROW_ORDER = [10, 100, 1000, 10000]
 
-# Headline BED chart/table peers (chunk modes are mode-comparison only).
+# BED chart and table peers.
 BED_HEADLINE_TOOLS = [
     "z-fasta-default",
+    "z-fasta-fai",
     "noodles",
     "rustbio-custom-get",
     "samtools",
     "bedtools",
 ]
-BED_MODE_TOOLS = ["z-fasta-default", "z-fasta-chunk-all", "z-fasta-chunk-1"]
-BED_DEFAULT_CHUNK = 4096
-
 # Multi-region headline peers (reference loops omitted from default timed runs).
 MULTI_HEADLINE_TOOLS = [
     "z-fasta-default",
+    "z-fasta-fai",
     "noodles",
     "rustbio-custom-get",
     "samtools",
 ]
-MULTI_CHART_TOOLS = MULTI_HEADLINE_TOOLS
-MULTI_TABLE_TOOLS = MULTI_CHART_TOOLS
 MULTI_N_ORDER = [1, 10, 100, 1000]
 MULTI_REPORT_FIGURES = frozenset(
     {
@@ -132,6 +90,7 @@ RC_EXCLUDED_DATASETS = frozenset({"Proteome"})
 RC_HEADLINE_TOOLS = [
     "z-fasta-default",
     "z-fasta-rc",
+    "z-fasta-fai-rc",
     "z-fasta-complement-only",
     "z-fasta-reverse-only",
     "noodles-rc",
@@ -140,10 +99,7 @@ RC_HEADLINE_TOOLS = [
 ]
 
 # Consistent ratio wording in tables, figure notes, and reading sections.
-LABEL_PEER_RATIO = "peer / z-fasta"
-LABEL_PEER_WALL_RATIO = "peer wall time ÷ z-fasta wall time"
-LABEL_PEER_RSS_RATIO = "peer peak RSS ÷ z-fasta peak RSS"
-LABEL_PEER_FAULTS_RATIO = "peer minor faults ÷ z-fasta minor faults"
+LABEL_PEER_RATIO = "peer / z-fasta (.zfi)"
 
 # Horizontal gap between Genome / Transcriptome / Proteome facet panels.
 GROUPED_BAR_WSPACE = 0.10
@@ -159,15 +115,11 @@ CORE_REPORT_FIGURES = frozenset(
         "perf_pos_wall.png",
         "perf_pos_rss.png",
         "perf_pos_faults.png",
-        "mode_pos.png",
         "messy_ratio_headline.png",
         "messy_ratio_summary.png",
         "perf_rc.png",
     }
 )
-
-# Back-compat alias (tests / docs).
-GET_REPORT_FIGURES = CORE_REPORT_FIGURES
 
 REGION_ORDER = ["100bp", "1kbp_mid", "10kbp", "full_seq"]
 
@@ -225,15 +177,12 @@ def messy_span_bases(region_full: str) -> int:
     return int(end) - int(start) + 1
 
 
-MESSY_LAYOUT_TOOLS = ["z-fasta-uniform", "z-fasta-messy"]
-
 GET_COLORS = {
     "z-fasta-default": "#F7A41D",
     "z-fasta-uniform": "#9E9E9E",
     "z-fasta-messy": "#F7A41D",
-    "z-fasta-fai": "#E65100",
-    "z-fasta-chunk-all": "#FFF59D",
-    "z-fasta-chunk-1": "#FBC02D",
+    "z-fasta-fai": "#FFC45C",
+    "z-fasta-fai-rc": "#FFC45C",
     # RC transform modes: darker / mid / pale shades of brand gold (#F7A41D).
     "z-fasta-rc": "#C67A00",
     "z-fasta-complement-only": "#F5B041",
@@ -250,15 +199,14 @@ GET_COLORS = {
 }
 
 GET_DISPLAY = {
-    "z-fasta-default": "z-fasta",
+    "z-fasta-default": BASELINE_LABEL,
     "z-fasta-uniform": "z-fasta (uniform)",
     "z-fasta-messy": "z-fasta (messy)",
     "z-fasta-fai": "z-fasta (.fai)",
-    "z-fasta-chunk-all": "z-fasta --chunk-size -1",
-    "z-fasta-chunk-1": "z-fasta --chunk-size 1",
-    "z-fasta-rc": "z-fasta --rc",
-    "z-fasta-complement-only": "z-fasta --complement-only",
-    "z-fasta-reverse-only": "z-fasta --reverse-only",
+    "z-fasta-fai-rc": "z-fasta (.fai) --rc",
+    "z-fasta-rc": "z-fasta (.zfi) --rc",
+    "z-fasta-complement-only": "z-fasta (.zfi) --complement-only",
+    "z-fasta-reverse-only": "z-fasta (.zfi) --reverse-only",
     "noodles": "noodles",
     "noodles-rc": "noodles --rc",
     "rustbio-custom-get": "rust-bio",
@@ -334,13 +282,22 @@ def load_index_report():
 
 
 def load_section(results_dir: Path, manifest: dict | None, key: str, ir) -> pd.DataFrame | None:
-    return ir.load_section_frames(
-        results_dir,
-        manifest,
-        key,
-        load_json=lambda p, m: load_zebrac_json(p, m, ir),
-        load_metadata=ir.load_metadata,
-    )
+    rel = (manifest or {}).get("sections", {}).get(key)
+    if not rel:
+        return None
+    section_dir = results_dir / rel
+    if not section_dir.is_dir():
+        return None
+
+    metadata = ir.load_metadata(results_dir, manifest)
+    frames = []
+    for path in sorted(section_dir.glob("*.json")):
+        frame = load_zebrac_json(path, metadata, ir)
+        if not frame.empty:
+            frames.append(frame)
+    if not frames:
+        return None
+    return pd.concat(frames, ignore_index=True)
 
 
 def load_zebrac_json(path: Path, metadata_df: pd.DataFrame | None, ir) -> pd.DataFrame:
@@ -400,9 +357,8 @@ def get_dataset_sort_key(name: str) -> tuple:
         return len(DATASET_ORDER), str(name)
 
 
-def tools_in_run(df: pd.DataFrame, *, exclude: frozenset[str] = frozenset()) -> list[str]:
-    present = set(df["tool"].astype(str))
-    return [t for t in TOOL_ORDER if t in present and t not in exclude]
+def display_tool_order(tools: list[str]) -> str:
+    return ", ".join(GET_DISPLAY.get(tool, tool) for tool in tools)
 
 
 def speedup_peer_tools(tools: list[str]) -> list[str]:
@@ -422,6 +378,15 @@ def region_sort_key(value: str) -> tuple:
         return (REGION_ORDER.index(value), value)
     except ValueError:
         return (len(REGION_ORDER), value)
+
+
+def dataset_region_sort_key(value: str) -> tuple:
+    dataset, separator, label = str(value).partition(" / ")
+    region = next(
+        (region for region, display in REGION_LABELS.items() if display == label),
+        label if separator else "",
+    )
+    return (*get_dataset_sort_key(dataset), *region_sort_key(region))
 
 
 def parse_multi_n(text: str) -> int | None:
@@ -453,9 +418,9 @@ def multi_ds_n_sort_key(label: str) -> tuple:
 
 
 def n_values_for_dataset(work: pd.DataFrame, dataset: str) -> list[int]:
-    allowed = set(MULTI_N_ORDER)
     vals = work.loc[work["dataset"] == dataset, "n"].dropna().unique()
-    return [n for n in MULTI_N_ORDER if n in allowed and n in {int(v) for v in vals}]
+    present = {int(v) for v in vals}
+    return [n for n in MULTI_N_ORDER if n in present]
 
 
 def multi_chart_tools(df: pd.DataFrame) -> list[str]:
@@ -465,10 +430,6 @@ def multi_chart_tools(df: pd.DataFrame) -> list[str]:
         if t in present and t not in tools:
             tools.append(t)
     return tools
-
-
-def multi_table_tools(df: pd.DataFrame) -> list[str]:
-    return multi_chart_tools(df)
 
 
 def md_multi_intro_blurb(work: pd.DataFrame, table_tools: list[str]) -> str:
@@ -497,9 +458,8 @@ def md_multi_intro_blurb(work: pd.DataFrame, table_tools: list[str]) -> str:
         "One `get` invocation fetches **N regions × 1 kbp each** (e.g. N=100 → 100 kbp ≈ "
         f"0.1 Mb output). Timed on {', '.join(datasets)} with **{n_list}** (log-spaced). "
         "Three figure panels (Genome, Transcriptome, Proteome); panel width follows each "
-        "dataset's N count. At **N≥16**, z-fasta uses `lookup_full_map` (N=100 and N=1,000 "
-        f"here; N=1 and N=10 use the lighter index path (see `getter.zig`)).{genome_note}"
-        f"{ref_note} Chart/table tool order: z-fasta, noodles, rust-bio, samtools{tool_tail}"
+        f"dataset's N count.{genome_note}"
+        f"{ref_note} Chart/table tool order: {display_tool_order(table_tools)}{tool_tail}"
     )
 
 
@@ -514,18 +474,17 @@ def md_multi_figure_reading_base(
     ref_lines = ""
     if any(t in REFERENCE_TOOLS for t in chart_tools):
         ref_lines = (
-            "- **Legend order:** z-fasta, noodles, rust-bio, samtools, seqtk (ref), "
-            "fastahack (ref).\n"
+            f"- **Legend order:** {display_tool_order(chart_tools)}.\n"
             "- **Hatched bars:** reference loops (one subprocess per region).\n"
         )
     else:
-        ref_lines = "- **Legend order:** z-fasta, noodles, rust-bio, samtools.\n"
+        ref_lines = f"- **Legend order:** {display_tool_order(chart_tools)}.\n"
     return (
         f"**Reading Figure {f_num}**\n"
         "- Three panels: Genome, Transcriptome, Proteome (N on x-axis).\n"
         f"- {y_note}\n"
         f"{ref_lines}"
-        f"- **Bar labels:** `1×` on z-fasta; other labels = {ratio_label}. "
+        f"- **Bar labels:** `1×` on z-fasta (.zfi); other labels = {ratio_label}. "
         f"Details in Table {t_cmp}."
     )
 
@@ -563,16 +522,6 @@ def fmt_bed_output_mb(row_count: int) -> str:
     return f"{mb:.2f} Mb"
 
 
-def bed_row_sort_key(value) -> tuple:
-    if isinstance(value, (int, float)) and not pd.isna(value):
-        return (0, int(value))
-    text = str(value)
-    n = parse_bed_rows(f"rows={text.split()[0].replace(',', '')}")
-    if n is not None:
-        return (0, n)
-    return (1, text)
-
-
 def bed_row_table_label(row_count: int) -> str:
     return f"{row_count:,} rows ({fmt_bed_output_mb(row_count)})"
 
@@ -606,21 +555,12 @@ def sort_comparisons_by_tool_order(
 
 
 def bed_work_sorted(work: pd.DataFrame) -> pd.DataFrame:
-    out = work.copy()
-    out["bed_rows"] = out["rows"].astype(int)
-    out = out.sort_values("bed_rows")
-    return out
+    return work.sort_values("bed_rows")
 
 
 def bed_tools_present(work: pd.DataFrame, tool_list: list[str]) -> list[str]:
     present = set(work["tool"].astype(str))
     return [t for t in tool_list if t in present]
-
-
-def bed_display_tool(tool: str, ir, *, mode_table: bool = False) -> str:
-    if mode_table and tool == "z-fasta-default":
-        return f"z-fasta (--chunk-size {BED_DEFAULT_CHUNK})"
-    return ir.display_tool(tool)
 
 
 def bed_ds_row_label(dataset: str, row_count: int) -> str:
@@ -644,55 +584,35 @@ def bed_chart_tools(df: pd.DataFrame) -> list[str]:
     return [t for t in BED_HEADLINE_TOOLS if t in present]
 
 
-def md_bed_intro_blurb(work: pd.DataFrame, *, t_mode: int | None = None) -> str:
+def md_bed_intro_blurb(work: pd.DataFrame, chart_tools: list[str]) -> str:
     datasets = real_datasets_in_work(work)
     rows_present = [
         n for n in BED_ROW_ORDER if n in {int(v) for v in work["bed_rows"].unique()}
     ]
     row_list = ", ".join(bed_row_table_label(n) for n in rows_present)
-    mode_blurb = ""
-    if t_mode is not None:
-        mode_blurb = (
-            f" Table {t_mode} compares z-fasta `--chunk-size` settings when those lanes ran; "
-            f"headline chart uses **default `--chunk-size {BED_DEFAULT_CHUNK}` only**."
-        )
     return (
         f"`z-fasta get --bed` on {', '.join(datasets)}. Each BED row fetches **1 kbp** "
         f"(sweep: {row_list}). Three figure panels (Genome, Transcriptome, Proteome); "
-        f"grouped bars per row count. Headline z-fasta is plain `get --bed` with CLI default "
-        f"**`--chunk-size {BED_DEFAULT_CHUNK}`** (internal batching; not `--chunk-size -1` "
-        f"read-whole-file or `--chunk-size 1`).{mode_blurb} Chart/table tool order: z-fasta, "
-        "noodles, rust-bio, samtools, bedtools."
+        f"grouped bars per row count. Chart/table tool order: {display_tool_order(chart_tools)}."
     )
 
 
 def md_bed_figure_reading_base(
+    chart_tools: list[str],
     *,
     y_note: str,
     ratio_label: str,
     t_cmp: int,
     f_num: int,
-    include_chunk_note: bool = False,
 ) -> str:
-    chunk_line = ""
-    if include_chunk_note:
-        chunk_line = (
-            f"- **Headline z-fasta:** default `--chunk-size {BED_DEFAULT_CHUNK}` only.\n"
-        )
     return (
         f"**Reading Figure {f_num}**\n"
         "- Three panels: Genome, Transcriptome, Proteome (BED row count on x-axis).\n"
         f"- {y_note}\n"
-        "- **Legend order:** z-fasta, noodles, rust-bio, samtools, bedtools.\n"
-        f"{chunk_line}"
-        f"- **Bar labels:** `1×` on z-fasta; other labels = {ratio_label}. "
+        f"- **Legend order:** {display_tool_order(chart_tools)}.\n"
+        f"- **Bar labels:** `1×` on z-fasta (.zfi); other labels = {ratio_label}. "
         f"Details in Table {t_cmp}."
     )
-
-
-def rc_tools_present(work: pd.DataFrame, tool_list: list[str]) -> list[str]:
-    present = set(work["tool"].astype(str))
-    return [t for t in tool_list if t in present]
 
 
 def enrich_rc(df: pd.DataFrame) -> pd.DataFrame:
@@ -1300,7 +1220,7 @@ def enrich_multi(df: pd.DataFrame) -> pd.DataFrame:
 
 def enrich_bed(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    out["rows"] = out.apply(
+    out["bed_rows"] = out.apply(
         lambda r: parse_bed_rows(
             r["region"]
             if pd.notna(r.get("region")) and str(r.get("region", "")).startswith("rows=")
@@ -1308,9 +1228,8 @@ def enrich_bed(df: pd.DataFrame) -> pd.DataFrame:
         ),
         axis=1,
     )
-    out = out.dropna(subset=["rows"])
-    out["rows"] = out["rows"].astype(int)
-    out["bed_rows"] = out["rows"]
+    out = out.dropna(subset=["bed_rows"])
+    out["bed_rows"] = out["bed_rows"].astype(int)
     if "dataset" in out.columns:
         legacy = out["dataset"].isna() & out["workload"].astype(str).str.match(r"^rows=", na=False)
         out.loc[legacy, "dataset"] = "Transcriptome"
@@ -1322,140 +1241,6 @@ def enrich_bed(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def tool_legend_blurb(tools: list[str], ir) -> str:
-    parts = []
-    for tool in tools:
-        color_word = {
-            "z-fasta-default": "gold",
-            "z-fasta-fai": "deep orange",
-            "z-fasta-chunk-all": "pale gold",
-            "noodles": "bronze",
-            "rustbio-custom-get": "red-brown",
-            "samtools": "grey",
-            "bedtools": "green",
-            "pyfaidx": "blue",
-            "seqtk": "purple",
-            "fastahack": "pink",
-            "fastahack-reference": "pink",
-        }.get(tool, "grey")
-        parts.append(f"{color_word} = {ir.display_tool(tool)}")
-    return "; ".join(parts)
-
-
-def build_throughput_comparisons(
-    work: pd.DataFrame, tools: list[str], ir, *, group_col: str = "dataset"
-) -> pd.DataFrame:
-    peers = speedup_peer_tools(tools)
-    ratio = ir.build_ratio_comparisons(
-        work, "mean", baseline=BASELINE, peer_tools=peers, group_col=group_col
-    )
-    return ir.build_time_throughput_comparisons(work, ratio, baseline=BASELINE)
-
-
-def fig_throughput_dual_axis(
-    work: pd.DataFrame,
-    out: Path,
-    tools: list[str],
-    comparisons: pd.DataFrame,
-    title: str,
-    fig_note: str,
-    ir,
-    *,
-    throughput_ylabel: str = "Output Throughput (Mbp/s)",
-    dataset_order: list[str] | None = None,
-) -> Path:
-    if dataset_order:
-        datasets = [d for d in dataset_order if d in work["dataset"].unique()]
-    else:
-        datasets = sorted(work["dataset"].unique(), key=get_dataset_sort_key)
-    tools = [t for t in tools if t in work["tool"].unique()]
-
-    fig, ax1 = plt.subplots(figsize=(14, 7.2))
-    ax2 = ax1.twinx()
-    width = min(0.095, 0.80 / max(1, len(tools)))
-    x = list(range(len(datasets)))
-    bar_tops: dict[tuple[str, str], tuple[float, float]] = {}
-
-    for i, tool in enumerate(tools):
-        color = ir.COLORS.get(tool, "#888888")
-        xs: list[float] = []
-        tputs: list[float] = []
-        linestyle = "--" if tool in REFERENCE_TOOLS else "-"
-        for di, ds in enumerate(datasets):
-            row = work[(work["dataset"] == ds) & (work["tool"] == tool)]
-            if row.empty:
-                continue
-            mean_t = max(float(row["mean"].values[0]), 1e-6)
-            std_t = max(float(row["stddev"].values[0]), 0.0)
-            xpos = di + (i - len(tools) / 2 + 0.5) * width
-            xs.append(xpos)
-            ax1.bar(
-                xpos,
-                mean_t,
-                width,
-                color=color,
-                alpha=0.88,
-                yerr=std_t,
-                capsize=2,
-                error_kw={"elinewidth": 0.8, "capthick": 0.8, "ecolor": "#333333"},
-                zorder=2,
-            )
-            bar_tops[(ds, tool)] = (xpos, mean_t)
-            tput = row["throughput_mibs"].values[0]
-            if pd.notna(tput) and float(tput) > 0:
-                tputs.append(float(tput))
-        if xs and tputs and len(xs) == len(tputs):
-            ax2.plot(
-                xs,
-                tputs,
-                color=color,
-                marker="o",
-                linestyle=linestyle,
-                linewidth=1.8,
-                markersize=6,
-                markeredgecolor="white",
-                markeredgewidth=0.7,
-                label=ir.display_tool(tool),
-                zorder=3,
-            )
-
-    if not comparisons.empty:
-        ir._annotate_headline_comparisons(ax1, datasets, tools, width, bar_tops, comparisons)
-
-    ax1.set_yscale("log")
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(datasets, fontsize=11)
-    ax1.set_ylabel("Wall Time (s, log scale)", fontsize=10)
-    ax2.set_ylabel(throughput_ylabel, fontsize=10)
-    ax1.set_title(title, fontsize=12, fontweight="bold", pad=20)
-    fig.text(
-        0.3125,
-        0.945,
-        fig_note,
-        ha="center",
-        va="top",
-        fontsize=9,
-        color="#444444",
-        style="italic",
-    )
-    ax1.grid(axis="y", alpha=0.28, which="both")
-    ax1.set_axisbelow(True)
-    handles, _labels = ax2.get_legend_handles_labels()
-    fig.legend(
-        handles,
-        _labels,
-        fontsize=9,
-        loc="upper center",
-        bbox_to_anchor=(0.5, 0.15),
-        ncol=len(tools),
-        frameon=False,
-        columnspacing=1.2,
-        handletextpad=0.4,
-    )
-    fig.subplots_adjust(bottom=0.20, top=0.92)
-    return ir._save(fig, out)
-
-
 def bed_filter_work(df: pd.DataFrame) -> pd.DataFrame:
     work = enrich_bed(df)
     if work.empty:
@@ -1463,7 +1248,7 @@ def bed_filter_work(df: pd.DataFrame) -> pd.DataFrame:
     return work[~work["workload"].astype(str).str.contains("/stdin", na=False)]
 
 
-def md_bed_zfasta_vs_metric_table(
+def md_bed_zfasta_vs_table(
     work: pd.DataFrame,
     tools: list[str],
     ir,
@@ -1498,7 +1283,8 @@ def md_bed_zfasta_vs_metric_table(
     return ir.md_zfasta_vs_ratio_table(
         comparisons,
         group_label="Dataset / BED rows",
-        zf_label="z-fasta",
+        vs_label=f"{BASELINE_LABEL} vs",
+        zf_label=BASELINE_LABEL,
         comp_label="Peer",
         ratio_label=ratio_label,
         fmt_zf=fmt_zf,
@@ -1512,7 +1298,6 @@ def md_bed_detail_pivot(
     ir,
     *,
     formatter,
-    mode_table: bool = False,
 ) -> str:
     rows = []
     filtered = ir.filter_tools(work, tools)
@@ -1527,7 +1312,7 @@ def md_bed_detail_pivot(
                 rows.append(
                     {
                         "dataset_row": bed_ds_row_label(ds, n),
-                        "tool": bed_display_tool(row["tool"], ir, mode_table=mode_table),
+                        "tool": ir.display_tool(row["tool"]),
                         "value": formatted,
                     }
                 )
@@ -1537,96 +1322,13 @@ def md_bed_detail_pivot(
     detail = detail.pivot(index="dataset_row", columns="tool", values="value")
     detail = detail.reindex(index=sorted(detail.index, key=bed_ds_row_sort_key))
     detail.index.name = "Dataset / BED rows"
-    if mode_table:
-        tool_labels = [
-            bed_display_tool(t, ir, mode_table=True)
-            for t in tools
-            if bed_display_tool(t, ir, mode_table=True) in detail.columns
-        ]
-    else:
-        tool_labels = [
-            ir.display_tool(t) for t in tools if ir.display_tool(t) in detail.columns
-        ]
+    tool_labels = [ir.display_tool(t) for t in tools if ir.display_tool(t) in detail.columns]
     return detail.reindex(columns=tool_labels).pipe(df_to_markdown)
-
-
-def md_bed_zfasta_vs_table(work: pd.DataFrame, tools: list[str], ir) -> str:
-    work = bed_work_sorted(work)
-    headline_tools = bed_tools_present(work, tools)
-    tagged = work[work["tool"].isin(headline_tools)].copy()
-    tagged["ds_row"] = tagged.apply(
-        lambda r: bed_ds_row_label(r["dataset"], int(r["bed_rows"])),
-        axis=1,
-    )
-    comparisons = ir.build_ratio_comparisons(
-        tagged,
-        "mean",
-        baseline=BASELINE,
-        peer_tools=speedup_peer_tools(headline_tools),
-        group_col="ds_row",
-        group_sort=bed_ds_row_sort_key,
-    )
-    if comparisons.empty:
-        return "_No z-fasta comparison data._"
-    comparisons = sort_comparisons_by_tool_order(
-        comparisons,
-        headline_tools,
-        group_sort_key=bed_ds_row_sort_key,
-    )
-    return ir.md_zfasta_vs_ratio_table(
-        comparisons,
-        group_label="Dataset / BED rows",
-        zf_label="z-fasta",
-        comp_label="Peer",
-        ratio_label="Speedup",
-        fmt_zf=lambda r: f"{r.zfasta_v:.4f}s",
-        fmt_comp=lambda r: f"{r.comp_v:.4f}s",
-    )
-
-
-def fig_metric_bars(
-    work: pd.DataFrame,
-    out: Path,
-    tools: list[str],
-    value_col: str,
-    std_col: str | None,
-    ylabel: str,
-    title: str,
-    ir,
-    *,
-    fig_note: str | None = None,
-    after_bars=None,
-) -> Path:
-    filtered = ir.filter_tools(work, tools)
-    comparisons = ir.build_ratio_comparisons(
-        filtered,
-        value_col,
-        baseline=BASELINE,
-        peer_tools=speedup_peer_tools(tools),
-        group_col="dataset",
-    )
-    return ir._fig_metric_bars(
-        filtered,
-        out,
-        tools=tools,
-        comparisons=comparisons,
-        value_col=value_col,
-        std_col=std_col,
-        ylabel=ylabel,
-        title=title,
-        fig_note=fig_note,
-        after_bars=after_bars,
-    )
 
 
 def pos_chart_tools(df: pd.DataFrame) -> list[str]:
     present = set(df["tool"].astype(str))
     return [t for t in POS_CHART_TOOLS if t in present]
-
-
-def pos_table_tools(df: pd.DataFrame) -> list[str]:
-    present = set(df["tool"].astype(str))
-    return [t for t in POS_TABLE_TOOLS if t in present]
 
 
 def _pos_std_col(value_col: str) -> str | None:
@@ -1685,11 +1387,109 @@ def _finish_grouped_bar_figure(
         loc="upper center",
         bbox_to_anchor=(0.5, bottom - legend_gap),
         bbox_transform=fig.transFigure,
-        ncol=min(len(tool_labels), 6),
+        ncol=min(len(tool_labels), 7),
         frameon=False,
         columnspacing=1.2,
         handletextpad=0.4,
     )
+
+
+def annotate_headline_comparisons(
+    ax,
+    datasets: list[str],
+    tools: list[str],
+    width: float,
+    bar_tops: dict[tuple[str, str], tuple[float, float]],
+    comparisons: pd.DataFrame,
+    ir,
+) -> None:
+    badge_offsets: dict[tuple[str, str], int] = {}
+
+    for dataset in datasets:
+        previous_y: float | None = None
+        level = 0
+        for tool in tools:
+            key = (dataset, tool)
+            if key not in bar_tops:
+                continue
+            current_y = bar_tops[key][1]
+            close = (
+                previous_y is not None
+                and max(previous_y, current_y) / min(previous_y, current_y) <= 1.2
+            )
+            level = (level + 1) % 4 if close else 0
+            badge_offsets[key] = 9 + level * 18
+            previous_y = current_y
+
+    baseline_color = ir.COLORS.get(BASELINE, "#F7A41D")
+    for dataset in datasets:
+        baseline_key = (dataset, BASELINE)
+        if baseline_key not in bar_tops:
+            continue
+        baseline_x, baseline_y = bar_tops[baseline_key]
+        cluster_xs = [
+            bar_tops[(dataset, tool)][0]
+            for tool in tools
+            if (dataset, tool) in bar_tops
+        ]
+        ax.hlines(
+            baseline_y,
+            min(cluster_xs) - width * 0.65,
+            max(cluster_xs) + width * 0.65,
+            colors=baseline_color,
+            linestyles=(0, (4, 3)),
+            linewidth=1.1,
+            alpha=0.55,
+            zorder=1,
+        )
+        ax.annotate(
+            "1x",
+            (baseline_x, baseline_y),
+            xytext=(0, badge_offsets[baseline_key]),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            fontweight="bold",
+            color=baseline_color,
+            bbox=dict(
+                boxstyle="round,pad=0.28",
+                facecolor="white",
+                edgecolor=baseline_color,
+                linewidth=1.1,
+            ),
+            zorder=5,
+        )
+
+    for row in comparisons.itertuples(index=False):
+        key = (row.dataset, row.tool)
+        if key not in bar_tops:
+            continue
+        xpos, value = bar_tops[key]
+        ratio = getattr(row, "ratio", None)
+        if ratio is None:
+            ratio = getattr(row, "speedup", None)
+        color = ir.COLORS.get(row.tool, "#666666")
+        ax.annotate(
+            ir._format_speedup(ratio),
+            (xpos, value),
+            xytext=(0, badge_offsets[key]),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            fontweight="bold",
+            linespacing=0.95,
+            color="#111111",
+            bbox=dict(
+                boxstyle="round,pad=0.28",
+                facecolor="white",
+                edgecolor=color,
+                linewidth=1.1,
+                alpha=0.96,
+            ),
+            zorder=5,
+        )
 
 
 def fig_pos_grouped_bars(
@@ -1797,8 +1597,14 @@ def fig_pos_grouped_bars(
                     peer_tools=peer_tools,
                 )
                 if not comparisons.empty:
-                    ir._annotate_headline_comparisons(
-                        ax, [ds], present_tools, width, reg_tops, comparisons
+                    annotate_headline_comparisons(
+                        ax,
+                        [ds],
+                        present_tools,
+                        width,
+                        reg_tops,
+                        comparisons,
+                        ir,
                     )
 
         if log_y:
@@ -1938,8 +1744,14 @@ def fig_multi_grouped_bars(
                     peer_tools=peer_tools,
                 )
                 if not comparisons.empty:
-                    ir._annotate_headline_comparisons(
-                        ax, [ds], present_tools, width, n_tops, comparisons
+                    annotate_headline_comparisons(
+                        ax,
+                        [ds],
+                        present_tools,
+                        width,
+                        n_tops,
+                        comparisons,
+                        ir,
                     )
 
         if log_y:
@@ -2077,8 +1889,14 @@ def fig_bed_grouped_bars(
                     peer_tools=peer_tools,
                 )
                 if not comparisons.empty:
-                    ir._annotate_headline_comparisons(
-                        ax, [ds], present_tools, width, n_tops, comparisons
+                    annotate_headline_comparisons(
+                        ax,
+                        [ds],
+                        present_tools,
+                        width,
+                        n_tops,
+                        comparisons,
+                        ir,
                     )
 
         if log_y:
@@ -2134,7 +1952,7 @@ def _rc_draw_facet(
     log_y: bool,
     ir,
 ) -> None:
-    """One RC facet: datasets on x-axis, colored bars per tool (mode_pos layout)."""
+    """One RC facet: datasets on x-axis, colored bars per tool."""
     width = min(0.095, 0.80 / max(1, len(tools)))
     x = list(range(len(datasets)))
     bar_tops: dict[tuple[str, str], tuple[float, float]] = {}
@@ -2282,177 +2100,6 @@ def fig_rc_overhead(
     return ir._save(fig, out)
 
 
-def fig_scaling_metric_lines(
-    work: pd.DataFrame,
-    out: Path,
-    tools: list[str],
-    param_col: str,
-    value_col: str,
-    xlabel: str,
-    ylabel: str,
-    title: str,
-    fig_note: str,
-    ir,
-    *,
-    log_x: bool = True,
-    log_y: bool = True,
-    value_floor: float = 1e-6,
-) -> Path:
-    filtered = ir.filter_tools(work, tools)
-    tools = [t for t in tools if t in filtered["tool"].unique()]
-    fig, ax = plt.subplots(figsize=(14, 7.2))
-    for tool in tools:
-        tdf = filtered[filtered["tool"] == tool].sort_values(param_col)
-        if tdf.empty:
-            continue
-        xs = tdf[param_col].astype(float)
-        ys = tdf[value_col].astype(float).clip(lower=value_floor)
-        std_col = _pos_std_col(value_col)
-        yerr = None
-        if std_col and std_col in tdf.columns:
-            yerr = tdf[std_col].astype(float).clip(lower=0.0).values
-        color = ir.COLORS.get(tool, "#888888")
-        linewidth = 2.4 if tool == "z-fasta-default" else 1.8
-        linestyle = "--" if tool in REFERENCE_TOOLS else "-"
-        ax.errorbar(
-            xs,
-            ys,
-            yerr=yerr,
-            color=color,
-            marker="o",
-            linestyle=linestyle,
-            linewidth=linewidth,
-            markersize=6,
-            markeredgecolor="white",
-            markeredgewidth=0.7,
-            label=ir.display_tool(tool),
-            capsize=3,
-            elinewidth=0.9,
-            zorder=3 if tool == "z-fasta-default" else 2,
-        )
-    if log_x:
-        ax.set_xscale("log")
-    if log_y:
-        ax.set_yscale("log")
-    ax.set_xlabel(xlabel, fontsize=10)
-    ax.set_ylabel(ylabel, fontsize=10)
-    ax.set_title(title, fontsize=12, fontweight="bold", pad=20)
-    fig.text(
-        0.3125,
-        0.945,
-        fig_note,
-        ha="center",
-        va="top",
-        fontsize=9,
-        color="#444444",
-        style="italic",
-    )
-    ax.grid(alpha=0.28, which="both")
-    ax.set_axisbelow(True)
-    handles, labels = ax.get_legend_handles_labels()
-    fig.legend(
-        handles,
-        labels,
-        fontsize=9,
-        loc="upper center",
-        bbox_to_anchor=(0.5, 0.15),
-        ncol=min(len(handles), 6),
-        frameon=False,
-        columnspacing=1.2,
-        handletextpad=0.4,
-    )
-    fig.subplots_adjust(bottom=0.20, top=0.92)
-    return ir._save(fig, out)
-
-
-def fig_scaling_lines(
-    work: pd.DataFrame,
-    out: Path,
-    tools: list[str],
-    param_col: str,
-    xlabel: str,
-    title: str,
-    fig_note: str,
-    ir,
-    *,
-    label_fn=None,
-) -> Path:
-    filtered = ir.filter_tools(work, tools)
-    tools = [t for t in tools if t in filtered["tool"].unique()]
-    fig, ax = plt.subplots(figsize=(14, 7.2))
-    for tool in tools:
-        tdf = filtered[filtered["tool"] == tool].sort_values(param_col)
-        if tdf.empty:
-            continue
-        xs = tdf[param_col].astype(float)
-        ys = tdf["mean"].astype(float).clip(lower=1e-6)
-        yerr = None
-        if "stddev" in tdf.columns:
-            yerr = tdf["stddev"].astype(float).clip(lower=0.0).values
-        color = ir.COLORS.get(tool, "#888888")
-        linewidth = 2.4 if tool == "z-fasta-default" else 1.8
-        linestyle = "--" if tool in REFERENCE_TOOLS else "-"
-        ax.errorbar(
-            xs,
-            ys,
-            yerr=yerr,
-            color=color,
-            marker="o",
-            linestyle=linestyle,
-            linewidth=linewidth,
-            markersize=6,
-            markeredgecolor="white",
-            markeredgewidth=0.7,
-            label=ir.display_tool(tool),
-            capsize=3,
-            elinewidth=0.9,
-            zorder=3 if tool == "z-fasta-default" else 2,
-        )
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.set_xlabel(xlabel, fontsize=10)
-    ax.set_ylabel("Wall Time (s, log scale)", fontsize=10)
-    ax.set_title(title, fontsize=12, fontweight="bold", pad=20)
-    fig.text(
-        0.3125,
-        0.945,
-        fig_note,
-        ha="center",
-        va="top",
-        fontsize=9,
-        color="#444444",
-        style="italic",
-    )
-    ax.grid(alpha=0.28, which="both")
-    ax.set_axisbelow(True)
-    handles, labels = ax.get_legend_handles_labels()
-    fig.legend(
-        handles,
-        labels,
-        fontsize=9,
-        loc="upper center",
-        bbox_to_anchor=(0.5, 0.15),
-        ncol=len(tools),
-        frameon=False,
-        columnspacing=1.2,
-        handletextpad=0.4,
-    )
-    fig.subplots_adjust(bottom=0.20, top=0.92)
-    return ir._save(fig, out)
-
-
-def md_wall_table(df: pd.DataFrame, tools: list[str], index_col: str, ir) -> str:
-    return ir.md_tool_pivot_table(
-        df,
-        tools,
-        index_col,
-        "mean",
-        lambda row: f"{row['mean']:.4f}s ±{row['stddev']:.4f}",
-        sort_index=get_dataset_sort_key if index_col == "dataset" else None,
-        empty_msg="_No performance data._",
-    )
-
-
 def fmt_mbp_s(value: float) -> str:
     if value >= 10:
         return f"{value:.1f} Mbp/s"
@@ -2461,216 +2108,13 @@ def fmt_mbp_s(value: float) -> str:
     return f"{value:.3f} Mbp/s"
 
 
-def md_throughput_table(df: pd.DataFrame, tools: list[str], index_col: str, ir) -> str:
-    if "throughput_mibs" not in df.columns:
-        return "_No throughput data._"
-    return ir.md_tool_pivot_table(
-        df,
-        tools,
-        index_col,
-        "throughput_mibs",
-        lambda row: fmt_mbp_s(float(row["throughput_mibs"])),
-        sort_index=get_dataset_sort_key if index_col == "dataset" else None,
-        empty_msg="_No throughput data._",
-        require_non_null=True,
-    )
-
-
-def md_zfasta_vs_table(work: pd.DataFrame, tools: list[str], ir, *, group_col: str = "dataset") -> str:
-    comparisons = build_throughput_comparisons(work, tools, ir, group_col=group_col)
-    return ir.md_zfasta_vs_ratio_table(
-        comparisons,
-        zf_label="z-fasta",
-        comp_label="Peer",
-        ratio_label="Speedup",
-        fmt_zf=lambda r: f"{r.zfasta_s:.4f}s",
-        fmt_comp=lambda r: f"{r.comp_s:.4f}s",
-        extra_columns=lambda r: {
-            "z-fasta Mbp/s": fmt_mbp_s(r.zfasta_mibs) if r.zfasta_mibs else "n/a",
-            "Peer Mbp/s": fmt_mbp_s(r.comp_mibs) if r.comp_mibs else "n/a",
-            "Throughput ×": ir._format_speedup(r.throughput_x),
-        },
-    )
-
-
-def md_zfasta_vs_metric_table(work: pd.DataFrame, tools: list[str], value_col: str, ir, *, unit: str, ratio_label: str) -> str:
-    filtered = ir.filter_tools(work, tools)
-    comparisons = ir.build_ratio_comparisons(
-        filtered,
-        value_col,
-        baseline=BASELINE,
-        peer_tools=speedup_peer_tools(tools),
-        group_col="dataset",
-    )
-    if value_col == "peak_rss_mb":
-        fmt_zf = lambda r: f"{r.zfasta_v:.2f} MB"
-        fmt_comp = lambda r: f"{r.comp_v:.2f} MB"
-    else:
-        fmt_zf = lambda r: f"{int(r.zfasta_v):,}"
-        fmt_comp = lambda r: f"{int(r.comp_v):,}"
-    return ir.md_zfasta_vs_ratio_table(
-        comparisons,
-        zf_label="z-fasta",
-        comp_label="Peer",
-        ratio_label=ratio_label,
-        fmt_zf=fmt_zf,
-        fmt_comp=fmt_comp,
-    )
-
-
-def md_perf_dual_axis_section(
-    work: pd.DataFrame,
-    nums,
-    tools: list[str],
-    ir,
-    *,
-    intro: str,
-    wall_caption: str,
-    throughput_summary: str,
-    comparison_summary: str,
-    figure_path: str,
-    figure_caption: str,
-    reading_notes: str,
-    figure_title: str,
-    fig_note: str,
-    out_figure: Path,
-    dataset_order: list[str] | None = None,
-) -> str:
-    t_wall = nums.next_table()
-    t_tp = nums.next_table()
-    t_cmp = nums.next_table()
-    f_perf = nums.next_figure()
-    fig_throughput_dual_axis(
-        work,
-        out_figure,
-        tools,
-        build_throughput_comparisons(work, tools, ir),
-        figure_title,
-        fig_note,
-        ir,
-        dataset_order=dataset_order,
-    )
-    blocks = [
-        intro,
-        f"**Table {t_wall}:** {wall_caption}",
-        md_wall_table(work, tools, "dataset", ir),
-        "<details>",
-        f"<summary><strong>Table {t_tp}:</strong> {throughput_summary}</summary>",
-        "",
-        md_throughput_table(work, tools, "dataset", ir),
-        "</details>",
-        "<details>",
-        f"<summary><strong>Table {t_cmp}:</strong> {comparison_summary}</summary>",
-        "",
-        md_zfasta_vs_table(work, tools, ir),
-        "</details>",
-        '<div style="margin: 1.5em 0"></div>',
-        f"**Figure {f_perf}:** {figure_caption}",
-        f"![Figure {f_perf}: {figure_title}]({figure_path})",
-        reading_notes.format(f_perf=f_perf, t_cmp=t_cmp, t_wall=t_wall, t_tp=t_tp),
-    ]
-    return "\n\n".join(blocks)
-
-
-def md_memory_section(work: pd.DataFrame, nums, tools: list[str], ir, *, context: str, figure_path: str) -> str:
-    t_rss = nums.next_table()
-    t_cmp = nums.next_table()
-    f_mem = nums.next_figure()
-    return "\n\n".join(
-        [
-            context,
-            (
-                "### Peak RSS\n\n"
-                "zebrac starts a new process for each sample and records peak RSS when it "
-                "exits. That is the most RAM the process had in use at once (Linux "
-                "`ru_maxrss` via `getrusage`). Table and figure show the mean across samples."
-            ),
-            f"**Table {t_rss}:** Peak RSS (MB, zebrac mean). Same tool order as Performance.",
-            ir.md_tool_pivot_table(
-                work,
-                tools,
-                "dataset",
-                "peak_rss_mb",
-                lambda row: f"{row['peak_rss_mb']:.2f} MB",
-                sort_index=get_dataset_sort_key,
-            ),
-            "<details>",
-            f"<summary><strong>Table {t_cmp}:</strong> z-fasta vs each peer. "
-            f"RSS × = peer peak RSS ÷ z-fasta peak RSS. Same ratios as bar labels on "
-            f"Figure {f_mem}.</summary>",
-            "",
-            md_zfasta_vs_metric_table(work, tools, "peak_rss_mb", ir, unit="MB", ratio_label="RSS ×"),
-            "</details>",
-            '<div style="margin: 1.5em 0"></div>',
-            f"**Figure {f_mem}:** Table {t_rss} as grouped bars (log scale). Bar labels = "
-            f"RSS × (see Table {t_cmp}). Gold dashed line = z-fasta RSS per dataset.",
-            f"![Figure {f_mem}: peak RSS]({figure_path})",
-            (
-                f"**Reading Figure {f_mem}**\n"
-                "- Bars: mean peak RSS. `1×` on z-fasta; other labels = peer / z-fasta.\n"
-                "- Gold dashed line: z-fasta RSS for that dataset.\n"
-                f"- Details in Table {t_cmp}."
-            ),
-        ]
-    )
-
-
-def md_page_faults_section(work: pd.DataFrame, nums, tools: list[str], ir, *, context: str, figure_path: str) -> str:
-    t_minor = nums.next_table()
-    t_cmp = nums.next_table()
-    t_major = nums.next_table()
-    f_pf = nums.next_figure()
-    blocks = [
-        context,
-        (
-            "### Page faults\n\n"
-            "A **minor** fault maps a page without reading disk. A **major** fault reads "
-            "from disk. zebrac reports both per run, like wall time."
-        ),
-        f"**Table {t_minor}:** Minor page faults (zebrac mean). Same tool order as Performance.",
-        ir.md_tool_pivot_table(
-            work,
-            tools,
-            "dataset",
-            "minor_faults",
-            lambda row: f"{int(row['minor_faults']):,}",
-        ),
-        "<details>",
-        f"<summary><strong>Table {t_cmp}:</strong> z-fasta vs each peer. "
-        f"Faults × = peer minor faults / z-fasta minor faults. Same ratios as bar "
-        f"labels on Figure {f_pf}.</summary>",
-        "",
-        md_zfasta_vs_metric_table(work, tools, "minor_faults", ir, unit="", ratio_label="Faults ×"),
-        "</details>",
-        "<details>",
-        f"<summary><strong>Table {t_major}:</strong> Major page faults.</summary>",
-        "",
-        ir.md_tool_pivot_table(
-            work,
-            tools,
-            "dataset",
-            "major_faults",
-            lambda row: f"{int(row['major_faults']):,}",
-        ),
-        "</details>",
-        '<div style="margin: 1.5em 0"></div>',
-        f"**Figure {f_pf}:** Table {t_minor} as grouped bars (log scale). Bar labels = "
-        f"Faults × (see Table {t_cmp}).",
-        f"![Figure {f_pf}: page faults]({figure_path})",
-        (
-            f"**Reading Figure {f_pf}**\n"
-            "- Bars: mean minor page faults. `1×` on z-fasta; other labels = peer / z-fasta.\n"
-            f"- Details in Table {t_cmp}."
-        ),
-    ]
-    return "\n\n".join(blocks)
-
-
 def md_overview(manifest: dict | None) -> str:
     lines = [
         "This report compares `z-fasta get` to other FASTA region fetch tools on preloaded "
-        "`.zfi` and `.fai` sidecars. Wall time, peak RSS, and page faults come from "
-        "the same zebrac samples for every tool in each section.",
+        "indexes. `.zfi` is z-fasta's first-class format and the baseline for every ratio. "
+        "For compatibility, z-fasta also reads standard `.fai` indexes; that path remains "
+        "competitive and is sometimes faster or more memory-efficient. Wall time, peak RSS, "
+        "and page faults come from the same zebrac samples for every tool in each section.",
         "Other timed tools are **peers**: they perform the same GET work (named regions, "
         "multi-region batches, or BED batch fetch) on the same fixtures. Charts label "
         f"peer ratios as **{LABEL_PEER_RATIO}**. **Reference lanes** (seqtk positional, "
@@ -2684,7 +2128,8 @@ def md_overview(manifest: dict | None) -> str:
         "GET pairs on verify fixtures.",
         "**Correctness:** `bench/get/run.sh` (not timed here) checks byte-identical output "
         "against golden fixtures.",
-        "**Tool order in charts:** z-fasta, noodles, rust-bio, samtools, fastahack (on "
+        "**Tool order in charts:** z-fasta (.zfi), then z-fasta (.fai) when captured, "
+        "followed by noodles, rust-bio, samtools, fastahack (on "
         "`full seq`), then reference lanes (seqtk positional; multi seqtk/fastahack loops "
         "omitted from default timed runs). **bedtools** "
         "is timed in **Performance: BED batch** (`bedtools getfasta`); it is not a "
@@ -2694,9 +2139,6 @@ def md_overview(manifest: dict | None) -> str:
         "are **omitted from default timed runs** because wall time grows linearly with N "
         "and largely duplicates positional seqtk reference data. Set `GET_MULTI_REFERENCE=1` "
         "in `run.sh` for a one-off reference sweep.",
-        "**pyfaidx** is omitted from timed runs: Python per-call overhead makes it much "
-        "slower on these fixtures, which would dominate charts and lengthen reruns. "
-        "Enable it in `run.sh` if needed.",
         "**fastahack** positional timing uses `fastahack -r` on **`full seq`** rows "
         "(whole-entry fetch on bounded sequences; see fixture notes in `run.sh`).",
         "**seqtk (ref)** positional timing pipes one region via stdin on each call with "
@@ -2726,7 +2168,7 @@ def md_overview(manifest: dict | None) -> str:
     return "\n\n".join(lines)
 
 
-def md_run_provenance(manifest: dict | None, project_root: Path, ir) -> str:
+def md_run_provenance(manifest: dict | None, ir) -> str:
     if not manifest:
         return "_No run manifest found._"
 
@@ -2745,7 +2187,7 @@ def md_run_provenance(manifest: dict | None, project_root: Path, ir) -> str:
     lines = [
         f"Run **`{ts}`** used **{runner}** in **{mode}** mode: {runs} measured samples, "
         f"{warmup} warmup passes, {duration} ms minimum per sample.",
-        f"- **Subject:** {zfasta} (Zig; default `.zfi` get, `.fai` lane, chunk modes in tables)",
+        f"- **Subject:** {zfasta} (Zig; default `.zfi` get and `.fai` lane)",
         f"- **Runner:** {zebrac}",
     ]
 
@@ -2774,7 +2216,8 @@ def md_run_provenance(manifest: dict | None, project_root: Path, ir) -> str:
         )
 
     lines.append("")
-    lines.append(ir.md_data_used(project_root))
+    lines.append("**Datasets**")
+    lines.append(ir.md_datasets())
 
     measured = []
     for spec in GET_PEERS:
@@ -2793,43 +2236,20 @@ def md_run_provenance(manifest: dict | None, project_root: Path, ir) -> str:
             "vendored pins in `bench/shared/tools.sh` / `tools/`):\n" + "\n".join(measured)
         )
 
-    lines.append(
-        "Indexes (`.zfi` / `.fai`) are built once in preload before timed GET commands. "
-        "Timed commands do not delete sidecars."
-    )
+    if manifest.get("sidecars") == "private single-format views":
+        lines.append(
+            "Private `.zfi` and `.fai` views are prepared before timed GET commands. "
+            "Timed commands do not create, remove, or replace shared sidecars."
+        )
+    else:
+        lines.append(
+            "Indexes (`.zfi` / `.fai`) are built once in preload before timed GET commands. "
+            "Timed commands do not delete sidecars."
+        )
     return "\n\n".join(lines)
 
 
-def md_pos_zfasta_vs_table(work: pd.DataFrame, tools: list[str], ir) -> str:
-    """z-fasta vs each peer for every dataset/region row (includes reference lanes)."""
-    peers = [t for t in tools if t != "z-fasta-default"]
-    tagged = work.copy()
-    tagged["ds_region"] = tagged.apply(
-        lambda r: f"{r['dataset']} / {REGION_LABELS.get(r['region'], r['region'])}",
-        axis=1,
-    )
-    comparisons = ir.build_ratio_comparisons(
-        tagged,
-        "mean",
-        baseline=BASELINE,
-        peer_tools=peers,
-        group_col="ds_region",
-        group_sort=None,
-    )
-    if comparisons.empty:
-        return "_No z-fasta comparison data._"
-    return ir.md_zfasta_vs_ratio_table(
-        comparisons,
-        group_label="Dataset / region",
-        zf_label="z-fasta",
-        comp_label="Peer",
-        ratio_label="Speedup",
-        fmt_zf=lambda r: f"{r.zfasta_v:.4f}s",
-        fmt_comp=lambda r: f"{r.comp_v:.4f}s",
-    )
-
-
-def md_pos_zfasta_vs_metric_table(
+def md_pos_zfasta_vs_table(
     work: pd.DataFrame,
     tools: list[str],
     value_col: str,
@@ -2851,14 +2271,15 @@ def md_pos_zfasta_vs_metric_table(
         baseline=BASELINE,
         peer_tools=peers,
         group_col="ds_region",
-        group_sort=None,
+        group_sort=dataset_region_sort_key,
     )
     if comparisons.empty:
         return "_No z-fasta comparison data._"
     return ir.md_zfasta_vs_ratio_table(
         comparisons,
         group_label="Dataset / region",
-        zf_label="z-fasta",
+        vs_label=f"{BASELINE_LABEL} vs",
+        zf_label=BASELINE_LABEL,
         comp_label="Peer",
         ratio_label=ratio_label,
         fmt_zf=fmt_zf,
@@ -2892,20 +2313,9 @@ def md_pos_detail_pivot(
     if detail.empty:
         return "_No data._"
     detail = detail.pivot(index="dataset_region", columns="tool", values="value")
+    detail = detail.reindex(sorted(detail.index, key=dataset_region_sort_key))
     tool_labels = [ir.display_tool(t) for t in tools if ir.display_tool(t) in detail.columns]
     return detail.reindex(columns=tool_labels).pipe(df_to_markdown)
-
-
-def md_pos_wall_pivot_table(work: pd.DataFrame, tools: list[str], ir) -> str:
-    return ir.md_tool_pivot_table(
-        work,
-        tools,
-        "dataset",
-        "mean",
-        lambda row: f"{row['mean']:.4f}s ±{row['stddev']:.4f}",
-        sort_index=get_dataset_sort_key,
-        empty_msg="_No performance data._",
-    )
 
 
 def md_pos_section(
@@ -2916,7 +2326,7 @@ def md_pos_section(
     manifest: dict | None = None,
 ) -> str:
     chart_tools = pos_chart_tools(df)
-    table_tools = pos_table_tools(df)
+    table_tools = chart_tools
     if not chart_tools:
         return "_No positional chart data._"
 
@@ -2966,8 +2376,8 @@ def md_pos_section(
             "Positional GET on preloaded indexes. Three panels (Genome, Transcriptome, "
             "Proteome) with grouped bars per region size. **`full seq`** is a "
             "whole-entry fetch on a bounded sequence (Genome ≤1 kbp; Transcriptome/Proteome "
-            "medium entries, not titin). Tool order: z-fasta, noodles, rust-bio, samtools, "
-            "fastahack (when present), seqtk (ref).",
+            "medium entries, not titin). Tool order: "
+            f"{display_tool_order(table_tools)}.",
             (
                 f"**Table {t_wall}:** Wall time (mean ± stddev, seconds). Lower is better. "
                 "Same tool order as the figure."
@@ -2984,13 +2394,21 @@ def md_pos_section(
             "</details>",
             "<details>",
             (
-                f"<summary><strong>Table {t_cmp}:</strong> z-fasta vs each peer. "
+                f"<summary><strong>Table {t_cmp}:</strong> z-fasta (.zfi) vs each peer. "
                 "Speedup = peer wall time ÷ z-fasta wall time (higher = z-fasta faster). "
                 f"Includes reference lanes. Same ratios as bar labels on "
                 f"Figure {f_wall}.</summary>"
             ),
             "",
-            md_pos_zfasta_vs_table(table_work, table_tools, ir),
+            md_pos_zfasta_vs_table(
+                table_work,
+                table_tools,
+                "mean",
+                ir,
+                ratio_label="Speedup",
+                fmt_zf=lambda r: f"{r.zfasta_v:.4f}s",
+                fmt_comp=lambda r: f"{r.comp_v:.4f}s",
+            ),
             "</details>",
             '<div style="margin: 1.5em 0"></div>',
             (
@@ -3002,11 +2420,11 @@ def md_pos_section(
                 f"**Reading Figure {f_wall}**\n"
                 "- Three panels: Genome, Transcriptome, Proteome.\n"
                 "- **Bars:** zebrac mean wall time. Error bars are one standard deviation.\n"
-                "- **Legend order:** z-fasta, noodles, rust-bio, samtools, fastahack, seqtk (ref).\n"
+                f"- **Legend order:** {display_tool_order(chart_tools)}.\n"
                 "- **Hatched bars:** seqtk (ref) has no index and rescans the FASTA each call.\n"
                 "- **On large FASTA files:** seqtk (ref) can dominate log-scale y-axis; "
                 "compare indexed tools within each region, not bar height vs seqtk.\n"
-                "- **Bar labels:** `1×` on z-fasta; other labels = "
+                "- **Bar labels:** `1×` on z-fasta (.zfi); other labels = "
                 f"{LABEL_PEER_RATIO} (indexed peers only). Details in Table {t_cmp}."
             ),
         ]
@@ -3062,12 +2480,12 @@ def md_pos_memory_section(
             rss_md,
             "<details>",
             (
-                f"<summary><strong>Table {t_cmp}:</strong> z-fasta vs each peer. "
+                f"<summary><strong>Table {t_cmp}:</strong> z-fasta (.zfi) vs each peer. "
                 f"RSS × = peer peak RSS ÷ z-fasta peak RSS. Same ratios as bar labels "
                 f"on Figure {f_rss}.</summary>"
             ),
             "",
-            md_pos_zfasta_vs_metric_table(
+            md_pos_zfasta_vs_table(
                 chart_work,
                 chart_tools,
                 "peak_rss_mb",
@@ -3086,7 +2504,7 @@ def md_pos_memory_section(
             (
                 f"**Reading Figure {f_rss}**\n"
                 "- Same three-panel layout as positional wall time; linear y-axis (MB).\n"
-                "- `1×` on z-fasta; other labels = "
+                "- `1×` on z-fasta (.zfi); other labels = "
                 f"{LABEL_PEER_RATIO}.\n"
                 f"- Details in Table {t_cmp}."
             ),
@@ -3151,12 +2569,12 @@ def md_pos_page_faults_section(
             minor_md,
             "<details>",
             (
-                f"<summary><strong>Table {t_cmp}:</strong> z-fasta vs each peer. "
+                f"<summary><strong>Table {t_cmp}:</strong> z-fasta (.zfi) vs each peer. "
                 f"Faults × = peer minor faults / z-fasta minor faults. Same ratios as "
                 f"bar labels on Figure {f_pf}.</summary>"
             ),
             "",
-            md_pos_zfasta_vs_metric_table(
+            md_pos_zfasta_vs_table(
                 chart_work,
                 chart_tools,
                 "minor_faults",
@@ -3180,68 +2598,9 @@ def md_pos_page_faults_section(
             (
                 f"**Reading Figure {f_pf}**\n"
                 "- Same three-panel layout as positional wall time.\n"
-                "- `1×` on z-fasta; other labels = "
+                "- `1×` on z-fasta (.zfi); other labels = "
                 f"{LABEL_PEER_RATIO}.\n"
                 f"- Details in Table {t_cmp}."
-            ),
-        ]
-    )
-
-
-def md_mode_comparison(df: pd.DataFrame, nums, ir, figures_dir: Path) -> str:
-    sub = ir.filter_tools(df[df["region"] == "1kbp_mid"], MODE_POS_TOOLS)
-    if sub.empty:
-        return "_No z-fasta mode comparison data._"
-    chart_ds = DATASET_ORDER
-    sub = sub[sub["dataset"].isin(chart_ds)]
-    t_wall = nums.next_table()
-    t_cmp = nums.next_table()
-    f_mode = nums.next_figure()
-    fig_metric_bars(
-        sub,
-        figures_dir / "mode_pos.png",
-        MODE_POS_TOOLS,
-        "mean",
-        "stddev",
-        "Wall Time (s, log scale)",
-        "z-fasta GET: default vs .fai lane (1 kbp_mid)",
-        ir,
-        fig_note="Bar labels: .fai lane wall time / default wall time.",
-    )
-    return "\n\n".join(
-        [
-            "z-fasta default (`.zfi`) vs `.fai` lane on **1kbp_mid**. "
-            "The `.fai` lane stashes `.zfi` once per region outside the zebrac sample "
-            "(see `run.sh`); native `.fai` tools do not pay that cost. "
-            "Transcriptome **~7.6×** is mostly **index load**, not the 1 kbp fetch: the "
-            "`.fai` path parses **~254k** tab-separated lines and mmaps a **~33 MiB** "
-            "`.fai` on every zebrac sample, while `.zfi` mmaps a **~9.7 MiB** binary "
-            "index with no line parsing. Genome (**194** seqs) and Proteome (**~21k**) pay "
-            "far less parse overhead. Single-region GET uses `records_only` (no hash map); "
-            "lookup is O(n) on both paths, so startup parse cost dominates on large catalogs.",
-            f"**Table {t_wall}:** Wall time per dataset (Genome, Transcriptome, Proteome).",
-            md_wall_table(sub, MODE_POS_TOOLS, "dataset", ir),
-            "<details>",
-            f"<summary><strong>Table {t_cmp}:</strong> default vs `.fai` lane.</summary>",
-            "",
-            ir.md_zfasta_vs_ratio_table(
-                ir.build_ratio_comparisons(
-                    sub, "mean", baseline=BASELINE, peer_tools=MODE_POS_TOOLS[1:]
-                ),
-                zf_label="z-fasta",
-                comp_label="z-fasta (.fai)",
-                ratio_label="Time ×",
-                fmt_zf=lambda r: f"{r.zfasta_v:.4f}s",
-                fmt_comp=lambda r: f"{r.comp_v:.4f}s",
-            ),
-            "</details>",
-            '<div style="margin: 1.5em 0"></div>',
-            f"**Figure {f_mode}:** Wall time for Table {t_wall}.",
-            f"![Figure {f_mode}: z-fasta mode comparison](results/figures/mode_pos.png)",
-            (
-                f"**Reading Figure {f_mode}**\n"
-                "- Grouped bars: wall time per dataset.\n"
-                f"- Bar labels match Table {t_cmp} (`.fai` lane / default)."
             ),
         ]
     )
@@ -3283,35 +2642,7 @@ def md_multi_detail_pivot(
     return detail.reindex(columns=tool_labels).pipe(df_to_markdown)
 
 
-def md_multi_zfasta_vs_table(work: pd.DataFrame, tools: list[str], ir) -> str:
-    peers = [t for t in tools if t != "z-fasta-default"]
-    tagged = work.copy()
-    tagged["ds_n"] = tagged.apply(
-        lambda r: multi_ds_n_label(r["dataset"], int(r["n"])),
-        axis=1,
-    )
-    comparisons = ir.build_ratio_comparisons(
-        tagged,
-        "mean",
-        baseline=BASELINE,
-        peer_tools=peers,
-        group_col="ds_n",
-        group_sort=multi_ds_n_sort_key,
-    )
-    if comparisons.empty:
-        return "_No z-fasta comparison data._"
-    return ir.md_zfasta_vs_ratio_table(
-        comparisons,
-        group_label="Dataset / N",
-        zf_label="z-fasta",
-        comp_label="Peer",
-        ratio_label="Speedup",
-        fmt_zf=lambda r: f"{r.zfasta_v:.4f}s",
-        fmt_comp=lambda r: f"{r.comp_v:.4f}s",
-    )
-
-
-def md_multi_zfasta_vs_metric_table(
+def md_multi_zfasta_vs_table(
     work: pd.DataFrame,
     tools: list[str],
     value_col: str,
@@ -3340,7 +2671,8 @@ def md_multi_zfasta_vs_metric_table(
     return ir.md_zfasta_vs_ratio_table(
         comparisons,
         group_label="Dataset / N",
-        zf_label="z-fasta",
+        vs_label=f"{BASELINE_LABEL} vs",
+        zf_label=BASELINE_LABEL,
         comp_label="Peer",
         ratio_label=ratio_label,
         fmt_zf=fmt_zf,
@@ -3357,7 +2689,7 @@ def md_multi_section(
 ) -> str:
     work = enrich_multi(df)
     chart_tools = multi_chart_tools(work)
-    table_tools = multi_table_tools(work)
+    table_tools = chart_tools
     if not chart_tools:
         return "_No multi-region chart data._"
 
@@ -3433,13 +2765,21 @@ def md_multi_section(
             "</details>",
             "<details>",
             (
-                f"<summary><strong>Table {t_cmp}:</strong> z-fasta vs each peer. "
+                f"<summary><strong>Table {t_cmp}:</strong> z-fasta (.zfi) vs each peer. "
                 "Speedup = peer wall time ÷ z-fasta wall time (higher = z-fasta faster)."
                 f"{cmp_ref_blurb} Same ratios as bar labels on "
                 f"Figure {f_wall}.</summary>"
             ),
             "",
-            md_multi_zfasta_vs_table(table_work, table_tools, ir),
+            md_multi_zfasta_vs_table(
+                table_work,
+                table_tools,
+                "mean",
+                ir,
+                ratio_label="Speedup",
+                fmt_zf=lambda r: f"{r.zfasta_v:.4f}s",
+                fmt_comp=lambda r: f"{r.comp_v:.4f}s",
+            ),
             "</details>",
             '<div style="margin: 1.5em 0"></div>',
             (
@@ -3517,12 +2857,12 @@ def md_multi_memory_section(
             rss_md,
             "<details>",
             (
-                f"<summary><strong>Table {t_cmp}:</strong> z-fasta vs each peer. "
+                f"<summary><strong>Table {t_cmp}:</strong> z-fasta (.zfi) vs each peer. "
                 f"RSS × = peer peak RSS ÷ z-fasta peak RSS. Same ratios as bar labels "
                 f"on Figure {f_rss}.</summary>"
             ),
             "",
-            md_multi_zfasta_vs_metric_table(
+            md_multi_zfasta_vs_table(
                 chart_work,
                 chart_tools,
                 "peak_rss_mb",
@@ -3629,12 +2969,12 @@ def md_multi_page_faults_section(
             minor_md,
             "<details>",
             (
-                f"<summary><strong>Table {t_cmp}:</strong> z-fasta vs each peer. "
+                f"<summary><strong>Table {t_cmp}:</strong> z-fasta (.zfi) vs each peer. "
                 f"Faults × = peer minor faults ÷ z-fasta minor faults. Same ratios as "
                 f"bar labels on Figure {f_pf}.</summary>"
             ),
             "",
-            md_multi_zfasta_vs_metric_table(
+            md_multi_zfasta_vs_table(
                 chart_work,
                 chart_tools,
                 "minor_faults",
@@ -3679,12 +3019,9 @@ def md_bed_section(
         return "_No BED batch chart data._"
 
     chart_work = work[work["tool"].isin(chart_tools)].copy()
-    mode_tools = bed_tools_present(work, BED_MODE_TOOLS)
-    mode_work = ir.filter_tools(work, mode_tools) if mode_tools else pd.DataFrame()
     t_wall = nums.next_table()
     t_tp = nums.next_table()
     t_cmp = nums.next_table()
-    t_mode = nums.next_table() if not mode_work.empty else None
     f_wall = nums.next_figure()
     sample_n = manifest_sample_count(manifest)
 
@@ -3722,7 +3059,7 @@ def md_bed_section(
     )
 
     blocks = [
-        md_bed_intro_blurb(work, t_mode=t_mode),
+        md_bed_intro_blurb(work, chart_tools),
         (
             f"**Table {t_wall}:** Wall time (mean ± stddev, seconds). Rows sorted by "
             "dataset then BED row count. Lower is better. Same tool order as the figure."
@@ -3739,33 +3076,22 @@ def md_bed_section(
         "</details>",
         "<details>",
         (
-            f"<summary><strong>Table {t_cmp}:</strong> z-fasta vs each peer. "
+            f"<summary><strong>Table {t_cmp}:</strong> z-fasta (.zfi) vs each peer. "
             "Speedup = peer wall time ÷ z-fasta wall time (higher = z-fasta faster). "
             f"Same ratios as bar labels on Figure {f_wall}.</summary>"
         ),
         "",
-        md_bed_zfasta_vs_table(chart_work, chart_tools, ir),
+        md_bed_zfasta_vs_table(
+            chart_work,
+            chart_tools,
+            ir,
+            value_col="mean",
+            ratio_label="Speedup",
+            fmt_zf=lambda r: f"{r.zfasta_v:.4f}s",
+            fmt_comp=lambda r: f"{r.comp_v:.4f}s",
+        ),
         "</details>",
     ]
-    if t_mode is not None:
-        blocks.extend(
-            [
-                "<details>",
-                (
-                    f"<summary><strong>Table {t_mode}:</strong> z-fasta chunk-size comparison "
-                    f"(default {BED_DEFAULT_CHUNK} vs -1 vs 1; not in Figure {f_wall}).</summary>"
-                ),
-                "",
-                md_bed_detail_pivot(
-                    mode_work,
-                    mode_tools,
-                    ir,
-                    mode_table=True,
-                    formatter=lambda row: f"{row['mean']:.4f}s ±{row['stddev']:.4f}",
-                ),
-                "</details>",
-            ]
-        )
     blocks.extend(
         [
             '<div style="margin: 1.5em 0"></div>',
@@ -3775,13 +3101,13 @@ def md_bed_section(
             ),
             "![bed batch wall time](results/figures/perf_bed_wall.png)",
             md_bed_figure_reading_base(
+                chart_tools,
                 y_note=(
                     "**Bars:** zebrac mean wall time. Error bars = one standard deviation."
                 ),
                 ratio_label=f"{LABEL_PEER_RATIO} (indexed peers + bedtools)",
                 t_cmp=t_cmp,
                 f_num=f_wall,
-                include_chunk_note=True,
             ),
         ]
     )
@@ -3839,12 +3165,12 @@ def md_bed_memory_section(
             rss_md,
             "<details>",
             (
-                f"<summary><strong>Table {t_cmp}:</strong> z-fasta vs each peer. "
+                f"<summary><strong>Table {t_cmp}:</strong> z-fasta (.zfi) vs each peer. "
                 f"RSS × = peer peak RSS ÷ z-fasta peak RSS. Same ratios as bar labels "
                 f"on Figure {f_rss}.</summary>"
             ),
             "",
-            md_bed_zfasta_vs_metric_table(
+            md_bed_zfasta_vs_table(
                 chart_work,
                 chart_tools,
                 ir,
@@ -3861,6 +3187,7 @@ def md_bed_memory_section(
             ),
             "![bed batch RSS](results/figures/perf_bed_rss.png)",
             md_bed_figure_reading_base(
+                chart_tools,
                 y_note=(
                     "**Bars:** zebrac mean peak RSS. Error bars when stddev is non-zero. "
                     "Linear y-axis (MB)."
@@ -3937,12 +3264,12 @@ def md_bed_page_faults_section(df: pd.DataFrame, nums, ir, figures_dir: Path) ->
             minor_md,
             "<details>",
             (
-                f"<summary><strong>Table {t_cmp}:</strong> z-fasta vs each peer. "
+                f"<summary><strong>Table {t_cmp}:</strong> z-fasta (.zfi) vs each peer. "
                 f"Faults × = peer minor faults ÷ z-fasta minor faults. Same ratios as "
                 f"bar labels on Figure {f_pf}.</summary>"
             ),
             "",
-            md_bed_zfasta_vs_metric_table(
+            md_bed_zfasta_vs_table(
                 chart_work,
                 chart_tools,
                 ir,
@@ -3964,6 +3291,7 @@ def md_bed_page_faults_section(df: pd.DataFrame, nums, ir, figures_dir: Path) ->
             ),
             "![bed batch page faults](results/figures/perf_bed_faults.png)",
             md_bed_figure_reading_base(
+                chart_tools,
                 y_note="**Bars:** zebrac mean minor page faults. Log y-axis.",
                 ratio_label="Faults × (peer minor faults ÷ z-fasta minor faults)",
                 t_cmp=t_cmp,
@@ -4083,10 +3411,12 @@ def md_rc_section(
             "no reverse-complement semantics, so `--rc` and `--complement-only` do not apply; "
             "`--reverse-only` only permutes amino-acid characters and adds negligible overhead "
             "vs plain GET, so it is not a meaningful benchmark axis. **X-axis = dataset** "
-            "(Genome, Transcriptome); **bar color = tool/lane** (same layout as z-fasta mode "
-            "comparison). Figure facets are wall time, peak RSS, and minor page faults. Primary "
-            "comparison: z-fasta plain vs `--rc`. RC-capable peers use native `--rc`; seqtk (ref) "
-            "uses `subseq` + `seq -r` (no index).",
+            "(Genome, Transcriptome); **bar color = tool/lane**. Figure facets are wall time, "
+            "peak RSS, and minor page faults. Primary "
+            "comparison: z-fasta (.zfi) plain vs `--rc`. The z-fasta (.fai) RC lane uses "
+            "the same command and output contract through the compatible index. Other "
+            "RC-capable peers use native `--rc`; seqtk (ref) uses `subseq` + `seq -r` "
+            "(no index).",
             f"**Table {t_wall}:** Wall time (mean ± stddev, seconds).",
             wall_md,
             f"**Table {t_rss}:** Peak RSS (MB).",
@@ -4106,8 +3436,9 @@ def md_rc_section(
                 [
                     "<details>",
                     (
-                        f"<summary><strong>Table {t_cmp}:</strong> RC peers vs z-fasta --rc. "
-                        f"Ratio = {LABEL_PEER_WALL_RATIO} (baseline = z-fasta --rc).</summary>"
+                        f"<summary><strong>Table {t_cmp}:</strong> RC peers vs z-fasta "
+                        "(.zfi) --rc. Ratio = peer wall time / z-fasta (.zfi) --rc wall "
+                        "time.</summary>"
                     ),
                     "",
                     ir.md_zfasta_vs_ratio_table(
@@ -4117,7 +3448,8 @@ def md_rc_section(
                             baseline="z-fasta-rc",
                             peer_tools=rc_peers,
                         ),
-                        zf_label="z-fasta --rc",
+                        vs_label="z-fasta (.zfi) --rc vs",
+                        zf_label="z-fasta (.zfi) --rc",
                         comp_label="Peer",
                         ratio_label="Time ×",
                         fmt_zf=lambda r: f"{r.zfasta_v:.4f}s",
@@ -4139,9 +3471,10 @@ def md_rc_section(
                 "- **Facets:** wall time (log y) | peak RSS (linear) | minor page faults (log y).\n"
                 "- **X-axis:** Genome, Transcriptome (Proteome omitted; see section intro).\n"
                 "- **Bar colors:** one lane per tool (legend below figure).\n"
-                "- **Bar labels (rotated):** plain = `1×` baseline; z-fasta `--rc`, "
-                "`--complement-only`, `--reverse-only` vs plain; noodles/rust-bio `--rc` "
-                "and seqtk (ref) vs z-fasta `--rc`. Same ratio rules on wall time, peak RSS, "
+                "- **Bar labels (rotated):** plain = `1×` baseline; z-fasta (.zfi) `--rc`, "
+                "`--complement-only`, and `--reverse-only` vs plain; z-fasta (.fai), "
+                "noodles, rust-bio, and seqtk (ref) RC lanes vs z-fasta (.zfi) `--rc`. "
+                "Same ratio rules apply to wall time, peak RSS, "
                 "and page faults.\n"
                 "- **Hatched bars:** plain z-fasta (no transform) and seqtk (ref)."
             ),
@@ -4278,23 +3611,11 @@ def expected_report_figures(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate GET benchmark report.")
     parser.add_argument("results_dir", nargs="?", type=Path, default=RESULTS_DIR)
-    parser.add_argument("--allow-incomplete", action="store_true")
     args = parser.parse_args()
 
     ir = load_index_report()
     results_dir = args.results_dir
     manifest = ir.load_run_manifest(results_dir)
-    incomplete = ir.is_incomplete_run(
-        manifest,
-        required_sections=("perf_pos", "perf_multi", "perf_bed", "perf_rc"),
-        skip_flags=("skip_pos", "skip_multi", "skip_bed", "skip_rc"),
-    )
-    if incomplete and not args.allow_incomplete:
-        ts = (manifest or {}).get("timestamp", "unknown")
-        raise SystemExit(
-            f"Refusing to overwrite REPORT.md from incomplete run {ts}. "
-            "Pass --allow-incomplete for drafts."
-        )
 
     figures_dir = results_dir / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
@@ -4304,18 +3625,12 @@ def main() -> None:
         "# z-fasta GET Benchmark Report",
         "_Auto-generated by `bench/get/generate_report.py` from zebrac results._",
     ]
-    if incomplete:
-        report_lines.append(
-            "> **DRAFT: incomplete run.** Missing headline sections or below minimum "
-            "zebrac sample settings. Do not publish until a full run completes without "
-            "missing sections or `skip_*` flags on headline workloads."
-        )
     report_lines.extend(
         [
         "## Overview",
         md_overview(manifest),
         "## Run Provenance",
-        md_run_provenance(manifest, PROJECT_ROOT, ir),
+        md_run_provenance(manifest, ir),
         ]
     )
 
@@ -4373,10 +3688,6 @@ def main() -> None:
     elif manifest and not manifest.get("skip_rc"):
         report_lines.append("## RC overhead")
         report_lines.append("_No RC zebrac data found._")
-
-    if pos_df is not None and not pos_df.empty:
-        report_lines.append("## z-fasta Mode Comparison")
-        report_lines.append(md_mode_comparison(pos_df, nums, ir, figures_dir))
 
     if messy_df is not None and not messy_df.empty:
         report_lines.append("## Messy FASTA GET (z-fasta only)")

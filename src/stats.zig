@@ -1,670 +1,565 @@
-//! Assembly and proteome statistics: index-only and full composition scan modes.
+//! Assembly and proteome statistics from indexed FASTA files.
 //!
-//! Source duplicate extras are counted from the FASTA when scanning; index-only mode
-//! reports `n/a` unless the index retained repeats (`--no-dedup`).
+//! Length statistics come from index metadata. Type and composition use one
+//! descriptor-owned bounded read window over indexed sequence spans.
 
 const std = @import("std");
 const index_format = @import("index_format.zig");
-const platform = @import("platform.zig");
 
 const IndexRecord = index_format.IndexRecord;
 const LoadedIndex = index_format.LoadedIndex;
+const SideTableLine = index_format.SideTableLine;
 const printErrorAndExit = index_format.printErrorAndExit;
 
 const SIMD_CHUNK_SIZE = 32;
 const SimdVec = @Vector(SIMD_CHUNK_SIZE, u8);
+const TAIL_CHUNK_SIZE = 8;
+const TailVec = @Vector(TAIL_CHUNK_SIZE, u8);
+const FINAL_CHUNK_SIZE = 4;
+const FinalVec = @Vector(FINAL_CHUNK_SIZE, u8);
 
-// ============================================================================
-// Stats computation
-// ============================================================================
-
+/// Sequence class shared by stats, GET transformation guards, and validation.
 pub const SequenceType = enum { nucleotide, protein };
 
+/// Bases sampled per record for GET transformation guards.
+pub const GET_TYPE_SAMPLE_BASES: u64 = 256;
+
+/// Bases sampled across the file for validation alphabet selection.
+pub const VALIDATE_TYPE_SAMPLE_BASES: u64 = 100_000;
+
 const CompositionStats = struct {
-    counts: [256]u64,
-    total_bases: u64,
-    seq_type: SequenceType,
-    lowercase_count: u64,
+    counts: [256]u64 = .{0} ** 256,
+    total_bases: u64 = 0,
+    seq_type: SequenceType = .nucleotide,
+    lowercase_count: u64 = 0,
 };
 
-/// Format a u64 with comma separators into the provided buffer.
-pub fn formatComma(buf: []u8, value: u64) []const u8 {
-    if (value == 0) {
-        buf[0] = '0';
-        return buf[0..1];
-    }
+const LengthSummary = struct {
+    total_symbols: u64,
+    shortest_index: usize,
+    longest_index: usize,
+    mean: u64,
+    q1: u64,
+    median: u64,
+    q3: u64,
+    range: u64,
+    n50: u64,
+    l50: usize,
+    n90: u64,
+    l90: usize,
+    aun_numerator: u128,
+};
 
-    // First format without commas (digits in reverse)
-    var tmp: [20]u8 = undefined;
-    var v = value;
-    var tmp_len: usize = 0;
-    while (v > 0) {
-        tmp[tmp_len] = @intCast((v % 10) + '0');
-        v /= 10;
-        tmp_len += 1;
-    }
+const NucleotideSummary = struct {
+    type_name: []const u8,
+    categories: [8]u64,
+    canonical: u64,
+    gc_total: u64,
+};
 
-    // Write left-to-right with commas every 3 digits from the right
-    var pos: usize = 0;
-    var d: usize = 0;
-    while (d < tmp_len) {
-        if (d > 0 and (tmp_len - d) % 3 == 0) {
-            buf[pos] = ',';
-            pos += 1;
-        }
-        buf[pos] = tmp[tmp_len - 1 - d];
-        pos += 1;
-        d += 1;
-    }
-    return buf[0..pos];
-}
+const ProteinSummary = struct {
+    categories: [PROTEIN_FIELDS.len]u64,
+    stop: u64,
+    invalid: u64,
+};
 
-/// Format bytes into human-readable size (e.g., "3.1 GB")
-pub fn formatSize(buf: []u8, bytes: u64) []const u8 {
-    const gb: f64 = @as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0 * 1024.0);
-    const mb: f64 = @as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0);
-    const kb: f64 = @as(f64, @floatFromInt(bytes)) / 1024.0;
+const CompositionSummary = union(enum) {
+    nucleotide: NucleotideSummary,
+    protein: ProteinSummary,
+};
 
-    if (gb >= 1.0) {
-        return std.fmt.bufPrint(buf, "{d:.1} GB", .{gb}) catch "?";
-    } else if (mb >= 1.0) {
-        return std.fmt.bufPrint(buf, "{d:.1} MB", .{mb}) catch "?";
-    } else if (kb >= 1.0) {
-        return std.fmt.bufPrint(buf, "{d:.1} KB", .{kb}) catch "?";
-    } else {
-        return std.fmt.bufPrint(buf, "{d} B", .{bytes}) catch "?";
-    }
-}
-
-const AminoAcid = struct {
+const ProteinField = struct {
+    key: []const u8,
     code: u8,
-    name: []const u8,
 };
 
-const amino_acid_names = [_]AminoAcid{
-    .{ .code = 'A', .name = "Alanine" },
-    .{ .code = 'R', .name = "Arginine" },
-    .{ .code = 'N', .name = "Asparagine" },
-    .{ .code = 'D', .name = "Aspartate" },
-    .{ .code = 'C', .name = "Cysteine" },
-    .{ .code = 'E', .name = "Glutamate" },
-    .{ .code = 'Q', .name = "Glutamine" },
-    .{ .code = 'G', .name = "Glycine" },
-    .{ .code = 'H', .name = "Histidine" },
-    .{ .code = 'I', .name = "Isoleucine" },
-    .{ .code = 'L', .name = "Leucine" },
-    .{ .code = 'K', .name = "Lysine" },
-    .{ .code = 'M', .name = "Methionine" },
-    .{ .code = 'F', .name = "Phenylalanine" },
-    .{ .code = 'P', .name = "Proline" },
-    .{ .code = 'S', .name = "Serine" },
-    .{ .code = 'T', .name = "Threonine" },
-    .{ .code = 'W', .name = "Tryptophan" },
-    .{ .code = 'Y', .name = "Tyrosine" },
-    .{ .code = 'V', .name = "Valine" },
+const PROTEIN_FIELDS = [_]ProteinField{
+    .{ .key = "a_alanine", .code = 'A' },
+    .{ .key = "r_arginine", .code = 'R' },
+    .{ .key = "n_asparagine", .code = 'N' },
+    .{ .key = "d_aspartate", .code = 'D' },
+    .{ .key = "c_cysteine", .code = 'C' },
+    .{ .key = "e_glutamate", .code = 'E' },
+    .{ .key = "q_glutamine", .code = 'Q' },
+    .{ .key = "g_glycine", .code = 'G' },
+    .{ .key = "h_histidine", .code = 'H' },
+    .{ .key = "i_isoleucine", .code = 'I' },
+    .{ .key = "l_leucine", .code = 'L' },
+    .{ .key = "k_lysine", .code = 'K' },
+    .{ .key = "m_methionine", .code = 'M' },
+    .{ .key = "f_phenylalanine", .code = 'F' },
+    .{ .key = "p_proline", .code = 'P' },
+    .{ .key = "s_serine", .code = 'S' },
+    .{ .key = "t_threonine", .code = 'T' },
+    .{ .key = "w_tryptophan", .code = 'W' },
+    .{ .key = "y_tyrosine", .code = 'Y' },
+    .{ .key = "v_valine", .code = 'V' },
+    .{ .key = "b_asx", .code = 'B' },
+    .{ .key = "z_glx", .code = 'Z' },
+    .{ .key = "j_xle", .code = 'J' },
+    .{ .key = "x_unknown", .code = 'X' },
+    .{ .key = "u_selenocysteine", .code = 'U' },
+    .{ .key = "o_pyrrolysine", .code = 'O' },
 };
 
-fn getAminoAcidName(code: u8) []const u8 {
-    const upper = if (code >= 'a' and code <= 'z') code - 32 else code;
-    for (amino_acid_names) |aa| {
-        if (aa.code == upper) return aa.name;
-    }
-    return "Unknown";
+fn medianSorted(values: []const u64) u64 {
+    const middle = values.len / 2;
+    if (values.len % 2 == 1) return values[middle];
+    const lower = values[middle - 1];
+    return lower + (values[middle] - lower) / 2;
 }
 
-/// Extra repeated records by name: for each name with count k, add (k - 1).
-pub fn countNameDuplicateExtras(map: *const std.StringHashMap(usize)) usize {
-    var extras: usize = 0;
-    var it = map.iterator();
-    while (it.next()) |entry| {
-        if (entry.value_ptr.* > 1) extras += entry.value_ptr.* - 1;
-    }
-    return extras;
-}
-
-/// Tally first-token FASTA header names (line-leading `>`). Names are slices into `fasta`.
-pub fn tallyFastaHeaderNames(fasta: []const u8, map: *std.StringHashMap(usize)) !void {
-    var at_line_start = true;
-    var i: usize = 0;
-    while (i < fasta.len) : (i += 1) {
-        const c = fasta[i];
-        if (at_line_start and c == '>') {
-            const name_start = i + 1;
-            var name_end = name_start;
-            while (name_end < fasta.len and
-                fasta[name_end] != ' ' and
-                fasta[name_end] != '\t' and
-                fasta[name_end] != '\n' and
-                fasta[name_end] != '\r')
-            {
-                name_end += 1;
-            }
-            const name = fasta[name_start..name_end];
-            const gop = try map.getOrPut(name);
-            if (!gop.found_existing) gop.value_ptr.* = 0;
-            gop.value_ptr.* += 1;
-            at_line_start = false;
-            continue;
-        }
-        at_line_start = (c == '\n');
-    }
-}
-
-const DuplicateReport = union(enum) {
-    /// Known source-level extras (`sum(k-1)`).
-    count: usize,
-    /// Index-only cannot prove absence of duplicates on a deduplicated index.
-    unknown,
-};
-
-fn reportSourceDuplicates(
-    idx: *LoadedIndex,
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    index_only: bool,
-) DuplicateReport {
-    var map = std.StringHashMap(usize).init(allocator);
-    defer map.deinit();
-
-    if (!index_only) {
-        tallyFastaHeaderNames(idx.fasta_data, &map) catch {
-            printErrorAndExit("error: out of memory\n", .{});
-        };
-        return .{ .count = countNameDuplicateExtras(&map) };
+fn summarizeLengths(records: []const IndexRecord, lengths: []u64) !LengthSummary {
+    var total: u64 = 0;
+    var shortest_index: usize = 0;
+    var longest_index: usize = 0;
+    var aun_numerator: u128 = 0;
+    for (records, 0..) |record, i| {
+        total = try std.math.add(u64, total, record.seq_len);
+        lengths[i] = record.seq_len;
+        if (record.seq_len < records[shortest_index].seq_len) shortest_index = i;
+        if (record.seq_len > records[longest_index].seq_len) longest_index = i;
+        const square = @as(u128, record.seq_len) * @as(u128, record.seq_len);
+        aun_numerator = try std.math.add(u128, aun_numerator, square);
     }
 
-    // Index-only: report only when the index itself retains repeated names
-    // (--no-dedup). A fully unique index cannot distinguish "no source dups"
-    // from "dedup dropped them", so never fabricate 0.
-    for (0..idx.records.len) |ri| {
-        const name = getRecordName(idx, io, ri);
-        const gop = map.getOrPut(name) catch {
-            printErrorAndExit("error: out of memory\n", .{});
-        };
-        if (!gop.found_existing) gop.value_ptr.* = 0;
-        gop.value_ptr.* += 1;
-    }
-    var had_repeat = false;
-    var it = map.iterator();
-    while (it.next()) |entry| {
-        if (entry.value_ptr.* > 1) {
-            had_repeat = true;
-            break;
-        }
-    }
-    if (!had_repeat) return .unknown;
-    return .{ .count = countNameDuplicateExtras(&map) };
-}
-
-/// Run the stats command.
-pub fn runStats(io: std.Io, fasta_path: []const u8, index_only: bool) void {
-    var idx = index_format.loadIndexWithMode(io, fasta_path, .stats_scan);
-    defer idx.deinit(io);
-
-    const records = idx.records;
-    const num_seqs = records.len;
-
-    if (num_seqs == 0) {
-        printErrorAndExit("error: no sequences in index\n", .{});
-    }
-
-    // Compute total bases
-    var total_bases: u64 = 0;
-    for (records) |rec| {
-        total_bases += rec.seq_len;
-    }
-
-    // Sort lengths descending for N50/L50/N90/L90/AU
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const lengths = allocator.alloc(u64, num_seqs) catch {
-        printErrorAndExit("error: out of memory\n", .{});
-    };
-    for (records, 0..) |rec, i| {
-        lengths[i] = rec.seq_len;
-    }
-
-    // Sort descending
-    std.mem.sort(u64, lengths, {}, struct {
-        fn cmp(_: void, a: u64, b: u64) bool {
-            return a > b;
-        }
-    }.cmp);
-
-    // Single pass: N50, L50, N90, L90, AU
-    var bases_seen: u64 = 0;
-    var au_sum: u128 = 0;
+    std.mem.sort(u64, lengths, {}, std.sort.asc(u64));
+    const half = lengths.len / 2;
+    const q1 = if (lengths.len == 1) lengths[0] else medianSorted(lengths[0..half]);
+    const q3 = if (lengths.len == 1) lengths[0] else medianSorted(lengths[lengths.len - half ..]);
+    const threshold_50: u128 = (@as(u128, total) * 50 + 99) / 100;
+    const threshold_90: u128 = (@as(u128, total) * 90 + 99) / 100;
+    var seen: u128 = 0;
     var n50: u64 = 0;
     var l50: usize = 0;
     var n90: u64 = 0;
     var l90: usize = 0;
-    var found_n50 = false;
-    var found_n90 = false;
-
-    const threshold_50 = (total_bases + 1) / 2; // ceiling
-    const threshold_90 = (total_bases * 9 + 9) / 10; // ceiling
-
-    for (lengths, 0..) |len, i| {
-        bases_seen += len;
-        au_sum += @as(u128, len) * @as(u128, len);
-
-        if (!found_n50 and bases_seen >= threshold_50) {
-            n50 = len;
-            l50 = i + 1;
-            found_n50 = true;
+    var rank: usize = 0;
+    var i = lengths.len;
+    while (i > 0) {
+        i -= 1;
+        rank += 1;
+        seen += lengths[i];
+        if (l50 == 0 and seen >= threshold_50) {
+            n50 = lengths[i];
+            l50 = rank;
         }
-        if (!found_n90 and bases_seen >= threshold_90) {
-            n90 = len;
-            l90 = i + 1;
-            found_n90 = true;
+        if (l90 == 0 and seen >= threshold_90) {
+            n90 = lengths[i];
+            l90 = rank;
+            break;
         }
     }
 
-    const au: u64 = if (total_bases > 0) @intCast(au_sum / @as(u128, total_bases)) else 0;
+    return .{
+        .total_symbols = total,
+        .shortest_index = shortest_index,
+        .longest_index = longest_index,
+        .mean = total / records.len,
+        .q1 = q1,
+        .median = medianSorted(lengths),
+        .q3 = q3,
+        .range = records[longest_index].seq_len - records[shortest_index].seq_len,
+        .n50 = n50,
+        .l50 = l50,
+        .n90 = n90,
+        .l90 = l90,
+        .aun_numerator = aun_numerator,
+    };
+}
 
-    // Mean and median
-    const mean: u64 = if (num_seqs > 0) total_bases / num_seqs else 0;
-    const median: u64 = if (num_seqs > 0) blk: {
-        if (num_seqs % 2 == 1) {
-            break :blk lengths[num_seqs / 2];
-        } else {
-            break :blk (lengths[num_seqs / 2 - 1] + lengths[num_seqs / 2]) / 2;
-        }
-    } else 0;
+fn writeFixedUnsigned(writer: *std.Io.Writer, numerator: u128, denominator: u128, decimals: u8) !void {
+    const scale: u128 = switch (decimals) {
+        2 => 100,
+        3 => 1000,
+        else => unreachable,
+    };
+    var whole = numerator / denominator;
+    const remainder = numerator % denominator;
+    var fraction = (remainder * scale + denominator / 2) / denominator;
+    if (fraction == scale) {
+        whole += 1;
+        fraction = 0;
+    }
+    try writer.print("{d}.", .{whole});
+    var divisor = scale / 10;
+    while (divisor > 0) : (divisor /= 10) {
+        try writer.writeByte(@intCast('0' + (fraction / divisor) % 10));
+    }
+}
 
-    // Find shortest and longest with names
-    var shortest_idx: usize = 0;
-    var longest_idx: usize = 0;
-    for (records, 0..) |rec, i| {
-        if (rec.seq_len < records[shortest_idx].seq_len) shortest_idx = i;
-        if (rec.seq_len > records[longest_idx].seq_len) longest_idx = i;
+fn writeFixedSigned(writer: *std.Io.Writer, numerator: i128, denominator: u128, decimals: u8) !void {
+    const magnitude: u128 = @intCast(if (numerator < 0) -numerator else numerator);
+    const scale: u128 = if (decimals == 3) 1000 else 100;
+    const rounded = (magnitude % denominator * scale + denominator / 2) / denominator;
+    if (numerator < 0 and (magnitude / denominator != 0 or rounded != 0)) try writer.writeByte('-');
+    try writeFixedUnsigned(writer, magnitude, denominator, decimals);
+}
+
+fn countLetter(comp: *const CompositionStats, upper: u8) u64 {
+    return comp.counts[upper] + comp.counts[upper + ('a' - 'A')];
+}
+
+fn summarizeComposition(comp: *const CompositionStats) !CompositionSummary {
+    if (comp.seq_type == .nucleotide) {
+        const a = countLetter(comp, 'A');
+        const c = countLetter(comp, 'C');
+        const g = countLetter(comp, 'G');
+        const t = countLetter(comp, 'T');
+        const u = countLetter(comp, 'U');
+        const n = countLetter(comp, 'N');
+        var ambiguous: u64 = 0;
+        for ("RYSWKMBDHV") |code| ambiguous += countLetter(comp, code);
+        const assigned = @as(u128, a) + c + g + t + u + n + ambiguous;
+        if (assigned > comp.total_bases) return error.CompositionMismatch;
+        return .{ .nucleotide = .{
+            .type_name = if (t > 0 and u > 0)
+                "nucleotide_mixed_tu"
+            else if (t > 0)
+                "nucleotide_t"
+            else if (u > 0)
+                "nucleotide_u"
+            else
+                "nucleotide",
+            .categories = .{ a, c, g, t, u, n, ambiguous, @intCast(@as(u128, comp.total_bases) - assigned) },
+            .canonical = a + c + g + t + u,
+            .gc_total = g + c,
+        } };
     }
 
-    // Get names - handle both .zfi and .fai sources.
-    const shortest_name = getRecordName(&idx, io, shortest_idx);
-    const longest_name = getRecordName(&idx, io, longest_idx);
+    var categories: [PROTEIN_FIELDS.len]u64 = undefined;
+    var assigned: u128 = 0;
+    for (PROTEIN_FIELDS, 0..) |field, i| {
+        categories[i] = countLetter(comp, field.code);
+        assigned += categories[i];
+    }
+    const stop = comp.counts['*'];
+    assigned += stop;
+    if (assigned > comp.total_bases) return error.CompositionMismatch;
+    return .{ .protein = .{
+        .categories = categories,
+        .stop = stop,
+        .invalid = @intCast(@as(u128, comp.total_bases) - assigned),
+    } };
+}
 
-    const duplicates = reportSourceDuplicates(&idx, io, allocator, index_only);
+fn writeCountPercent(writer: *std.Io.Writer, key: []const u8, count: u64, total: u64) !void {
+    try writer.print("  {s}: {d} ", .{ key, count });
+    try writeFixedUnsigned(writer, @as(u128, count) * 100, total, 2);
+    try writer.writeAll("%\n");
+}
 
-    // Run composition scan early (if not --index-only) so we can include Type in the header
-    const comp: ?CompositionStats = if (!index_only) scanComposition(&idx) else null;
+fn writeNucleotide(writer: *std.Io.Writer, summary: NucleotideSummary, comp: *const CompositionStats) !void {
+    try writer.print("  type: {s}\n  percent_denominator: total_symbols\n", .{summary.type_name});
+    const keys = [_][]const u8{ "a", "c", "g", "t", "u", "n", "iupac_ambiguous", "invalid" };
+    for (keys, summary.categories) |key, count| try writeCountPercent(writer, key, count, comp.total_bases);
+    if (summary.canonical == 0) {
+        try writer.writeAll("  gc: n/a\n");
+    } else {
+        try writer.writeAll("  gc: ");
+        try writeFixedUnsigned(writer, @as(u128, summary.gc_total) * 100, summary.canonical, 2);
+        try writer.writeAll("%\n");
+    }
+    if (summary.gc_total == 0) {
+        try writer.writeAll("  gc_skew: n/a\n");
+    } else {
+        try writer.writeAll("  gc_skew: ");
+        try writeFixedSigned(
+            writer,
+            @as(i128, summary.categories[2]) - @as(i128, summary.categories[1]),
+            summary.gc_total,
+            3,
+        );
+        try writer.writeByte('\n');
+    }
+    try writeCountPercent(writer, "lowercase", comp.lowercase_count, comp.total_bases);
+}
 
-    // Output
+fn writeProtein(writer: *std.Io.Writer, summary: ProteinSummary, comp: *const CompositionStats) !void {
+    try writer.writeAll("  type: protein\n  percent_denominator: total_symbols\n");
+    for (PROTEIN_FIELDS, summary.categories) |field, count| {
+        try writeCountPercent(writer, field.key, count, comp.total_bases);
+    }
+    try writeCountPercent(writer, "stop", summary.stop, comp.total_bases);
+    try writeCountPercent(writer, "invalid", summary.invalid, comp.total_bases);
+    try writeCountPercent(writer, "lowercase", comp.lowercase_count, comp.total_bases);
+}
+
+fn writeReport(
+    writer: *std.Io.Writer,
+    fasta_path: []const u8,
+    index_extension: []const u8,
+    fasta_size: u64,
+    records: []const IndexRecord,
+    summary: LengthSummary,
+    shortest_name: []const u8,
+    longest_name: []const u8,
+    comp: *const CompositionStats,
+    composition: CompositionSummary,
+) !void {
+    try writer.print(
+        "File:\n  path: {s}\n  index: {s}{s}\n  size_bytes: {d}\n\n",
+        .{ fasta_path, fasta_path, index_extension, fasta_size },
+    );
+    try writer.print(
+        "Lengths:\n  indexed_records: {d}\n  total_symbols: {d}\n" ++
+            "  shortest_length: {d}\n  shortest_name: {s}\n" ++
+            "  longest_length: {d}\n  longest_name: {s}\n" ++
+            "  mean: {d}\n  q1: {d}\n  median: {d}\n  q3: {d}\n  range: {d}\n\n",
+        .{
+            records.len,
+            summary.total_symbols,
+            records[summary.shortest_index].seq_len,
+            shortest_name,
+            records[summary.longest_index].seq_len,
+            longest_name,
+            summary.mean,
+            summary.q1,
+            summary.median,
+            summary.q3,
+            summary.range,
+        },
+    );
+    try writer.print(
+        "Nx:\n  n50: {d}\n  l50: {d}\n  n90: {d}\n  l90: {d}\n  aun: ",
+        .{ summary.n50, summary.l50, summary.n90, summary.l90 },
+    );
+    try writeFixedUnsigned(writer, summary.aun_numerator, summary.total_symbols, 2);
+    try writer.writeAll("\n\nComposition:\n");
+    switch (composition) {
+        .nucleotide => |nucleotide| try writeNucleotide(writer, nucleotide, comp),
+        .protein => |protein| try writeProtein(writer, protein, comp),
+    }
+}
+
+/// Loads indexed FASTA statistics, writes the exact report to stdout, and exits
+/// through the shared CLI diagnostic path on failure.
+pub fn runStats(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8) void {
+    var idx = index_format.loadIndexForStats(allocator, io, fasta_path);
+    defer idx.deinit();
+
+    const records = idx.records;
+    const record_count = records.len;
+
+    if (record_count == 0) {
+        printErrorAndExit("error: no sequences in index\n", .{});
+    }
+
+    const lengths = allocator.alloc(u64, record_count) catch {
+        printErrorAndExit("error: out of memory\n", .{});
+    };
+    defer allocator.free(lengths);
+    const summary = summarizeLengths(records, lengths) catch {
+        printErrorAndExit("error: sequence length overflow\n", .{});
+    };
+    const shortest_name = idx.recordName(summary.shortest_index) orelse {
+        printErrorAndExit("error: index does not retain the shortest record name\n", .{});
+    };
+    const longest_name = idx.recordName(summary.longest_index) orelse {
+        printErrorAndExit("error: index does not retain the longest record name\n", .{});
+    };
+    const comp = scanComposition(allocator, &idx) catch |err| switch (err) {
+        error.OutOfMemory => printErrorAndExit("error: out of memory\n", .{}),
+        error.ReadFailed => printErrorAndExit("error: failed to read FASTA\n", .{}),
+        error.CorruptGeometry => printErrorAndExit("error: index sequence lengths do not match FASTA data\n", .{}),
+    };
+    if (comp.total_bases != summary.total_symbols) {
+        printErrorAndExit("error: index sequence lengths do not match FASTA data\n", .{});
+    }
+    const composition = summarizeComposition(&comp) catch {
+        printErrorAndExit("error: composition does not match indexed symbols\n", .{});
+    };
+
     var out_buf: [65536]u8 = undefined;
     var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
     const writer = &stdout_fw.interface;
-
-    var size_buf: [64]u8 = undefined;
-    const size_str = formatSize(&size_buf, idx.fasta_size);
-
-    var comma_buf: [64]u8 = undefined;
 
     const index_ext: []const u8 = switch (idx.source) {
         .zfi => ".zfi",
         .fai => ".fai",
     };
 
-    const type_str: []const u8 = if (comp) |c| switch (c.seq_type) {
-        .nucleotide => "Nucleotide",
-        .protein => "Protein",
-    } else "(run without --index-only for composition)";
-
-    writer.print("File:           {s} ({s} on disk)\n", .{ fasta_path, size_str }) catch {
+    writeReport(
+        writer,
+        fasta_path,
+        index_ext,
+        idx.fasta_size,
+        records,
+        summary,
+        shortest_name,
+        longest_name,
+        &comp,
+        composition,
+    ) catch {
         printErrorAndExit("error: write failed\n", .{});
     };
-    writer.print("Index:          {s}{s}\n", .{ fasta_path, index_ext }) catch {
+    stdout_fw.flush() catch {
         printErrorAndExit("error: write failed\n", .{});
     };
-    writer.print("Type:           {s}\n", .{type_str}) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-    writer.print("Sequences:      {s}\n", .{formatComma(&comma_buf, @intCast(num_seqs))}) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-    writer.print("Total bases:    {s}\n", .{formatComma(&comma_buf, total_bases)}) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-    writer.print("Shortest:       {s} ({s})\n", .{ formatComma(&comma_buf, records[shortest_idx].seq_len), shortest_name }) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-    writer.print("Longest:        {s} ({s})\n", .{ formatComma(&comma_buf, records[longest_idx].seq_len), longest_name }) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-    writer.print("Mean:           {s}\n", .{formatComma(&comma_buf, mean)}) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-    writer.print("Median:         {s}\n", .{formatComma(&comma_buf, median)}) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-    writer.print("N50:            {s}\n", .{formatComma(&comma_buf, n50)}) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-    writer.print("L50:            {s}\n", .{formatComma(&comma_buf, @intCast(l50))}) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-    writer.print("N90:            {s}\n", .{formatComma(&comma_buf, n90)}) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-    writer.print("L90:            {s}\n", .{formatComma(&comma_buf, @intCast(l90))}) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-    writer.print("AU:             {s}\n", .{formatComma(&comma_buf, au)}) catch {
-        printErrorAndExit("error: write failed\n", .{});
-    };
-    switch (duplicates) {
-        .count => |n| writer.print("Duplicates:     {d}\n", .{n}) catch {
-            printErrorAndExit("error: write failed\n", .{});
-        },
-        .unknown => writer.print("Duplicates:     n/a (run without --index-only)\n", .{}) catch {
-            printErrorAndExit("error: write failed\n", .{});
-        },
-    }
-
-    // Tier 2: composition details (unless --index-only)
-    if (comp) |c| {
-        writer.print("\nComposition:\n", .{}) catch {};
-
-        if (c.seq_type == .nucleotide) {
-            // Nucleotide stats
-            const a_count = c.counts['A'] + c.counts['a'];
-            const c_count = c.counts['C'] + c.counts['c'];
-            const g_count = c.counts['G'] + c.counts['g'];
-            const t_count = c.counts['T'] + c.counts['t'];
-            const n_count = c.counts['N'] + c.counts['n'];
-
-            const acgt_total = a_count + c_count + g_count + t_count;
-            const all_total = c.total_bases;
-
-            // Other = total - A - C - G - T - N
-            const other = if (all_total > a_count + c_count + g_count + t_count + n_count)
-                all_total - a_count - c_count - g_count - t_count - n_count
-            else
-                0;
-
-            const f_total: f64 = @floatFromInt(all_total);
-            const f_acgt: f64 = @floatFromInt(acgt_total);
-
-            writer.print("  A:   {d:.2}%\n", .{if (f_total > 0) @as(f64, @floatFromInt(a_count)) / f_total * 100.0 else 0.0}) catch {};
-            writer.print("  C:   {d:.2}%\n", .{if (f_total > 0) @as(f64, @floatFromInt(c_count)) / f_total * 100.0 else 0.0}) catch {};
-            writer.print("  G:   {d:.2}%\n", .{if (f_total > 0) @as(f64, @floatFromInt(g_count)) / f_total * 100.0 else 0.0}) catch {};
-            writer.print("  T:   {d:.2}%\n", .{if (f_total > 0) @as(f64, @floatFromInt(t_count)) / f_total * 100.0 else 0.0}) catch {};
-            writer.print("  N:   {d:.2}%\n", .{if (f_total > 0) @as(f64, @floatFromInt(n_count)) / f_total * 100.0 else 0.0}) catch {};
-
-            if (other > 0) {
-                writer.print("  Other: {d:.2}%\n", .{@as(f64, @floatFromInt(other)) / f_total * 100.0}) catch {};
-            }
-
-            // GC content (N excluded from denominator)
-            const gc = @as(f64, @floatFromInt(g_count + c_count));
-            const gc_pct = if (f_acgt > 0) gc / f_acgt * 100.0 else 0.0;
-            const n_pct = if (f_total > 0) @as(f64, @floatFromInt(n_count)) / f_total * 100.0 else 0.0;
-
-            if (n_pct > 1.0) {
-                writer.print("  GC:  {d:.2}% (excl. N)\n", .{gc_pct}) catch {};
-            } else {
-                writer.print("  GC:  {d:.2}%\n", .{gc_pct}) catch {};
-            }
-
-            // GC skew
-            const f_g: f64 = @floatFromInt(g_count);
-            const f_c: f64 = @floatFromInt(c_count);
-            const gc_sum = f_g + f_c;
-            if (gc_sum > 0) {
-                writer.print("  GC skew: {d:.3}\n", .{(f_g - f_c) / gc_sum}) catch {};
-            }
-
-            // N content
-            writer.print("  N content: {s}\n", .{formatComma(&comma_buf, n_count)}) catch {};
-
-            // Soft-masked
-            const soft_pct = if (f_total > 0) @as(f64, @floatFromInt(c.lowercase_count)) / f_total * 100.0 else 0.0;
-            writer.print("  Soft-masked: {d:.2}%\n", .{soft_pct}) catch {};
-        } else {
-            // Protein stats: top 3 most frequent amino acids
-            const f_total: f64 = @floatFromInt(c.total_bases);
-
-            // Collect amino acid counts (combine upper+lower)
-            const AaCount = struct { code: u8, count: u64 };
-            var aa_counts: [20]AaCount = undefined;
-            for (amino_acid_names, 0..) |aa, i| {
-                const lower = aa.code + 32;
-                aa_counts[i] = .{
-                    .code = aa.code,
-                    .count = c.counts[aa.code] + c.counts[lower],
-                };
-            }
-
-            // Sort by count descending
-            std.mem.sort(AaCount, &aa_counts, {}, struct {
-                fn cmp(_: void, a: AaCount, b: AaCount) bool {
-                    return a.count > b.count;
-                }
-            }.cmp);
-
-            // Print top 3
-            for (0..@min(3, aa_counts.len)) |i| {
-                const pct = if (f_total > 0) @as(f64, @floatFromInt(aa_counts[i].count)) / f_total * 100.0 else 0.0;
-                writer.print("  {c}:   {d:.2}%  ({s})\n", .{
-                    aa_counts[i].code,
-                    pct,
-                    getAminoAcidName(aa_counts[i].code),
-                }) catch {};
-            }
-            writer.print("  (20 amino acids total)\n", .{}) catch {};
-
-            // Lowercase fraction
-            const soft_pct = if (f_total > 0) @as(f64, @floatFromInt(c.lowercase_count)) / f_total * 100.0 else 0.0;
-            writer.print("  Lowercase: {d:.2}%\n", .{soft_pct}) catch {};
-        }
-    }
-
-    stdout_fw.flush() catch {};
 }
 
-/// Get the name of a record, handling both .zfi and .fai sources.
-fn getRecordName(idx: *LoadedIndex, io: std.Io, rec_idx: usize) []const u8 {
-    return idx.getRecordNameWithIo(io, rec_idx);
-}
+const STATS_READ_BUFFER_BYTES: usize = 256 * 1024;
 
-const fasta_release_batch_bytes: usize = 8 * 1024 * 1024;
+const ScanError = error{ OutOfMemory, ReadFailed, CorruptGeometry };
 
-/// Release FASTA mmap pages during sequential composition scan; batches `madvise` to limit syscall overhead.
-const CompositionReleaseCursor = struct {
-    released_end: usize = 0,
-    scan_end: usize = 0,
+const BoundedFastaReader = struct {
+    io: std.Io,
+    file: std.Io.File,
+    file_size: u64,
+    buffer: []u8,
+    start: u64 = 0,
+    len: usize = 0,
 
-    fn beforeRegion(self: *CompositionReleaseCursor, fasta: []const u8, start_byte: usize) void {
-        if (start_byte <= self.released_end) return;
-        const pending = start_byte - self.released_end;
-        if (pending >= fasta_release_batch_bytes) {
-            index_format.dropFastaSpan(fasta, self.released_end, start_byte);
-            self.released_end = start_byte;
+    fn read(self: *BoundedFastaReader, offset: u64, limit: u64) ScanError![]const u8 {
+        if (self.buffer.len == 0 or offset >= self.file_size or limit == 0) return error.CorruptGeometry;
+
+        const buffered_end = std.math.add(u64, self.start, self.len) catch return error.CorruptGeometry;
+        if (offset >= self.start and offset < buffered_end) {
+            const relative: usize = @intCast(offset - self.start);
+            const available = self.len - relative;
+            const take: usize = @intCast(@min(@as(u64, available), limit));
+            return self.buffer[relative..][0..take];
         }
-    }
 
-    fn afterRegion(self: *CompositionReleaseCursor, span_end: usize) void {
-        if (span_end > self.scan_end) self.scan_end = span_end;
-    }
-
-    fn flush(self: *CompositionReleaseCursor, fasta: []const u8) void {
-        const drop_end = @max(self.scan_end, self.released_end);
-        if (drop_end > self.released_end) {
-            index_format.dropFastaSpan(fasta, self.released_end, drop_end);
-            self.released_end = drop_end;
-        }
+        const wanted: usize = @intCast(@min(@as(u64, self.buffer.len), self.file_size - offset));
+        const got = std.Io.File.readPositionalAll(
+            self.file,
+            self.io,
+            self.buffer[0..wanted],
+            offset,
+        ) catch return error.ReadFailed;
+        if (got != wanted) return error.CorruptGeometry;
+        self.start = offset;
+        self.len = got;
+        const take: usize = @intCast(@min(@as(u64, got), limit));
+        return self.buffer[0..take];
     }
 };
 
-fn scanCompositionBytes(
-    fasta: []const u8,
-    start: usize,
-    end: usize,
-    counts: *[256]u64,
-    total_bases: *u64,
-    lowercase_count: *u64,
-) void {
-    for (fasta[start..end]) |byte| {
+fn countCompositionFiltered(data: []const u8, comp: *CompositionStats) void {
+    for (data) |byte| {
         if (byte > ' ') {
-            counts[byte] += 1;
-            total_bases.* += 1;
+            comp.counts[byte] += 1;
+            comp.total_bases += 1;
             if (byte >= 'a' and byte <= 'z') {
-                lowercase_count.* += 1;
+                comp.lowercase_count += 1;
             }
         }
     }
 }
 
-fn uniformRecordByteSpan(rec: IndexRecord) usize {
-    const full_lines = rec.seq_len / rec.line_bases;
-    const remainder = rec.seq_len % rec.line_bases;
-    return @intCast(full_lines * rec.line_bytes + remainder);
-}
-
-fn compositionRegionEnd(fasta: []const u8, rec: IndexRecord, start: usize) usize {
-    const full_lines = rec.seq_len / rec.line_bases;
-    const remainder = rec.seq_len % rec.line_bases;
-    var end: usize = start;
-    if (remainder > 0) {
-        end = start + (full_lines * rec.line_bytes) + remainder;
-        if (end < fasta.len and (fasta[end] == '\n' or fasta[end] == '\r')) {
-            end += 1;
-            if (end < fasta.len and fasta[end - 1] == '\r' and fasta[end] == '\n') {
-                end += 1;
-            }
-        }
-    } else {
-        end = start + (full_lines * rec.line_bytes);
-    }
-    return @min(end, fasta.len);
-}
-
-/// Inline composition scan for one record (hot path; kept in scanComposition for inlining).
-fn scanCompositionRecordInline(
-    idx: *const LoadedIndex,
-    rec: IndexRecord,
-    counts: *[256]u64,
-    total_bases: *u64,
-    lowercase_count: *u64,
-    release: *CompositionReleaseCursor,
-) void {
-    const fasta = idx.fasta_data;
+fn scanUniformRecord(reader: *BoundedFastaReader, rec: IndexRecord, comp: *CompositionStats) ScanError!void {
     if (rec.seq_len == 0) return;
+    if (rec.line_bases == 0 or rec.line_bytes < rec.line_bases) return error.CorruptGeometry;
 
-    if (!rec.isUniformWidth()) {
-        const side_table = idx.sideTableLines(rec);
-        var record_end: usize = 0;
-        for (side_table) |line| {
-            const start: usize = @intCast(line.byte_offset);
-            const end = @min(fasta.len, start + @as(usize, @intCast(line.line_bytes)));
-            release.beforeRegion(fasta, start);
-            scanCompositionBytes(fasta, start, end, counts, total_bases, lowercase_count);
-            if (end > record_end) record_end = end;
+    const last_base = rec.seq_len - 1;
+    const line = last_base / rec.line_bases;
+    const column = last_base % rec.line_bases;
+    const line_offset = std.math.mul(u64, line, rec.line_bytes) catch return error.CorruptGeometry;
+    const last_offset = std.math.add(u64, line_offset, column) catch return error.CorruptGeometry;
+    const span_len = std.math.add(u64, last_offset, 1) catch return error.CorruptGeometry;
+    const span_end = std.math.add(u64, rec.seq_offset, span_len) catch return error.CorruptGeometry;
+    if (span_end > reader.file_size) return error.CorruptGeometry;
+
+    var offset = rec.seq_offset;
+    var line_pos: usize = 0;
+    while (offset < span_end) {
+        const data = try reader.read(offset, span_end - offset);
+
+        var pos: usize = 0;
+        while (pos < data.len) {
+            if (line_pos >= rec.line_bases) {
+                const skipped = @min(data.len - pos, @as(usize, rec.line_bytes) - line_pos);
+                pos += skipped;
+                line_pos += skipped;
+                if (line_pos == rec.line_bytes) line_pos = 0;
+                continue;
+            }
+            const bases = @min(data.len - pos, @as(usize, rec.line_bases) - line_pos);
+            countCompositionSlice(data[pos..][0..bases], comp);
+            pos += bases;
+            line_pos += bases;
+            if (line_pos == rec.line_bytes) line_pos = 0;
         }
-        release.afterRegion(record_end);
-        return;
+        offset += data.len;
     }
-
-    const start: usize = @intCast(rec.seq_offset);
-    release.beforeRegion(fasta, start);
-
-    if (tryScanFixedWidthRecord(fasta, rec, start, counts, total_bases, lowercase_count)) {
-        release.afterRegion(compositionRegionEnd(fasta, rec, start));
-        return;
-    }
-
-    const end = compositionRegionEnd(fasta, rec, start);
-    scanCompositionBytes(fasta, start, end, counts, total_bases, lowercase_count);
-    release.afterRegion(end);
 }
 
-/// Scan all sequence regions in the FASTA for composition.
-fn scanComposition(idx: *const LoadedIndex) CompositionStats {
-    const fasta = idx.fasta_data;
+fn scanSideTableRecord(
+    reader: *BoundedFastaReader,
+    lines: []const SideTableLine,
+    comp: *CompositionStats,
+) ScanError!void {
+    if (lines.len == 0) return error.CorruptGeometry;
 
-    // Sequential access hint for full scan (no-op on Windows).
-    platform.advise(fasta, .sequential);
+    var line_index: usize = 0;
+    while (line_index < lines.len) {
+        const start = lines[line_index].byte_offset;
+        var end = std.math.add(u64, start, lines[line_index].line_bytes) catch return error.CorruptGeometry;
+        line_index += 1;
 
-    var counts: [256]u64 = .{0} ** 256;
-    var lowercase_count: u64 = 0;
-    var total_bases: u64 = 0;
-
-    const records = idx.records;
-    const record_count = records.len;
-    if (record_count == 0) {
-        return CompositionStats{
-            .counts = counts,
-            .total_bases = total_bases,
-            .seq_type = .nucleotide,
-            .lowercase_count = lowercase_count,
-        };
-    }
-
-    var release = CompositionReleaseCursor{};
-
-    if (recordsInSeqOffsetOrder(records)) {
-        var scan_end: usize = 0;
-        for (records) |rec| {
-            if (rec.seq_len == 0) continue;
-
-            if (!rec.isUniformWidth()) {
-                scanCompositionRecordInline(idx, rec, &counts, &total_bases, &lowercase_count, &release);
-                if (release.scan_end > scan_end) scan_end = release.scan_end;
-                continue;
-            }
-
-            const start: usize = @intCast(rec.seq_offset);
-            if (start >= release.released_end + fasta_release_batch_bytes) {
-                release.beforeRegion(fasta, start);
-            }
-
-            if (tryScanFixedWidthRecord(fasta, rec, start, &counts, &total_bases, &lowercase_count)) {
-                const end = start + uniformRecordByteSpan(rec);
-                if (end > scan_end) scan_end = end;
-                continue;
-            }
-
-            const end = compositionRegionEnd(fasta, rec, start);
-            scanCompositionBytes(fasta, start, end, &counts, &total_bases, &lowercase_count);
-            if (end > scan_end) scan_end = end;
+        while (line_index < lines.len and lines[line_index].byte_offset == end) {
+            const next_end = std.math.add(u64, end, lines[line_index].line_bytes) catch return error.CorruptGeometry;
+            if (next_end - start > reader.buffer.len) break;
+            end = next_end;
+            line_index += 1;
         }
-        release.scan_end = scan_end;
+        if (end > reader.file_size) return error.CorruptGeometry;
+
+        var offset = start;
+        while (offset < end) {
+            const data = try reader.read(offset, end - offset);
+            countCompositionFiltered(data, comp);
+            offset += data.len;
+        }
+    }
+}
+
+fn scanRecord(
+    reader: *BoundedFastaReader,
+    rec: IndexRecord,
+    side_table: []const SideTableLine,
+    comp: *CompositionStats,
+) ScanError!void {
+    if (rec.seq_len == 0) return;
+    if (rec.isUniformWidth()) {
+        try scanUniformRecord(reader, rec, comp);
     } else {
-        // `.fai` rows are usually name-sorted, not file order; must sort before page release.
-        const sorted_indices = std.heap.page_allocator.alloc(usize, record_count) catch {
-            printErrorAndExit("error: out of memory\n", .{});
-        };
-        defer std.heap.page_allocator.free(sorted_indices);
-        for (sorted_indices, 0..) |*slot, i| slot.* = i;
-        std.mem.sort(usize, sorted_indices, records, struct {
-            fn lessThan(ctx: []const IndexRecord, a: usize, b: usize) bool {
-                return ctx[a].seq_offset < ctx[b].seq_offset;
+        try scanSideTableRecord(reader, side_table, comp);
+    }
+}
+
+fn scanComposition(allocator: std.mem.Allocator, idx: *const LoadedIndex) ScanError!CompositionStats {
+    var comp: CompositionStats = .{};
+    var buffer: [STATS_READ_BUFFER_BYTES]u8 = undefined;
+    var reader = BoundedFastaReader{
+        .io = idx.io,
+        .file = idx.fasta_file,
+        .file_size = idx.fasta_size,
+        .buffer = &buffer,
+    };
+
+    if (recordsInSeqOffsetOrder(idx.records)) {
+        for (idx.records) |rec| {
+            try scanRecord(&reader, rec, idx.sideTableLines(rec), &comp);
+        }
+    } else {
+        const indices = allocator.alloc(usize, idx.records.len) catch return error.OutOfMemory;
+        defer allocator.free(indices);
+        for (indices, 0..) |*slot, i| slot.* = i;
+        std.mem.sort(usize, indices, idx.records, struct {
+            fn lessThan(records: []const IndexRecord, a: usize, b: usize) bool {
+                return records[a].seq_offset < records[b].seq_offset;
             }
         }.lessThan);
-
-        for (sorted_indices) |rec_idx| {
-            scanCompositionRecordInline(
-                idx,
-                records[rec_idx],
-                &counts,
-                &total_bases,
-                &lowercase_count,
-                &release,
-            );
+        for (indices) |rec_index| {
+            const rec = idx.records[rec_index];
+            try scanRecord(&reader, rec, idx.sideTableLines(rec), &comp);
         }
     }
-    release.flush(fasta);
 
-    // Detect nucleotide vs protein
-    const seq_type = detectType(&counts, total_bases);
-
-    return CompositionStats{
-        .counts = counts,
-        .total_bases = total_bases,
-        .seq_type = seq_type,
-        .lowercase_count = lowercase_count,
-    };
+    comp.seq_type = detectType(&comp.counts, comp.total_bases);
+    return comp;
 }
 
 fn recordsInSeqOffsetOrder(records: []const IndexRecord) bool {
@@ -677,57 +572,7 @@ fn recordsInSeqOffsetOrder(records: []const IndexRecord) bool {
     return true;
 }
 
-test "recordsInSeqOffsetOrder detects sorted and unsorted offsets" {
-    const sorted = [_]IndexRecord{
-        .{ .seq_offset = 10, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
-        .{ .seq_offset = 20, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
-        .{ .seq_offset = 30, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
-    };
-    try std.testing.expect(recordsInSeqOffsetOrder(&sorted));
-
-    const unsorted = [_]IndexRecord{
-        .{ .seq_offset = 30, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
-        .{ .seq_offset = 10, .seq_len = 1, .line_bases = 1, .line_bytes = 2 },
-    };
-    try std.testing.expect(!recordsInSeqOffsetOrder(&unsorted));
-}
-
-fn tryScanFixedWidthRecord(
-    fasta: []const u8,
-    rec: IndexRecord,
-    start: usize,
-    counts: *[256]u64,
-    total_bases: *u64,
-    lowercase_count: *u64,
-) bool {
-    if (rec.seq_len == 0 or rec.line_bases == 0) return true;
-    if (rec.line_bytes < rec.line_bases) return false;
-
-    const newline_bytes = rec.line_bytes - rec.line_bases;
-    if (newline_bytes != 1 and newline_bytes != 2) return false;
-
-    var pos = start;
-    var bases_remaining = rec.seq_len;
-    while (bases_remaining > 0) {
-        const bases_this_line: usize = @intCast(@min(bases_remaining, @as(u64, rec.line_bases)));
-        const line_end = pos + bases_this_line;
-        if (line_end > fasta.len) return false;
-
-        countCompositionSlice(fasta[pos..line_end], counts, total_bases, lowercase_count);
-
-        bases_remaining -= bases_this_line;
-        pos += if (bases_remaining > 0) @as(usize, @intCast(rec.line_bytes)) else bases_this_line;
-    }
-
-    return true;
-}
-
-fn countCompositionSlice(
-    data: []const u8,
-    counts: *[256]u64,
-    total_bases: *u64,
-    lowercase_count: *u64,
-) void {
+fn countCompositionSlice(data: []const u8, comp: *CompositionStats) void {
     const a_vec: SimdVec = @splat('a');
     const z_vec: SimdVec = @splat('z');
 
@@ -735,45 +580,52 @@ fn countCompositionSlice(
     while (pos + SIMD_CHUNK_SIZE <= data.len) {
         const chunk: SimdVec = data[pos..][0..SIMD_CHUNK_SIZE].*;
         inline for (0..SIMD_CHUNK_SIZE) |j| {
-            counts[chunk[j]] += 1;
+            comp.counts[chunk[j]] += 1;
         }
-        total_bases.* += SIMD_CHUNK_SIZE;
+        comp.total_bases += SIMD_CHUNK_SIZE;
         const lower_mask = (chunk >= a_vec) & (chunk <= z_vec);
-        lowercase_count.* += @popCount(@as(u32, @bitCast(lower_mask)));
+        comp.lowercase_count += @popCount(@as(u32, @bitCast(lower_mask)));
         pos += SIMD_CHUNK_SIZE;
+    }
+    while (pos + TAIL_CHUNK_SIZE <= data.len) {
+        const chunk: TailVec = data[pos..][0..TAIL_CHUNK_SIZE].*;
+        inline for (0..TAIL_CHUNK_SIZE) |j| {
+            comp.counts[chunk[j]] += 1;
+        }
+        comp.total_bases += TAIL_CHUNK_SIZE;
+        const lower_mask = (chunk >= @as(TailVec, @splat('a'))) & (chunk <= @as(TailVec, @splat('z')));
+        comp.lowercase_count += @popCount(@as(u8, @bitCast(lower_mask)));
+        pos += TAIL_CHUNK_SIZE;
+    }
+    while (pos + FINAL_CHUNK_SIZE <= data.len) {
+        const chunk: FinalVec = data[pos..][0..FINAL_CHUNK_SIZE].*;
+        inline for (0..FINAL_CHUNK_SIZE) |j| {
+            comp.counts[chunk[j]] += 1;
+        }
+        comp.total_bases += FINAL_CHUNK_SIZE;
+        const lower_mask = (chunk >= @as(FinalVec, @splat('a'))) & (chunk <= @as(FinalVec, @splat('z')));
+        comp.lowercase_count += @popCount(@as(u4, @bitCast(lower_mask)));
+        pos += FINAL_CHUNK_SIZE;
     }
     while (pos < data.len) : (pos += 1) {
         const byte = data[pos];
-        counts[byte] += 1;
-        total_bases.* += 1;
+        comp.counts[byte] += 1;
+        comp.total_bases += 1;
         if (byte >= 'a' and byte <= 'z') {
-            lowercase_count.* += 1;
+            comp.lowercase_count += 1;
         }
     }
 }
 
-test "countCompositionSlice tallies composition and lowercase" {
-    var counts: [256]u64 = .{0} ** 256;
-    var total: u64 = 0;
-    var lowercase: u64 = 0;
-    countCompositionSlice("ACGTacgtNN", &counts, &total, &lowercase);
-    try std.testing.expectEqual(@as(u64, 10), total);
-    try std.testing.expectEqual(@as(u64, 4), lowercase);
-    try std.testing.expectEqual(@as(u64, 1), counts['A']);
-    try std.testing.expectEqual(@as(u64, 1), counts['a']);
-    try std.testing.expectEqual(@as(u64, 2), counts['N']);
-}
-
-/// Detect if sequences are nucleotide or protein from composition counts.
+/// Detects whether represented sequence counts are nucleotide or protein.
 ///
 /// Shared by stats (full-file counts), GET (per-record sample), and validate
 /// (prefix sample). Threshold: nucleotide if IUPAC nuc letters are strictly
-/// more than 90% of counted bases (`nuc * 10 > total * 9`).
+/// more than 90% of counted bases (`nuc * 10 > total * 9`). The caller supplies
+/// `total` for the same sample represented by `counts`. Empty samples are nucleotide.
 pub fn detectType(counts: *const [256]u64, total: u64) SequenceType {
     if (total == 0) return .nucleotide;
 
-    // Sum the full IUPAC nucleotide alphabet (case-insensitive):
-    // A C G T U R Y S W K M B D H V N
     const nuc_count = counts['A'] + counts['a'] +
         counts['C'] + counts['c'] +
         counts['G'] + counts['g'] +
@@ -798,8 +650,312 @@ pub fn detectType(counts: *const [256]u64, total: u64) SequenceType {
     return .protein;
 }
 
-/// Bases sampled per record for GET `--rc` / `--complement-only` protein guard.
-pub const get_type_sample_bases: u64 = 256;
+fn testIndexRecord(seq_offset: u64, seq_len: u64, line_bases: u32, line_bytes: u32) IndexRecord {
+    return .{
+        .name_offset = 0,
+        .name_len = 0,
+        .seq_offset = seq_offset,
+        .seq_len = seq_len,
+        .line_bases = line_bases,
+        .line_bytes = line_bytes,
+    };
+}
 
-/// Bases sampled across the file for validate alphabet selection.
-pub const validate_type_sample_bases: u64 = 100_000;
+test "[unit] - [stats scan order]: detects sorted and unsorted offsets" {
+    const sorted = [_]IndexRecord{
+        testIndexRecord(10, 1, 1, 2),
+        testIndexRecord(20, 1, 1, 2),
+        testIndexRecord(30, 1, 1, 2),
+    };
+    try std.testing.expect(recordsInSeqOffsetOrder(&sorted));
+
+    const unsorted = [_]IndexRecord{
+        testIndexRecord(30, 1, 1, 2),
+        testIndexRecord(10, 1, 1, 2),
+    };
+    try std.testing.expect(!recordsInSeqOffsetOrder(&unsorted));
+}
+
+test "[property] - [stats composition]: SIMD matches scalar counts at every tail length" {
+    var data: [512]u8 = undefined;
+    for (&data, 0..) |*byte, i| byte.* = @truncate(i);
+
+    for (0..data.len + 1) |len| {
+        var expected: [256]u64 = .{0} ** 256;
+        var expected_lowercase: u64 = 0;
+        for (data[0..len]) |byte| {
+            expected[byte] += 1;
+            if (byte >= 'a' and byte <= 'z') expected_lowercase += 1;
+        }
+        var comp: CompositionStats = .{};
+
+        countCompositionSlice(data[0..len], &comp);
+
+        try std.testing.expectEqual(@as(u64, @intCast(len)), comp.total_bases);
+        try std.testing.expectEqual(expected_lowercase, comp.lowercase_count);
+        try std.testing.expectEqualSlices(u64, &expected, &comp.counts);
+    }
+}
+
+test "[integration] - [stats composition]: scans uniform line-ending variants" {
+    const Case = struct {
+        bytes: []const u8,
+        record: IndexRecord,
+    };
+    const cases = [_]Case{
+        .{
+            .bytes = "prefixACGT\nacgt\nNN",
+            .record = testIndexRecord(6, 10, 4, 5),
+        },
+        .{
+            .bytes = "xACGT\r\nacgt\r\nNN\r\nsuffix",
+            .record = testIndexRecord(1, 10, 4, 6),
+        },
+    };
+    const buffer_sizes = [_]usize{ 1, 2, 3, 4, 5, 6, 7, 15, 16, 17, 32, 33 };
+
+    for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{ .read = true });
+        defer file.close(std.testing.io);
+        try std.Io.File.writeStreamingAll(file, std.testing.io, case.bytes);
+        for (buffer_sizes) |buffer_size| {
+            var comp: CompositionStats = .{};
+            var storage: [33]u8 = undefined;
+            var reader = BoundedFastaReader{
+                .io = std.testing.io,
+                .file = file,
+                .file_size = case.bytes.len,
+                .buffer = storage[0..buffer_size],
+            };
+
+            try scanUniformRecord(&reader, case.record, &comp);
+            try std.testing.expectEqual(@as(u64, 10), comp.total_bases);
+            try std.testing.expectEqual(@as(u64, 4), comp.lowercase_count);
+            try std.testing.expectEqual(@as(u64, 1), comp.counts['A']);
+            try std.testing.expectEqual(@as(u64, 1), comp.counts['a']);
+            try std.testing.expectEqual(@as(u64, 2), comp.counts['N']);
+        }
+    }
+}
+
+test "[integration] - [stats composition]: excludes bytes outside indexed spans" {
+    const bytes = ">one\nAC\nGT\n>two\nTT\n";
+    const buffer_sizes = [_]usize{ 3, 32 };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{ .read = true });
+    defer file.close(std.testing.io);
+    try std.Io.File.writeStreamingAll(file, std.testing.io, bytes);
+    for (buffer_sizes) |buffer_size| {
+        var storage: [32]u8 = undefined;
+        var comp: CompositionStats = .{};
+        var reader = BoundedFastaReader{
+            .io = std.testing.io,
+            .file = file,
+            .file_size = bytes.len,
+            .buffer = storage[0..buffer_size],
+        };
+
+        try scanUniformRecord(
+            &reader,
+            testIndexRecord(5, 4, 2, 3),
+            &comp,
+        );
+        try scanUniformRecord(
+            &reader,
+            testIndexRecord(16, 2, 2, 3),
+            &comp,
+        );
+
+        try std.testing.expectEqual(@as(u64, 6), comp.total_bases);
+        try std.testing.expectEqual(@as(u64, 1), comp.counts['A']);
+        try std.testing.expectEqual(@as(u64, 1), comp.counts['C']);
+        try std.testing.expectEqual(@as(u64, 1), comp.counts['G']);
+        try std.testing.expectEqual(@as(u64, 3), comp.counts['T']);
+        try std.testing.expectEqual(@as(u64, 0), comp.counts['>']);
+    }
+}
+
+test "[integration] - [stats composition]: coalesces only adjacent side-table spans" {
+    const bytes = "AC\nGT\nignored\nnn\r\n";
+    const lines = [_]SideTableLine{
+        .{ .base_start = 0, .byte_offset = 0, .line_bytes = 3, .line_bases = 2 },
+        .{ .base_start = 2, .byte_offset = 3, .line_bytes = 3, .line_bases = 2 },
+        .{ .base_start = 4, .byte_offset = 14, .line_bytes = 4, .line_bases = 2 },
+    };
+    const buffer_sizes = [_]usize{ 1, 2, 3, 4, 5, 6, 7 };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{ .read = true });
+    defer file.close(std.testing.io);
+    try std.Io.File.writeStreamingAll(file, std.testing.io, bytes);
+    for (buffer_sizes) |buffer_size| {
+        var comp: CompositionStats = .{};
+        var storage: [7]u8 = undefined;
+        var reader = BoundedFastaReader{
+            .io = std.testing.io,
+            .file = file,
+            .file_size = bytes.len,
+            .buffer = storage[0..buffer_size],
+        };
+
+        try scanSideTableRecord(&reader, &lines, &comp);
+        try std.testing.expectEqual(@as(u64, 6), comp.total_bases);
+        try std.testing.expectEqual(@as(u64, 2), comp.lowercase_count);
+        try std.testing.expectEqual(@as(u64, 0), comp.counts['i']);
+        try std.testing.expectEqual(@as(u64, 2), comp.counts['n']);
+    }
+}
+
+test "[failure] - [stats composition]: rejects invalid uniform geometry" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
+    defer file.close(std.testing.io);
+    try std.Io.File.writeStreamingAll(file, std.testing.io, "ACGT");
+    var storage: [2]u8 = undefined;
+    var comp: CompositionStats = .{};
+    var reader = BoundedFastaReader{
+        .io = std.testing.io,
+        .file = file,
+        .file_size = 4,
+        .buffer = &storage,
+    };
+    const invalid = [_]IndexRecord{
+        testIndexRecord(0, 1, 0, 0),
+        testIndexRecord(0, 1, 2, 1),
+        testIndexRecord(0, 5, 5, 6),
+        testIndexRecord(std.math.maxInt(u64), 1, 1, 1),
+        testIndexRecord(0, std.math.maxInt(u64), 1, std.math.maxInt(u32)),
+    };
+
+    for (invalid) |record| {
+        try std.testing.expectError(error.CorruptGeometry, scanUniformRecord(&reader, record, &comp));
+    }
+}
+
+test "[failure] - [stats composition]: propagates positional read failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{ .read = true });
+    std.Io.File.writeStreamingAll(file, std.testing.io, "A") catch |err| {
+        file.close(std.testing.io);
+        return err;
+    };
+    file.close(std.testing.io);
+
+    var storage: [1]u8 = undefined;
+    var reader = BoundedFastaReader{
+        .io = std.testing.io,
+        .file = file,
+        .file_size = 1,
+        .buffer = &storage,
+    };
+
+    try std.testing.expectError(error.ReadFailed, reader.read(0, 1));
+}
+
+test "[edge] - [stats lengths]: computes a near-maximum median without overflow" {
+    const near_max = [_]u64{ std.math.maxInt(u64) - 1, std.math.maxInt(u64) };
+
+    try std.testing.expectEqual(std.math.maxInt(u64) - 1, medianSorted(&near_max));
+}
+
+test "[failure] - [stats lengths]: rejects total-symbol overflow" {
+    const records = [_]IndexRecord{
+        testIndexRecord(0, std.math.maxInt(u64), 1, 2),
+        testIndexRecord(0, 1, 1, 2),
+    };
+    var lengths: [2]u64 = undefined;
+
+    try std.testing.expectError(error.Overflow, summarizeLengths(&records, &lengths));
+}
+
+test "[edge] - [stats lengths]: accumulates and formats auN above u64" {
+    const length: u64 = 1 << 32;
+    const records = [_]IndexRecord{
+        testIndexRecord(0, length, 1, 2),
+        testIndexRecord(0, length, 1, 2),
+    };
+    var lengths: [2]u64 = undefined;
+    const summary = try summarizeLengths(&records, &lengths);
+    try std.testing.expectEqual(@as(u64, 1) << 33, summary.total_symbols);
+    try std.testing.expectEqual(@as(u128, 1) << 65, summary.aun_numerator);
+
+    var buffer: [32]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeFixedUnsigned(&writer, summary.aun_numerator, summary.total_symbols, 2);
+    try std.testing.expectEqualStrings("4294967296.00", writer.buffered());
+}
+
+test "[unit] - [stats formatting]: rounds fixed decimals exactly" {
+    var buffer: [64]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeFixedUnsigned(&writer, 100, 32, 2);
+    try writer.writeByte(' ');
+    try writeFixedUnsigned(&writer, 200, 3, 2);
+    try writer.writeByte(' ');
+    try writeFixedUnsigned(&writer, 226, 16, 2);
+    try writer.writeByte(' ');
+    try writeFixedSigned(&writer, -30, 32, 3);
+    try writer.writeByte(' ');
+    try writeFixedSigned(&writer, -1, 10_000, 3);
+
+    try std.testing.expectEqualStrings("3.13 66.67 14.13 -0.938 0.000", writer.buffered());
+}
+
+test "[failure] - [stats report]: propagates a full destination" {
+    const records = [_]IndexRecord{
+        testIndexRecord(0, 4, 4, 5),
+    };
+    const summary = LengthSummary{
+        .total_symbols = 4,
+        .shortest_index = 0,
+        .longest_index = 0,
+        .mean = 4,
+        .q1 = 4,
+        .median = 4,
+        .q3 = 4,
+        .range = 0,
+        .n50 = 4,
+        .l50 = 1,
+        .n90 = 4,
+        .l90 = 1,
+        .aun_numerator = 16,
+    };
+    var comp: CompositionStats = .{ .total_bases = 4 };
+    comp.counts['A'] = 4;
+    var buffer: [1]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+
+    try std.testing.expectError(
+        error.WriteFailed,
+        writeReport(
+            &writer,
+            "x.fa",
+            ".zfi",
+            8,
+            &records,
+            summary,
+            "x",
+            "x",
+            &comp,
+            try summarizeComposition(&comp),
+        ),
+    );
+}
+
+test "[failure] - [stats composition]: rejects categories above total symbols" {
+    const sequence_types = [_]SequenceType{ .nucleotide, .protein };
+    for (sequence_types) |sequence_type| {
+        var comp: CompositionStats = .{
+            .total_bases = 4,
+            .seq_type = sequence_type,
+        };
+        comp.counts['A'] = 5;
+
+        try std.testing.expectError(error.CompositionMismatch, summarizeComposition(&comp));
+    }
+}

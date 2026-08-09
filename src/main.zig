@@ -1,30 +1,17 @@
 //! CLI entry and subcommand dispatcher for `index`, `get`, `stats`, and `validate`.
-//!
-//! Re-exports core modules for tests. Argument parsing, usage text, and routing live here;
-//! indexing, extraction, stats, and validation logic live in the sibling modules.
 
 const std = @import("std");
 const builtin = @import("builtin");
-const platform = @import("platform.zig");
 
-// --- Module imports ---
 pub const index_format = @import("index_format.zig");
 pub const indexer = @import("indexer.zig");
 pub const getter = @import("getter.zig");
 pub const stats = @import("stats.zig");
 pub const validator = @import("validator.zig");
 
-// --- Re-exports for tests ---
-pub const IndexRecord = index_format.IndexRecord;
-pub const ZfiHeader = index_format.ZfiHeader;
-pub const ZFI_MAGIC = index_format.ZFI_MAGIC;
-pub const validateFasta = indexer.validateFasta;
-pub const scanHeaders = indexer.scanHeaders;
-
 const printErrorAndExit = index_format.printErrorAndExit;
 
 const VERSION = "0.3.1";
-const CHUNK_SIZE_FLAG = "--chunk-size";
 const STRAND_AWARE_FLAG = "--strand-aware";
 const STRAND_AWARE_ALIAS = "--honor-strand";
 const RC_FLAG = "--rc";
@@ -49,28 +36,21 @@ const USAGE =
     \\  --emit-fai   Output FAI to stdout when every record has fixed line geometry;
     \\               otherwise fails and directs you to default .zfi indexing
     \\  --no-dedup   Keep duplicate sequence names in the index (default: first wins
-    \\               at index time). get resolves duplicate names to the last record.
-    \\  --low-mem    Stream input with bounded RAM; same outputs as default index
+    \\               at index time). get resolves duplicate names to the first record.
     \\
     \\Get usage:
-    \\  z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt]
-    \\               [--strand-aware] [--summary] [--rc|--complement-only|--reverse-only]
-    \\               [--annotate-rc] [--chunk-size N|-1] <region> [region ...]
+    \\  z-fasta get <file.fasta> [options] <region> [region ...]
+    \\  z-fasta get <file.fasta> [options] --names file.txt|-
+    \\  z-fasta get <file.fasta> [options] --bed file.bed|- [--strand-aware]
+    \\  Choose exactly one request source: positional regions, --names, or --bed.
     \\  Region formats: NAME, NAME:START-END, NAME:START-
-    \\  --strand-aware  Respect BED column 6; '-' emits reverse-complement output
+    \\  --strand-aware  With --bed, respect column 6; '-' emits reverse-complement output
     \\                  (alias: --honor-strand)
     \\  --rc            Reverse-complement extracted sequence output
     \\  --complement-only  Complement extracted sequence output without reversing
     \\  --reverse-only  Reverse extracted sequence output without complementing
-    \\  --annotate-rc   Annotate transformed headers (for example: reverse complement)
-    \\  --chunk-size N  Process BED rows in batches of N (default: 4096). Use 1 only
-    \\                  for debugging: one row per batch, high per-row arena overhead.
-    \\  --chunk-size -1 Process all BED rows in one batch (512 MiB cap)
-    \\  Positional regions: max 1024 per invocation. --names loads the whole file
-    \\  up to 512 MiB (--chunk-size does not stream --names). BED streams by default.
-    \\
-    \\Stats options:
-    \\  --index-only   Only show index-derived stats (no composition scan)
+    \\  --annotate-rc   Annotate the final output orientation when it is transformed
+    \\  Positional regions: max 1024 per invocation. Names and BED input stream.
     \\
     \\Validate usage:
     \\  z-fasta validate [options] <file.fasta>
@@ -93,14 +73,15 @@ const USAGE =
     \\  z-fasta get genome.fa --bed regions.bed  Extract BED regions
     \\  z-fasta get genome.fa --names ids.txt    Extract whole sequences from a file
     \\  z-fasta get genome.fa --bed regions.bed --strand-aware --summary
-    \\  z-fasta stats genome.fa                  Full stats with composition
-    \\  z-fasta stats --index-only genome.fa     Quick index-only stats
+    \\  z-fasta stats genome.fa                  Show stats with composition
     \\  z-fasta validate genome.fa               Check FASTA validity
     \\  z-fasta validate --json --summary genome.fa
     \\
 ;
 
-const ParseChunkSizeError = error{InvalidChunkSize};
+const GET_USAGE_ERROR =
+    "error: usage: z-fasta get <file.fasta> (<region>... | --names file.txt|- | --bed file.bed|-)\n";
+
 const ParseTransformFlagsError = error{ConflictingTransformFlags};
 
 const ParsedTransformFlags = struct {
@@ -108,23 +89,12 @@ const ParsedTransformFlags = struct {
     annotate_transform: bool,
 };
 
-fn parseChunkSizeValue(raw: []const u8) ParseChunkSizeError!usize {
-    if (std.mem.eql(u8, raw, "-1")) return getter.chunk_size_all;
-
-    const parsed = std.fmt.parseInt(usize, raw, 10) catch {
-        return error.InvalidChunkSize;
-    };
-    if (parsed == 0) return error.InvalidChunkSize;
-    return parsed;
-}
-
-fn chunkSizeEqualsValue(arg: []const u8) ?[]const u8 {
-    const prefix = CHUNK_SIZE_FLAG ++ "=";
-    if (!std.mem.startsWith(u8, arg, prefix)) return null;
-    return arg[prefix.len..];
-}
-
-fn parseTransformFlags(rc: bool, complement_only: bool, reverse_only: bool, annotate_transform: bool) ParseTransformFlagsError!ParsedTransformFlags {
+fn parseTransformFlags(
+    rc: bool,
+    complement_only: bool,
+    reverse_only: bool,
+    annotate_transform: bool,
+) ParseTransformFlagsError!ParsedTransformFlags {
     var selected: usize = 0;
     if (rc) selected += 1;
     if (complement_only) selected += 1;
@@ -151,7 +121,7 @@ fn printUsageAndExit() noreturn {
     std.process.exit(1);
 }
 
-/// Positional argv tokens must not start with `-`. Known flags are matched earlier.
+// Positional argv tokens must not start with `-`. Known flags are matched earlier.
 fn rejectUnknownOption(arg: []const u8) void {
     if (arg.len > 0 and arg[0] == '-') {
         printErrorAndExit("error: unknown option: {s}\n", .{arg});
@@ -218,7 +188,7 @@ pub fn main(init: std.process.Init.Minimal) void {
     const io = threaded.io();
 
     if (std.mem.eql(u8, cmd, "index")) {
-        runIndex(io, &args);
+        runIndex(io, init.environ, &args);
     } else if (std.mem.eql(u8, cmd, "get")) {
         runGetCmd(io, &args);
     } else if (std.mem.eql(u8, cmd, "stats")) {
@@ -230,14 +200,11 @@ pub fn main(init: std.process.Init.Minimal) void {
     }
 }
 
-// ============================================================================
-// Subcommand: index
-// ============================================================================
+// --- Index command ---
 
-fn runIndex(io: std.Io, args: *std.process.Args.Iterator) void {
+fn runIndex(io: std.Io, environ: std.process.Environ, args: *std.process.Args.Iterator) void {
     var emit_fai = false;
     var enable_dedup = true;
-    var low_mem = false;
     var fasta_path: ?[]const u8 = null;
 
     while (args.next()) |arg| {
@@ -251,10 +218,11 @@ fn runIndex(io: std.Io, args: *std.process.Args.Iterator) void {
             enable_dedup = false;
         } else if (std.mem.eql(u8, arg, "--dedup")) {
             enable_dedup = true;
-        } else if (std.mem.eql(u8, arg, "--low-mem")) {
-            low_mem = true;
         } else {
             rejectUnknownOption(arg);
+            if (fasta_path != null) {
+                printErrorAndExit("error: index accepts exactly one FASTA path\n", .{});
+            }
             fasta_path = arg;
         }
     }
@@ -263,108 +231,68 @@ fn runIndex(io: std.Io, args: *std.process.Args.Iterator) void {
         printUsageAndExit();
     };
 
-    if (low_mem) {
-        indexer.runIndexLowMem(io, path, emit_fai, enable_dedup);
-        return;
-    }
-
-    // Standard mmap mode
-    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| {
-        switch (err) {
-            error.FileNotFound => printErrorAndExit("error: file not found: {s}\n", .{path}),
-            error.AccessDenied => printErrorAndExit("error: access denied: {s}\n", .{path}),
-            else => printErrorAndExit("error: failed to open file: {s}\n", .{path}),
-        }
+    indexer.runIndex(io, environ, path, .{
+        .emit_fai = emit_fai,
+        .enable_dedup = enable_dedup,
+    }) catch |err| switch (err) {
+        error.FileNotFound => printErrorAndExit("error: file not found: {s}\n", .{path}),
+        error.AccessDenied => printErrorAndExit("error: access denied: {s}\n", .{path}),
+        error.SourceOpenFailed => printErrorAndExit("error: failed to open file: {s}\n", .{path}),
+        error.SourceStatFailed => printErrorAndExit("error: failed to stat file: {s}\n", .{path}),
+        error.EmptyFile => printErrorAndExit("error: file is empty: {s}\n", .{path}),
+        error.NotFasta => printErrorAndExit("error: not a FASTA file: {s}\n", .{path}),
+        error.HeaderTooLong => printErrorAndExit(
+            "error: sequence name exceeds {d} bytes: {s}\n",
+            .{ indexer.MAX_INDEX_NAME_LEN, path },
+        ),
+        error.SequenceLineTooLong => printErrorAndExit(
+            "error: sequence line exceeds the index format limit: {s}\n",
+            .{path},
+        ),
+        error.NonUniformFai => printErrorAndExit(
+            "error: cannot emit .fai for non-uniform sequence layout; run 'z-fasta index' (default) to write .zfi\n",
+            .{},
+        ),
+        error.NoValidSequences => printErrorAndExit(
+            "error: no valid sequences found in: {s}\n",
+            .{path},
+        ),
+        error.SourceReadFailed => printErrorAndExit("error: failed to read file: {s}\n", .{path}),
+        error.NoUsableFaiSpool => printErrorAndExit(
+            "error: no usable temporary directory for FAI spool\n",
+            .{},
+        ),
+        error.FaiSpoolWriteFailed => printErrorAndExit(
+            "error: failed to write temporary FAI spool\n",
+            .{},
+        ),
+        error.FaiSpoolReadFailed => printErrorAndExit(
+            "error: failed to read temporary FAI spool\n",
+            .{},
+        ),
+        error.StdoutReplayFailed => printErrorAndExit("error: failed to replay FAI stdout\n", .{}),
+        error.StdoutFlushFailed => printErrorAndExit("error: failed to flush FAI stdout\n", .{}),
+        error.SourceChanged => printErrorAndExit(
+            "error: source changed while indexing: {s}\n",
+            .{path},
+        ),
+        error.UnsupportedTimestamp => printErrorAndExit(
+            "error: source modification time predates the Unix epoch: {s}\n",
+            .{path},
+        ),
+        error.OutputPathTooLong => printErrorAndExit("error: path too long\n", .{}),
+        error.ZfiWriteFailed => printErrorAndExit("error: write failed\n", .{}),
+        error.ZfiFinalizeFailed => printErrorAndExit(
+            "error: failed to finalize index: {s}.zfi\n",
+            .{path},
+        ),
+        error.ProcessingFailed => printErrorAndExit("error: processing failed\n", .{}),
+        error.OutOfMemory => printErrorAndExit("error: processing failed\n", .{}),
+        else => printErrorAndExit("error: processing failed\n", .{}),
     };
-    defer file.close(io);
-
-    const stat = file.stat(io) catch {
-        printErrorAndExit("error: failed to stat file: {s}\n", .{path});
-    };
-
-    if (stat.size == 0) {
-        printErrorAndExit("error: file is empty: {s}\n", .{path});
-    }
-
-    var fasta_view = platform.FileView.mapFile(io, file, @intCast(stat.size)) catch {
-        printErrorAndExit("error: failed to mmap file: {s}\n", .{path});
-    };
-    defer fasta_view.destroy(io);
-    const data = fasta_view.bytes();
-
-    platform.advise(data, .sequential);
-
-    if (data.len == 0 or data[0] != '>') {
-        printErrorAndExit("error: not a FASTA file: {s}\n", .{path});
-    }
-
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-
-    if (emit_fai) {
-        var out_buf: [65536]u8 = undefined;
-        var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
-        // Buffer first so a mid-file NonUniformFai does not leave a partial `.fai` on stdout.
-        var fai_aw: std.Io.Writer.Allocating = .init(arena.allocator());
-        defer fai_aw.deinit();
-
-        const record_count = indexer.streamingScan(data, &fai_aw.writer, .fai, enable_dedup, arena.allocator()) catch |err| switch (err) {
-            error.HeaderTooLong => printErrorAndExit("error: sequence name exceeds {d} bytes: {s}\n", .{ indexer.max_index_name_len, path }),
-            error.NonUniformFai => printErrorAndExit(
-                "error: cannot emit .fai for non-uniform sequence layout; run 'z-fasta index' (default) to write .zfi\n",
-                .{},
-            ),
-            else => printErrorAndExit("error: failed to scan/write\n", .{}),
-        };
-
-        if (record_count == 0) {
-            printErrorAndExit("error: no valid sequences found in: {s}\n", .{path});
-        }
-        stdout_fw.interface.writeAll(fai_aw.written()) catch {
-            printErrorAndExit("error: write failed\n", .{});
-        };
-        stdout_fw.flush() catch {};
-    } else {
-        var zfi_path_buf: [4096]u8 = undefined;
-        const zfi_path = std.fmt.bufPrint(&zfi_path_buf, "{s}.zfi", .{path}) catch {
-            printErrorAndExit("error: path too long\n", .{});
-        };
-
-        var zfi_tmp_buf: [4096]u8 = undefined;
-        const zfi_tmp_path = std.fmt.bufPrint(&zfi_tmp_buf, "{s}.zfi.tmp", .{path}) catch {
-            printErrorAndExit("error: path too long\n", .{});
-        };
-
-        const cwd = std.Io.Dir.cwd();
-        cwd.deleteFile(io, zfi_tmp_path) catch {};
-
-        var zfi_index = indexer.scanZfiIndex(data, enable_dedup, arena.allocator()) catch |err| switch (err) {
-            error.HeaderTooLong => printErrorAndExit("error: sequence name exceeds {d} bytes: {s}\n", .{ indexer.max_index_name_len, path }),
-            else => printErrorAndExit("error: scan failed\n", .{}),
-        };
-        defer zfi_index.deinit(arena.allocator());
-
-        if (zfi_index.records.items.len == 0) {
-            printErrorAndExit("error: no valid sequences found in: {s}\n", .{path});
-        }
-
-        indexer.writeZfiIndexFile(io, zfi_tmp_path, &zfi_index, data.len, index_format.timestampToNs(stat.mtime)) catch {
-            cwd.deleteFile(io, zfi_tmp_path) catch {};
-            printErrorAndExit("error: write failed\n", .{});
-        };
-
-        cwd.rename(zfi_tmp_path, cwd, zfi_path, io) catch {
-            cwd.deleteFile(io, zfi_tmp_path) catch {};
-            printErrorAndExit("error: failed to finalize index: {s}\n", .{zfi_path});
-        };
-
-        std.debug.print("wrote {s} ({d} sequences)\n", .{ zfi_path, zfi_index.records.items.len });
-    }
 }
 
-// ============================================================================
-// Subcommand: get
-// ============================================================================
+// --- Get command ---
 
 fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     var fasta_path: ?[]const u8 = null;
@@ -372,7 +300,6 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     var names_path: ?[]const u8 = null;
     var honor_strand = false;
     var summary = false;
-    var chunk_size: usize = 4_096;
     var rc = false;
     var complement_only = false;
     var reverse_only = false;
@@ -385,10 +312,16 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printHelpAndExit(io);
         } else if (std.mem.eql(u8, arg, "--bed")) {
+            if (bed_path != null) {
+                printErrorAndExit("error: --bed may be specified only once\n", .{});
+            }
             bed_path = args.next() orelse {
                 printErrorAndExit("error: --bed requires a path or '-'\n", .{});
             };
         } else if (std.mem.eql(u8, arg, "--names")) {
+            if (names_path != null) {
+                printErrorAndExit("error: --names may be specified only once\n", .{});
+            }
             names_path = args.next() orelse {
                 printErrorAndExit("error: --names requires a path\n", .{});
             };
@@ -404,17 +337,6 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
             reverse_only = true;
         } else if (std.mem.eql(u8, arg, ANNOTATE_RC_FLAG)) {
             annotate_transform = true;
-        } else if (std.mem.eql(u8, arg, CHUNK_SIZE_FLAG)) {
-            const raw = args.next() orelse {
-                printErrorAndExit("error: --chunk-size requires a positive integer or -1\n", .{});
-            };
-            chunk_size = parseChunkSizeValue(raw) catch {
-                printErrorAndExit("error: --chunk-size requires a positive integer or -1\n", .{});
-            };
-        } else if (chunkSizeEqualsValue(arg)) |raw| {
-            chunk_size = parseChunkSizeValue(raw) catch {
-                printErrorAndExit("error: --chunk-size requires a positive integer or -1\n", .{});
-            };
         } else if (fasta_path == null) {
             rejectUnknownOption(arg);
             fasta_path = arg;
@@ -429,96 +351,69 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     }
 
     const path = fasta_path orelse {
-        printErrorAndExit("error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--strand-aware] [--summary] [--rc|--complement-only|--reverse-only] [--annotate-rc] [--chunk-size N|-1] <region> [region ...]\n", .{});
+        printErrorAndExit(GET_USAGE_ERROR, .{});
     };
-    if (region_count == 0 and bed_path == null and names_path == null) {
-        printErrorAndExit("error: usage: z-fasta get <file.fasta> [--bed file.bed|-] [--names file.txt] [--strand-aware] [--summary] [--rc|--complement-only|--reverse-only] [--annotate-rc] [--chunk-size N|-1] <region> [region ...]\n", .{});
+    const source_count = @as(usize, @intFromBool(region_count > 0)) +
+        @as(usize, @intFromBool(bed_path != null)) +
+        @as(usize, @intFromBool(names_path != null));
+    if (source_count == 0) {
+        printErrorAndExit(GET_USAGE_ERROR, .{});
+    }
+    if (source_count > 1) {
+        printErrorAndExit("error: choose one request source: positional regions, --names, or --bed\n", .{});
+    }
+    if (honor_strand and bed_path == null) {
+        printErrorAndExit("error: --strand-aware requires --bed\n", .{});
     }
 
     const transform = parseTransformFlags(rc, complement_only, reverse_only, annotate_transform) catch {
         printErrorAndExit("error: --rc, --complement-only, and --reverse-only are mutually exclusive\n", .{});
     };
-    if (transform.annotate_transform and transform.orientation.isIdentity()) {
-        printErrorAndExit("error: --annotate-rc requires --rc, --complement-only, or --reverse-only\n", .{});
+    if (transform.annotate_transform and transform.orientation.isIdentity() and !honor_strand) {
+        printErrorAndExit("error: --annotate-rc requires a transform or --strand-aware BED input\n", .{});
     }
 
-    getter.runGetWithOptions(io, path, .{
-        .region_strs = region_buf[0..region_count],
-        .bed_path = bed_path,
-        .names_path = names_path,
+    const source: getter.RequestSource = if (bed_path) |bed|
+        .{ .bed = bed }
+    else if (names_path) |names|
+        .{ .names = names }
+    else
+        .{ .positional = region_buf[0..region_count] };
+
+    getter.runGetWithOptions(std.heap.page_allocator, io, path, .{
+        .source = source,
         .honor_strand = honor_strand,
         .summary = summary,
-        .chunk_size = chunk_size,
         .orientation = transform.orientation,
         .annotate_transform = transform.annotate_transform,
     });
 }
 
-test "parseChunkSizeValue accepts positive sizes and all sentinel" {
-    try std.testing.expectEqual(@as(usize, 4096), try parseChunkSizeValue("4096"));
-    try std.testing.expectEqual(getter.chunk_size_all, try parseChunkSizeValue("-1"));
-}
-
-test "parseChunkSizeValue rejects zero and invalid input" {
-    try std.testing.expectError(error.InvalidChunkSize, parseChunkSizeValue("0"));
-    try std.testing.expectError(error.InvalidChunkSize, parseChunkSizeValue("abc"));
-}
-
-test "chunkSizeEqualsValue parses inline assignment syntax" {
-    try std.testing.expectEqualStrings("-1", chunkSizeEqualsValue("--chunk-size=-1").?);
-    try std.testing.expect(chunkSizeEqualsValue("--chunk-size") == null);
-}
-
-test "parseTransformFlags returns requested orientation" {
-    const rc = try parseTransformFlags(true, false, false, false);
-    try std.testing.expect(rc.orientation.reverse);
-    try std.testing.expect(rc.orientation.complement);
-
-    const complement_only = try parseTransformFlags(false, true, false, true);
-    try std.testing.expect(!complement_only.orientation.reverse);
-    try std.testing.expect(complement_only.orientation.complement);
-    try std.testing.expect(complement_only.annotate_transform);
-
-    const reverse_only = try parseTransformFlags(false, false, true, false);
-    try std.testing.expect(reverse_only.orientation.reverse);
-    try std.testing.expect(!reverse_only.orientation.complement);
-}
-
-test "parseTransformFlags rejects conflicting transform flags" {
-    try std.testing.expectError(error.ConflictingTransformFlags, parseTransformFlags(true, true, false, false));
-    try std.testing.expectError(error.ConflictingTransformFlags, parseTransformFlags(true, false, true, false));
-    try std.testing.expectError(error.ConflictingTransformFlags, parseTransformFlags(false, true, true, false));
-}
-
-// ============================================================================
-// Subcommand: stats
-// ============================================================================
+// --- Stats command ---
 
 fn runStatsCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     var fasta_path: ?[]const u8 = null;
-    var index_only = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printHelpAndExit(io);
-        } else if (std.mem.eql(u8, arg, "--index-only")) {
-            index_only = true;
         } else {
             rejectUnknownOption(arg);
+            if (fasta_path != null) {
+                printErrorAndExit("error: stats accepts exactly one FASTA path\n", .{});
+            }
             fasta_path = arg;
         }
     }
 
     const path = fasta_path orelse {
-        printErrorAndExit("error: usage: z-fasta stats [--index-only] <file.fasta>\n", .{});
+        printErrorAndExit("error: usage: z-fasta stats <file.fasta>\n", .{});
     };
 
-    stats.runStats(io, path, index_only);
+    stats.runStats(std.heap.page_allocator, io, path);
 }
 
-// ============================================================================
-// Subcommand: validate
-// ============================================================================
+// --- Validate command ---
 
 fn runValidateCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     var fasta_path: ?[]const u8 = null;
@@ -571,6 +466,12 @@ fn runValidateCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     if (saw_summary and !saw_json) {
         printErrorAndExit("error: validate --summary requires --json\n", .{});
     }
+    if (options.fix_format_only and !options.fix) {
+        printErrorAndExit("error: validate --fix-format-only requires --fix\n", .{});
+    }
+    if (options.output_path != null and !options.fix) {
+        printErrorAndExit("error: validate -o requires --fix\n", .{});
+    }
 
     const path = fasta_path orelse {
         printErrorAndExit("error: usage: z-fasta validate [options] <file.fasta>\n", .{});
@@ -593,4 +494,78 @@ fn parsePositiveUsize(raw: []const u8, comptime flag: []const u8) usize {
         printErrorAndExit("error: {s} requires a positive integer\n", .{flag});
     }
     return parsed;
+}
+
+test "[unit] - [get transform flags]: selects the requested orientation" {
+    const rc = try parseTransformFlags(true, false, false, false);
+    const complement_only = try parseTransformFlags(false, true, false, true);
+    const reverse_only = try parseTransformFlags(false, false, true, false);
+
+    try std.testing.expect(rc.orientation.reverse);
+    try std.testing.expect(rc.orientation.complement);
+    try std.testing.expect(!complement_only.orientation.reverse);
+    try std.testing.expect(complement_only.orientation.complement);
+    try std.testing.expect(complement_only.annotate_transform);
+    try std.testing.expect(reverse_only.orientation.reverse);
+    try std.testing.expect(!reverse_only.orientation.complement);
+}
+
+test "[failure] - [get transform flags]: rejects conflicting modes" {
+    const conflicts = [_][3]bool{
+        .{ true, true, false },
+        .{ true, false, true },
+        .{ false, true, true },
+        .{ true, true, true },
+    };
+
+    for (conflicts) |flags| {
+        try std.testing.expectError(
+            error.ConflictingTransformFlags,
+            parseTransformFlags(flags[0], flags[1], flags[2], false),
+        );
+    }
+}
+
+test "[cli] - [dispatch]: writes help and rejects missing or unknown commands" {
+    const zfasta_bin = if (builtin.os.tag == .windows) "zig-out\\bin\\z-fasta.exe" else "zig-out/bin/z-fasta";
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const help = try std.process.run(allocator, io, .{
+        .argv = &.{ zfasta_bin, "--help" },
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    });
+    defer allocator.free(help.stdout);
+    defer allocator.free(help.stderr);
+    switch (help.term) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        else => return error.ChildProcessFailed,
+    }
+    try std.testing.expectEqual(@as(usize, 0), help.stderr.len);
+    try std.testing.expectEqualStrings(USAGE, help.stdout);
+
+    const cases = [_][]const []const u8{
+        &.{zfasta_bin},
+        &.{ zfasta_bin, "index" },
+        &.{ zfasta_bin, "not-a-command" },
+    };
+    for (cases) |argv| {
+        const result = try std.process.run(allocator, io, .{
+            .argv = argv,
+            .stdout_limit = .limited(64 * 1024),
+            .stderr_limit = .limited(64 * 1024),
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+
+        switch (result.term) {
+            .exited => |code| try std.testing.expectEqual(@as(u8, 1), code),
+            else => return error.ChildProcessFailed,
+        }
+        try std.testing.expectEqual(@as(usize, 0), result.stdout.len);
+        try std.testing.expectEqualStrings(help.stdout, result.stderr);
+    }
 }

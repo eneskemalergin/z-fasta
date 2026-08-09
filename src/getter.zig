@@ -1,30 +1,27 @@
 //! Sequence extraction: positional regions, BED/names batching, strand, and RC transforms.
 //!
 //! Uniform records use O(1) byte-offset math; non-uniform records use side-table lookup.
-//! Prefers `.zfi` via `index_format.loadIndex`, with `.fai` fallback.
+//! A present `.zfi` is authoritative; `.fai` is used only when `.zfi` is absent.
 
 const std = @import("std");
 const complement = @import("complement.zig");
 const bed_parser = @import("bed_parser.zig");
 const index_format = @import("index_format.zig");
-const platform = @import("platform.zig");
 const stats = @import("stats.zig");
 
-const IndexRecord = index_format.IndexRecord;
 const LoadedIndex = index_format.LoadedIndex;
 const printErrorAndExit = index_format.printErrorAndExit;
 
-// ============================================================================
-// Region parsing
-// ============================================================================
-
+/// A borrowed sequence name with an optional 1-based inclusive interval.
+/// `is_full` preserves the distinct header form of a bare name.
 pub const Region = struct {
     name: []const u8,
-    start: u64, // 1-based inclusive
-    end: ?u64, // 1-based inclusive, null = to end of sequence
-    is_full: bool, // true if no :START-END specified
+    start: u64,
+    end: ?u64,
+    is_full: bool,
 };
 
+/// Independent reverse and complement operations composed by toggling each operation.
 pub const Orientation = struct {
     reverse: bool = false,
     complement: bool = false,
@@ -53,48 +50,81 @@ pub const Orientation = struct {
     }
 };
 
+/// GET execution options for one borrowed request source.
+/// Direct callers must supply combinations accepted by the CLI contract.
 pub const GetOptions = struct {
-    region_strs: []const []const u8,
-    bed_path: ?[]const u8 = null,
-    names_path: ?[]const u8 = null,
+    source: RequestSource,
     honor_strand: bool = false,
     summary: bool = false,
-    chunk_size: usize = 4_096,
     orientation: Orientation = .{},
     annotate_transform: bool = false,
 };
 
-pub const chunk_size_all = std.math.maxInt(usize);
-
-/// Maximum size for inputs loaded fully into memory: `--names` (always) and
-/// BED with `--chunk-size -1`. Default BED chunking is not size-capped here.
-pub const max_input_file_mib: usize = 512;
-pub const max_input_file_bytes: usize = max_input_file_mib * 1024 * 1024;
-
-comptime {
-    // Keep get help / README "512 MiB" wording synchronized with this constant.
-    if (max_input_file_mib != 512) {
-        @compileError("update get help and README for max_input_file_mib");
-    }
-}
-
-const AllInMemoryInputKind = enum {
-    names_file,
-    bed_all_in_memory,
+/// Borrowed positional tokens or a names/BED path; a path of `-` selects stdin.
+pub const RequestSource = union(enum) {
+    positional: []const []const u8,
+    names: []const u8,
+    bed: []const u8,
 };
 
-/// Per-line buffer for chunked BED streaming (`takeDelimiter` limit).
-pub const bed_line_reader_buffer_bytes = 4096;
-
-/// Per-region output cap for the multi-region sort buffer path (≥16 regions).
-pub const max_sort_path_region_output_bytes: u64 = 64 * 1024 * 1024;
-
-/// Total intermediate output cap for the multi-region sort buffer path.
-pub const max_sort_path_total_output_bytes: u64 = 256 * 1024 * 1024;
+const MAX_REQUEST_NAME_BYTES = std.math.maxInt(u16);
+const REQUEST_LINE_READER_BUFFER_BYTES = MAX_REQUEST_NAME_BYTES + 4096;
+const ACTIVE_NAME_BYTES = 4 * 1024 * 1024;
+const MAX_ACTIVE_NAME_BYTES = ACTIVE_NAME_BYTES + MAX_REQUEST_NAME_BYTES;
+const NAMES_REQUEST_BATCH_SIZE = 65536;
+const BED_REQUEST_BATCH_SIZE = 4096;
 
 const ParsedRequest = struct {
     region: Region,
     orientation: Orientation,
+
+    fn parsed(self: ParsedRequest, _: []const u8) ParsedRequest {
+        return self;
+    }
+};
+
+const OwnedRequest = struct {
+    name_offset: u32,
+    name_len: u16,
+    start: u64,
+    end: u64,
+    orientation: Orientation,
+
+    fn parsed(self: OwnedRequest, names: []const u8) ParsedRequest {
+        const name_offset: usize = self.name_offset;
+        const name_end = name_offset + self.name_len;
+        return .{
+            .region = .{
+                .name = names[name_offset..name_end],
+                .start = self.start,
+                .end = if (self.end == 0) null else self.end,
+                .is_full = self.end == 0,
+            },
+            .orientation = self.orientation,
+        };
+    }
+};
+
+const RequestWorkspace = struct {
+    names: std.ArrayList(u8) = .empty,
+    requests: std.ArrayList(OwnedRequest) = .empty,
+    scratch: std.heap.ArenaAllocator,
+
+    fn init(allocator: std.mem.Allocator) RequestWorkspace {
+        return .{ .scratch = std.heap.ArenaAllocator.init(allocator) };
+    }
+
+    fn deinit(self: *RequestWorkspace, allocator: std.mem.Allocator) void {
+        self.names.deinit(allocator);
+        self.requests.deinit(allocator);
+        self.scratch.deinit();
+    }
+
+    fn clearRetainingCapacity(self: *RequestWorkspace) void {
+        self.names.clearRetainingCapacity();
+        self.requests.clearRetainingCapacity();
+        _ = self.scratch.reset(.retain_capacity);
+    }
 };
 
 const BatchStats = struct {
@@ -102,37 +132,12 @@ const BatchStats = struct {
     total_bases: u64 = 0,
 };
 
-/// Parse a region string. Handles the Ensembl colon trap by parsing from the right.
-/// Accepted formats:
-///   NAME              full sequence
-///   NAME:START-END    1-based, inclusive
-///   NAME:START-       from START to end
+/// Parses a borrowed name or rightmost `:START-END`/`:START-` suffix.
+/// Invalid or overflowing suffixes remain part of the literal name.
 pub fn parseRegion(input: []const u8) Region {
-    if (input.len == 0) {
-        printErrorAndExit("error: empty region string\n", .{});
-    }
-
-    // Try to find a region suffix by scanning from the right.
-    // Look for the last '-' that separates two valid integers (or START-),
-    // then the ':' immediately before the START integer.
-
-    // Find the last ':' in the string
-    var colon_pos: ?usize = null;
-    {
-        var i: usize = input.len;
-        while (i > 0) {
-            i -= 1;
-            if (input[i] == ':') {
-                colon_pos = i;
-                break;
-            }
-        }
-    }
-
-    if (colon_pos) |cp| {
+    if (std.mem.findScalarLast(u8, input, ':')) |cp| {
         const suffix = input[cp + 1 ..];
 
-        // Try to parse as START-END or START-
         if (parseRangeSuffix(suffix)) |range| {
             return Region{
                 .name = input[0..cp],
@@ -141,39 +146,8 @@ pub fn parseRegion(input: []const u8) Region {
                 .is_full = false,
             };
         }
-
-        // If the suffix didn't parse as a valid range, the ':' is part of the name.
-        // But there might be other colons further left; keep trying.
-        var search_end = cp;
-        while (search_end > 0) {
-            var i: usize = search_end;
-            var found_colon: ?usize = null;
-            while (i > 0) {
-                i -= 1;
-                if (input[i] == ':') {
-                    found_colon = i;
-                    break;
-                }
-            }
-
-            if (found_colon) |cp2| {
-                const suffix2 = input[cp2 + 1 ..];
-                if (parseRangeSuffix(suffix2)) |range| {
-                    return Region{
-                        .name = input[0..cp2],
-                        .start = range.start,
-                        .end = range.end,
-                        .is_full = false,
-                    };
-                }
-                search_end = cp2;
-            } else {
-                break;
-            }
-        }
     }
 
-    // No valid region suffix found; treat entire input as sequence name
     return Region{
         .name = input,
         .start = 1,
@@ -182,77 +156,64 @@ pub fn parseRegion(input: []const u8) Region {
     };
 }
 
-const RangeParsed = struct {
+const ParsedRange = struct {
     start: u64,
     end: ?u64,
 };
 
-fn parseRangeSuffix(suffix: []const u8) ?RangeParsed {
-    // Expect: START-END or START-
-    // Find the '-' separator
-    const dash_pos = std.mem.indexOfScalar(u8, suffix, '-') orelse return null;
+fn parseRangeSuffix(suffix: []const u8) ?ParsedRange {
+    const dash_pos = std.mem.findScalar(u8, suffix, '-') orelse return null;
 
     const start_str = suffix[0..dash_pos];
     const end_str = suffix[dash_pos + 1 ..];
 
-    // START must be a valid positive integer
     if (start_str.len == 0) return null;
     const start = std.fmt.parseInt(u64, start_str, 10) catch return null;
 
-    if (end_str.len == 0) {
-        // NAME:START- form (to end of sequence)
-        return RangeParsed{ .start = start, .end = null };
-    }
+    if (end_str.len == 0) return .{ .start = start, .end = null };
 
     const end = std.fmt.parseInt(u64, end_str, 10) catch return null;
-    return RangeParsed{ .start = start, .end = end };
+    return .{ .start = start, .end = end };
 }
 
-// ============================================================================
-// Region resolution
-// ============================================================================
-
-/// A fully resolved, validated extraction request.
-/// Byte offset and length are pre-computed so extraction is a single mmap
-/// slice walk; no further index lookups required.
+/// A validated extraction request borrowing its name and non-uniform line table.
+/// Coordinates are 1-based inclusive; `display_end` preserves an unclamped request end.
 pub const ResolvedRegion = struct {
-    name: []const u8, // sequence name for FASTA header
-    start: u64, // 1-based inclusive (validated)
-    display_end: u64, // end value for header (pre-clamp, samtools convention)
-    is_full: bool, // true -> emit ">NAME", false -> emit ">NAME:start-display_end"
-    start_byte: u64, // absolute byte offset into fasta_data for first base
+    name: []const u8,
+    start: u64,
+    display_end: u64,
+    is_full: bool,
     seq_offset: u64,
-    num_bases: u64, // number of bases to extract
+    num_bases: u64,
     line_bases: u32,
     line_bytes: u32,
     side_table: []const index_format.SideTableLine,
+    record_index: usize,
     orientation: Orientation,
     annotate_transform: bool,
-    original_index: usize, // position in CLI argument list (preserves output order)
 };
 
-/// Resolve one region string against a loaded index.
-/// Validates coordinates and pre-computes the O(1) byte offset.
-/// Calls printErrorAndExit on any error (sequence not found, bad coordinates).
-pub fn resolveRegion(idx: *const LoadedIndex, region_str: []const u8, original_index: usize) ResolvedRegion {
+/// Resolves one region against an index and returns slices borrowing the index and input.
+/// Exits the process when the name or coordinates are invalid.
+pub fn resolveRegion(idx: *const LoadedIndex, region_str: []const u8) ResolvedRegion {
     const region = parseRegion(region_str);
 
     const rec_idx = idx.lookupName(region.name) orelse {
         printErrorAndExit("error: sequence not found: {s}\n", .{region.name});
     };
 
-    return resolveParsedRegion(idx, region, rec_idx, original_index);
-}
-
-fn resolveParsedRegion(idx: *const LoadedIndex, region: Region, rec_idx: usize, original_index: usize) ResolvedRegion {
-    return resolveParsedRequest(idx, .{ .region = region, .orientation = .{} }, rec_idx, original_index, false);
+    return resolveParsedRequest(
+        idx,
+        .{ .region = region, .orientation = .{} },
+        rec_idx,
+        false,
+    );
 }
 
 fn resolveParsedRequest(
     idx: *const LoadedIndex,
     request: ParsedRequest,
     rec_idx: usize,
-    original_index: usize,
     annotate_transform: bool,
 ) ResolvedRegion {
     const rec = idx.records[rec_idx];
@@ -260,7 +221,7 @@ fn resolveParsedRequest(
 
     var start = region.start;
     var end = region.end orelse rec.seq_len;
-    const display_end = end; // capture before clamping (samtools keeps unclamped in header)
+    const display_end = end;
 
     if (region.is_full) {
         start = 1;
@@ -277,7 +238,6 @@ fn resolveParsedRequest(
         printErrorAndExit("error: end position must be >= start position\n", .{});
     }
 
-    // Clamp end to seq_len silently (samtools behavior)
     if (end > rec.seq_len) {
         end = rec.seq_len;
     }
@@ -285,407 +245,540 @@ fn resolveParsedRequest(
     const num_bases = end - start + 1;
 
     const side_table = idx.sideTableLines(rec);
-    const start_byte = byteOffsetForBase(idx.fasta_data, rec, side_table, start - 1);
 
     return ResolvedRegion{
         .name = region.name,
         .start = start,
         .display_end = display_end,
         .is_full = region.is_full,
-        .start_byte = start_byte,
         .seq_offset = rec.seq_offset,
         .num_bases = num_bases,
         .line_bases = rec.line_bases,
         .line_bytes = rec.line_bytes,
         .side_table = side_table,
+        .record_index = rec_idx,
         .orientation = request.orientation,
         .annotate_transform = annotate_transform,
-        .original_index = original_index,
     };
 }
 
-fn byteOffsetForBase(
-    fasta: []const u8,
-    rec: IndexRecord,
-    side_table: []const index_format.SideTableLine,
-    base_index: u64,
-) u64 {
-    if (side_table.len == 0) {
-        const line_number = base_index / rec.line_bases;
-        const column = base_index % rec.line_bases;
-        return rec.seq_offset + (line_number * rec.line_bytes) + column;
+fn detectRegionType(source: FastaSource, resolved: ResolvedRegion) stats.SequenceType {
+    const span = diskSpanForRegion(resolved);
+    if (span.end > source.size or span.start >= span.end) {
+        printErrorAndExit("error: read past end of FASTA\n", .{});
     }
 
+    var counts = [_]u64{0} ** 256;
+    var total: u64 = 0;
+    var skip = span.leading_bases;
+    var input: [FASTA_INPUT_BUFFER_BYTES]u8 = undefined;
+    var offset = span.start;
+
+    while (offset < span.end and total < resolved.num_bases) {
+        const wanted: usize = @intCast(@min(@as(u64, input.len), span.end - offset));
+        const got = std.Io.File.readPositionalAll(source.file, source.io, input[0..wanted], offset) catch {
+            printErrorAndExit("error: failed to read FASTA\n", .{});
+        };
+        if (got != wanted) printErrorAndExit("error: read past end of FASTA\n", .{});
+        for (input[0..got]) |byte| {
+            if (byte <= ' ') continue;
+            if (skip != 0) {
+                skip -= 1;
+                continue;
+            }
+            counts[byte] += 1;
+            total += 1;
+            if (total == resolved.num_bases) break;
+        }
+        offset += got;
+    }
+
+    if (total != resolved.num_bases) printErrorAndExit("error: read past end of FASTA\n", .{});
+    return stats.detectType(&counts, total);
+}
+
+// --- Sequence emission ---
+
+const FastaSource = struct {
+    io: std.Io,
+    file: std.Io.File,
+    size: u64,
+};
+
+fn fastaSource(idx: *const LoadedIndex) FastaSource {
+    return .{ .io = idx.io, .file = idx.fasta_file, .size = idx.fasta_size };
+}
+
+/// Resolves and writes one region with 60-base wrapping, exiting on any failure.
+pub fn extractRegion(idx: *const LoadedIndex, region_str: []const u8, writer: anytype) void {
+    const resolved = resolveRegion(idx, region_str);
+    var input_buffer: [FASTA_INPUT_BUFFER_BYTES]u8 = undefined;
+    var output_buffer: [REGION_OUTPUT_BUFFER_BYTES]u8 = undefined;
+    emitRegion(resolved, fastaSource(idx), &input_buffer, &output_buffer, writer);
+}
+
+const FASTA_INPUT_BUFFER_BYTES: usize = 256 * 1024;
+const REGION_OUTPUT_BUFFER_BYTES: usize = 64 * 1024;
+
+const DiskSpan = struct {
+    start: u64,
+    end: u64,
+    leading_bases: u64,
+    trailing_bases: u64,
+};
+
+fn spansOverlapOrTouch(first_start: u64, first_end: u64, second_start: u64, second_end: u64) bool {
+    return first_start <= second_end and second_start <= first_end;
+}
+
+fn sideTableLineForBase(lines: []const index_format.SideTableLine, base_index: u64) usize {
     var lo: usize = 0;
-    var hi: usize = side_table.len;
+    var hi = lines.len;
     while (lo < hi) {
         const mid = lo + (hi - lo) / 2;
-        if (side_table[mid].base_start <= base_index) {
+        if (lines[mid].base_start <= base_index) {
             lo = mid + 1;
         } else {
             hi = mid;
         }
     }
-    const line_idx = if (lo == 0) 0 else lo - 1;
-    const line = side_table[line_idx];
-    const column = base_index - line.base_start;
-
-    var seen: u64 = 0;
-    var pos: usize = @intCast(line.byte_offset);
-    const end = @min(fasta.len, pos + @as(usize, @intCast(line.line_bytes)));
-    while (pos < end) : (pos += 1) {
-        if (fasta[pos] <= ' ') continue;
-        if (seen == column) return @intCast(pos);
-        seen += 1;
-    }
-
-    printErrorAndExit("error: corrupt non-uniform index side table\n", .{});
+    return if (lo == 0) 0 else lo - 1;
 }
 
-/// Resolve multi-region batches when the index was loaded without a name hash map.
-/// Scans every index record against every request: O(records x regions). Production
-/// `runGetWithOptions` loads `.lookup_full_map` for any N > 1; this path remains for
-/// callers that pass a `.records_only` index (tests, future embedding).
-fn resolveParsedRequestsByRecordScan(
-    idx: *const LoadedIndex,
-    requests: []const ParsedRequest,
-    resolved: []ResolvedRegion,
-    annotate_transform: bool,
-) void {
-    var rec_indices = std.ArrayList(?usize).empty;
-    defer rec_indices.deinit(std.heap.page_allocator);
-    rec_indices.resize(std.heap.page_allocator, requests.len) catch {
-        printErrorAndExit("error: out of memory\n", .{});
+fn uniformByteOffset(resolved: ResolvedRegion, base_index: u64) u64 {
+    const line_number = base_index / resolved.line_bases;
+    const column = base_index % resolved.line_bases;
+    const line_delta = std.math.mul(u64, line_number, resolved.line_bytes) catch {
+        printErrorAndExit("error: corrupt index geometry\n", .{});
     };
-    for (rec_indices.items) |*entry| entry.* = null;
-
-    for (idx.records, 0..) |_, rec_idx| {
-        const rec_name = idx.getRecordName(rec_idx);
-        for (requests, 0..) |request, request_idx| {
-            if (std.mem.eql(u8, rec_name, request.region.name)) {
-                rec_indices.items[request_idx] = rec_idx;
-            }
-        }
-    }
-
-    for (requests, 0..) |request, i| {
-        const rec_idx = rec_indices.items[i] orelse {
-            printErrorAndExit("error: sequence not found: {s}\n", .{request.region.name});
-        };
-        resolved[i] = resolveParsedRequest(idx, request, rec_idx, i, annotate_transform);
-    }
-}
-
-fn findRecordIndex(idx: *const LoadedIndex, name: []const u8) ?usize {
-    if (idx.lookupName(name)) |rec_idx| return rec_idx;
-    return null;
-}
-
-/// Classify a record as nucleotide or protein from a short sequence prefix.
-/// Uses `stats.get_type_sample_bases` (not full-file): protein vs IUPAC nucleotide
-/// is clear within a few hundred bases, and sampling up to 100k on every `--rc`
-/// path was a large share of Genome RC overhead.
-fn detectRecordType(rec: IndexRecord, fasta: []const u8) stats.SequenceType {
-    var counts = [_]u64{0} ** 256;
-    var total: u64 = 0;
-    var pos: usize = @intCast(rec.seq_offset);
-    const sample_limit: u64 = @min(rec.seq_len, stats.get_type_sample_bases);
-
-    while (pos < fasta.len and total < sample_limit) : (pos += 1) {
-        const byte = fasta[pos];
-        if (byte <= ' ') continue;
-        counts[byte] += 1;
-        total += 1;
-    }
-
-    return stats.detectType(&counts, total);
-}
-
-fn ensureComplementAllowed(idx: *const LoadedIndex, requests: []const ParsedRequest) void {
-    var last_name: ?[]const u8 = null;
-    var last_rec_idx: usize = 0;
-    var last_checked_rec_idx: ?usize = null;
-    var last_checked_type: stats.SequenceType = undefined;
-
-    for (requests) |request| {
-        if (!request.orientation.complement) continue;
-
-        const rec_idx = if (last_name) |name|
-            if (std.mem.eql(u8, name, request.region.name))
-                last_rec_idx
-            else
-                findRecordIndex(idx, request.region.name) orelse {
-                    printErrorAndExit("error: sequence not found: {s}\n", .{request.region.name});
-                }
-        else
-            findRecordIndex(idx, request.region.name) orelse {
-                printErrorAndExit("error: sequence not found: {s}\n", .{request.region.name});
-            };
-
-        last_name = request.region.name;
-        last_rec_idx = rec_idx;
-
-        const rec_type = if (last_checked_rec_idx) |cached_rec_idx|
-            if (cached_rec_idx == rec_idx)
-                last_checked_type
-            else blk: {
-                const detected = detectRecordType(idx.records[rec_idx], idx.fasta_data);
-                last_checked_rec_idx = rec_idx;
-                last_checked_type = detected;
-                break :blk detected;
-            }
-        else blk: {
-            const detected = detectRecordType(idx.records[rec_idx], idx.fasta_data);
-            last_checked_rec_idx = rec_idx;
-            last_checked_type = detected;
-            break :blk detected;
-        };
-
-        if (rec_type == .protein) {
-            printErrorAndExit(
-                "error: reverse complement is not defined for protein sequences: {s} (classified from up to {d} bases)\n",
-                .{ request.region.name, stats.get_type_sample_bases },
-            );
-        }
-    }
-}
-
-// ============================================================================
-// Sequence emission
-// ============================================================================
-
-/// Writes one region's FASTA output and releases cached FASTA pages for the span read.
-pub fn extractRegion(idx: *const LoadedIndex, region_str: []const u8, writer: anytype) void {
-    const resolved = resolveRegion(idx, region_str, 0);
-    emitRegionAndRelease(resolved, idx.fasta_data, writer);
-}
-
-fn emitRegionAndRelease(resolved: ResolvedRegion, fasta: []const u8, writer: anytype) void {
-    emitRegion(resolved, fasta, writer);
-    const span = fastaSpanForRegion(resolved, fasta);
-    index_format.dropFastaSpan(fasta, span.start, span.end);
-}
-
-/// Batch sequential FASTA page releases to balance RSS vs `madvise` syscall cost.
-const fasta_release_batch_bytes: usize = 8 * 1024 * 1024;
-
-/// Release FASTA mmap pages during sequential extraction; batches `madvise` to limit syscall overhead.
-/// Only safe when regions are visited in file order with small gaps (dense catalogs).
-const FastaReleaseCursor = struct {
-    released_end: usize = 0,
-    /// Highest byte offset covered by a completed region emit (may lag `released_end` while batching).
-    scan_end: usize = 0,
-
-    fn beforeRegion(self: *FastaReleaseCursor, fasta: []const u8, start_byte: usize) void {
-        if (start_byte <= self.released_end) return;
-        const pending = start_byte - self.released_end;
-        if (pending >= fasta_release_batch_bytes) {
-            index_format.dropFastaSpan(fasta, self.released_end, start_byte);
-            self.released_end = start_byte;
-        }
-    }
-
-    fn afterRegion(self: *FastaReleaseCursor, span_end: usize) void {
-        if (span_end > self.scan_end) self.scan_end = span_end;
-    }
-
-    fn flush(self: *FastaReleaseCursor, fasta: []const u8) void {
-        const drop_end = @max(self.scan_end, self.released_end);
-        if (drop_end > self.released_end) {
-            index_format.dropFastaSpan(fasta, self.released_end, drop_end);
-            self.released_end = drop_end;
-        }
-    }
-};
-
-fn emitRegionAndReleaseSequential(
-    resolved: ResolvedRegion,
-    fasta: []const u8,
-    writer: anytype,
-    release: *FastaReleaseCursor,
-) void {
-    const start_byte: usize = @intCast(resolved.start_byte);
-    release.beforeRegion(fasta, start_byte);
-    emitRegion(resolved, fasta, writer);
-    const span = fastaSpanForRegion(resolved, fasta);
-    release.afterRegion(@max(span.end, start_byte + 1));
-}
-
-fn fastaSpanForRegion(resolved: ResolvedRegion, fasta: []const u8) struct { start: usize, end: usize } {
-    const rec = IndexRecord{
-        .name_offset = 0,
-        .name_len = 0,
-        .seq_offset = resolved.seq_offset,
-        .seq_len = resolved.start - 1 + resolved.num_bases,
-        .line_bases = resolved.line_bases,
-        .line_bytes = resolved.line_bytes,
+    const line_start = std.math.add(u64, resolved.seq_offset, line_delta) catch {
+        printErrorAndExit("error: corrupt index geometry\n", .{});
     };
-    const start: usize = @intCast(resolved.start_byte);
-    const last_base_index = resolved.start - 1 + resolved.num_bases - 1;
-    const last_byte = byteOffsetForBase(fasta, rec, resolved.side_table, last_base_index);
-    const end: usize = @min(fasta.len, @as(usize, @intCast(last_byte)) + resolved.line_bytes);
-    return .{ .start = start, .end = @max(start + 1, end) };
+    return std.math.add(u64, line_start, column) catch {
+        printErrorAndExit("error: corrupt index geometry\n", .{});
+    };
 }
 
-/// Write FASTA output for one resolved region to `writer`.
-/// Output is wrapped at 60 bases per line (samtools default).
-fn emitRegion(resolved: ResolvedRegion, fasta: []const u8, writer: anytype) void {
-    const annotation = headerAnnotation(resolved.orientation, resolved.annotate_transform);
-    if (resolved.is_full) {
-        writer.print(">{s}{s}\n", .{ resolved.name, annotation }) catch {
-            printErrorAndExit("error: write failed\n", .{});
-        };
-    } else {
-        writer.print(">{s}:{d}-{d}{s}\n", .{ resolved.name, resolved.start, resolved.display_end, annotation }) catch {
-            printErrorAndExit("error: write failed\n", .{});
-        };
-    }
-
-    if (resolved.orientation.reverse) {
-        if (resolved.side_table.len == 0 and resolved.line_bases > 0) {
-            emitRegionBackwardUniform(resolved, fasta, writer);
-        } else {
-            emitRegionBackward(resolved, fasta, writer);
-        }
-        return;
-    }
-
-    emitRegionForward(resolved, fasta, writer);
-}
-
-/// Max on-disk span for sparse positional emit. Larger / reverse / side-table
-/// regions fall back to mmap.
-const max_pread_span_bytes: usize = 64 * 1024;
-
-/// GET-only handle for sparse large-FASTA reads via `std.Io.File.readPositionalAll`
-/// (Zig 0.16 portable positional I/O). Not part of index load.
-const SparseFastaSource = struct {
-    io: std.Io,
-    file: std.Io.File,
-};
-
-fn canEmitRegionViaPread(resolved: ResolvedRegion, fasta_len: usize) bool {
-    if (resolved.orientation.reverse) return false;
-    if (resolved.side_table.len != 0 or resolved.line_bases == 0) return false;
-    const start: usize = @intCast(resolved.start_byte);
-    const last_base = resolved.start - 1 + resolved.num_bases - 1;
-    const last_line = last_base / resolved.line_bases;
-    const end_exclusive: usize = @min(
-        fasta_len,
-        @as(usize, @intCast(resolved.seq_offset + (last_line + 1) * resolved.line_bytes)),
-    );
-    return end_exclusive > start and (end_exclusive - start) <= max_pread_span_bytes;
-}
-
-/// Positional read into `file_buf`, then emit. Avoids faulting mmap pages on
-/// sparse large-FASTA batches (T3). Dense catalogs keep the mmap path.
-fn emitRegionViaPread(
-    resolved: ResolvedRegion,
-    sparse: SparseFastaSource,
-    fasta_len: usize,
-    file_buf: []u8,
-    writer: anytype,
-) void {
-    const annotation = headerAnnotation(resolved.orientation, resolved.annotate_transform);
-    if (resolved.is_full) {
-        writer.print(">{s}{s}\n", .{ resolved.name, annotation }) catch {
-            printErrorAndExit("error: write failed\n", .{});
-        };
-    } else {
-        writer.print(">{s}:{d}-{d}{s}\n", .{ resolved.name, resolved.start, resolved.display_end, annotation }) catch {
-            printErrorAndExit("error: write failed\n", .{});
-        };
-    }
-
-    const start: usize = @intCast(resolved.start_byte);
-    const line_bases: u64 = resolved.line_bases;
-    const line_bytes: u64 = resolved.line_bytes;
+fn diskSpanForRegion(resolved: ResolvedRegion) DiskSpan {
     const first_base = resolved.start - 1;
     const last_base = first_base + resolved.num_bases - 1;
-    const first_line = first_base / line_bases;
-    const first_column = first_base % line_bases;
-    const last_line = last_base / line_bases;
-    const end_exclusive: usize = @min(
-        fasta_len,
-        @as(usize, @intCast(resolved.seq_offset + (last_line + 1) * line_bytes)),
-    );
-    const span_len = end_exclusive - start;
-    if (span_len > file_buf.len) {
-        printErrorAndExit("error: internal: positional span exceeds buffer\n", .{});
+
+    if (resolved.side_table.len == 0) {
+        const start = uniformByteOffset(resolved, first_base);
+        const last = uniformByteOffset(resolved, last_base);
+        return .{
+            .start = start,
+            .end = std.math.add(u64, last, 1) catch printErrorAndExit("error: corrupt index geometry\n", .{}),
+            .leading_bases = 0,
+            .trailing_bases = 0,
+        };
     }
 
-    const got = std.Io.File.readPositionalAll(sparse.file, sparse.io, file_buf[0..span_len], start) catch {
-        printErrorAndExit("error: failed to read FASTA\n", .{});
+    const first_line_idx = sideTableLineForBase(resolved.side_table, first_base);
+    const last_line_idx = sideTableLineForBase(resolved.side_table, last_base);
+    const first_line = resolved.side_table[first_line_idx];
+    const last_line = resolved.side_table[last_line_idx];
+    const last_line_end = std.math.add(u64, last_line.byte_offset, last_line.line_bytes) catch {
+        printErrorAndExit("error: corrupt non-uniform index side table\n", .{});
     };
-    if (got != span_len) {
-        printErrorAndExit("error: read past end of FASTA\n", .{});
+    return .{
+        .start = first_line.byte_offset,
+        .end = last_line_end,
+        .leading_bases = first_base - first_line.base_start,
+        .trailing_bases = last_line.base_start + last_line.line_bases - 1 - last_base,
+    };
+}
+
+const RegionOutput = struct {
+    line_pos: usize = 0,
+    len: usize = 0,
+    bases_written: u64 = 0,
+    bytes: []u8,
+
+    inline fn flush(self: *RegionOutput, writer: anytype) void {
+        if (self.len == 0) return;
+        writer.writeAll(self.bytes[0..self.len]) catch {
+            printErrorAndExit("error: write failed\n", .{});
+        };
+        self.len = 0;
     }
-    const slice = file_buf[0..span_len];
 
-    const wrap_width: usize = 60;
-    var bases_written: u64 = 0;
-    var line_pos: usize = 0;
-    var out_buf: [65536]u8 = undefined;
-    var out_len: usize = 0;
-    var base_index: u64 = first_base;
-
-    while (bases_written < resolved.num_bases) {
-        const line_number = base_index / line_bases;
-        const column = base_index % line_bases;
-        const src_start: usize = @intCast(
-            (line_number - first_line) * line_bytes + column - first_column,
-        );
-        const available = line_bases - column;
-        const take_u64 = @min(available, resolved.num_bases - bases_written);
-        const take: usize = @intCast(take_u64);
-        if (src_start + take > slice.len) {
-            printErrorAndExit("error: read past end of FASTA\n", .{});
-        }
-        const src = slice[src_start .. src_start + take];
-
-        var i: usize = 0;
-        while (i < take) {
-            if (out_buf.len - out_len < 2) {
-                writer.writeAll(out_buf[0..out_len]) catch {
-                    printErrorAndExit("error: write failed\n", .{});
-                };
-                out_len = 0;
-            }
-            const chunk = @min(take - i, wrap_width - line_pos);
-            if (resolved.orientation.complement) {
-                complement.complementInto(out_buf[out_len .. out_len + chunk], src[i .. i + chunk]);
+    inline fn appendForward(self: *RegionOutput, src: []const u8, do_complement: bool, writer: anytype) void {
+        var start: usize = 0;
+        while (start < src.len) {
+            const chunk = @min(src.len - start, 60 - self.line_pos);
+            if (self.bytes.len - self.len < chunk + 1) self.flush(writer);
+            const dst = self.bytes[self.len .. self.len + chunk];
+            if (do_complement) {
+                complement.complementInto(dst, src[start .. start + chunk]);
             } else {
-                @memcpy(out_buf[out_len .. out_len + chunk], src[i .. i + chunk]);
+                @memcpy(dst, src[start .. start + chunk]);
             }
-            out_len += chunk;
-            i += chunk;
-            line_pos += chunk;
-            if (line_pos >= wrap_width) {
-                out_buf[out_len] = '\n';
-                out_len += 1;
-                line_pos = 0;
+            self.len += chunk;
+            self.bases_written += chunk;
+            self.line_pos += chunk;
+            start += chunk;
+            if (self.line_pos == 60) {
+                self.bytes[self.len] = '\n';
+                self.len += 1;
+                self.line_pos = 0;
             }
         }
-
-        bases_written += take_u64;
-        base_index += take_u64;
     }
 
-    if (line_pos > 0) {
-        if (out_len == out_buf.len) {
-            writer.writeAll(&out_buf) catch {
-                printErrorAndExit("error: write failed\n", .{});
-            };
-            out_len = 0;
+    inline fn appendReverse(self: *RegionOutput, src: []const u8, do_complement: bool, writer: anytype) void {
+        var end = src.len;
+        while (end > 0) {
+            const chunk = @min(end, 60 - self.line_pos);
+            if (self.bytes.len - self.len < chunk + 1) self.flush(writer);
+            var j: usize = 0;
+            while (j < chunk) : (j += 1) {
+                const byte = src[end - 1 - j];
+                self.bytes[self.len + j] = if (do_complement) complement.complement(byte) else byte;
+            }
+            self.len += chunk;
+            self.bases_written += chunk;
+            self.line_pos += chunk;
+            end -= chunk;
+            if (self.line_pos == 60) {
+                self.bytes[self.len] = '\n';
+                self.len += 1;
+                self.line_pos = 0;
+            }
         }
-        out_buf[out_len] = '\n';
-        out_len += 1;
     }
-    if (out_len > 0) {
-        writer.writeAll(out_buf[0..out_len]) catch {
+
+    fn finish(self: *RegionOutput, writer: anytype) void {
+        if (self.line_pos != 0) {
+            if (self.len == self.bytes.len) self.flush(writer);
+            self.bytes[self.len] = '\n';
+            self.len += 1;
+        }
+        self.flush(writer);
+    }
+};
+
+fn writeRegionHeader(resolved: ResolvedRegion, writer: anytype) void {
+    const annotation = headerAnnotation(resolved.orientation, resolved.annotate_transform);
+    if (resolved.is_full) {
+        writer.print(">{s}{s}\n", .{ resolved.name, annotation }) catch {
+            printErrorAndExit("error: write failed\n", .{});
+        };
+    } else {
+        writer.print(">{s}:{d}-{d}{s}\n", .{ resolved.name, resolved.start, resolved.display_end, annotation }) catch {
             printErrorAndExit("error: write failed\n", .{});
         };
     }
+}
+
+fn consumeForwardBytes(
+    resolved: ResolvedRegion,
+    bytes: []const u8,
+    skip: *u64,
+    output: *RegionOutput,
+    writer: anytype,
+) void {
+    var pos: usize = 0;
+    while (pos < bytes.len and output.bases_written < resolved.num_bases) {
+        while (pos < bytes.len and bytes[pos] <= ' ') pos += 1;
+        const run_start = pos;
+        while (pos < bytes.len and bytes[pos] > ' ') pos += 1;
+        var run = bytes[run_start..pos];
+        if (skip.* != 0) {
+            const skipped: usize = @intCast(@min(skip.*, @as(u64, run.len)));
+            skip.* -= @intCast(skipped);
+            run = run[skipped..];
+        }
+        const remaining: usize = @intCast(resolved.num_bases - output.bases_written);
+        run = run[0..@min(run.len, remaining)];
+        output.appendForward(run, resolved.orientation.complement, writer);
+    }
+}
+
+fn consumeReverseBytes(
+    resolved: ResolvedRegion,
+    bytes: []const u8,
+    skip: *u64,
+    output: *RegionOutput,
+    writer: anytype,
+) void {
+    var i = bytes.len;
+    while (i > 0 and output.bases_written < resolved.num_bases) {
+        while (i > 0 and bytes[i - 1] <= ' ') i -= 1;
+        const run_end = i;
+        while (i > 0 and bytes[i - 1] > ' ') i -= 1;
+        var run = bytes[i..run_end];
+        if (skip.* != 0) {
+            const skipped: usize = @intCast(@min(skip.*, @as(u64, run.len)));
+            skip.* -= @intCast(skipped);
+            run = run[0 .. run.len - skipped];
+        }
+        const remaining: usize = @intCast(resolved.num_bases - output.bases_written);
+        if (run.len > remaining) run = run[run.len - remaining ..];
+        output.appendReverse(run, resolved.orientation.complement, writer);
+    }
+}
+
+fn emitUniformFromSpan(
+    resolved: ResolvedRegion,
+    span_start: u64,
+    bytes: []const u8,
+    output: *RegionOutput,
+    writer: anytype,
+) void {
+    var remaining = resolved.num_bases;
+    var base_index = if (resolved.orientation.reverse)
+        resolved.start - 1 + resolved.num_bases - 1
+    else
+        resolved.start - 1;
+
+    while (remaining != 0) {
+        const line_number = base_index / resolved.line_bases;
+        const column = base_index % resolved.line_bases;
+        const line_start = uniformByteOffset(resolved, line_number * resolved.line_bases);
+
+        const take_u64 = if (resolved.orientation.reverse)
+            @min(column + 1, remaining)
+        else
+            @min(resolved.line_bases - column, remaining);
+        const take: usize = @intCast(take_u64);
+        const source_start = if (resolved.orientation.reverse)
+            line_start + column + 1 - take_u64
+        else
+            line_start + column;
+        if (source_start < span_start) printErrorAndExit("error: corrupt index geometry\n", .{});
+        const relative_start: usize = @intCast(source_start - span_start);
+        if (relative_start > bytes.len or take > bytes.len - relative_start) {
+            printErrorAndExit("error: read past end of FASTA\n", .{});
+        }
+        const src = bytes[relative_start .. relative_start + take];
+        if (resolved.orientation.reverse) {
+            output.appendReverse(src, resolved.orientation.complement, writer);
+        } else {
+            output.appendForward(src, resolved.orientation.complement, writer);
+        }
+
+        remaining -= take_u64;
+        if (remaining == 0) break;
+        if (resolved.orientation.reverse) {
+            base_index -= take_u64;
+        } else {
+            base_index += take_u64;
+        }
+    }
+}
+
+fn consumeUniformForwardChunk(
+    resolved: ResolvedRegion,
+    chunk_start: u64,
+    bytes: []const u8,
+    base_index: *u64,
+    output: *RegionOutput,
+    writer: anytype,
+) void {
+    const chunk_end = std.math.add(u64, chunk_start, bytes.len) catch {
+        printErrorAndExit("error: corrupt index geometry\n", .{});
+    };
+    while (output.bases_written < resolved.num_bases) {
+        const column = base_index.* % resolved.line_bases;
+        const source_start = uniformByteOffset(resolved, base_index.*);
+        if (source_start >= chunk_end) return;
+        if (source_start < chunk_start) printErrorAndExit("error: corrupt index geometry\n", .{});
+        const relative_start: usize = @intCast(source_start - chunk_start);
+        const available = @min(
+            resolved.line_bases - column,
+            resolved.num_bases - output.bases_written,
+        );
+        const take: usize = @intCast(@min(available, chunk_end - source_start));
+        output.appendForward(bytes[relative_start .. relative_start + take], resolved.orientation.complement, writer);
+        base_index.* += take;
+    }
+}
+
+fn consumeUniformReverseChunk(
+    resolved: ResolvedRegion,
+    chunk_start: u64,
+    bytes: []const u8,
+    base_index: *u64,
+    output: *RegionOutput,
+    writer: anytype,
+) void {
+    const chunk_end = std.math.add(u64, chunk_start, bytes.len) catch {
+        printErrorAndExit("error: corrupt index geometry\n", .{});
+    };
+    while (output.bases_written < resolved.num_bases) {
+        const column = base_index.* % resolved.line_bases;
+        const source_end = std.math.add(u64, uniformByteOffset(resolved, base_index.*), 1) catch {
+            printErrorAndExit("error: corrupt index geometry\n", .{});
+        };
+        if (source_end > chunk_end) return;
+        if (source_end <= chunk_start) return;
+        const available = @min(
+            column + 1,
+            resolved.num_bases - output.bases_written,
+        );
+        const take: usize = @intCast(@min(available, source_end - chunk_start));
+        const source_start = source_end - take;
+        const relative_start: usize = @intCast(source_start - chunk_start);
+        output.appendReverse(bytes[relative_start .. relative_start + take], resolved.orientation.complement, writer);
+        if (output.bases_written < resolved.num_bases) base_index.* -= take;
+    }
+}
+
+fn emitRegionFromSpan(
+    resolved: ResolvedRegion,
+    span: DiskSpan,
+    span_start: u64,
+    bytes: []const u8,
+    output_buffer: []u8,
+    writer: anytype,
+) void {
+    writeRegionHeader(resolved, writer);
+    const relative_start = std.math.cast(usize, span.start - span_start) orelse {
+        printErrorAndExit("error: FASTA span is too large\n", .{});
+    };
+    const relative_end = std.math.cast(usize, span.end - span_start) orelse {
+        printErrorAndExit("error: FASTA span is too large\n", .{});
+    };
+    if (relative_end > bytes.len or relative_start > relative_end) {
+        printErrorAndExit("error: read past end of FASTA\n", .{});
+    }
+    var output = RegionOutput{ .bytes = output_buffer };
+    if (resolved.side_table.len == 0) {
+        emitUniformFromSpan(resolved, span_start, bytes, &output, writer);
+    } else {
+        const region_bytes = bytes[relative_start..relative_end];
+        var skip = if (resolved.orientation.reverse) span.trailing_bases else span.leading_bases;
+        if (resolved.orientation.reverse) {
+            consumeReverseBytes(resolved, region_bytes, &skip, &output, writer);
+        } else {
+            consumeForwardBytes(resolved, region_bytes, &skip, &output, writer);
+        }
+    }
+    if (output.bases_written != resolved.num_bases) {
+        printErrorAndExit("error: read past end of FASTA\n", .{});
+    }
+    output.finish(writer);
+}
+
+fn emitRegion(
+    resolved: ResolvedRegion,
+    source: FastaSource,
+    input_buffer: []u8,
+    output_buffer: []u8,
+    writer: anytype,
+) void {
+    const span = diskSpanForRegion(resolved);
+    if (span.end > source.size or span.start >= span.end) {
+        printErrorAndExit("error: read past end of FASTA\n", .{});
+    }
+
+    writeRegionHeader(resolved, writer);
+    var output = RegionOutput{ .bytes = output_buffer };
+    var skip = if (resolved.orientation.reverse) span.trailing_bases else span.leading_bases;
+    var base_index = if (resolved.orientation.reverse)
+        resolved.start - 1 + resolved.num_bases - 1
+    else
+        resolved.start - 1;
+
+    if (!resolved.orientation.reverse) {
+        var offset = span.start;
+        while (offset < span.end and output.bases_written < resolved.num_bases) {
+            const wanted: usize = @intCast(@min(@as(u64, input_buffer.len), span.end - offset));
+            const got = std.Io.File.readPositionalAll(source.file, source.io, input_buffer[0..wanted], offset) catch {
+                printErrorAndExit("error: failed to read FASTA\n", .{});
+            };
+            if (got != wanted) printErrorAndExit("error: read past end of FASTA\n", .{});
+            if (resolved.side_table.len == 0) {
+                consumeUniformForwardChunk(resolved, offset, input_buffer[0..got], &base_index, &output, writer);
+            } else {
+                consumeForwardBytes(resolved, input_buffer[0..got], &skip, &output, writer);
+            }
+            offset += got;
+        }
+    } else {
+        var end = span.end;
+        while (end > span.start and output.bases_written < resolved.num_bases) {
+            const wanted: usize = @intCast(@min(@as(u64, input_buffer.len), end - span.start));
+            const offset = end - wanted;
+            const got = std.Io.File.readPositionalAll(source.file, source.io, input_buffer[0..wanted], offset) catch {
+                printErrorAndExit("error: failed to read FASTA\n", .{});
+            };
+            if (got != wanted) printErrorAndExit("error: read past end of FASTA\n", .{});
+            if (resolved.side_table.len == 0) {
+                consumeUniformReverseChunk(resolved, offset, input_buffer[0..got], &base_index, &output, writer);
+            } else {
+                consumeReverseBytes(resolved, input_buffer[0..got], &skip, &output, writer);
+            }
+            end = offset;
+        }
+    }
+
+    if (output.bases_written != resolved.num_bases) {
+        printErrorAndExit("error: read past end of FASTA\n", .{});
+    }
+    output.finish(writer);
+}
+
+fn emitResolvedBatch(
+    resolved: []const ResolvedRegion,
+    source: FastaSource,
+    writer: anytype,
+) u64 {
+    var total_bases: u64 = 0;
+    var shared: [FASTA_INPUT_BUFFER_BYTES]u8 = undefined;
+    var output_buffer: [REGION_OUTPUT_BUFFER_BYTES]u8 = undefined;
+    var i: usize = 0;
+
+    while (i < resolved.len) {
+        const first_span = diskSpanForRegion(resolved[i]);
+        var shared_start = first_span.start;
+        var shared_end = first_span.end;
+        const shared_record = resolved[i].record_index;
+        var shared_first_base = resolved[i].start - 1;
+        var shared_last_base = shared_first_base + resolved[i].num_bases - 1;
+        var group_end = i + 1;
+
+        while (group_end < resolved.len) : (group_end += 1) {
+            const next = diskSpanForRegion(resolved[group_end]);
+            const next_first_base = resolved[group_end].start - 1;
+            const next_last_base = next_first_base + resolved[group_end].num_bases - 1;
+            const merged_start = @min(shared_start, next.start);
+            const merged_end = @max(shared_end, next.end);
+            const separated_after = next_first_base > shared_last_base and next_first_base - shared_last_base > 1;
+            const separated_before = shared_first_base > next_last_base and shared_first_base - next_last_base > 1;
+            const logical_neighbor = resolved[group_end].record_index == shared_record and
+                !separated_after and !separated_before;
+            const disk_neighbor = spansOverlapOrTouch(shared_start, shared_end, next.start, next.end);
+            if ((!logical_neighbor and !disk_neighbor) or merged_end - merged_start > shared.len) break;
+            shared_start = merged_start;
+            shared_end = merged_end;
+            shared_first_base = @min(shared_first_base, next_first_base);
+            shared_last_base = @max(shared_last_base, next_last_base);
+        }
+
+        if (shared_end - shared_start <= shared.len) {
+            if (shared_end > source.size) printErrorAndExit("error: read past end of FASTA\n", .{});
+            const wanted: usize = @intCast(shared_end - shared_start);
+            const got = std.Io.File.readPositionalAll(source.file, source.io, shared[0..wanted], shared_start) catch {
+                printErrorAndExit("error: failed to read FASTA\n", .{});
+            };
+            if (got != wanted) printErrorAndExit("error: read past end of FASTA\n", .{});
+            for (resolved[i..group_end]) |region| {
+                const span = diskSpanForRegion(region);
+                emitRegionFromSpan(region, span, shared_start, shared[0..got], &output_buffer, writer);
+                total_bases += region.num_bases;
+            }
+            i = group_end;
+            continue;
+        }
+
+        emitRegion(resolved[i], source, &shared, &output_buffer, writer);
+        total_bases += resolved[i].num_bases;
+        i += 1;
+    }
+
+    return total_bases;
 }
 
 fn headerAnnotation(orientation: Orientation, annotate_transform: bool) []const u8 {
@@ -696,491 +789,71 @@ fn headerAnnotation(orientation: Orientation, annotate_transform: bool) []const 
     return "";
 }
 
-fn emitRegionForward(resolved: ResolvedRegion, fasta: []const u8, writer: anytype) void {
-    // Uniform records: copy whole line runs instead of per-byte whitespace scans.
-    // Messy (side-table) and reverse paths keep the byte walker.
-    if (resolved.side_table.len == 0 and resolved.line_bases > 0) {
-        emitRegionForwardUniform(resolved, fasta, writer);
-        return;
-    }
-    emitRegionForwardScan(resolved, fasta, writer);
-}
-
-fn emitRegionForwardUniform(resolved: ResolvedRegion, fasta: []const u8, writer: anytype) void {
-    const wrap_width: usize = 60;
-    const line_bases: u64 = resolved.line_bases;
-    const line_bytes: u64 = resolved.line_bytes;
-    var bases_written: u64 = 0;
-    var line_pos: usize = 0;
-    var out_buf: [65536]u8 = undefined;
-    var out_len: usize = 0;
-    var base_index: u64 = resolved.start - 1;
-
-    while (bases_written < resolved.num_bases) {
-        const line_number = base_index / line_bases;
-        const column = base_index % line_bases;
-        const line_start: usize = @intCast(resolved.seq_offset + line_number * line_bytes);
-        const available = line_bases - column;
-        const take_u64 = @min(available, resolved.num_bases - bases_written);
-        const take: usize = @intCast(take_u64);
-        const src_start = line_start + @as(usize, @intCast(column));
-        if (src_start + take > fasta.len) {
-            printErrorAndExit("error: read past end of FASTA\n", .{});
-        }
-        const src = fasta[src_start .. src_start + take];
-
-        var i: usize = 0;
-        while (i < take) {
-            const room = out_buf.len - out_len;
-            // Need space for at least one base and a possible newline.
-            if (room < 2) {
-                writer.writeAll(out_buf[0..out_len]) catch {
-                    printErrorAndExit("error: write failed\n", .{});
-                };
-                out_len = 0;
-            }
-            const bases_to_wrap = wrap_width - line_pos;
-            const chunk = @min(take - i, bases_to_wrap);
-            if (resolved.orientation.complement) {
-                complement.complementInto(out_buf[out_len .. out_len + chunk], src[i .. i + chunk]);
-            } else {
-                @memcpy(out_buf[out_len .. out_len + chunk], src[i .. i + chunk]);
-            }
-            out_len += chunk;
-            i += chunk;
-            line_pos += chunk;
-            if (line_pos >= wrap_width) {
-                out_buf[out_len] = '\n';
-                out_len += 1;
-                line_pos = 0;
-            }
-        }
-
-        bases_written += take_u64;
-        base_index += take_u64;
-    }
-
-    if (line_pos > 0) {
-        if (out_len == out_buf.len) {
-            writer.writeAll(&out_buf) catch {
-                printErrorAndExit("error: write failed\n", .{});
-            };
-            out_len = 0;
-        }
-        out_buf[out_len] = '\n';
-        out_len += 1;
-    }
-
-    if (out_len > 0) {
-        writer.writeAll(out_buf[0..out_len]) catch {
-            printErrorAndExit("error: write failed\n", .{});
-        };
-    }
-}
-
-fn emitRegionForwardScan(resolved: ResolvedRegion, fasta: []const u8, writer: anytype) void {
-    const wrap_width: usize = 60;
-    var pos: usize = @intCast(resolved.start_byte);
-    var bases_written: u64 = 0;
-    var line_pos: usize = 0;
-    var out_buf: [65536]u8 = undefined;
-    var out_len: usize = 0;
-
-    while (bases_written < resolved.num_bases and pos < fasta.len) {
-        const byte = fasta[pos];
-        pos += 1;
-
-        if (byte <= ' ') continue;
-
-        if (out_len + 2 > out_buf.len) {
-            writer.writeAll(out_buf[0..out_len]) catch {
-                printErrorAndExit("error: write failed\n", .{});
-            };
-            out_len = 0;
-        }
-
-        out_buf[out_len] = if (resolved.orientation.complement) complement.complement(byte) else byte;
-        out_len += 1;
-        bases_written += 1;
-        line_pos += 1;
-
-        if (line_pos >= wrap_width) {
-            out_buf[out_len] = '\n';
-            out_len += 1;
-            line_pos = 0;
-        }
-    }
-
-    if (line_pos > 0) {
-        if (out_len == out_buf.len) {
-            writer.writeAll(&out_buf) catch {
-                printErrorAndExit("error: write failed\n", .{});
-            };
-            out_len = 0;
-        }
-        out_buf[out_len] = '\n';
-        out_len += 1;
-    }
-
-    if (out_len > 0) {
-        writer.writeAll(out_buf[0..out_len]) catch {
-            printErrorAndExit("error: write failed\n", .{});
-        };
-    }
-}
-
-/// Uniform reverse / RC: walk whole line runs backward (same geometry as forward uniform).
-fn emitRegionBackwardUniform(resolved: ResolvedRegion, fasta: []const u8, writer: anytype) void {
-    const wrap_width: usize = 60;
-    const line_bases: u64 = resolved.line_bases;
-    const line_bytes: u64 = resolved.line_bytes;
-    var bases_written: u64 = 0;
-    var line_pos: usize = 0;
-    var out_buf: [65536]u8 = undefined;
-    var out_len: usize = 0;
-    // Emit from last base toward first (reverse order).
-    var base_index: u64 = resolved.start - 1 + resolved.num_bases - 1;
-
-    while (bases_written < resolved.num_bases) {
-        const line_number = base_index / line_bases;
-        const column = base_index % line_bases;
-        const line_start: usize = @intCast(resolved.seq_offset + line_number * line_bytes);
-        // How many bases we can take walking left on this line (inclusive of column).
-        const available = column + 1;
-        const take_u64 = @min(available, resolved.num_bases - bases_written);
-        const take: usize = @intCast(take_u64);
-        const src_start = line_start + @as(usize, @intCast(column + 1 - take_u64));
-        if (src_start + take > fasta.len) {
-            printErrorAndExit("error: read past end of FASTA\n", .{});
-        }
-        const src = fasta[src_start .. src_start + take];
-
-        var i: usize = 0;
-        while (i < take) {
-            if (out_buf.len - out_len < 2) {
-                writer.writeAll(out_buf[0..out_len]) catch {
-                    printErrorAndExit("error: write failed\n", .{});
-                };
-                out_len = 0;
-            }
-            const chunk = @min(take - i, wrap_width - line_pos);
-            // Walk src from the right end of this take window.
-            const src_end = take - i;
-            if (resolved.orientation.complement) {
-                var j: usize = 0;
-                while (j < chunk) : (j += 1) {
-                    out_buf[out_len + j] = complement.complement(src[src_end - 1 - j]);
-                }
-            } else {
-                var j: usize = 0;
-                while (j < chunk) : (j += 1) {
-                    out_buf[out_len + j] = src[src_end - 1 - j];
-                }
-            }
-            out_len += chunk;
-            i += chunk;
-            line_pos += chunk;
-            if (line_pos >= wrap_width) {
-                out_buf[out_len] = '\n';
-                out_len += 1;
-                line_pos = 0;
-            }
-        }
-
-        bases_written += take_u64;
-        if (bases_written >= resolved.num_bases) break;
-        base_index -= take_u64;
-    }
-
-    if (line_pos > 0) {
-        if (out_len == out_buf.len) {
-            writer.writeAll(&out_buf) catch {
-                printErrorAndExit("error: write failed\n", .{});
-            };
-            out_len = 0;
-        }
-        out_buf[out_len] = '\n';
-        out_len += 1;
-    }
-    if (out_len > 0) {
-        writer.writeAll(out_buf[0..out_len]) catch {
-            printErrorAndExit("error: write failed\n", .{});
-        };
-    }
-}
-
-fn emitRegionBackward(resolved: ResolvedRegion, fasta: []const u8, writer: anytype) void {
-    const wrap_width: usize = 60;
-    var bases_remaining = resolved.num_bases;
-    var line_pos: usize = 0;
-    var out_buf: [65536]u8 = undefined;
-    var out_len: usize = 0;
-
-    const last_base_index = resolved.start - 1 + resolved.num_bases - 1;
-    const rec = IndexRecord{
-        .name_offset = 1,
-        .name_len = 1,
-        .seq_offset = resolved.seq_offset,
-        .seq_len = resolved.start - 1 + resolved.num_bases,
-        .line_bases = resolved.line_bases,
-        .line_bytes = resolved.line_bytes,
-    };
-    var pos: usize = @intCast(byteOffsetForBase(fasta, rec, resolved.side_table, last_base_index));
-
-    while (bases_remaining > 0) {
-        const byte = if (resolved.orientation.complement) complement.complement(fasta[pos]) else fasta[pos];
-
-        if (out_len + 2 > out_buf.len) {
-            writer.writeAll(out_buf[0..out_len]) catch {
-                printErrorAndExit("error: write failed\n", .{});
-            };
-            out_len = 0;
-        }
-
-        out_buf[out_len] = byte;
-        out_len += 1;
-        bases_remaining -= 1;
-        line_pos += 1;
-
-        if (line_pos >= wrap_width) {
-            out_buf[out_len] = '\n';
-            out_len += 1;
-            line_pos = 0;
-        }
-
-        if (bases_remaining > 0) {
-            while (pos > 0) {
-                pos -= 1;
-                const prev = fasta[pos];
-                if (prev > ' ') break;
-            }
-        }
-    }
-
-    if (line_pos > 0) {
-        if (out_len == out_buf.len) {
-            writer.writeAll(&out_buf) catch {
-                printErrorAndExit("error: write failed\n", .{});
-            };
-            out_len = 0;
-        }
-        out_buf[out_len] = '\n';
-        out_len += 1;
-    }
-
-    if (out_len > 0) {
-        writer.writeAll(out_buf[0..out_len]) catch {
-            printErrorAndExit("error: write failed\n", .{});
-        };
-    }
-}
-
 fn monotonicNs(io: std.Io) u64 {
     const now = std.Io.Clock.Timestamp.now(io, .awake);
     return @intCast(now.raw.toNanoseconds());
 }
 
-fn estimateRegionOutputBytes(resolved: ResolvedRegion) u64 {
-    const wrap_lines = resolved.num_bases / 60 + @as(u64, @intFromBool(resolved.num_bases % 60 != 0));
-    const header_len: u64 = if (resolved.is_full)
-        @intCast(resolved.name.len + 1)
-    else
-        @intCast(resolved.name.len + 32);
-    const annotation_len: u64 = if (resolved.annotate_transform) 24 else 0;
-    return resolved.num_bases + wrap_lines + header_len + annotation_len;
-}
+const OwnedName = struct {
+    offset: u32,
+    len: u16,
+};
 
-/// Drop FASTA cache after a sparse batch on huge files to cap peak RSS.
-const sparse_large_fasta_bytes: u64 = 256 * 1024 * 1024;
-/// Few contigs (e.g. GRCh38): BED rows are sparse; file-order sort walks huge gaps.
-pub const sparse_catalog_record_threshold: usize = 512;
-/// Median byte gap above this → emit in request order with direct seeks.
-const sparse_median_gap_bytes: u64 = 512 * 1024;
-/// File-order sort only helps on FASTA large enough that random BED seeks lose.
-const sort_by_offset_min_fasta_bytes: u64 = 64 * 1024 * 1024;
-
-fn medianStartByteGap(allocator: std.mem.Allocator, resolved: []const ResolvedRegion) !u64 {
-    if (resolved.len < 2) return 0;
-    const starts = try allocator.alloc(u64, resolved.len);
-    defer allocator.free(starts);
-    for (resolved, 0..) |r, i| starts[i] = r.start_byte;
-    std.mem.sort(u64, starts, {}, std.sort.asc(u64));
-    const gap_count = starts.len - 1;
-    var gaps = try allocator.alloc(u64, gap_count);
-    defer allocator.free(gaps);
-    for (0..gap_count) |i| gaps[i] = starts[i + 1] - starts[i];
-    std.mem.sort(u64, gaps, {}, std.sort.asc(u64));
-    return gaps[gap_count / 2];
-}
-
-fn shouldSortByFileOffset(
-    idx: *const index_format.LoadedIndex,
+fn ownRequestName(
     allocator: std.mem.Allocator,
-    resolved: []const ResolvedRegion,
-) !bool {
-    return shouldSortByFileOffsetForBatch(
-        idx.records.len,
-        idx.fasta_size,
-        allocator,
-        resolved,
-    );
-}
-
-fn shouldSortByFileOffsetForBatch(
-    record_count: usize,
-    fasta_size: u64,
-    allocator: std.mem.Allocator,
-    resolved: []const ResolvedRegion,
-) !bool {
-    if (resolved.len < 16) return false;
-    if (record_count <= sparse_catalog_record_threshold) return false;
-    if (fasta_size < sort_by_offset_min_fasta_bytes) return false;
-    const gap = try medianStartByteGap(allocator, resolved);
-    return gap <= sparse_median_gap_bytes;
-}
-
-fn shouldUseSortBuffers(resolved: []const ResolvedRegion) bool {
-    var total: u64 = 0;
-    for (resolved) |r| {
-        const est = estimateRegionOutputBytes(r);
-        if (est > max_sort_path_region_output_bytes) return false;
-        total += est;
-        if (total > max_sort_path_total_output_bytes) return false;
-    }
-    return true;
-}
-
-fn batchHasReverseReads(resolved: []const ResolvedRegion) bool {
-    for (resolved) |r| {
-        if (r.orientation.reverse) return true;
-    }
-    return false;
-}
-
-fn shouldAdviseSequentialMmap(
-    requests_len: usize,
-    sequential_scan: bool,
-    has_reverse_reads: bool,
-    allow_sequential_madvise: bool,
-) bool {
-    if (!allow_sequential_madvise) return false;
-    if (requests_len < 16) return false;
-    if (has_reverse_reads) return false;
-    return sequential_scan;
-}
-
-fn adviseFastaMmap(fasta: []const u8, advice: platform.Advice) void {
-    platform.advise(fasta, advice);
-}
-
-fn readAllInput(allocator: std.mem.Allocator, io: std.Io, path: []const u8, kind: AllInMemoryInputKind) []u8 {
-    if (std.mem.eql(u8, path, "-")) {
-        var stdin_buf: [4096]u8 = undefined;
-        var reader = std.Io.File.stdin().reader(io, &stdin_buf);
-        return reader.interface.allocRemaining(allocator, .limited(max_input_file_bytes)) catch |err| switch (err) {
-            error.StreamTooLong => switch (kind) {
-                .names_file => printErrorAndExit(
-                    "error: --names stdin exceeds {d} MiB limit (--chunk-size does not stream --names)\n",
-                    .{max_input_file_mib},
-                ),
-                .bed_all_in_memory => printErrorAndExit(
-                    "error: BED stdin exceeds {d} MiB limit for --chunk-size -1; use default --chunk-size\n",
-                    .{max_input_file_mib},
-                ),
-            },
-            else => printErrorAndExit("error: failed to read stdin\n", .{}),
-        };
-    }
-
-    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
-        error.FileNotFound => printErrorAndExit("error: file not found: {s}\n", .{path}),
-        error.AccessDenied => printErrorAndExit("error: access denied: {s}\n", .{path}),
-        else => printErrorAndExit("error: failed to open file: {s}\n", .{path}),
-    };
-    defer file.close(io);
-
-    const stat = file.stat(io) catch {
-        printErrorAndExit("error: failed to stat file: {s}\n", .{path});
-    };
-
-    if (stat.size > max_input_file_bytes) {
-        switch (kind) {
-            .names_file => printErrorAndExit(
-                "error: names file exceeds {d} MiB limit: {s} (--chunk-size does not stream --names)\n",
-                .{ max_input_file_mib, path },
-            ),
-            .bed_all_in_memory => printErrorAndExit(
-                "error: BED file exceeds {d} MiB limit for --chunk-size -1: {s}; use default --chunk-size\n",
-                .{ max_input_file_mib, path },
-            ),
+    workspace: *RequestWorkspace,
+    name: []const u8,
+) OwnedName {
+    if (workspace.requests.getLastOrNull()) |last| {
+        const offset: usize = last.name_offset;
+        const end = offset + last.name_len;
+        if (std.mem.eql(u8, workspace.names.items[offset..end], name)) {
+            return .{ .offset = last.name_offset, .len = last.name_len };
         }
     }
 
-    const bytes = allocator.alloc(u8, stat.size) catch {
-        printErrorAndExit("error: out of memory\n", .{});
-    };
-
-    var file_buf: [4096]u8 = undefined;
-    var reader = file.reader(io, &file_buf);
-    reader.interface.readSliceAll(bytes) catch {
-        printErrorAndExit("error: failed to read file: {s}\n", .{path});
-    };
-    return bytes;
-}
-
-fn appendBedRegionRequest(
-    requests: *std.ArrayList(ParsedRequest),
-    region: bed_parser.BedRegion,
-    honor_strand: bool,
-    global_orientation: Orientation,
-    allocator: std.mem.Allocator,
-    name_allocator: std.mem.Allocator,
-    duplicate_name: bool,
-    last_duplicated_name: ?*?[]const u8,
-) void {
-    if (honor_strand and region.strand == .invalid) {
-        printErrorAndExit("error: invalid BED line {d}: invalid strand\n", .{region.line_number});
-    }
-
-    const name = if (duplicate_name) blk: {
-        if (last_duplicated_name) |cached_name| {
-            if (cached_name.*) |existing| {
-                if (std.mem.eql(u8, existing, region.chrom)) break :blk existing;
-            }
-        }
-
-        const duplicated = name_allocator.dupe(u8, region.chrom) catch {
+    const offset = workspace.names.items.len;
+    const required_capacity = offset + name.len;
+    if (required_capacity > workspace.names.capacity) {
+        const doubled = @max(workspace.names.capacity, 4096) * 2;
+        const new_capacity = @min(MAX_ACTIVE_NAME_BYTES, @max(required_capacity, doubled));
+        workspace.names.ensureTotalCapacityPrecise(allocator, new_capacity) catch {
             printErrorAndExit("error: out of memory\n", .{});
         };
-        if (last_duplicated_name) |cached_name| cached_name.* = duplicated;
-        break :blk duplicated;
-    } else region.chrom;
+    }
+    workspace.names.appendSliceAssumeCapacity(name);
+    return .{ .offset = @intCast(offset), .len = @intCast(name.len) };
+}
 
-    requests.append(allocator, .{
-        .region = .{
-            .name = name,
-            .start = region.start1Based(),
-            .end = region.end1BasedInclusive(),
-            .is_full = false,
-        },
-        .orientation = (if (honor_strand and region.strand == .minus) Orientation.reverseComplement() else Orientation{}).compose(global_orientation),
+fn appendOwnedRequest(
+    allocator: std.mem.Allocator,
+    workspace: *RequestWorkspace,
+    name: []const u8,
+    start: u64,
+    end: u64,
+    orientation: Orientation,
+) void {
+    const owned_name = ownRequestName(allocator, workspace, name);
+    workspace.requests.append(allocator, .{
+        .name_offset = owned_name.offset,
+        .name_len = owned_name.len,
+        .start = start,
+        .end = end,
+        .orientation = orientation,
     }) catch {
         printErrorAndExit("error: out of memory\n", .{});
     };
 }
 
 fn appendBedLineRequest(
-    requests: *std.ArrayList(ParsedRequest),
+    allocator: std.mem.Allocator,
+    workspace: *RequestWorkspace,
     line: []const u8,
     line_number: usize,
     honor_strand: bool,
     global_orientation: Orientation,
-    allocator: std.mem.Allocator,
-    name_allocator: std.mem.Allocator,
-    duplicate_name: bool,
-    last_duplicated_name: ?*?[]const u8,
 ) void {
-    const parsed = bed_parser.parseBedLine(line, line_number) catch |err| switch (err) {
+    const parsed = bed_parser.parseBedLine(line) catch |err| switch (err) {
         error.MissingChrom => printErrorAndExit("error: invalid BED line {d}: missing chrom\n", .{line_number}),
         error.MissingStart => printErrorAndExit("error: invalid BED line {d}: missing start\n", .{line_number}),
         error.MissingEnd => printErrorAndExit("error: invalid BED line {d}: missing end\n", .{line_number}),
@@ -1191,57 +864,52 @@ fn appendBedLineRequest(
 
     switch (parsed) {
         .skip => {},
-        .region => |region| appendBedRegionRequest(requests, region, honor_strand, global_orientation, allocator, name_allocator, duplicate_name, last_duplicated_name),
+        .region => |region| {
+            if (honor_strand and region.strand == .invalid) {
+                printErrorAndExit("error: invalid BED line {d}: invalid strand\n", .{line_number});
+            }
+            if (region.chrom.len > MAX_REQUEST_NAME_BYTES) {
+                printErrorAndExit(
+                    "error: invalid BED line {d}: chrom exceeds {d} bytes\n",
+                    .{ line_number, MAX_REQUEST_NAME_BYTES },
+                );
+            }
+            appendOwnedRequest(
+                allocator,
+                workspace,
+                region.chrom,
+                region.start_1based,
+                region.end_1based,
+                (if (honor_strand and region.strand == .reverse) Orientation.reverseComplement() else Orientation{}).compose(global_orientation),
+            );
+        },
     }
 }
 
-fn appendBedRequests(requests: *std.ArrayList(ParsedRequest), bed_data: []const u8, honor_strand: bool, global_orientation: Orientation, allocator: std.mem.Allocator) void {
-    var lines = std.mem.splitScalar(u8, bed_data, '\n');
-    var line_number: usize = 0;
-
-    while (lines.next()) |line| {
-        line_number += 1;
-        appendBedLineRequest(requests, line, line_number, honor_strand, global_orientation, allocator, allocator, false, null);
-    }
-}
-
-fn processBedData(
-    idx: *LoadedIndex,
+fn appendNamesLine(
     allocator: std.mem.Allocator,
-    bed_data: []const u8,
-    honor_strand: bool,
-    global_orientation: Orientation,
-    annotate_transform: bool,
-    writer: anytype,
-) BatchStats {
-    var requests = std.ArrayList(ParsedRequest).empty;
-    defer requests.deinit(allocator);
-
-    appendBedRequests(&requests, bed_data, honor_strand, global_orientation, allocator);
-    return processParsedRequests(idx, allocator, requests.items, annotate_transform, writer, false, null);
-}
-
-fn appendNamesRequests(requests: *std.ArrayList(ParsedRequest), names_data: []const u8, orientation: Orientation, allocator: std.mem.Allocator) void {
-    var lines = std.mem.splitScalar(u8, names_data, '\n');
-    while (lines.next()) |line| {
-        const trimmed = if (line.len > 0 and line[line.len - 1] == '\r') line[0 .. line.len - 1] else line;
-        if (trimmed.len == 0 or trimmed[0] == '#') continue;
-
-        requests.append(allocator, .{
-            .region = .{
-                .name = trimmed,
-                .start = 1,
-                .end = null,
-                .is_full = true,
-            },
-            .orientation = orientation,
-        }) catch {
-            printErrorAndExit("error: out of memory\n", .{});
-        };
+    workspace: *RequestWorkspace,
+    line: []const u8,
+    line_number: usize,
+    orientation: Orientation,
+) void {
+    const name = if (line.len > 0 and line[line.len - 1] == '\r') line[0 .. line.len - 1] else line;
+    if (name.len == 0 or name[0] == '#') return;
+    if (name.len > MAX_REQUEST_NAME_BYTES) {
+        printErrorAndExit(
+            "error: name at line {d} exceeds {d} bytes\n",
+            .{ line_number, MAX_REQUEST_NAME_BYTES },
+        );
     }
+    appendOwnedRequest(allocator, workspace, name, 1, 0, orientation);
 }
 
-fn appendCliRequests(requests: *std.ArrayList(ParsedRequest), region_strs: []const []const u8, orientation: Orientation, allocator: std.mem.Allocator) void {
+fn appendCliRequests(
+    allocator: std.mem.Allocator,
+    requests: *std.ArrayList(ParsedRequest),
+    region_strs: []const []const u8,
+    orientation: Orientation,
+) void {
     for (region_strs) |region_str| {
         requests.append(allocator, .{
             .region = parseRegion(region_str),
@@ -1252,211 +920,132 @@ fn appendCliRequests(requests: *std.ArrayList(ParsedRequest), region_strs: []con
     }
 }
 
-fn writeSummary(io: std.Io, region_count: usize, total_bases: u64, elapsed_ns: u64) void {
-    var err_buf: [512]u8 = undefined;
-    var stderr_fw = std.Io.File.Writer.initStreaming(.stderr(), io, &err_buf);
-    const writer = &stderr_fw.interface;
-
+fn writeSummary(writer: *std.Io.Writer, region_count: usize, total_bases: u64, elapsed_ns: u64) !void {
     const seconds = if (elapsed_ns == 0) 0.0 else @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s));
     const regions_per_second = if (seconds == 0.0) 0.0 else @as(f64, @floatFromInt(region_count)) / seconds;
 
-    writer.print("summary: regions={d} total_bases={d} elapsed_s={d:.6} regions_per_s={d:.1}\n", .{ region_count, total_bases, seconds, regions_per_second }) catch {};
-    stderr_fw.flush() catch {};
+    try writer.print("summary: regions={d} total_bases={d} elapsed_s={d:.6} regions_per_s={d:.1}\n", .{ region_count, total_bases, seconds, regions_per_second });
 }
 
 fn processParsedRequests(
-    idx: *index_format.LoadedIndex,
     allocator: std.mem.Allocator,
-    requests: []const ParsedRequest,
+    idx: *index_format.LoadedIndex,
+    request_entries: anytype,
+    active_names: []const u8,
     annotate_transform: bool,
     writer: anytype,
-    allow_sequential_madvise: bool,
-    sparse: ?SparseFastaSource,
+    source: FastaSource,
 ) BatchStats {
-    if (requests.len == 0) return .{};
+    if (request_entries.len == 0) return .{};
 
-    ensureComplementAllowed(idx, requests);
-
-    const resolved = allocator.alloc(ResolvedRegion, requests.len) catch {
+    const resolved = allocator.alloc(ResolvedRegion, request_entries.len) catch {
         printErrorAndExit("error: out of memory\n", .{});
     };
-    var already_in_offset_order = requests.len >= 16;
-    var prev_start_byte: u64 = 0;
+    defer allocator.free(resolved);
 
-    // Multi-region without a name map: O(records x N) scan (see resolveParsedRequestsByRecordScan).
-    // Production loads `.lookup_full_map` for N > 1, so this branch is the fallback only.
-    if (requests.len > 1 and !idx.has_name_map) {
-        resolveParsedRequestsByRecordScan(idx, requests, resolved, annotate_transform);
-    } else {
-        var last_name: ?[]const u8 = null;
-        var last_rec_idx: usize = 0;
-        for (requests, 0..) |request, i| {
-            const rec_idx = if (last_name) |name|
-                if (std.mem.eql(u8, name, request.region.name))
-                    last_rec_idx
-                else
-                    idx.lookupName(request.region.name) orelse {
-                        printErrorAndExit("error: sequence not found: {s}\n", .{request.region.name});
-                    }
+    var last_name: ?[]const u8 = null;
+    var last_rec_idx: usize = 0;
+    var last_typed_rec_idx: ?usize = null;
+    var last_type: stats.SequenceType = undefined;
+
+    for (request_entries, 0..) |entry, i| {
+        const request = entry.parsed(active_names);
+        const rec_idx = if (last_name) |name|
+            if (std.mem.eql(u8, name, request.region.name))
+                last_rec_idx
             else
                 idx.lookupName(request.region.name) orelse {
                     printErrorAndExit("error: sequence not found: {s}\n", .{request.region.name});
-                };
-
-            last_name = request.region.name;
-            last_rec_idx = rec_idx;
-
-            resolved[i] = resolveParsedRequest(idx, request, rec_idx, i, annotate_transform);
-            if (already_in_offset_order) {
-                if (i > 0 and resolved[i].start_byte < prev_start_byte) {
-                    already_in_offset_order = false;
                 }
-                prev_start_byte = resolved[i].start_byte;
-            }
-        }
-    }
-
-    const dense_sort = if (requests.len >= 16)
-        shouldSortByFileOffset(idx, allocator, resolved) catch {
-            printErrorAndExit("error: out of memory\n", .{});
-        }
-    else
-        false;
-    // Sparse large-FASTA (Genome): do not sort. Sort+buffer was a wall regression
-    // vs T2 with no RSS win over request-order emit. Dense catalogs still sort
-    // via dense_sort for sequential page release.
-    const release_sorted = dense_sort;
-
-    const use_sort_buffers = release_sorted and !already_in_offset_order and shouldUseSortBuffers(resolved);
-    const sequential_scan = dense_sort and (already_in_offset_order or use_sort_buffers);
-    const sequential_mmap = shouldAdviseSequentialMmap(
-        requests.len,
-        sequential_scan,
-        batchHasReverseReads(resolved),
-        allow_sequential_madvise,
-    );
-    // Sparse large-FASTA uses positional reads below; MADV on a 3 GiB map is wasted.
-    const use_positional = !release_sorted and requests.len >= 16 and
-        idx.fasta_size >= sort_by_offset_min_fasta_bytes and sparse != null;
-    if (!use_positional) {
-        const mmap_advice: platform.Advice = if (sequential_mmap) .sequential else .random;
-        adviseFastaMmap(idx.fasta_data, mmap_advice);
-    }
-
-    var total_bases: u64 = 0;
-
-    if (requests.len < 16) {
-        for (resolved) |r| {
-            total_bases += r.num_bases;
-            emitRegionAndRelease(r, idx.fasta_data, writer);
-        }
-    } else if (!release_sorted) {
-        // Large sparse FASTA: positional reads so scattered regions never fault
-        // the mmap (T3). Small FASTAs: mmap (whole file is the RSS ceiling).
-        var pread_buf: [max_pread_span_bytes]u8 = undefined;
-        for (resolved) |r| {
-            total_bases += r.num_bases;
-            if (use_positional) {
-                if (canEmitRegionViaPread(r, idx.fasta_data.len)) {
-                    emitRegionViaPread(r, sparse.?, idx.fasta_data.len, &pread_buf, writer);
-                    continue;
-                }
-            }
-            emitRegion(r, idx.fasta_data, writer);
-        }
-    } else if (already_in_offset_order) {
-        var release = FastaReleaseCursor{};
-        for (resolved) |r| {
-            total_bases += r.num_bases;
-            emitRegionAndReleaseSequential(r, idx.fasta_data, writer, &release);
-        }
-        release.flush(idx.fasta_data);
-    } else if (!use_sort_buffers) {
-        for (resolved) |r| {
-            total_bases += r.num_bases;
-            emitRegionAndRelease(r, idx.fasta_data, writer);
-        }
-    } else {
-        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        defer arena.deinit();
-        const sort_allocator = arena.allocator();
-
-        const sorted = sort_allocator.dupe(ResolvedRegion, resolved) catch {
-            printErrorAndExit("error: out of memory\n", .{});
-        };
-        std.mem.sort(ResolvedRegion, sorted, {}, struct {
-            fn lessThan(_: void, a: ResolvedRegion, b: ResolvedRegion) bool {
-                return a.start_byte < b.start_byte;
-            }
-        }.lessThan);
-
-        var total_out: u64 = 0;
-        for (resolved) |r| total_out += estimateRegionOutputBytes(r);
-
-        var storage = std.Io.Writer.Allocating.init(sort_allocator);
-        storage.ensureTotalCapacity(total_out) catch {
-            printErrorAndExit("error: out of memory\n", .{});
-        };
-        const starts = sort_allocator.alloc(usize, requests.len) catch {
-            printErrorAndExit("error: out of memory\n", .{});
-        };
-        const lens = sort_allocator.alloc(usize, requests.len) catch {
-            printErrorAndExit("error: out of memory\n", .{});
-        };
-
-        var release = FastaReleaseCursor{};
-        for (sorted) |r| {
-            total_bases += r.num_bases;
-            starts[r.original_index] = storage.writer.end;
-            emitRegionAndReleaseSequential(r, idx.fasta_data, &storage.writer, &release);
-            lens[r.original_index] = storage.writer.end - starts[r.original_index];
-        }
-        release.flush(idx.fasta_data);
-
-        const bytes = storage.written();
-        for (starts, lens) |start, len| {
-            writer.writeAll(bytes[start .. start + len]) catch {
-                printErrorAndExit("error: write failed\n", .{});
+        else
+            idx.lookupName(request.region.name) orelse {
+                printErrorAndExit("error: sequence not found: {s}\n", .{request.region.name});
             };
+
+        last_name = request.region.name;
+        last_rec_idx = rec_idx;
+        resolved[i] = resolveParsedRequest(idx, request, rec_idx, annotate_transform);
+
+        if (request.orientation.complement) {
+            const rec_type = if (last_typed_rec_idx == rec_idx)
+                last_type
+            else blk: {
+                var sample = resolved[i];
+                sample.num_bases = @min(sample.num_bases, stats.GET_TYPE_SAMPLE_BASES);
+                const detected = detectRegionType(source, sample);
+                last_typed_rec_idx = rec_idx;
+                last_type = detected;
+                break :blk detected;
+            };
+            if (rec_type == .protein) {
+                printErrorAndExit(
+                    "error: reverse complement is not defined for protein sequences: {s} (classified from up to {d} bases)\n",
+                    .{ request.region.name, stats.GET_TYPE_SAMPLE_BASES },
+                );
+            }
         }
     }
 
     return .{
-        .region_count = requests.len,
-        .total_bases = total_bases,
+        .region_count = request_entries.len,
+        .total_bases = emitResolvedBatch(resolved, source, writer),
     };
 }
 
-fn processBedReaderChunked(
+const StreamRequestSource = union(enum) {
+    names: Orientation,
+    bed: struct {
+        honor_strand: bool,
+        global_orientation: Orientation,
+    },
+};
+
+fn processRequestReader(
+    allocator: std.mem.Allocator,
     idx: *LoadedIndex,
     reader: *std.Io.Reader,
-    honor_strand: bool,
-    global_orientation: Orientation,
-    chunk_size: usize,
+    source: StreamRequestSource,
+    name_reservation: usize,
     annotate_transform: bool,
     writer: anytype,
-    sparse: ?SparseFastaSource,
+    fasta_source: FastaSource,
 ) BatchStats {
     var total = BatchStats{};
     var line_number: usize = 0;
     var reached_end = false;
-    var name_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer name_arena.deinit();
-    var last_duplicated_name: ?[]const u8 = null;
+    var workspace = RequestWorkspace.init(allocator);
+    defer workspace.deinit(allocator);
+
+    const request_limit: usize = switch (source) {
+        .names => NAMES_REQUEST_BATCH_SIZE,
+        .bed => BED_REQUEST_BATCH_SIZE,
+    };
+    workspace.requests.ensureTotalCapacityPrecise(allocator, request_limit) catch {
+        printErrorAndExit("error: out of memory\n", .{});
+    };
+    if (name_reservation > 0) {
+        workspace.names.ensureTotalCapacityPrecise(allocator, name_reservation) catch {
+            printErrorAndExit("error: out of memory\n", .{});
+        };
+    }
 
     while (true) {
-        var chunk_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        const chunk_allocator = chunk_arena.allocator();
-
-        var requests = std.ArrayList(ParsedRequest).empty;
-
-        while (requests.items.len < chunk_size) {
+        while (workspace.requests.items.len < request_limit and workspace.names.items.len < ACTIVE_NAME_BYTES) {
             const maybe_line = reader.takeDelimiter('\n') catch |err| switch (err) {
-                error.ReadFailed => printErrorAndExit("error: failed to read BED input\n", .{}),
-                error.StreamTooLong => printErrorAndExit(
-                    "error: BED line {d} exceeds {d}-byte reader buffer (no newline within limit)\n",
-                    .{ line_number + 1, bed_line_reader_buffer_bytes },
-                ),
+                error.ReadFailed => switch (source) {
+                    .names => printErrorAndExit("error: failed to read names input\n", .{}),
+                    .bed => printErrorAndExit("error: failed to read BED input\n", .{}),
+                },
+                error.StreamTooLong => switch (source) {
+                    .names => printErrorAndExit(
+                        "error: name at line {d} exceeds {d} bytes\n",
+                        .{ line_number + 1, MAX_REQUEST_NAME_BYTES },
+                    ),
+                    .bed => printErrorAndExit(
+                        "error: BED line {d} exceeds {d}-byte reader buffer (no newline within limit)\n",
+                        .{ line_number + 1, REQUEST_LINE_READER_BUFFER_BYTES },
+                    ),
+                },
             };
 
             const line = maybe_line orelse {
@@ -1465,47 +1054,48 @@ fn processBedReaderChunked(
             };
 
             line_number += 1;
-            appendBedLineRequest(&requests, line, line_number, honor_strand, global_orientation, chunk_allocator, name_arena.allocator(), true, &last_duplicated_name);
+            switch (source) {
+                .names => |orientation| appendNamesLine(allocator, &workspace, line, line_number, orientation),
+                .bed => |bed| appendBedLineRequest(allocator, &workspace, line, line_number, bed.honor_strand, bed.global_orientation),
+            }
         }
 
-        if (requests.items.len == 0) {
-            chunk_arena.deinit();
-            break;
-        }
+        if (workspace.requests.items.len == 0) break;
 
-        const batch = processParsedRequests(idx, chunk_allocator, requests.items, annotate_transform, writer, false, sparse);
+        const batch = processParsedRequests(
+            workspace.scratch.allocator(),
+            idx,
+            workspace.requests.items,
+            workspace.names.items,
+            annotate_transform,
+            writer,
+            fasta_source,
+        );
         total.region_count += batch.region_count;
         total.total_bases += batch.total_bases;
 
-        chunk_arena.deinit();
+        workspace.clearRetainingCapacity();
 
         if (reached_end) break;
-    }
-
-    // Full-map DONTNEED only when the mmap was the read path. Positional sparse
-    // BED never faulted those pages; a 3 GiB madvise is pure wall cost.
-    if (idx.fasta_size > sparse_large_fasta_bytes and sparse == null) {
-        index_format.dropFastaSpan(idx.fasta_data, 0, idx.fasta_data.len);
     }
 
     return total;
 }
 
-fn processBedPathChunked(
+fn processRequestPath(
+    allocator: std.mem.Allocator,
     io: std.Io,
     idx: *LoadedIndex,
     path: []const u8,
-    honor_strand: bool,
-    global_orientation: Orientation,
-    chunk_size: usize,
+    source: StreamRequestSource,
     annotate_transform: bool,
     writer: anytype,
-    sparse: ?SparseFastaSource,
+    fasta_source: FastaSource,
 ) BatchStats {
     if (std.mem.eql(u8, path, "-")) {
-        var stdin_buf: [bed_line_reader_buffer_bytes]u8 = undefined;
+        var stdin_buf: [REQUEST_LINE_READER_BUFFER_BYTES]u8 = undefined;
         var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buf);
-        return processBedReaderChunked(idx, &stdin_reader.interface, honor_strand, global_orientation, chunk_size, annotate_transform, writer, sparse);
+        return processRequestReader(allocator, idx, &stdin_reader.interface, source, 0, annotate_transform, writer, fasta_source);
     }
 
     const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
@@ -1515,97 +1105,85 @@ fn processBedPathChunked(
     };
     defer file.close(io);
 
-    var file_buf: [bed_line_reader_buffer_bytes]u8 = undefined;
+    const name_reservation: usize = switch (source) {
+        .names => blk: {
+            const stat = file.stat(io) catch break :blk 0;
+            break :blk @intCast(@min(stat.size, MAX_ACTIVE_NAME_BYTES));
+        },
+        .bed => 0,
+    };
+
+    var file_buf: [REQUEST_LINE_READER_BUFFER_BYTES]u8 = undefined;
     var file_reader = file.reader(io, &file_buf);
-    return processBedReaderChunked(idx, &file_reader.interface, honor_strand, global_orientation, chunk_size, annotate_transform, writer, sparse);
+    return processRequestReader(allocator, idx, &file_reader.interface, source, name_reservation, annotate_transform, writer, fasta_source);
 }
 
-fn processBedPathAllInMemory(
+/// Runs one GET source, writing FASTA to stdout and an optional summary to stderr.
+/// All failures terminate the process through the command diagnostic path.
+pub fn runGetWithOptions(
+    backing_allocator: std.mem.Allocator,
     io: std.Io,
-    idx: *LoadedIndex,
-    allocator: std.mem.Allocator,
-    path: []const u8,
-    honor_strand: bool,
-    global_orientation: Orientation,
-    annotate_transform: bool,
-    writer: anytype,
-) BatchStats {
-    const bed_data = readAllInput(allocator, io, path, .bed_all_in_memory);
-    return processBedData(idx, allocator, bed_data, honor_strand, global_orientation, annotate_transform, writer);
-}
+    fasta_path: []const u8,
+    options: GetOptions,
+) void {
+    const start_ns = if (options.summary) monotonicNs(io) else 0;
 
-// ============================================================================
-// Public entry point
-// ============================================================================
-
-/// Run the get command: extract one or more regions from a FASTA file.
-///
-/// Regions are emitted in CLI argument order regardless of their position in
-/// the file.
-///
-/// For >= 16 regions the extractions may be sorted by file offset before reading
-/// to improve sequential page access. Output is buffered per-region and
-/// flushed in original CLI order. Any multi-region batch (N > 1) loads the name
-/// hash map; single-region stays on `.records_only`.
-pub fn runGet(io: std.Io, fasta_path: []const u8, region_strs: []const []const u8) void {
-    runGetWithOptions(io, fasta_path, .{ .region_strs = region_strs });
-}
-
-pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions) void {
-    if (options.chunk_size == 0) {
-        printErrorAndExit("error: --chunk-size must be >= 1\n", .{});
-    }
-
-    var input_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var input_arena = std.heap.ArenaAllocator.init(backing_allocator);
     defer input_arena.deinit();
     const allocator = input_arena.allocator();
 
     var requests = std.ArrayList(ParsedRequest).empty;
-    defer requests.deinit(allocator);
 
-    if (options.names_path) |names_path| {
-        const names_data = readAllInput(allocator, io, names_path, .names_file);
-        appendNamesRequests(&requests, names_data, options.orientation, allocator);
-    }
+    // Positional requests are known before loading, so `.fai` retains only their
+    // first matching records. Names and BED still require the complete lookup map.
+    const load_mode: index_format.LoadMode = switch (options.source) {
+        .positional => |region_strs| blk: {
+            appendCliRequests(allocator, &requests, region_strs, options.orientation);
+            const names = allocator.alloc([]const u8, requests.items.len) catch {
+                printErrorAndExit("error: out of memory\n", .{});
+            };
+            for (requests.items, names) |request, *name| {
+                name.* = request.region.name;
+            }
+            break :blk .{ .positional = names };
+        },
+        .names, .bed => .lookup_full_map,
+    };
+    var idx = index_format.loadIndexForGet(backing_allocator, io, fasta_path, load_mode);
+    defer idx.deinit();
 
-    appendCliRequests(&requests, options.region_strs, options.orientation, allocator);
-
-    const start_ns = if (options.summary) monotonicNs(io) else 0;
-
-    // N=1: skip hash map (positional startup). N>1 / BED / names: always map.
-    // Same rule on every catalog; no dataset-tuned threshold (plan/get-performance.md T1).
-    const load_mode: index_format.LoadMode = if (options.bed_path != null or options.names_path != null or requests.items.len > 1) .lookup_full_map else .records_only;
-    var idx = index_format.loadIndexWithMode(io, fasta_path, load_mode);
-    defer idx.deinit(io);
-
-    // GET-only: open FASTA for sparse positional reads when the catalog is large.
-    // Index load stays mmap-only; this fd is not part of LoadedIndex.
-    const sparse: ?SparseFastaSource = if (idx.fasta_size >= sort_by_offset_min_fasta_bytes) blk: {
-        const file = std.Io.Dir.cwd().openFile(io, fasta_path, .{}) catch break :blk null;
-        break :blk .{ .io = io, .file = file };
-    } else null;
-    defer if (sparse) |s| s.file.close(io);
+    const fasta_source = fastaSource(&idx);
 
     var out_buf: [65536]u8 = undefined;
     var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
     const writer = &stdout_fw.interface;
 
-    var totals = BatchStats{};
-
-    if (options.bed_path) |bed_path| {
-        const batch = if (options.chunk_size == chunk_size_all)
-            processBedPathAllInMemory(io, &idx, allocator, bed_path, options.honor_strand, options.orientation, options.annotate_transform, writer)
-        else
-            processBedPathChunked(io, &idx, bed_path, options.honor_strand, options.orientation, options.chunk_size, options.annotate_transform, writer, sparse);
-        totals.region_count += batch.region_count;
-        totals.total_bases += batch.total_bases;
-    }
-
-    if (requests.items.len > 0) {
-        const batch = processParsedRequests(&idx, allocator, requests.items, options.annotate_transform, writer, true, sparse);
-        totals.region_count += batch.region_count;
-        totals.total_bases += batch.total_bases;
-    }
+    const totals = switch (options.source) {
+        .positional => processParsedRequests(allocator, &idx, requests.items, &.{}, options.annotate_transform, writer, fasta_source),
+        .names => |path| processRequestPath(
+            backing_allocator,
+            io,
+            &idx,
+            path,
+            .{ .names = options.orientation },
+            options.annotate_transform,
+            writer,
+            fasta_source,
+        ),
+        .bed => |path| processRequestPath(
+            backing_allocator,
+            io,
+            &idx,
+            path,
+            .{ .bed = .{
+                .honor_strand = options.honor_strand,
+                .global_orientation = options.orientation,
+            } },
+            options.annotate_transform,
+            writer,
+            fasta_source,
+        ),
+    };
 
     if (totals.region_count == 0) {
         printErrorAndExit("error: no regions provided\n", .{});
@@ -1616,369 +1194,204 @@ pub fn runGetWithOptions(io: std.Io, fasta_path: []const u8, options: GetOptions
     };
 
     if (options.summary) {
-        writeSummary(io, totals.region_count, totals.total_bases, monotonicNs(io) - start_ns);
+        var err_buf: [512]u8 = undefined;
+        var stderr_fw = std.Io.File.Writer.initStreaming(.stderr(), io, &err_buf);
+        writeSummary(&stderr_fw.interface, totals.region_count, totals.total_bases, monotonicNs(io) - start_ns) catch {
+            printErrorAndExit("error: write failed\n", .{});
+        };
+        stderr_fw.flush() catch {
+            printErrorAndExit("error: write failed\n", .{});
+        };
     }
 }
 
-test "processBedReaderChunked matches non-chunked extraction" {
-    const test_io = std.testing.io;
-    var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
-    defer idx.deinit(test_io);
+test "[failure] - [get summary]: propagates a full destination" {
+    var buffer: [1]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
 
-    const bed_data =
-        "# comment\n" ++
-        "seq2\t0\t4\n" ++
-        "seq1\t0\t4\n" ++
-        "seq1\t4\t8\n";
-
-    var chunk_reader = std.Io.Reader.fixed(bed_data);
-    var chunk_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer chunk_writer.deinit();
-
-    const chunked = processBedReaderChunked(&idx, &chunk_reader, false, .{}, 2, false, &chunk_writer.writer, null);
-
-    var batch_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer batch_writer.deinit();
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const batch = processBedData(&idx, arena.allocator(), bed_data, false, .{}, false, &batch_writer.writer);
-
-    try std.testing.expectEqual(batch.region_count, chunked.region_count);
-    try std.testing.expectEqual(batch.total_bases, chunked.total_bases);
-    try std.testing.expectEqualStrings(batch_writer.written(), chunk_writer.written());
+    try std.testing.expectError(error.WriteFailed, writeSummary(&writer, 1, 1, 1));
 }
 
-test "processBedReaderChunked preserves strand handling across chunk boundaries" {
-    const test_io = std.testing.io;
-    var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
-    defer idx.deinit(test_io);
-
-    const bed_data =
-        "seq1\t0\t5\tname\t0\t-\n" ++
-        "seq2\t0\t4\tname\t0\t+\n";
-
-    var chunk_reader = std.Io.Reader.fixed(bed_data);
-    var chunk_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer chunk_writer.deinit();
-
-    const chunked = processBedReaderChunked(&idx, &chunk_reader, true, .{}, 1, false, &chunk_writer.writer, null);
-
-    try std.testing.expectEqual(@as(usize, 2), chunked.region_count);
-    try std.testing.expectEqual(@as(u64, 9), chunked.total_bases);
-    try std.testing.expectEqualStrings(
-        ">seq1:1-5\nTACGT\n>seq2:1-4\nGGGG\n",
-        chunk_writer.written(),
-    );
+test "[unit] - [get read grouping]: accepts overlap and adjacency in either order" {
+    try std.testing.expect(spansOverlapOrTouch(10, 20, 20, 30));
+    try std.testing.expect(spansOverlapOrTouch(20, 30, 10, 20));
+    try std.testing.expect(spansOverlapOrTouch(10, 20, 15, 25));
+    try std.testing.expect(spansOverlapOrTouch(15, 25, 10, 20));
+    try std.testing.expect(!spansOverlapOrTouch(10, 20, 21, 30));
+    try std.testing.expect(!spansOverlapOrTouch(21, 30, 10, 20));
 }
 
-test "processBedReaderChunked preserves duplicate chrom cache across chunk boundaries" {
-    const test_io = std.testing.io;
-    var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
-    defer idx.deinit(test_io);
+test "[unit] - [get request workspace]: reuses consecutive names" {
+    var workspace = RequestWorkspace.init(std.testing.allocator);
+    defer workspace.deinit(std.testing.allocator);
 
-    const bed_data =
-        "seq1\t0\t4\n" ++
-        "seq1\t4\t8\n" ++
-        "seq2\t0\t4\n";
+    appendNamesLine(std.testing.allocator, &workspace, "seq1", 1, .{});
+    appendNamesLine(std.testing.allocator, &workspace, "seq1", 2, .{});
+    appendNamesLine(std.testing.allocator, &workspace, "seq2", 3, .{});
 
-    var chunk_reader = std.Io.Reader.fixed(bed_data);
-    var chunk_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer chunk_writer.deinit();
-
-    const chunked = processBedReaderChunked(&idx, &chunk_reader, false, .{}, 1, false, &chunk_writer.writer, null);
-
-    var batch_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer batch_writer.deinit();
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const batch = processBedData(&idx, arena.allocator(), bed_data, false, .{}, false, &batch_writer.writer);
-
-    try std.testing.expectEqual(batch.region_count, chunked.region_count);
-    try std.testing.expectEqual(batch.total_bases, chunked.total_bases);
-    try std.testing.expectEqualStrings(batch_writer.written(), chunk_writer.written());
+    try std.testing.expectEqualStrings("seq1seq2", workspace.names.items);
+    try std.testing.expectEqual(@as(usize, 3), workspace.requests.items.len);
+    try std.testing.expectEqualStrings("seq1", workspace.requests.items[0].parsed(workspace.names.items).region.name);
+    try std.testing.expectEqualStrings("seq1", workspace.requests.items[1].parsed(workspace.names.items).region.name);
+    try std.testing.expectEqualStrings("seq2", workspace.requests.items[2].parsed(workspace.names.items).region.name);
 }
 
-test "orientation compose behaves like transform composition" {
-    const minus_strand = Orientation.reverseComplement();
-    const global_rc = Orientation.reverseComplement();
-    const global_reverse = Orientation.reverseOnly();
-    const global_complement = Orientation.complementOnly();
+test "[edge] - [get request workspace]: retains the name crossing its byte target" {
+    var workspace = RequestWorkspace.init(std.testing.allocator);
+    defer workspace.deinit(std.testing.allocator);
+    const name = try std.testing.allocator.alloc(u8, MAX_REQUEST_NAME_BYTES);
+    defer std.testing.allocator.free(name);
+    @memset(name, 'A');
 
-    try std.testing.expect(minus_strand.compose(global_rc).isIdentity());
-    try std.testing.expectEqual(true, minus_strand.compose(global_reverse).complement);
-    try std.testing.expectEqual(false, minus_strand.compose(global_reverse).reverse);
-    try std.testing.expectEqual(true, minus_strand.compose(global_complement).reverse);
-    try std.testing.expectEqual(false, minus_strand.compose(global_complement).complement);
+    for (0..64) |i| {
+        name[0] = if (i % 2 == 0) 'A' else 'B';
+        appendNamesLine(std.testing.allocator, &workspace, name, i + 1, .{});
+    }
+    try std.testing.expect(workspace.names.items.len < ACTIVE_NAME_BYTES);
+
+    name[0] = 'A';
+    appendNamesLine(std.testing.allocator, &workspace, name, 65, .{});
+
+    try std.testing.expect(workspace.names.items.len >= ACTIVE_NAME_BYTES);
+    try std.testing.expect(workspace.names.items.len <= MAX_ACTIVE_NAME_BYTES);
+    try std.testing.expect(workspace.names.capacity <= MAX_ACTIVE_NAME_BYTES);
 }
 
-test "processParsedRequests applies complement-only and reverse-only transforms" {
+test "[unit] - [get names reader]: handles line endings and a final unterminated line" {
     const test_io = std.testing.io;
-    var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
-    defer idx.deinit(test_io);
-
-    const requests = [_]ParsedRequest{
-        .{ .region = parseRegion("seq1:1-5"), .orientation = Orientation.complementOnly() },
-        .{ .region = parseRegion("seq1:1-5"), .orientation = Orientation.reverseOnly() },
-    };
-
+    var idx = index_format.loadIndex(std.testing.allocator, test_io, "tests/data/simple.fasta");
+    defer idx.deinit();
+    var reader = std.Io.Reader.fixed("# comment\r\n\r\nseq2\r\nseq1\nseq2");
     var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer writer.deinit();
 
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
+    const result = processRequestReader(
+        std.testing.allocator,
+        &idx,
+        &reader,
+        .{ .names = .{} },
+        0,
+        false,
+        &writer.writer,
+        fastaSource(&idx),
+    );
 
-    const batch = processParsedRequests(&idx, arena.allocator(), &requests, true, &writer.writer, true, null);
-
-    try std.testing.expectEqual(@as(usize, 2), batch.region_count);
+    try std.testing.expectEqual(@as(usize, 3), result.region_count);
+    try std.testing.expectEqual(@as(u64, 48), result.total_bases);
     try std.testing.expectEqualStrings(
-        ">seq1:1-5 (complement)\nTGCAT\n>seq1:1-5 (reverse)\nATGCA\n",
+        ">seq2\nGGGGCCCCAAAA\n>seq1\nACGTACGTACGTACGTACGTACGT\n>seq2\nGGGGCCCCAAAA\n",
         writer.written(),
     );
 }
 
-test "processParsedRequests annotates transforms on by-record-scan path" {
+test "[edge] - [get names reader]: resets storage at the request-count boundary" {
     const test_io = std.testing.io;
-    var idx = index_format.loadIndexWithMode(test_io, "tests/data/simple.fasta", .records_only);
-    defer idx.deinit(test_io);
-    try std.testing.expect(!idx.has_name_map);
-    try std.testing.expectEqual(index_format.LoadedIndex.IndexSource.zfi, idx.source);
-
-    const requests = [_]ParsedRequest{
-        .{ .region = parseRegion("seq1:1-5"), .orientation = Orientation.complementOnly() },
-        .{ .region = parseRegion("seq2:1-4"), .orientation = Orientation.reverseOnly() },
-    };
-
+    var idx = index_format.loadIndex(std.testing.allocator, test_io, "tests/data/simple.fasta");
+    defer idx.deinit();
+    var names = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer names.deinit();
+    const request_count = NAMES_REQUEST_BATCH_SIZE + 1;
+    for (0..request_count) |_| try names.writer.writeAll("seq1\n");
+    var reader = std.Io.Reader.fixed(names.written());
     var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer writer.deinit();
 
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
+    const result = processRequestReader(
+        std.testing.allocator,
+        &idx,
+        &reader,
+        .{ .names = .{} },
+        0,
+        false,
+        &writer.writer,
+        fastaSource(&idx),
+    );
 
-    const batch = processParsedRequests(&idx, arena.allocator(), &requests, true, &writer.writer, true, null);
+    const one_output = ">seq1\nACGTACGTACGTACGTACGTACGT\n";
+    try std.testing.expectEqual(request_count, result.region_count);
+    try std.testing.expectEqual(@as(u64, request_count * 24), result.total_bases);
+    try std.testing.expectEqual(one_output.len * request_count, writer.written().len);
+    try std.testing.expectEqualStrings(one_output, writer.written()[0..one_output.len]);
+    try std.testing.expectEqualStrings(one_output, writer.written()[writer.written().len - one_output.len ..]);
+}
 
-    try std.testing.expectEqual(@as(usize, 2), batch.region_count);
+test "[unit] - [get BED reader]: streams rows in source order" {
+    const test_io = std.testing.io;
+    var idx = index_format.loadIndex(std.testing.allocator, test_io, "tests/data/simple.fasta");
+    defer idx.deinit();
+
+    const bed_data =
+        "# comment\r\n" ++
+        "seq2\t0\t4\r\n" ++
+        "seq1\t0\t4\n" ++
+        "seq1\t4\t8";
+
+    var reader = std.Io.Reader.fixed(bed_data);
+    var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer writer.deinit();
+
+    const result = processRequestReader(
+        std.testing.allocator,
+        &idx,
+        &reader,
+        .{ .bed = .{ .honor_strand = false, .global_orientation = .{} } },
+        0,
+        false,
+        &writer.writer,
+        fastaSource(&idx),
+    );
+
+    try std.testing.expectEqual(@as(usize, 3), result.region_count);
+    try std.testing.expectEqual(@as(u64, 12), result.total_bases);
     try std.testing.expectEqualStrings(
-        ">seq1:1-5 (complement)\nTGCAT\n>seq2:1-4 (reverse)\nGGGG\n",
+        ">seq2:1-4\nGGGG\n>seq1:1-4\nACGT\n>seq1:5-8\nACGT\n",
         writer.written(),
     );
 }
 
-test "detectRecordType classifies nucleotide and protein records" {
+test "[edge] - [get BED reader]: preserves output across request-batch boundaries" {
     const test_io = std.testing.io;
+    var idx = index_format.loadIndex(std.testing.allocator, test_io, "tests/data/simple.fasta");
+    defer idx.deinit();
 
-    var nucleotide_idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
-    defer nucleotide_idx.deinit(test_io);
-    try std.testing.expectEqual(
-        stats.SequenceType.nucleotide,
-        detectRecordType(nucleotide_idx.records[0], nucleotide_idx.fasta_data),
-    );
+    const counts = [_]usize{
+        BED_REQUEST_BATCH_SIZE - 1,
+        BED_REQUEST_BATCH_SIZE,
+        BED_REQUEST_BATCH_SIZE + 1,
+    };
+    for (counts) |count| {
+        var bed = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer bed.deinit();
+        var expected = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer expected.deinit();
 
-    var protein_idx = index_format.loadIndex(test_io, "tests/data/proteome.fasta");
-    defer protein_idx.deinit(test_io);
-    try std.testing.expectEqual(
-        stats.SequenceType.protein,
-        detectRecordType(protein_idx.records[0], protein_idx.fasta_data),
-    );
-}
+        for (0..count) |i| {
+            if (count > BED_REQUEST_BATCH_SIZE and i + 1 == count) {
+                try bed.writer.writeAll("seq1\t0\t5\tname\t0\t-\n");
+                try expected.writer.writeAll(">seq1:1-5\nTACGT\n");
+            } else {
+                try bed.writer.writeAll("seq1\t0\t1\tname\t0\t+\n");
+                try expected.writer.writeAll(">seq1:1-1\nA\n");
+            }
+        }
 
-test "shouldSortByFileOffset rejects small catalogs and wide gaps" {
-    const test_io = std.testing.io;
-    var idx = index_format.loadIndex(test_io, "tests/data/simple.fasta");
-    defer idx.deinit(test_io);
+        var reader = std.Io.Reader.fixed(bed.written());
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        const result = processRequestReader(
+            std.testing.allocator,
+            &idx,
+            &reader,
+            .{ .bed = .{ .honor_strand = true, .global_orientation = .{} } },
+            0,
+            false,
+            &output.writer,
+            fastaSource(&idx),
+        );
 
-    var regions: [20]ResolvedRegion = undefined;
-    for (&regions, 0..) |*r, i| {
-        r.* = .{
-            .name = "seq1",
-            .start = @intCast(i + 1),
-            .display_end = @intCast(i + 1),
-            .is_full = false,
-            .start_byte = if (i == 0) 0 else 10_000_000 + i,
-            .seq_offset = 6,
-            .num_bases = 1,
-            .line_bases = 24,
-            .line_bytes = 25,
-            .side_table = &.{},
-            .orientation = .{},
-            .annotate_transform = false,
-            .original_index = i,
-        };
+        const expected_bases: u64 = count + @as(usize, @intFromBool(count > BED_REQUEST_BATCH_SIZE)) * 4;
+        try std.testing.expectEqual(count, result.region_count);
+        try std.testing.expectEqual(expected_bases, result.total_bases);
+        try std.testing.expectEqualStrings(expected.written(), output.written());
     }
-    try std.testing.expect(!try shouldSortByFileOffset(&idx, std.testing.allocator, &regions));
-
-    for (&regions, 0..) |*r, i| r.start_byte = 100 + i;
-    try std.testing.expect(!try shouldSortByFileOffset(&idx, std.testing.allocator, &regions));
-}
-
-test "shouldSortByFileOffsetForBatch requires large FASTA even for large catalogs" {
-    var regions: [20]ResolvedRegion = undefined;
-    for (&regions, 0..) |*r, i| {
-        r.* = .{
-            .name = "seq1",
-            .start = @intCast(i + 1),
-            .display_end = @intCast(i + 1),
-            .is_full = false,
-            .start_byte = 100 + i,
-            .seq_offset = 6,
-            .num_bases = 1,
-            .line_bases = 24,
-            .line_bytes = 25,
-            .side_table = &.{},
-            .orientation = .{},
-            .annotate_transform = false,
-            .original_index = i,
-        };
-    }
-    // Proteome-scale catalog on a small FASTA (direct seek wins).
-    try std.testing.expect(!try shouldSortByFileOffsetForBatch(
-        20_659,
-        13 * 1024 * 1024,
-        std.testing.allocator,
-        &regions,
-    ));
-    // Transcriptome-scale catalog on a large FASTA with dense offsets.
-    try std.testing.expect(try shouldSortByFileOffsetForBatch(
-        254_070,
-        459 * 1024 * 1024,
-        std.testing.allocator,
-        &regions,
-    ));
-    // Large FASTA but sparse median gaps (genome-style within batch).
-    for (&regions, 0..) |*r, i| {
-        r.start_byte = if (i == 0) 0 else @as(u64, i) * 1024 * 1024;
-    }
-    try std.testing.expect(!try shouldSortByFileOffsetForBatch(
-        254_070,
-        459 * 1024 * 1024,
-        std.testing.allocator,
-        &regions,
-    ));
-}
-
-test "shouldUseSortBuffers accepts typical 20-region batch" {
-    var regions: [20]ResolvedRegion = undefined;
-    for (&regions, 0..) |*r, i| {
-        r.* = .{
-            .name = "seq1",
-            .start = @intCast(i + 1),
-            .display_end = @intCast(i + 1),
-            .is_full = false,
-            .start_byte = 100 + i,
-            .seq_offset = 6,
-            .num_bases = 1,
-            .line_bases = 24,
-            .line_bytes = 25,
-            .side_table = &.{},
-            .orientation = .{},
-            .annotate_transform = false,
-            .original_index = i,
-        };
-    }
-    try std.testing.expect(shouldUseSortBuffers(&regions));
-}
-
-test "shouldUseSortBuffers rejects oversized single region" {
-    const region = ResolvedRegion{
-        .name = "chr1",
-        .start = 1,
-        .display_end = max_sort_path_region_output_bytes,
-        .is_full = false,
-        .start_byte = 0,
-        .seq_offset = 0,
-        .num_bases = max_sort_path_region_output_bytes,
-        .line_bases = 60,
-        .line_bytes = 61,
-        .side_table = &.{},
-        .orientation = .{},
-        .annotate_transform = false,
-        .original_index = 0,
-    };
-    try std.testing.expect(!shouldUseSortBuffers(&.{region}));
-}
-
-test "shouldAdviseSequentialMmap only when sequential scan is active" {
-    try std.testing.expect(shouldAdviseSequentialMmap(100, true, false, true));
-    try std.testing.expect(!shouldAdviseSequentialMmap(100, false, false, true));
-    try std.testing.expect(!shouldAdviseSequentialMmap(100, true, true, true));
-    try std.testing.expect(!shouldAdviseSequentialMmap(100, true, false, false));
-    try std.testing.expect(!shouldAdviseSequentialMmap(10, true, false, true));
-    try std.testing.expect(!shouldAdviseSequentialMmap(100, false, false, true));
-}
-
-test "emitRegion handles non-uniform side-table forward extraction" {
-    const fasta = ">seq\nAAA\nCCCC \nGG\n";
-    const side_table = [_]index_format.SideTableLine{
-        .{ .base_start = 0, .byte_offset = 5, .line_bytes = 4, .line_bases = 3 },
-        .{ .base_start = 3, .byte_offset = 9, .line_bytes = 6, .line_bases = 4 },
-        .{ .base_start = 7, .byte_offset = 15, .line_bytes = 3, .line_bases = 2 },
-    };
-    const rec = IndexRecord{
-        .name_offset = 1,
-        .name_len = 3,
-        .seq_offset = 5,
-        .seq_len = 9,
-        .line_bases = 3,
-        .line_bytes = 4,
-    };
-
-    var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer writer.deinit();
-
-    emitRegion(.{
-        .name = "seq",
-        .start = 2,
-        .display_end = 8,
-        .is_full = false,
-        .start_byte = byteOffsetForBase(fasta, rec, &side_table, 1),
-        .seq_offset = 5,
-        .num_bases = 7,
-        .line_bases = 3,
-        .line_bytes = 4,
-        .side_table = &side_table,
-        .orientation = .{},
-        .annotate_transform = false,
-        .original_index = 0,
-    }, fasta, &writer.writer);
-
-    try std.testing.expectEqualStrings(">seq:2-8\nAACCCCG\n", writer.written());
-}
-
-test "emitRegion handles non-uniform side-table reverse complement extraction" {
-    const fasta = ">seq\nAAA\nCCCC \nGG\n";
-    const side_table = [_]index_format.SideTableLine{
-        .{ .base_start = 0, .byte_offset = 5, .line_bytes = 4, .line_bases = 3 },
-        .{ .base_start = 3, .byte_offset = 9, .line_bytes = 6, .line_bases = 4 },
-        .{ .base_start = 7, .byte_offset = 15, .line_bytes = 3, .line_bases = 2 },
-    };
-    const rec = IndexRecord{
-        .name_offset = 1,
-        .name_len = 3,
-        .seq_offset = 5,
-        .seq_len = 9,
-        .line_bases = 3,
-        .line_bytes = 4,
-    };
-
-    var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer writer.deinit();
-
-    emitRegion(.{
-        .name = "seq",
-        .start = 2,
-        .display_end = 8,
-        .is_full = false,
-        .start_byte = byteOffsetForBase(fasta, rec, &side_table, 1),
-        .seq_offset = 5,
-        .num_bases = 7,
-        .line_bases = 3,
-        .line_bytes = 4,
-        .side_table = &side_table,
-        .orientation = Orientation.reverseComplement(),
-        .annotate_transform = false,
-        .original_index = 0,
-    }, fasta, &writer.writer);
-
-    try std.testing.expectEqualStrings(">seq:2-8\nCGGGGTT\n", writer.written());
 }

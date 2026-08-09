@@ -1,6 +1,4 @@
-//! IUPAC complement and reverse-complement lookup tables (comptime 256-byte maps).
-//!
-//! Used by GET transforms (`--rc`, `--complement-only`, `--reverse-only`).
+//! IUPAC byte complementation for GET transforms.
 
 const std = @import("std");
 
@@ -34,73 +32,32 @@ fn buildComplementTable() [256]u8 {
     return table;
 }
 
-pub const iupac_complement_table: [256]u8 = buildComplementTable();
+const IUPAC_COMPLEMENT_TABLE: [256]u8 = buildComplementTable();
 
-/// Return the IUPAC complement for one base.
-/// Unknown bytes pass through unchanged so headers and non-sequence bytes are not mangled.
+/// Returns the IUPAC complement for one byte.
+/// Unknown bytes pass through unchanged.
 pub fn complement(byte: u8) u8 {
-    return iupac_complement_table[byte];
+    return IUPAC_COMPLEMENT_TABLE[byte];
 }
 
-/// Write the IUPAC complement of `src` into `dst` (same length).
+/// Write the IUPAC complement of `src` into `dst`; asserts equal lengths.
 pub fn complementInto(dst: []u8, src: []const u8) void {
     std.debug.assert(dst.len == src.len);
     var i: usize = 0;
-    // Process 32-byte chunks with a table lookup per lane (no branch on base).
-    while (i + 32 <= src.len) : (i += 32) {
+    while (src.len - i >= 32) : (i += 32) {
         inline for (0..32) |j| {
-            dst[i + j] = iupac_complement_table[src[i + j]];
+            dst[i + j] = IUPAC_COMPLEMENT_TABLE[src[i + j]];
         }
     }
     while (i < src.len) : (i += 1) {
-        dst[i] = iupac_complement_table[src[i]];
+        dst[i] = IUPAC_COMPLEMENT_TABLE[src[i]];
     }
 }
 
-/// Write the reverse complement of `src` into `dst`.
-/// Caller must provide a same-length destination buffer.
-pub fn reverseComplementInto(dst: []u8, src: []const u8) void {
-    std.debug.assert(dst.len == src.len);
-
-    for (src, 0..) |byte, i| {
-        dst[src.len - 1 - i] = complement(byte);
-    }
-}
-
-/// Read exactly `len` bytes, reverse-complement them, and write the result.
-/// Allocation-backed helper for generic readers that cannot seek backward.
-///
-/// Not used by the shipped `get` command. Production RC/reverse paths walk the
-/// mmapped FASTA backward in `getter.zig` (zero extra copy of the region span).
-/// See `bench/get/RC_STRATEGY.md`. Kept exported for tests and future streaming callers.
-pub fn reverseComplementStream(allocator: std.mem.Allocator, reader: anytype, writer: anytype, len: usize) !void {
-    const src = try allocator.alloc(u8, len);
-    defer allocator.free(src);
-
-    const dst = try allocator.alloc(u8, len);
-    defer allocator.free(dst);
-
-    try reader.readSliceAll(src);
-    reverseComplementInto(dst, src);
-    try writer.writeAll(dst);
-}
-
-test "complement handles standard bases" {
-    try std.testing.expectEqual(@as(u8, 'T'), complement('A'));
-    try std.testing.expectEqual(@as(u8, 'A'), complement('T'));
-    try std.testing.expectEqual(@as(u8, 'G'), complement('C'));
-    try std.testing.expectEqual(@as(u8, 'C'), complement('G'));
-}
-
-test "complement handles lowercase bases" {
-    try std.testing.expectEqual(@as(u8, 't'), complement('a'));
-    try std.testing.expectEqual(@as(u8, 'a'), complement('t'));
-    try std.testing.expectEqual(@as(u8, 'g'), complement('c'));
-    try std.testing.expectEqual(@as(u8, 'c'), complement('g'));
-}
-
-test "complement handles IUPAC ambiguity codes" {
+test "[unit] - [complement]: maps IUPAC symbols and preserves other bytes" {
     const pairs = [_][2]u8{
+        .{ 'A', 'T' },
+        .{ 'C', 'G' },
         .{ 'R', 'Y' },
         .{ 'W', 'W' },
         .{ 'S', 'S' },
@@ -116,31 +73,26 @@ test "complement handles IUPAC ambiguity codes" {
         try std.testing.expectEqual(std.ascii.toLower(pair[1]), complement(std.ascii.toLower(pair[0])));
         try std.testing.expectEqual(std.ascii.toLower(pair[0]), complement(std.ascii.toLower(pair[1])));
     }
-}
-
-test "complement maps uracil to adenine" {
     try std.testing.expectEqual(@as(u8, 'A'), complement('U'));
     try std.testing.expectEqual(@as(u8, 'a'), complement('u'));
+
+    for ([_]u8{ 0, '-', 'X', 'x', 0xff }) |byte| {
+        try std.testing.expectEqual(byte, complement(byte));
+    }
 }
 
-test "complement leaves unknown bytes unchanged" {
-    try std.testing.expectEqual(@as(u8, '-'), complement('-'));
-    try std.testing.expectEqual(@as(u8, 'X'), complement('X'));
-    try std.testing.expectEqual(@as(u8, 'x'), complement('x'));
-}
+test "[property] - [complementInto]: matches scalar mapping across chunk boundaries" {
+    const alphabet = "ACGTRYSWKMBDHVNacgtryswkmbdhvnUu-Xx";
+    var src: [97]u8 = undefined;
+    for (&src, 0..) |*byte, i| byte.* = alphabet[i % alphabet.len];
 
-test "reverseComplementInto handles mixed case and ambiguity" {
-    var dst: [8]u8 = undefined;
-    reverseComplementInto(&dst, "AaCGnRyU");
-    try std.testing.expectEqualStrings("ArYnCGtT", &dst);
-}
+    for (0..src.len + 1) |len| {
+        var dst: [src.len]u8 = @splat(0xff);
+        complementInto(dst[0..len], src[0..len]);
 
-test "reverseComplementStream reads exact length and writes reversed complement" {
-    var reader = std.Io.Reader.fixed("ACGTN");
-    var out_buf: [5]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&out_buf);
-
-    try reverseComplementStream(std.testing.allocator, &reader, &writer, 5);
-
-    try std.testing.expectEqualStrings("NACGT", writer.buffered());
+        for (src[0..len], dst[0..len]) |input, actual| {
+            try std.testing.expectEqual(complement(input), actual);
+        }
+        if (len < dst.len) try std.testing.expectEqual(@as(u8, 0xff), dst[len]);
+    }
 }

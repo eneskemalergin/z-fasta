@@ -13,14 +13,14 @@ Defaults to bench/index/results/ (latest run via results/LATEST).
 
 import json
 import argparse
-import shutil
-import subprocess
 from pathlib import Path
+import tempfile
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import matplotlib.ticker as mticker
 import pandas as pd
 import tabulate  # noqa: F401  -- needed by pd.to_markdown()
 
@@ -44,18 +44,14 @@ class ReportCounters:
         self.figure += 1
         return n
 
-# ── Styling ────────────────────────────────────────────────────────
+# Styling.
 COLORS = {
     "z-fasta-fai": "#F7A41D",  # Zig gold (peer-comparable)
     "z-fasta-fai-nodedup": "#FBC02D",
-    "z-fasta-fai-lowmem": "#FFD54F",
-    "z-fasta-fai-lowmem-nodedup": "#FFE082",
     "z-fasta-zfi": "#E65100",  # deep orange (first-class)
     "z-fasta-zfi-nodedup": "#EF6C00",
-    "z-fasta-zfi-lowmem": "#FF8A65",
-    "z-fasta-zfi-lowmem-nodedup": "#FFAB91",
     "noodles": "#C45C26",  # rust bronze
-    "rustbio-custom-index": "#8B3A2A",  # rust red-brown
+    "rustbio-custom-index": "#8B3A2A",  # rust-bio benchmark lane
     "samtools": "#555555",  # C grey (GitHub linguist)
     "seqkit": "#009485",  # Go teal
     "fastahack": "#F34B7D",  # C++ pink (GitHub linguist)
@@ -64,12 +60,8 @@ COLORS = {
 DISPLAY_NAMES = {
     "z-fasta-fai": "z-fasta (.fai)",
     "z-fasta-fai-nodedup": "z-fasta (.fai) --no-dedup",
-    "z-fasta-fai-lowmem": "z-fasta (.fai) --low-mem",
-    "z-fasta-fai-lowmem-nodedup": "z-fasta (.fai) --low-mem --no-dedup",
     "z-fasta-zfi": "z-fasta (.zfi)",
     "z-fasta-zfi-nodedup": "z-fasta (.zfi) --no-dedup",
-    "z-fasta-zfi-lowmem": "z-fasta (.zfi) --low-mem",
-    "z-fasta-zfi-lowmem-nodedup": "z-fasta (.zfi) --low-mem --no-dedup",
     "samtools": "samtools",
     "seqkit": "seqkit",
     "fastahack": "fastahack",
@@ -80,11 +72,12 @@ DISPLAY_NAMES = {
 EDGE_EXIT_COLUMNS = (
     "zfasta_exit",
     "zfasta_zfi_exit",
+    "noodles_exit",
+    "rustbio_exit",
     "samtools_exit",
     "seqkit_exit",
     "fastahack_exit",
-    "noodles_exit",
-    "rustbio_exit",
+    "pyfaidx_exit",
 )
 EDGE_EXIT_LABELS = {
     "zfasta_exit": "z-fasta (.fai)",
@@ -92,6 +85,7 @@ EDGE_EXIT_LABELS = {
     "samtools_exit": "samtools",
     "seqkit_exit": "seqkit",
     "fastahack_exit": "fastahack",
+    "pyfaidx_exit": "pyfaidx",
     "noodles_exit": "noodles",
     "rustbio_exit": "rust-bio",
 }
@@ -101,123 +95,30 @@ EDGE_CONTRACT_CLASSES = {
     "invalid_input": "Invalid input review",
 }
 EDGE_MESSY_CASES = {"uniform", "mixed_widths", "trailing_whitespace", "blank_lines", "mixed_crlf"}
-TOOL_ORDER = [
-    "z-fasta-fai",
-    "z-fasta-fai-nodedup",
-    "z-fasta-fai-lowmem",
-    "z-fasta-fai-lowmem-nodedup",
-    "z-fasta-zfi",
-    "z-fasta-zfi-nodedup",
-    "z-fasta-zfi-lowmem",
-    "z-fasta-zfi-lowmem-nodedup",
-    "samtools",
-    "seqkit",
-    "fastahack",
-    "pyfaidx",
-    "noodles",
-    "rustbio-custom-index",
-]
 DATASET_ORDER = ["Genome", "Transcriptome", "Proteome"]
-
-# Pinned versions for vendored or wrapper tools (keep in sync with tools.sh /
-# tools/*/Cargo.toml / tools/fastahack-*). install_tools.sh verifies these.
-VERSION_PINS = {
-    "pyfaidx": "0.9.0.3",
-    "seqkit": "2.13.0",
-    "fastahack": "1.0.0",
-    "noodles": "0.61",
-    "rustbio": "2.2",
-}
-
-# Competitor metadata for provenance text (command + version source).
-COMPETITOR_TOOLS = [
-    {
-        "key": "samtools",
-        "label": "samtools",
-        "language": "C",
-        "command": "samtools faidx",
-        "version_from": "`samtools --version`",
-        "pin": None,
-    },
-    {
-        "key": "seqkit",
-        "label": "seqkit",
-        "language": "Go",
-        "command": "seqkit faidx",
-        "version_from": "`seqkit version`",
-        "pin": VERSION_PINS["seqkit"],
-    },
-    {
-        "key": "fastahack",
-        "label": "fastahack",
-        "language": "C++",
-        "command": "fastahack -i",
-        "version_from": "directory pin `tools/fastahack-1.0.0/`",
-        "pin": VERSION_PINS["fastahack"],
-    },
-    {
-        "key": "pyfaidx",
-        "label": "pyfaidx",
-        "language": "Python",
-        "command": "faidx --no-output",
-        "version_from": "`faidx --version` / `pyfaidx.__version__`",
-        "pin": VERSION_PINS["pyfaidx"],
-    },
-    {
-        "key": "noodles",
-        "label": "noodles",
-        "language": "Rust",
-        "command": "tools/noodles_wrapper index",
-        "version_from": "noodles-fasta crate in `tools/noodles_wrapper/Cargo.toml`",
-        "pin": VERSION_PINS["noodles"],
-    },
-    {
-        "key": "rustbio",
-        "label": "rust-bio",
-        "language": "Rust",
-        "command": "tools/rustbio_wrapper index",
-        "version_from": "bio crate in `tools/rustbio_wrapper/Cargo.toml`",
-        "pin": VERSION_PINS["rustbio"],
-    },
-]
-
 # Real benchmark datasets (bench/shared/data; see bench/shared/download_data.sh).
 REAL_DATASETS = [
     {
         "id": "Genome",
-        "file": "REAL_Genome.fa",
         "description": "Homo sapiens GRCh38 primary assembly (Ensembl release 113)",
-        "entry_noun": "sequences",
-        "len_unit": "bp",
     },
     {
         "id": "Transcriptome",
-        "file": "REAL_Transcriptome.fa",
         "description": "Homo sapiens GENCODE v46 transcript sequences",
-        "entry_noun": "transcripts",
-        "len_unit": "bp",
     },
     {
         "id": "Proteome",
-        "file": "REAL_Proteome.fasta",
         "description": "Homo sapiens UniProt reference proteome UP000005640",
-        "entry_noun": "proteins",
-        "len_unit": "residues",
     },
 ]
 
-# Mode section: full 8-cell z-fasta matrix plus headline competitor and industry reference.
-MODE_COMPARISON_TOOLS = [
+# Product section: format and dedup matrix on the record-rich real datasets.
+PRODUCT_WORKLOADS = ("Transcriptome", "Proteome")
+PRODUCT_COMPARISON_TOOLS = [
     "z-fasta-fai",
     "z-fasta-fai-nodedup",
-    "z-fasta-fai-lowmem",
-    "z-fasta-fai-lowmem-nodedup",
     "z-fasta-zfi",
     "z-fasta-zfi-nodedup",
-    "z-fasta-zfi-lowmem",
-    "z-fasta-zfi-lowmem-nodedup",
-    "noodles",
-    "samtools",
 ]
 
 # Headline real-dataset chart: peer-comparable z-fasta (.fai) plus competitors.
@@ -230,13 +131,6 @@ HEADLINE_PERF_TOOLS = [
     "fastahack",
     "pyfaidx",
 ]
-
-
-def tool_sort_key(name):
-    try:
-        return TOOL_ORDER.index(name)
-    except ValueError:
-        return 99
 
 
 def dataset_sort_key(name):
@@ -319,26 +213,28 @@ def md_tool_pivot_table(
     return _ordered_pivot(pivot, tools, sort_index=sort_index).to_markdown()
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  Data Loading
-# ══════════════════════════════════════════════════════════════════════
+# Data loading.
 
 
 def load_metadata(results_dir: Path, manifest: dict | None = None) -> pd.DataFrame | None:
     """Load metadata JSONL for the active run (manifest-linked when available)."""
     paths: list[Path] = []
-    if manifest and manifest.get("metadata"):
-        candidate = results_dir / manifest["metadata"]
-        if candidate.exists():
-            paths = [candidate]
-    if not paths:
+    if manifest is not None:
+        metadata_name = manifest.get("metadata")
+        if not isinstance(metadata_name, str):
+            return None
+        candidate = results_dir / metadata_name
+        if not candidate.is_file():
+            return None
+        paths = [candidate]
+    else:
         latest = results_dir / "LATEST"
         if latest.exists():
             ts = latest.read_text().strip()
             candidate = results_dir / f"metadata_{ts}.jsonl"
             if candidate.exists():
                 paths = [candidate]
-    if not paths:
+    if manifest is None and not paths:
         found = sorted(results_dir.glob("metadata_*.jsonl"), reverse=True)
         if found:
             paths = [found[0]]
@@ -351,7 +247,6 @@ def load_metadata(results_dir: Path, manifest: dict | None = None) -> pd.DataFra
                 if not line:
                     continue
                 row = json.loads(line)
-                row["_metadata_file"] = str(path)
                 rows.append(row)
     if not rows:
         return None
@@ -378,6 +273,8 @@ def meta_rows_for_json(metadata_df: pd.DataFrame | None, path: Path) -> list[dic
 def load_zebrac_json(path: Path, metadata_df: pd.DataFrame | None = None) -> pd.DataFrame:
     with open(path) as f:
         data = json.load(f)
+    if "zebrac_version" not in data:
+        raise ValueError(f"expected zebrac JSON, got unsupported format: {path}")
 
     meta_rows = meta_rows_for_json(metadata_df, path)
     meta_by_command = {row.get("command"): row for row in meta_rows}
@@ -405,19 +302,12 @@ def load_zebrac_json(path: Path, metadata_df: pd.DataFrame | None = None) -> pd.
                 "median": wall.get("median", 0) / 1_000_000_000.0,
                 "min": wall.get("min", 0) / 1_000_000_000.0,
                 "max": wall.get("max", 0) / 1_000_000_000.0,
-                "runner": "zebrac",
-                "sample_count": result.get("sample_count"),
-                "failed_sample_count": result.get("failed_sample_count", 0),
                 "peak_rss_mb": peak_rss.get("mean", 0) / (1024 * 1024),
                 "peak_rss_stddev_mb": peak_rss.get("std_dev", 0) / (1024 * 1024),
+                "peak_rss_min_mb": peak_rss.get("min", 0) / (1024 * 1024),
+                "peak_rss_max_mb": peak_rss.get("max", 0) / (1024 * 1024),
                 "minor_faults": result.get("minor_faults", {}).get("mean", 0),
                 "major_faults": result.get("major_faults", {}).get("mean", 0),
-                "cpu_cycles": result.get("cpu_cycles", {}).get("mean", 0),
-                "instructions": result.get("instructions", {}).get("mean", 0),
-                "cache_references": result.get("cache_references", {}).get("mean", 0),
-                "cache_misses": result.get("cache_misses", {}).get("mean", 0),
-                "branch_misses": result.get("branch_misses", {}).get("mean", 0),
-                "input_bytes": input_bytes,
                 "input_mib": input_mib,
                 "throughput_mibs": throughput_mibs,
             }
@@ -425,31 +315,26 @@ def load_zebrac_json(path: Path, metadata_df: pd.DataFrame | None = None) -> pd.
     return pd.DataFrame(rows)
 
 
-def load_result_json(path: Path, metadata_df: pd.DataFrame | None = None) -> pd.DataFrame:
-    with open(path) as f:
-        data = json.load(f)
-    if "zebrac_version" not in data:
-        raise ValueError(f"expected zebrac JSON, got unsupported format: {path}")
-    return load_zebrac_json(path, metadata_df)
-
-
 def discover_latest(results_dir: Path, prefix: str, manifest: dict | None = None) -> Path | None:
     """Find timestamped directory or file for the active run.
 
-    When a manifest is present, never fall back to a newer foreign run's artifacts.
+    When a manifest is present, never mix in files from another run.
     """
     section_key = {
         "perf": "real",
         "scale_size": "scale_size",
         "scale_seqs_budget": "scale_seqs_budget",
         "scale_seqs_fixed": "scale_seqs_fixed",
+        "tests": "correctness",
     }.get(prefix)
     if manifest is not None and section_key:
         rel = manifest.get("sections", {}).get(section_key)
         if not rel:
-            return None
-        candidate = results_dir / rel
-        return candidate if candidate.exists() else None
+            if section_key != "correctness" or manifest.get("schema_version") == "index-run.v3":
+                return None
+        else:
+            candidate = results_dir / rel
+            return candidate if candidate.exists() else None
 
     # Unmapped prefixes (e.g. tests_*.csv): pin to the run timestamp.
     if manifest is not None:
@@ -475,8 +360,12 @@ def discover_latest(results_dir: Path, prefix: str, manifest: dict | None = None
     return None
 
 
-def load_run_manifest(results_dir: Path) -> dict | None:
-    """Load run_<ts>.json via LATEST, else newest run_*.json."""
+def load_run_manifest(
+    results_dir: Path, manifest_path: Path | None = None
+) -> dict | None:
+    """Load an explicit manifest, then LATEST, then the newest timestamped run."""
+    if manifest_path is not None:
+        return json.loads(manifest_path.read_text())
     latest = results_dir / "LATEST"
     if latest.is_file():
         ts = latest.read_text().strip()
@@ -487,60 +376,6 @@ def load_run_manifest(results_dir: Path) -> dict | None:
     if paths:
         return json.loads(paths[0].read_text())
     return None
-
-
-def is_incomplete_run(
-    manifest: dict | None,
-    *,
-    required_sections: tuple[str, ...] = (),
-    skip_flags: tuple[str, ...] = ("skip_real", "skip_scaling", "skip_size"),
-    min_warmup: int = 1,
-    min_runs: int = 3,
-) -> bool:
-    """True when required sections are missing, skip flags are set, or samples are thin."""
-    if not manifest:
-        return True
-    sections = manifest.get("sections") or {}
-    for key in required_sections:
-        if key not in sections:
-            return True
-    for flag in skip_flags:
-        if manifest.get(flag):
-            return True
-    try:
-        if int(manifest.get("warmup", 0)) < min_warmup:
-            return True
-        if int(manifest.get("runs", 0)) < min_runs:
-            return True
-    except (TypeError, ValueError):
-        return True
-    return False
-
-
-def load_section_frames(
-    results_dir: Path,
-    manifest: dict | None,
-    key: str,
-    *,
-    load_json,
-    load_metadata,
-) -> pd.DataFrame | None:
-    """Concat zebrac JSON frames for one manifest section key."""
-    rel = (manifest or {}).get("sections", {}).get(key)
-    if not rel:
-        return None
-    section_dir = results_dir / rel
-    if not section_dir.is_dir():
-        return None
-    metadata = load_metadata(results_dir, manifest)
-    frames = []
-    for jf in sorted(section_dir.glob("*.json")):
-        frame = load_json(jf, metadata)
-        if not frame.empty:
-            frames.append(frame)
-    if not frames:
-        return None
-    return pd.concat(frames, ignore_index=True)
 
 
 def prune_stale_pngs(figures_dir: Path, allowed) -> list[str]:
@@ -557,115 +392,14 @@ def prune_stale_pngs(figures_dir: Path, allowed) -> list[str]:
     return removed
 
 
-def enrich_manifest(manifest: dict | None, results_dir: Path) -> dict | None:
-    """Fill missing provenance fields and resolve tool versions from live binaries."""
+def enrich_manifest(manifest: dict | None) -> dict | None:
+    """Apply non-evidentiary defaults without probing the live environment."""
     if not manifest:
         return manifest
 
     manifest.setdefault("runner", "zebrac")
     manifest.setdefault("mode", "warm")
-
-    project_root = results_dir.parent.parent.parent
-    versions = resolve_tool_versions(manifest, project_root)
-
-    if versions.get("z-fasta"):
-        manifest["z_fasta"] = versions["z-fasta"]
-    if versions.get("zebrac"):
-        manifest["zebrac"] = versions["zebrac"]
-
-    tools = dict(manifest.get("tools") or {})
-    for key in ("samtools", "seqkit", "fastahack", "pyfaidx", "noodles", "rustbio"):
-        if versions.get(key):
-            tools[key] = versions[key]
-    manifest["tools"] = tools
     return manifest
-
-
-def command_first_line(cmd: list[str]) -> str | None:
-    try:
-        out = subprocess.run(cmd, check=True, capture_output=True)
-        text = (out.stdout or out.stderr or b"").decode(errors="replace").strip()
-        if not text:
-            return None
-        return text.splitlines()[0]
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-        return None
-
-
-def probe_live_versions(project_root: Path) -> dict[str, str]:
-    """Query installed benchmark binaries for version strings."""
-    tools_dir = project_root / "tools"
-    versions: dict[str, str] = {}
-
-    zfasta = project_root / "zig-out" / "bin" / "z-fasta"
-    if zfasta.is_file():
-        line = command_first_line([str(zfasta), "--version"])
-        if line:
-            versions["z-fasta"] = line
-
-    zebrac = tools_dir / "zebrac"
-    if zebrac.is_file():
-        line = command_first_line([str(zebrac), "--version"])
-        if line:
-            versions["zebrac"] = line
-
-    line = command_first_line(["samtools", "--version"])
-    if line:
-        versions["samtools"] = line
-
-    seqkit = tools_dir / "seqkit"
-    if seqkit.is_file():
-        line = command_first_line([str(seqkit), "version"])
-        if line:
-            versions["seqkit"] = line
-
-    for faidx in (project_root / ".venv" / "bin" / "faidx",):
-        candidates = [faidx]
-        system_faidx = shutil.which("faidx")
-        if system_faidx:
-            candidates.append(Path(system_faidx))
-        for candidate in candidates:
-            if candidate.is_file():
-                line = command_first_line([str(candidate), "--version"])
-                if line:
-                    versions["pyfaidx"] = line
-                    break
-        if "pyfaidx" in versions:
-            break
-
-    fastahack = tools_dir / "fastahack-1.0.0" / "fastahack"
-    if fastahack.is_file():
-        versions["fastahack"] = (
-            f"fastahack {VERSION_PINS['fastahack']} (directory pin)"
-        )
-
-    noodles = tools_dir / "noodles_wrapper" / "target" / "release" / "noodles_wrapper"
-    if noodles.is_file():
-        versions["noodles"] = f"noodles-fasta {VERSION_PINS['noodles']} (wrapper)"
-
-    rustbio = tools_dir / "rustbio_wrapper" / "target" / "release" / "rustbio_wrapper"
-    if rustbio.is_file():
-        versions["rustbio"] = (
-            f"rust-bio {VERSION_PINS['rustbio']} (custom indexer wrapper)"
-        )
-
-    return versions
-
-
-def resolve_tool_versions(manifest: dict | None, project_root: Path) -> dict[str, str]:
-    """Merge manifest-captured versions with live probes."""
-    merged = probe_live_versions(project_root)
-    if not manifest:
-        return merged
-
-    for key, val in (manifest.get("tools") or {}).items():
-        if val:
-            merged[key] = val
-    if manifest.get("z_fasta"):
-        merged["z-fasta"] = manifest["z_fasta"]
-    if manifest.get("zebrac"):
-        merged["zebrac"] = manifest["zebrac"]
-    return merged
 
 
 def load_json_suite(
@@ -684,15 +418,17 @@ def load_json_suite(
 
     frames = []
     for jf in sorted(d.glob("*.json")):
-        frame = load_result_json(jf, metadata_df)
+        frame = load_zebrac_json(jf, metadata_df)
         if dataset_from_stem:
             frame["dataset"] = jf.stem
         elif param_col:
             stem = jf.stem
             try:
                 val = float(stem.replace("mb", ""))
-            except ValueError:
-                val = 0.0
+            except ValueError as exc:
+                raise ValueError(
+                    f"cannot derive {param_col} from result filename: {jf.name}"
+                ) from exc
             frame[param_col] = val
         frames.append(frame)
 
@@ -741,9 +477,7 @@ def load_tests(results_dir: Path, manifest: dict | None = None) -> pd.DataFrame 
     return pd.read_csv(p)
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  Figures
-# ══════════════════════════════════════════════════════════════════════
+# Figures.
 
 
 def _save(fig, path):
@@ -756,14 +490,29 @@ def filter_headline_perf(df: pd.DataFrame) -> pd.DataFrame:
     return filter_tools(df, HEADLINE_PERF_TOOLS)
 
 
-def filter_mode_comparison(df: pd.DataFrame) -> pd.DataFrame:
-    return filter_tools(df, MODE_COMPARISON_TOOLS)
+def product_workloads(manifest: dict | None) -> tuple[str, ...]:
+    configured = (manifest or {}).get("product_workloads")
+    if (
+        isinstance(configured, list)
+        and configured
+        and all(isinstance(workload, str) for workload in configured)
+    ):
+        return tuple(configured)
+    return PRODUCT_WORKLOADS
+
+
+def filter_product_comparison(
+    df: pd.DataFrame,
+    manifest: dict | None = None,
+) -> pd.DataFrame:
+    work = filter_tools(df, PRODUCT_COMPARISON_TOOLS)
+    return work[work["dataset"].isin(product_workloads(manifest))].copy()
 
 
 def _scaling_param_label(param_col: str, value: float) -> str:
     v = int(value)
     if param_col == "size_mb":
-        return f"{v} MB"
+        return f"{v} MiB"
     return f"{v:,}"
 
 
@@ -821,20 +570,6 @@ def build_headline_ratio_comparisons(work: pd.DataFrame, value_col: str) -> pd.D
         value_col,
         baseline="z-fasta-fai",
         peer_tools=HEADLINE_PERF_TOOLS[1:],
-    )
-
-
-def build_mode_ratio_comparisons(
-    work: pd.DataFrame,
-    value_col: str,
-    *,
-    baseline: str = "z-fasta-fai",
-) -> pd.DataFrame:
-    return build_ratio_comparisons(
-        work,
-        value_col,
-        baseline=baseline,
-        peer_tools=[t for t in MODE_COMPARISON_TOOLS if t != baseline],
     )
 
 
@@ -902,28 +637,20 @@ def build_headline_comparisons(work: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def build_mode_comparisons(work: pd.DataFrame) -> pd.DataFrame:
-    return build_time_throughput_comparisons(
-        work,
-        build_mode_ratio_comparisons(work, "mean"),
-        baseline="z-fasta-fai",
-    )
-
-
 def _format_speedup(ratio: float | None) -> str:
     if ratio is None or ratio <= 0:
         return "n/a"
     if ratio >= 100:
-        return f"{ratio:.0f}×"
+        return f"{ratio:.0f}x"
     if ratio >= 10:
-        return f"{ratio:.1f}×"
+        return f"{ratio:.1f}x"
     if ratio >= 2:
-        return f"{ratio:.1f}×"
+        return f"{ratio:.1f}x"
     if ratio >= 0.1:
-        return f"{ratio:.2f}×"
+        return f"{ratio:.2f}x"
     if ratio >= 0.01:
-        return f"{ratio:.3f}×"
-    return f"{ratio:.4f}×"
+        return f"{ratio:.3f}x"
+    return f"{ratio:.4f}x"
 
 
 def _annotate_headline_comparisons(
@@ -936,6 +663,23 @@ def _annotate_headline_comparisons(
 ) -> None:
     """Speedup badges (z-fasta vs competitor) and per-dataset reference lines."""
     zf_color = COLORS.get("z-fasta-fai", "#F7A41D")
+    badge_offsets: dict[tuple[str, str], int] = {}
+
+    for ds in datasets:
+        previous_y: float | None = None
+        level = 0
+        for tool in tools:
+            key = (ds, tool)
+            if key not in bar_tops:
+                continue
+            current_y = bar_tops[key][1]
+            close = (
+                previous_y is not None
+                and max(previous_y, current_y) / min(previous_y, current_y) <= 1.2
+            )
+            level = 1 - level if close else 0
+            badge_offsets[key] = 9 + level * 18
+            previous_y = current_y
 
     for ds in datasets:
         zf_key = (ds, "z-fasta-fai")
@@ -958,9 +702,9 @@ def _annotate_headline_comparisons(
             zorder=1,
         )
         ax1.annotate(
-            "1×",
+            "1x",
             (zf_x, zf_y),
-            xytext=(0, 9),
+            xytext=(0, badge_offsets[zf_key]),
             textcoords="offset points",
             ha="center",
             va="bottom",
@@ -988,7 +732,7 @@ def _annotate_headline_comparisons(
         ax1.annotate(
             _format_speedup(ratio),
             (xpos, mean_t),
-            xytext=(0, 9),
+            xytext=(0, badge_offsets[key]),
             textcoords="offset points",
             ha="center",
             va="bottom",
@@ -1079,10 +823,10 @@ def _fig_throughput_dual_axis(
     ax1.set_xticklabels(datasets, fontsize=11)
     ax1.set_ylabel("Wall Time (s, log scale)", fontsize=10)
     ax2.set_ylabel("Throughput (MiB/s)", fontsize=10)
-    ax1.set_title(title, fontsize=12, fontweight="bold", pad=20)
+    fig.suptitle(title, fontsize=12, fontweight="bold", y=0.98)
     fig.text(
-        0.3125,
-        0.945,
+        0.5,
+        0.935,
         fig_note,
         ha="center",
         va="top",
@@ -1105,7 +849,7 @@ def _fig_throughput_dual_axis(
         columnspacing=1.2,
         handletextpad=0.4,
     )
-    fig.subplots_adjust(bottom=0.20, top=0.92)
+    fig.subplots_adjust(bottom=0.20, top=0.88)
     return _save(fig, out)
 
 
@@ -1120,7 +864,7 @@ def fig_performance_throughput(df: pd.DataFrame, out: Path) -> Path:
         title="Real-Dataset Indexing: Wall Time & Throughput",
         fig_note=(
             "Bar labels: z-fasta speedup vs each tool "
-            "(competitor wall time ÷ z-fasta wall time)"
+            "(competitor wall time / z-fasta wall time)"
         ),
         bar_width=0.095,
     )
@@ -1167,10 +911,10 @@ def fig_scaling_headline_lines(
     ax.set_yscale("log")
     ax.set_xlabel(xlabel, fontsize=10)
     ax.set_ylabel("Wall Time (s, log scale)", fontsize=10)
-    ax.set_title(title, fontsize=12, fontweight="bold", pad=20)
+    fig.suptitle(title, fontsize=12, fontweight="bold", y=0.98)
     fig.text(
-        0.3125,
-        0.945,
+        0.5,
+        0.935,
         fig_note,
         ha="center",
         va="top",
@@ -1193,7 +937,7 @@ def fig_scaling_headline_lines(
         columnspacing=1.2,
         handletextpad=0.4,
     )
-    fig.subplots_adjust(bottom=0.20, top=0.92)
+    fig.subplots_adjust(bottom=0.20, top=0.88)
     return _save(fig, out)
 
 
@@ -1266,11 +1010,11 @@ def _fig_metric_bars(
     ax.set_xticks(x)
     ax.set_xticklabels(datasets, fontsize=11)
     ax.set_ylabel(ylabel, fontsize=10)
-    ax.set_title(title, fontsize=12, fontweight="bold", pad=20)
+    fig.suptitle(title, fontsize=12, fontweight="bold", y=0.98)
     if fig_note:
         fig.text(
-            0.3125,
-            0.945,
+            0.5,
+            0.935,
             fig_note,
             ha="center",
             va="top",
@@ -1300,7 +1044,7 @@ def _fig_metric_bars(
         columnspacing=1.2,
         handletextpad=0.4,
     )
-    fig.subplots_adjust(bottom=0.20, top=0.92)
+    fig.subplots_adjust(bottom=0.20, top=0.88)
     return _save(fig, out)
 
 
@@ -1372,7 +1116,7 @@ def fig_memory_rss(df: pd.DataFrame, out: Path) -> Path:
         out,
         value_col="peak_rss_mb",
         std_col="peak_rss_stddev_mb",
-        ylabel="Peak RSS (MB, log scale)",
+        ylabel="Peak RSS (MiB, log scale)",
         title="Real-Dataset Indexing: Peak RSS",
         value_floor=1e-3,
         after_bars=_draw_input_file_reference,
@@ -1397,72 +1141,17 @@ def fig_page_faults(df: pd.DataFrame, out: Path) -> Path:
     )
 
 
-def fig_mode_comparison_throughput(df: pd.DataFrame, out: Path) -> Path | None:
-    """Grouped wall-time bars with throughput lines for mode section tools."""
-    work = filter_mode_comparison(df)
-    if work.empty:
-        return None
-    return _fig_throughput_dual_axis(
-        work,
-        out,
-        tools=MODE_COMPARISON_TOOLS,
-        comparisons=build_mode_comparisons(work),
-        title="Mode Comparison: Wall Time & Throughput",
-        fig_note="Bar labels: wall time ratio vs z-fasta (.fai) (each value ÷ baseline)",
-        bar_width=0.11,
-    )
-
-
-def fig_mode_comparison_memory(df: pd.DataFrame, out: Path) -> Path | None:
-    """Peak RSS for mode section tools (Figure 2 style)."""
-    work = filter_mode_comparison(df)
-    if work.empty:
-        return None
-    return _fig_metric_bars(
-        work,
-        out,
-        tools=MODE_COMPARISON_TOOLS,
-        comparisons=build_mode_ratio_comparisons(work, "peak_rss_mb"),
-        value_col="peak_rss_mb",
-        std_col="peak_rss_stddev_mb",
-        ylabel="Peak RSS (MB, log scale)",
-        title="Mode Comparison: Peak RSS",
-        value_floor=1e-3,
-        fig_note=(
-            "Bar labels: peak RSS ratio vs z-fasta (.fai). "
-            "Dashed grey = FASTA file size on disk."
-        ),
-        after_bars=_draw_input_file_reference,
-        bar_width=0.11,
-        legend_ncol=6,
-    )
-
-
-def _dataset_facet_title(ds: str, stats_by_id: dict[str, dict]) -> str:
-    """Facet title with on-disk size and record count when available."""
-    entry = stats_by_id.get(ds)
-    if not entry or not entry.get("present"):
-        return ds
-    size = format_file_size(entry["file_bytes"])
-    records = entry.get("records")
-    if records is not None:
-        return f"{ds}\n{size} · {records:,} {entry['entry_noun']}"
-    return f"{ds}\n{size}"
-
-
-def fig_mode_comparison_tradeoff(
+def fig_product_comparison_tradeoff(
     df: pd.DataFrame,
     out: Path,
-    *,
-    stats_by_id: dict[str, dict],
 ) -> Path | None:
     """Time vs peak RSS scatter, one facet per real dataset."""
-    work = filter_mode_comparison(df)
+    work = filter_tools(df, PRODUCT_COMPARISON_TOOLS)
     if work.empty:
         return None
 
     datasets = sorted(work["dataset"].unique(), key=dataset_sort_key)
-    tools = [t for t in MODE_COMPARISON_TOOLS if t in work["tool"].unique()]
+    tools = [t for t in PRODUCT_COMPARISON_TOOLS if t in work["tool"].unique()]
 
     fig, axes = plt.subplots(1, len(datasets), figsize=(5 * len(datasets), 5.2))
     if len(datasets) == 1:
@@ -1470,6 +1159,14 @@ def fig_mode_comparison_tradeoff(
 
     legend_handles: list = []
     legend_labels: list[str] = []
+
+    def metric_ticks(values: list[float]) -> list[float]:
+        low, high = min(values), max(values)
+        if low == high:
+            return [low]
+        if high / low <= 1.5:
+            return [low, (low * high) ** 0.5, high]
+        return [low, high]
 
     for ax, ds in zip(axes, datasets):
         sub = work[work["dataset"] == ds]
@@ -1479,7 +1176,7 @@ def fig_mode_comparison_tradeoff(
                 continue
             color = COLORS.get(tool, "#888")
             label = display_tool(tool)
-            scatter = ax.scatter(
+            ax.scatter(
                 max(float(row["peak_rss_mb"].values[0]), 1e-3),
                 max(float(row["mean"].values[0]), 1e-6),
                 s=110,
@@ -1496,28 +1193,34 @@ def fig_mode_comparison_tradeoff(
 
         ax.set_xscale("log")
         ax.set_yscale("log")
-        ax.set_title(_dataset_facet_title(ds, stats_by_id), fontsize=10, fontweight="bold")
+        rss_values = [max(float(value), 1e-3) for value in sub["peak_rss_mb"]]
+        wall_values = [max(float(value), 1e-6) for value in sub["mean"]]
+        ax.xaxis.set_major_locator(mticker.FixedLocator(metric_ticks(rss_values)))
+        ax.xaxis.set_major_formatter(mticker.FormatStrFormatter("%.2f"))
+        ax.yaxis.set_major_locator(mticker.FixedLocator(metric_ticks(wall_values)))
+        ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.4f"))
+        ax.xaxis.set_minor_formatter(mticker.NullFormatter())
+        ax.yaxis.set_minor_formatter(mticker.NullFormatter())
+        ax.set_title(ds, fontsize=10, fontweight="bold")
         ax.grid(alpha=0.3, which="both")
 
     axes[0].set_ylabel("Wall Time (s, log scale)", fontsize=10)
     for ax in axes:
-        ax.set_xlabel("Peak RSS (MB, log scale)", fontsize=10)
+        ax.set_xlabel("Peak RSS (MiB, log scale)", fontsize=10)
 
     fig.suptitle(
-        "Mode Comparison: Time vs Memory Tradeoff",
+        "Format and Dedup Comparison: Time vs Memory",
         fontsize=12,
         fontweight="bold",
         y=0.98,
     )
 
-    middle = axes[1] if len(axes) > 1 else axes[0]
-    box = middle.get_position()
     fig.legend(
         handles=legend_handles,
         labels=legend_labels,
         fontsize=9,
         loc="upper center",
-        bbox_to_anchor=(box.x0 + box.width / 2, box.y0 - 0.14),
+        bbox_to_anchor=(0.5, 0.12),
         ncol=len(legend_handles),
         frameon=False,
         columnspacing=1.2,
@@ -1525,50 +1228,6 @@ def fig_mode_comparison_tradeoff(
     )
     fig.subplots_adjust(top=0.88, bottom=0.22, wspace=0.28)
     return _save(fig, out)
-
-
-def enrich_counter_metrics(df: pd.DataFrame) -> pd.DataFrame:
-    """Add IPC, cache miss rate, and related derived metrics."""
-    w = df.copy()
-    cycles = pd.to_numeric(w.get("cpu_cycles"), errors="coerce")
-    instr = pd.to_numeric(w.get("instructions"), errors="coerce")
-    refs = pd.to_numeric(w.get("cache_references"), errors="coerce")
-    misses = pd.to_numeric(w.get("cache_misses"), errors="coerce")
-    branches = pd.to_numeric(w.get("branch_misses"), errors="coerce")
-    if "input_mib" not in w.columns or w["input_mib"].isna().all():
-        bytes_col = pd.to_numeric(w.get("input_bytes"), errors="coerce")
-        w["input_mib"] = bytes_col / (1024 * 1024)
-    mib = pd.to_numeric(w["input_mib"], errors="coerce")
-    w["ipc"] = instr / cycles.where(cycles > 0)
-    w["cache_miss_rate"] = misses / refs.where(refs > 0)
-    w["branch_miss_rate"] = branches / instr.where(instr > 0)
-    w["instructions_per_mib"] = instr / mib.where(mib > 0)
-    return w
-
-
-def fig_zebrac_instructions_per_mib(df: pd.DataFrame, out: Path) -> Path | None:
-    """Instructions per MiB of input; total CPU work per byte indexed."""
-    required = {"instructions", "input_bytes"}
-    if not required.issubset(df.columns) and "input_mib" not in df.columns:
-        return None
-    work = enrich_counter_metrics(filter_headline_perf(df))
-    if work["instructions_per_mib"].isna().all():
-        return None
-    return _fig_metric_bars(
-        work,
-        out,
-        tools=HEADLINE_PERF_TOOLS,
-        comparisons=build_headline_ratio_comparisons(work, "instructions_per_mib"),
-        value_col="instructions_per_mib",
-        std_col=None,
-        ylabel="Instructions per MiB (log scale)",
-        title="Real-Dataset Indexing: CPU Work per MiB",
-        value_floor=1e3,
-        fig_note=(
-            "Bar labels: competitor instructions/MiB ÷ z-fasta. "
-            "Higher = more CPU work than z-fasta. Lower bars are better."
-        ),
-    )
 
 
 def fig_edge_heatmap(df: pd.DataFrame, out: Path) -> Path:
@@ -1657,9 +1316,7 @@ def fig_edge_heatmap(df: pd.DataFrame, out: Path) -> Path:
     return _save(fig, out)
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  Markdown Report
-# ══════════════════════════════════════════════════════════════════════
+# Markdown report.
 
 
 def normalize_markdown(chunks: list[str]) -> str:
@@ -1675,258 +1332,83 @@ def normalize_markdown(chunks: list[str]) -> str:
     return "\n\n".join(cleaned) + "\n"
 
 
-def format_file_size(num_bytes: int) -> str:
-    gib = num_bytes / (1024**3)
-    if gib >= 1.0:
-        return f"{gib:.2f} GiB"
-    mib = num_bytes / (1024**2)
-    if mib >= 1.0:
-        return f"{mib:.1f} MiB"
-    return f"{num_bytes:,} B"
+def short_tool_version(value: str | None, prefix: str) -> str:
+    """Normalize captured tool output to a compact version label."""
+    cleaned = (value or "unknown").split(" (", 1)[0]
+    if cleaned.startswith(prefix):
+        cleaned = cleaned[len(prefix) :]
+    if cleaned != "unknown" and not cleaned.startswith("v"):
+        cleaned = f"v{cleaned}"
+    return cleaned
 
 
-def format_total_length(num_bases: int, unit: str) -> str:
-    if unit == "bp":
-        if num_bases >= 1_000_000_000:
-            return f"{num_bases / 1e9:.2f} Gbp"
-        if num_bases >= 1_000_000:
-            return f"{num_bases / 1e6:.0f} Mbp"
-        return f"{num_bases:,} bp"
-    if num_bases >= 1_000_000:
-        return f"{num_bases / 1e6:.1f} M {unit}"
-    return f"{num_bases:,} {unit}"
+def readable_list(values: list[str] | tuple[str, ...]) -> str:
+    """Join a short list for prose."""
+    if len(values) < 2:
+        return "".join(values)
+    if len(values) == 2:
+        return " and ".join(values)
+    return f"{', '.join(values[:-1])}, and {values[-1]}"
 
 
-def parse_fai_stats(fai_path: Path) -> tuple[int, int]:
-    records = 0
-    total_len = 0
-    with open(fai_path, encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            parts = line.rstrip("\n").split("\t")
-            if len(parts) >= 2 and parts[1].isdigit():
-                records += 1
-                total_len += int(parts[1])
-    return records, total_len
-
-
-def parse_zfi_stats(zfi_path: Path) -> tuple[int, int]:
-    """Return (record_count, file_bytes) from a ZFI header."""
-    data = zfi_path.read_bytes()
-    if len(data) < 16 or data[:3] != b"ZFI":
-        return 0, len(data)
-    count = int.from_bytes(data[4:8], "little")
-    return count, len(data)
-
-
-def load_index_format_stats(data_dir: Path) -> list[dict]:
-    """On-disk `.zfi` vs `.fai` sizes for real benchmark fixtures."""
-    rows: list[dict] = []
+def md_datasets() -> str:
+    """Describe the three real datasets without exposing local storage paths."""
+    lines = []
     for spec in REAL_DATASETS:
-        fasta = data_dir / spec["file"]
-        if not fasta.is_file():
-            continue
-        zfi_path = data_dir / f"{spec['file']}.zfi"
-        fai_path = data_dir / f"{spec['file']}.fai"
-        row: dict = {
-            "dataset": spec["id"],
-            "fasta_bytes": fasta.stat().st_size,
-        }
-        if zfi_path.is_file():
-            zfi_records, zfi_bytes = parse_zfi_stats(zfi_path)
-            row["zfi_bytes"] = zfi_bytes
-            row["zfi_records"] = zfi_records
-            row["zfi_bytes_per_rec"] = zfi_bytes / zfi_records if zfi_records else None
-        if fai_path.is_file():
-            fai_records, _ = parse_fai_stats(fai_path)
-            fai_bytes = fai_path.stat().st_size
-            row["fai_bytes"] = fai_bytes
-            row["fai_records"] = fai_records
-            row["fai_bytes_per_line"] = fai_bytes / fai_records if fai_records else None
-        if row.get("zfi_bytes") and row.get("fai_bytes"):
-            row["fai_over_zfi"] = row["fai_bytes"] / row["zfi_bytes"]
-        rows.append(row)
-    return rows
-
-
-def load_real_dataset_stats(data_dir: Path) -> list[dict]:
-    """Read on-disk sizes and FAI entry counts for real benchmark fixtures."""
-    stats: list[dict] = []
-    for spec in REAL_DATASETS:
-        fasta = data_dir / spec["file"]
-        entry: dict = dict(spec)
-        entry["present"] = fasta.is_file()
-        if not entry["present"]:
-            stats.append(entry)
-            continue
-        entry["file_bytes"] = fasta.stat().st_size
-        fai = data_dir / f"{spec['file']}.fai"
-        if fai.is_file():
-            records, total_len = parse_fai_stats(fai)
-            entry["records"] = records
-            entry["total_len"] = total_len
-        stats.append(entry)
-    return stats
-
-
-def md_data_used(project_root: Path) -> str:
-    data_dir = project_root / "bench" / "shared" / "data"
-    lines = [
-        "**Data used** (human reference files in `bench/shared/data/`; "
-        "fetch with `bench/shared/download_data.sh`):",
-    ]
-    any_present = False
-    for entry in load_real_dataset_stats(data_dir):
-        if not entry.get("present"):
-            lines.append(
-                f"- **{entry['id']}** (`{entry['file']}`): {entry['description']} "
-                "(file not found on this machine)"
-            )
-            continue
-        any_present = True
-        records = entry.get("records")
-        total_len = entry.get("total_len")
-        size = format_file_size(entry["file_bytes"])
-        if records is not None and total_len is not None:
-            length = format_total_length(total_len, entry["len_unit"])
-            lines.append(
-                f"- **{entry['id']}** (`{entry['file']}`): {entry['description']}. "
-                f"{records:,} {entry['entry_noun']}, {length} total, {size} on disk."
-            )
-        else:
-            lines.append(
-                f"- **{entry['id']}** (`{entry['file']}`): {entry['description']}. "
-                f"{size} on disk (index `.fai` not found; run indexing to count entries)."
-            )
-    if not any_present:
-        lines.append(
-            "_No real dataset files present. Run `bash bench/shared/download_data.sh`._"
-        )
+        lines.append(f"- **{spec['id']}:** {spec['description']}.")
     return "\n".join(lines)
 
 
 def md_overview(manifest: dict | None) -> str:
-    """Opening narrative: what the index suite measures and what this report contains."""
-    lines = [
-        "This report compares `z-fasta index` to FASTA indexers that build or use "
-        "FAI-style `.fai` files. Wall time, throughput, peak RSS, and hardware counters "
-        "all come from the same zebrac samples for every tool, so the tables and charts "
-        "are directly comparable.",
-        (
-            "**Why `.fai` in cross-tool tables:** peer tools (samtools, noodles, seqkit, …) "
-            "emit text `.fai`. Headline **Performance**, **Memory**, **Page Faults**, and "
-            "**Scaling** therefore time **`z-fasta (.fai)`** (`index --emit-fai`) so the "
-            "comparison is format-fair. That lane is not the CLI default."
-        ),
-        (
-            "**Why `.zfi` is first-class:** CLI default `index` writes binary `.zfi` (embedded "
-            "names, optional side tables for messy wrap). That is the production path get and "
-            "stats are built around. **z-fasta Mode Comparison** times the full matrix: "
-            "mmap vs `--low-mem`, `.fai` vs `.zfi`, with and without `--no-dedup` (eight "
-            "lanes), with noodles and samtools as references."
-        ),
-        "**Performance and scaling:** three human reference downloads (Genome, "
-        "Transcriptome, Proteome; see **Data used** under Run Provenance), synthetic "
-        "file-size scaling from 1 MB through 1 GB, two sequence-count sweeps (bounded "
-        "~50 MiB total vs fixed 1 kbp per record through 1M sequences), and speedup "
-        "vs peers on the `.fai` lane. Zebrac counter columns are for profiling, not "
-        "headline marketing numbers.",
-        "**Correctness:** edge-case fixtures (structurally invalid FASTA) and messy "
-        "variants (ragged wrap, trailing spaces, CRLF exports). z-fasta indexes some "
-        "messy inputs with a side-table `.zfi`; samtools, noodles, and rust-bio follow "
-        "strict FAI line-width rules.",
-        "**On-disk `.zfi`:** after Mode Comparison, index file sizes and load/integrity "
-        "notes. Build timings for every mode live in Mode Comparison, not a second wall table.",
-        "**Charts** highlight peer-comparable `z-fasta (.fai)` plus samtools, seqkit, "
-        "noodles, and rust-bio. **Mode tables** list all eight z-fasta lanes when present.",
-    ]
-    if manifest and manifest.get("skip_real"):
-        lines.append("_This run skipped real datasets (`skip_real=true`)._")
-    if manifest and manifest.get("skip_scaling"):
-        lines.append("_This run skipped sequence-count scaling (`skip_scaling=true`)._")
-    if manifest and manifest.get("skip_size"):
-        lines.append("_This run skipped file-size scaling (`skip_size=true`)._")
-    return "\n\n".join(lines)
-
-
-def md_run_provenance(manifest: dict | None, project_root: Path) -> str:
-    if not manifest:
-        return "_No run manifest found._"
-
-    ts = manifest.get("timestamp", "unknown")
-    runner = manifest.get("runner", "zebrac")
-    mode = manifest.get("mode", "warm")
-    runs = manifest.get("runs", "?")
-    warmup = manifest.get("warmup", "?")
-    duration = manifest.get("duration_ms", "?")
-    zebrac = manifest.get("zebrac", "unknown")
-    zfasta = manifest.get("z_fasta", "unknown")
-    tools = manifest.get("tools") or {}
-    sections = manifest.get("sections") or {}
-    metadata = manifest.get("metadata") or f"metadata_{ts}.jsonl"
-
-    lines = [
-        f"Run **`{ts}`** used **{runner}** in **{mode}** mode: {runs} measured samples, "
-        f"{warmup} warmup passes, {duration} ms minimum per sample.",
-    ]
-
-    bullets = [
-        f"- **Subject:** {zfasta} (Zig; peer tables use `z-fasta (.fai)`; Mode Comparison covers `.fai` / `.zfi` × mmap / `--low-mem` × dedup / `--no-dedup`)",
-        f"- **Runner:** {zebrac}",
-    ]
-
-    artifacts: list[str] = []
-    if sections.get("real"):
-        artifacts.append(f"`results/{sections['real']}/` real datasets")
-    if sections.get("scale_size"):
-        artifacts.append(f"`results/{sections['scale_size']}/` file-size scaling")
-    if sections.get("scale_seqs_budget"):
-        artifacts.append(
-            f"`results/{sections['scale_seqs_budget']}/` sequence-count scaling (bounded bytes)"
-        )
-    if sections.get("scale_seqs_fixed"):
-        artifacts.append(
-            f"`results/{sections['scale_seqs_fixed']}/` sequence-count scaling (fixed length)"
-        )
-    if artifacts:
-        bullets.append(
-            f"- **Artifacts:** {'; '.join(artifacts)}; metadata in `results/{metadata}`"
-        )
-
-    blocks = [lines[0], "\n".join(bullets), md_data_used(project_root)]
-
-    measured: list[str] = []
-    for spec in COMPETITOR_TOOLS:
-        ver = tools.get(spec["key"])
-        if not ver:
-            continue
-        pin = spec["pin"]
-        pin_text = f"; pin {pin}" if pin else ""
-        measured.append(
-            f"- **{spec['label']}** ({spec['language']}): {ver} via `{spec['command']}` "
-            f"(from {spec['version_from']}{pin_text})"
-        )
-
-    if measured:
-        blocks.append(
-            "**Competitors in this run** (versions captured at benchmark time; "
-            "vendored pins in `bench/shared/tools.sh` / `tools/`):\n"
-            + "\n".join(measured)
-        )
-    else:
-        blocks.append(
-            "_Competitor binaries were not resolved on this machine. "
-            "Re-run `bash bench/index/run.sh` to capture versions in the manifest._"
-        )
-
-    blocks.append(
-        "Index-file cleanup runs inside each measured command because zebrac has no "
-        "separate prepare hook. Every tool pays the same small reset overhead."
+    """Explain the benchmark's scope and the meaning of each z-fasta lane."""
+    product_dataset_text = readable_list(list(product_workloads(manifest)))
+    return "\n\n".join(
+        [
+            "This report presents the benchmark sections captured by the selected run: "
+            "correctness, real-data performance and memory, format and dedup behavior, and "
+            "synthetic scaling where available.",
+            (
+                "Cross-tool tables use `z-fasta index --emit-fai` because the peer tools "
+                "write samtools-compatible `.fai` indexes. The z-fasta-only comparison "
+                f"separately covers `.fai` and the default `.zfi`, with dedup on and "
+                f"off, on {product_dataset_text}."
+            ),
+            (
+                "The **rust-bio** label needs one clarification: rust-bio has no equivalent "
+                "standalone FAI index command, so this benchmark lane uses the strict custom "
+                "Rust FAI writer in the rust-bio wrapper. The label stays short in tables and "
+                "figures, but the measured indexing code is custom."
+            ),
+            (
+                "Correctness covers strict FAI compatibility and z-fasta's `.zfi` support "
+                "for ragged wrapping, trailing spaces, blank lines, and mixed line endings."
+            ),
+        ]
     )
-    return "\n\n".join(blocks)
 
 
-def _headline_pivot(pivot: pd.DataFrame) -> pd.DataFrame:
-    return _ordered_pivot(pivot, HEADLINE_PERF_TOOLS, sort_index=dataset_sort_key)
+def md_run_provenance(manifest: dict | None) -> str:
+    """Summarize the build and benchmark setup."""
+    if not manifest:
+        return "_No run information available._"
+
+    build = manifest.get("build") or {}
+    target = str(build.get("target", "unknown")).split(".", 1)[0]
+    mode = manifest.get("mode", "warm")
+    return "\n".join(
+        (
+            f"- **Build:** z-fasta "
+            f"{short_tool_version(manifest.get('z_fasta'), 'z-fasta ')}; "
+            f"Zig {build.get('zig_version', 'unknown')}; "
+            f"{build.get('optimize', 'unknown')}; `{target}`.",
+            f"- **Benchmark:** zebrac "
+            f"{short_tool_version(manifest.get('zebrac'), 'zebrac ')}; "
+            f"{mode} cache; {manifest.get('runs', '?')} measured samples after "
+            f"{manifest.get('warmup', '?')} warmups; "
+            f"{manifest.get('duration_ms', '?')} ms budget per command.",
+        )
+    )
+
 
 
 def md_perf_headline_table(df: pd.DataFrame) -> str:
@@ -1970,7 +1452,7 @@ def md_zfasta_vs_tools_table(df: pd.DataFrame) -> str:
         extra_columns=lambda r: {
             "z-fasta MiB/s": f"{r.zfasta_mibs:.1f}" if r.zfasta_mibs else "n/a",
             "Competitor MiB/s": f"{r.comp_mibs:.1f}" if r.comp_mibs else "n/a",
-            "Throughput ×": _format_speedup(r.throughput_x),
+            "Throughput ratio": _format_speedup(r.throughput_x),
         },
     )
 
@@ -2012,9 +1494,9 @@ def md_zfasta_vs_rss_table(df: pd.DataFrame) -> str:
         comparisons,
         zf_label="z-fasta",
         comp_label="Competitor",
-        ratio_label="RSS ×",
-        fmt_zf=lambda r: f"{r.zfasta_v:.2f} MB",
-        fmt_comp=lambda r: f"{r.comp_v:.2f} MB",
+        ratio_label="RSS ratio",
+        fmt_zf=lambda r: f"{r.zfasta_v:.2f} MiB",
+        fmt_comp=lambda r: f"{r.comp_v:.2f} MiB",
     )
 
 
@@ -2025,9 +1507,29 @@ def md_zfasta_vs_faults_table(df: pd.DataFrame) -> str:
         comparisons,
         zf_label="z-fasta",
         comp_label="Competitor",
-        ratio_label="Faults ×",
+        ratio_label="Faults ratio",
         fmt_zf=lambda r: f"{int(r.zfasta_v):,}",
         fmt_comp=lambda r: f"{int(r.comp_v):,}",
+    )
+
+
+def md_real_performance_result(df: pd.DataFrame) -> str:
+    comparisons = build_headline_comparisons(filter_headline_perf(df))
+    if comparisons.empty:
+        return ""
+    losses = comparisons[comparisons["ratio"] < 1.0]
+    if losses.empty:
+        slowest_win = comparisons.loc[comparisons["ratio"].idxmin()]
+        datasets = sorted(df["dataset"].unique(), key=dataset_sort_key)
+        return (
+            f"**Measured result:** z-fasta is faster than every reported peer on "
+            f"{readable_list(datasets)}. The narrowest lead is {slowest_win.ratio:.2f}x against "
+            f"{slowest_win.competitor} on {slowest_win.dataset}."
+        )
+    loss = losses.loc[losses["ratio"].idxmin()]
+    return (
+        f"**Measured result:** {loss.competitor} is faster than z-fasta on {loss.dataset} "
+        f"(z-fasta speedup {loss.ratio:.2f}x)."
     )
 
 
@@ -2039,25 +1541,28 @@ def md_performance_real_datasets(df: pd.DataFrame, nums: ReportCounters) -> str:
     t_cmp = nums.next_table()
     f_perf = nums.next_figure()
     blocks = [
-        "Headline comparison on the three human reference datasets (see **Data used**). "
-        "**z-fasta (.fai)** is `index --emit-fai` (mmap + dedup, FAI to stdout) so peers are "
-        "format-fair. CLI default `index` writes `.zfi`; see **z-fasta Mode Comparison** and "
-        "**z-fasta Production Index (.zfi)**.",
+        "Headline comparison on the three human reference datasets (see **Datasets**). "
+        "**z-fasta (.fai)** is `index --emit-fai` with dedup. It constructs the "
+        "peer-compatible output while discarding the emitted stream; peers write sidecar "
+        "files. Output destinations and duplicate-name policies therefore are not identical. "
+        "The product table isolates z-fasta's dedup cost. CLI default `index` writes `.zfi`; "
+        "see **z-fasta Format and Dedup Comparison**.",
+        md_real_performance_result(df),
         f"**Table {t_wall}:** Zebrac wall time per dataset (seconds, mean ± stddev, warm cache). "
         "Lower is better. Tool order: z-fasta, noodles, rust-bio, samtools, seqkit, "
         "fastahack, pyfaidx.",
         md_perf_headline_table(df),
         "<details>",
-        f"<summary><strong>Table {t_tp}:</strong> Input throughput (MiB/s) from metadata "
-        f"<code>input_bytes</code> and wall time. Higher is better. Same tools and order "
+        f"<summary><strong>Table {t_tp}:</strong> Input throughput (MiB/s), calculated from "
+        f"input size and wall time. Higher is better. Same tools and order "
         f"as Table {t_wall}.</summary>",
         "",
         throughput,
         "</details>",
         "<details>",
         f"<summary><strong>Table {t_cmp}:</strong> z-fasta vs each competitor. "
-        "Speedup = competitor wall time ÷ z-fasta wall time (higher = z-fasta faster). "
-        f"Same ratios appear as bar labels on Figure {f_perf}. Throughput × uses MiB/s.</summary>",
+        "Speedup = competitor wall time / z-fasta wall time (higher = z-fasta faster). "
+        f"Same ratios appear as bar labels on Figure {f_perf}. Throughput ratio uses MiB/s.</summary>",
         "",
         md_zfasta_vs_tools_table(df),
         "</details>",
@@ -2073,12 +1578,13 @@ def md_performance_real_datasets(df: pd.DataFrame, nums: ReportCounters) -> str:
             f"**Reading Figure {f_perf}**\n"
             "- **Bars (left):** zebrac mean wall time. Error bars are one standard deviation.\n"
             "- **Lines and markers (right):** input MiB/s for the same tool at each dataset.\n"
-            "- **Legend order:** z-fasta, noodles, rust-bio, samtools, seqkit, fastahack, pyfaidx.\n"
-            "- **Bar labels:** `1×` on z-fasta (baseline); competitor labels = z-fasta speedup "
-            f"(competitor time ÷ z-fasta time). Border color matches the tool. Dashed gold line "
+            "- **Legend order:** z-fasta, noodles, rust-bio, samtools, seqkit, "
+            "fastahack, pyfaidx.\n"
+            "- **Bar labels:** `1x` on z-fasta (baseline); competitor labels = z-fasta speedup "
+            f"(competitor time / z-fasta time). Border color matches the tool. Dashed gold line "
             f"= z-fasta wall time for that dataset. Details in Table {t_cmp}.\n"
-            "- **z-fasta only:** this section uses the peer-comparable `.fai` lane; full "
-            "I/O × format × dedup tradeoffs are in **z-fasta Mode Comparison** (before Edge Case Correctness)."
+            "- **z-fasta only:** this section uses the peer-comparable `.fai` lane; format and "
+            "dedup tradeoffs are in **z-fasta Format and Dedup Comparison**."
         ),
     ]
     return "\n\n".join(blocks)
@@ -2100,6 +1606,27 @@ def md_scaling_headline_table(
     return pivot.to_markdown(floatfmt=".4f")
 
 
+def md_scaling_zfasta_rss_table(
+    df: pd.DataFrame, param_col: str, param_label: str
+) -> str:
+    """Peak RSS for the z-fasta FAI lane across one scaling sweep."""
+    work = df[df["tool"] == "z-fasta-fai"].sort_values(param_col)
+    if work.empty:
+        return "_No z-fasta scaling memory data._"
+    rows = []
+    for row in work.itertuples(index=False):
+        rows.append(
+            {
+                param_label: _scaling_param_label(param_col, getattr(row, param_col)),
+                "Peak RSS (MiB)": f"{row.peak_rss_mb:.2f}",
+                "RSS spread (MiB)": (
+                    f"{row.peak_rss_max_mb - row.peak_rss_min_mb:.2f}"
+                ),
+            }
+        )
+    return pd.DataFrame(rows).to_markdown(index=False)
+
+
 def md_zfasta_vs_scaling_table(
     df: pd.DataFrame, param_col: str, param_label: str
 ) -> str:
@@ -2110,10 +1637,26 @@ def md_zfasta_vs_scaling_table(
         group_label=param_label,
         zf_label="z-fasta",
         comp_label="Competitor",
-        ratio_label="Time ×",
+        ratio_label="Time ratio",
         fmt_zf=lambda r: f"{r.zfasta_v:.4f}s",
         fmt_comp=lambda r: f"{r.comp_v:.4f}s",
     )
+
+
+def md_scaling_result(comparisons: pd.DataFrame) -> str:
+    """Summarize scaling losses from the display labels in the ratio table."""
+    losses = comparisons[comparisons["ratio"] < 1.0]
+    if losses.empty:
+        return "**Measured result:** z-fasta is fastest at every measured point."
+    grouped: dict[str, list[str]] = {}
+    for row in losses.sort_values("ratio").head(3).itertuples(index=False):
+        grouped.setdefault(row.dataset, []).append(row.competitor)
+    names = "; ".join(
+        f"{readable_list(peers)} at {point}"
+        for point, peers in grouped.items()
+    )
+    suffix = "; additional losses remain in the table" if len(losses) > 3 else ""
+    return f"**Measured result:** faster than z-fasta: {names}{suffix}."
 
 
 def md_scaling_section(
@@ -2132,21 +1675,34 @@ def md_scaling_section(
     """Shared template for file-size and sequence-count scaling sections."""
     t_wall = nums.next_table()
     t_cmp = nums.next_table()
+    t_rss = nums.next_table()
     f_scale = nums.next_figure()
+    comparisons = build_scaling_ratio_comparisons(
+        filter_headline_perf(df), param_col, "mean"
+    )
+    result = md_scaling_result(comparisons)
     blocks = [
         intro,
+        result,
         subsection,
         "<details>",
         f"<summary><strong>Table {t_wall}:</strong> Wall time per {table_x_label} "
-        "(zebrac mean, seconds). Same tool order as Performance.</summary>",
+        "(zebrac mean, seconds). Tool order: z-fasta, noodles, rust-bio, samtools, "
+        "seqkit, fastahack, pyfaidx.</summary>",
         "",
         md_scaling_headline_table(df, param_col, param_label),
         "</details>",
         "<details>",
         f"<summary><strong>Table {t_cmp}:</strong> z-fasta vs each competitor at each "
-        f"{table_x_label}. Time × = competitor wall time / z-fasta wall time.</summary>",
+        f"{table_x_label}. Time ratio = competitor wall time / z-fasta wall time.</summary>",
         "",
         md_zfasta_vs_scaling_table(df, param_col, param_label),
+        "</details>",
+        "<details>",
+        f"<summary><strong>Table {t_rss}:</strong> z-fasta peak RSS across the same "
+        f"{table_x_label} sweep.</summary>",
+        "",
+        md_scaling_zfasta_rss_table(df, param_col, param_label),
         "</details>",
         '<div style="margin: 1.5em 0"></div>',
         f"**Figure {f_scale}:** Table {t_wall} as lines (log scales on both axes). "
@@ -2156,393 +1712,127 @@ def md_scaling_section(
             f"**Reading Figure {f_scale}**\n"
             f"- Lines: mean wall time vs {reading_x_label}. Both axes use log scale.\n"
             f"- Lower on the chart = faster at that {table_x_label}.\n"
-            "- Legend colors match **Performance: Real Datasets**.\n"
-            f"- Time × ratios are in Table {t_cmp}; the chart does not show them."
+            "- Legend order: z-fasta, noodles, rust-bio, samtools, seqkit, fastahack, "
+            "pyfaidx.\n"
+            f"- Time ratios are in Table {t_cmp}; the chart does not show them."
         ),
     ]
     return "\n\n".join(blocks)
 
 
-def md_mode_wall_time_table(df: pd.DataFrame) -> str:
-    return md_tool_pivot_table(
-        df,
-        MODE_COMPARISON_TOOLS,
-        "dataset",
-        "mean",
-        lambda row: f"{row['mean']:.4f}s ±{row['stddev']:.4f}",
-        empty_msg="_No mode comparison data._",
+def md_product_effect_table(df: pd.DataFrame) -> str:
+    """Dedup-on vs no-dedup wall time and RSS within each output format."""
+    formats = (
+        (".fai", "z-fasta-fai", "z-fasta-fai-nodedup"),
+        (".zfi", "z-fasta-zfi", "z-fasta-zfi-nodedup"),
     )
+    rows = []
+    for dataset in sorted(df["dataset"].unique(), key=dataset_sort_key):
+        for output, dedup_tool, no_dedup_tool in formats:
+            dedup = df[(df["dataset"] == dataset) & (df["tool"] == dedup_tool)]
+            no_dedup = df[(df["dataset"] == dataset) & (df["tool"] == no_dedup_tool)]
+            if dedup.empty or no_dedup.empty:
+                continue
+            dedup_row = dedup.iloc[0]
+            no_dedup_row = no_dedup.iloc[0]
+            no_dedup_wall = float(no_dedup_row["mean"])
+            no_dedup_rss = float(no_dedup_row["peak_rss_mb"])
+            wall_ratio = (
+                float(dedup_row["mean"]) / no_dedup_wall
+                if no_dedup_wall > 0
+                else None
+            )
+            rss_ratio = (
+                float(dedup_row["peak_rss_mb"]) / no_dedup_rss
+                if no_dedup_rss > 0
+                else None
+            )
+            rows.append(
+                {
+                    "Dataset": dataset,
+                    "Output": output,
+                    "Dedup wall": f"{dedup_row['mean']:.4f}s ±{dedup_row['stddev']:.4f}",
+                    "No-dedup wall": (
+                        f"{no_dedup_row['mean']:.4f}s ±{no_dedup_row['stddev']:.4f}"
+                    ),
+                    "Wall ratio": f"{wall_ratio:.2f}x" if wall_ratio else "n/a",
+                    "Dedup RSS": f"{dedup_row['peak_rss_mb']:.2f} MiB",
+                    "No-dedup RSS": f"{no_dedup_row['peak_rss_mb']:.2f} MiB",
+                    "RSS ratio": f"{rss_ratio:.2f}x" if rss_ratio else "n/a",
+                }
+            )
+    if not rows:
+        return "_No complete format and dedup pairs._"
+    return pd.DataFrame(rows).to_markdown(index=False)
 
 
-def md_mode_throughput_table(df: pd.DataFrame) -> str:
-    if "throughput_mibs" not in df.columns:
-        return "_No throughput data._"
-    return md_tool_pivot_table(
-        df,
-        MODE_COMPARISON_TOOLS,
-        "dataset",
-        "throughput_mibs",
-        lambda row: f"{row['throughput_mibs']:.1f} MiB/s",
-        empty_msg="_No throughput data._",
-        require_non_null=True,
-    )
-
-
-def md_mode_rss_table(df: pd.DataFrame) -> str:
-    return md_tool_pivot_table(
-        df,
-        MODE_COMPARISON_TOOLS,
-        "dataset",
-        "peak_rss_mb",
-        lambda row: f"{row['peak_rss_mb']:.2f} MB",
-        empty_msg="_No mode comparison data._",
-    )
-
-
-def md_mode_vs_default_table(
-    df: pd.DataFrame,
-    *,
-    value_col: str,
-    baseline_label: str,
-    ratio_label: str,
-    fmt_baseline,
-    fmt_other,
-) -> str:
-    work = filter_mode_comparison(df)
-    comparisons = build_mode_ratio_comparisons(work, value_col)
-    return md_zfasta_vs_ratio_table(
-        comparisons,
-        vs_label="vs z-fasta (.fai)",
-        zf_label=baseline_label,
-        comp_label="Other",
-        ratio_label=ratio_label,
-        fmt_zf=fmt_baseline,
-        fmt_comp=fmt_other,
-    )
-
-
-def md_mode_time_vs_default_table(df: pd.DataFrame) -> str:
-    work = filter_mode_comparison(df)
-    comparisons = build_mode_comparisons(work)
-    return md_zfasta_vs_ratio_table(
-        comparisons,
-        vs_label="vs z-fasta (.fai)",
-        zf_label="z-fasta (.fai)",
-        comp_label="Other",
-        ratio_label="Time ×",
-        fmt_zf=lambda r: f"{r.zfasta_s:.4f}s",
-        fmt_comp=lambda r: f"{r.comp_s:.4f}s",
-        extra_columns=lambda r: {
-            "(.fai) MiB/s": (
-                f"{r.zfasta_mibs:.1f}" if r.zfasta_mibs is not None else "n/a"
-            ),
-            "Other MiB/s": (
-                f"{r.comp_mibs:.1f}" if r.comp_mibs is not None else "n/a"
-            ),
-            "Throughput ×": (
-                f"{r.throughput_x:.2f}×"
-                if r.throughput_x is not None and r.throughput_x > 0
-                else "n/a"
-            ),
-        },
-    )
-
-
-def md_mode_comparison_section(
+def md_product_comparison_section(
     df: pd.DataFrame,
     nums: ReportCounters,
 ) -> str:
-    """Mode section: full 8-cell z-fasta matrix plus noodles and samtools."""
-    t_wall = nums.next_table()
-    t_tp = nums.next_table()
-    t_time_cmp = nums.next_table()
-    t_rss = nums.next_table()
-    t_rss_cmp = nums.next_table()
-    f_time = nums.next_figure()
-    f_mem = nums.next_figure()
+    """Thin z-fasta-only view of output format and dedup cost."""
+    t_effect = nums.next_table()
     f_trade = nums.next_figure()
+    datasets = sorted(df["dataset"].unique(), key=dataset_sort_key)
+    dataset_text = readable_list([f"**{dataset}**" for dataset in datasets])
+
+    effects = []
+    for dataset in datasets:
+        for output, dedup_tool, no_dedup_tool in (
+            (".fai", "z-fasta-fai", "z-fasta-fai-nodedup"),
+            (".zfi", "z-fasta-zfi", "z-fasta-zfi-nodedup"),
+        ):
+            dedup = df[(df["dataset"] == dataset) & (df["tool"] == dedup_tool)]
+            no_dedup = df[(df["dataset"] == dataset) & (df["tool"] == no_dedup_tool)]
+            if dedup.empty or no_dedup.empty:
+                continue
+            effects.append(
+                (
+                    float(dedup.iloc[0]["peak_rss_mb"])
+                    / float(no_dedup.iloc[0]["peak_rss_mb"]),
+                    dataset,
+                    output,
+                )
+            )
+    if effects:
+        rss_ratio, rss_dataset, rss_output = max(effects)
+        result = (
+            f"**Measured result:** the largest dedup memory cost is {rss_ratio:.2f}x on "
+            f"{rss_dataset} (`{rss_output}`)."
+        )
+    else:
+        result = ""
 
     blocks = [
         (
-            "Compares every published z-fasta index lane on the same human reference files "
-            "as **Performance: Real Datasets**, with **noodles** and **samtools** as "
-            "references. Axes: **I/O** (mmap vs `--low-mem`), **output** (`.fai` via "
-            "`--emit-fai` vs `.zfi` via default `index`), **dedup** (on vs `--no-dedup`). "
-            "Eight z-fasta commands; labels use `z-fasta (.fai)` / `z-fasta (.zfi)` plus "
-            "`--low-mem` / `--no-dedup` (never `--emit-fai` in the short name). "
-            "Time × / RSS × baseline is **`z-fasta (.fai)`** (peer-comparable lane)."
+            f"This focused z-fasta comparison uses {dataset_text}. It isolates output format "
+            "(`.fai` or `.zfi`) and duplicate-name tracking (dedup or `--no-dedup`). Peer "
+            "indexers stay in the cross-tool performance sections, where they answer a "
+            "different question."
         ),
+        result,
         (
-            "### Wall time and throughput\n\n"
-            "Mean zebrac wall time per dataset. **Lower is better.** Tool order follows "
-            "Mode Comparison columns (eight z-fasta lanes, then noodles, samtools). "
-            "Bar labels and Time × use each value divided by `z-fasta (.fai)` "
-            "(values below `1×` are faster than that baseline)."
+            f"**Table {t_effect}:** Measured wall time and peak RSS for each matched pair. "
+            "Each ratio is dedup divided by no-dedup within the same dataset and output "
+            "format. Values above `1x` are the measured dedup cost."
         ),
-        (
-            f"**Table {t_wall}:** Wall time (seconds, mean ± stddev). Same tool order as "
-            "the mode figures."
-        ),
-        md_mode_wall_time_table(df),
-        "<details>",
-        (
-            f"<summary><strong>Table {t_tp}:</strong> Input throughput (MiB/s) from metadata "
-            f"<code>input_bytes</code> and wall time. Higher is better. Same tools and order "
-            f"as Table {t_wall}.</summary>"
-        ),
-        "",
-        md_mode_throughput_table(df),
-        "</details>",
-        "<details>",
-        (
-            f"<summary><strong>Table {t_time_cmp}:</strong> Each configuration vs "
-            "`z-fasta (.fai)`. Time × = other wall time ÷ baseline wall time. Throughput × = "
-            f"baseline MiB/s ÷ other MiB/s. Same ratios as bar labels on Figure {f_time}.</summary>"
-        ),
-        "",
-        md_mode_time_vs_default_table(df),
-        "</details>",
+        md_product_effect_table(df),
         '<div style="margin: 1.5em 0"></div>',
         (
-            f"**Figure {f_time}:** Dual-axis chart for Table {t_wall} and Table {t_tp}. Bars "
-            "show wall time (left axis, log scale). Lines show throughput (right axis). "
-            f"Bar labels show Time × vs `z-fasta (.fai)` (see Table {t_time_cmp}); gold dashed "
-            "line = baseline wall time per dataset."
+            f"**Figure {f_trade}:** The same measured configurations plotted by peak RSS "
+            "and wall time. Both axes use log scale; lower-left is faster with less process "
+            "memory."
         ),
         (
-            f"![Figure {f_time}: mode comparison wall time and throughput]"
-            "(results/figures/mode_comparison_performance.png)"
-        ),
-        (
-            f"**Reading Figure {f_time}**\n"
-            "- **Bars (left):** zebrac mean wall time. Error bars are one standard deviation.\n"
-            "- **Lines and markers (right):** input MiB/s for the same tool at each dataset.\n"
-            "- **Legend:** eight z-fasta lanes (`(.fai)` / `(.zfi)` × mmap / `--low-mem` × "
-            "dedup / `--no-dedup`), then noodles, samtools.\n"
-            "- **Bar labels:** `1×` on `z-fasta (.fai)`; other labels = Time × (other ÷ baseline).\n"
-            f"- Details in Table {t_time_cmp}."
-        ),
-        (
-            "### Peak RSS\n\n"
-            "zebrac peak RSS when the indexer process exits (`ru_maxrss`). **Lower is better** "
-            "for the same file. Grey dashed lines on the figure mark FASTA size on disk. "
-            "`--low-mem` lanes stream the FASTA; mmap lanes hold the file mapping."
-        ),
-        (
-            f"**Table {t_rss}:** Peak RSS (MB, zebrac mean). Same tool order as Table {t_wall}."
-        ),
-        md_mode_rss_table(df),
-        "<details>",
-        (
-            f"<summary><strong>Table {t_rss_cmp}:</strong> Each configuration vs "
-            "`z-fasta (.fai)`. RSS × = other peak RSS ÷ baseline peak RSS. Same ratios as "
-            f"bar labels on Figure {f_mem}.</summary>"
-        ),
-        "",
-        md_mode_vs_default_table(
-            df,
-            value_col="peak_rss_mb",
-            baseline_label="z-fasta (.fai)",
-            ratio_label="RSS ×",
-            fmt_baseline=lambda r: f"{r.zfasta_v:.2f} MB",
-            fmt_other=lambda r: f"{r.comp_v:.2f} MB",
-        ),
-        "</details>",
-        '<div style="margin: 1.5em 0"></div>',
-        (
-            f"**Figure {f_mem}:** Table {t_rss} as grouped bars (log scale). Bar labels = RSS × "
-            f"(see Table {t_rss_cmp}). Gold dashed line = `z-fasta (.fai)` RSS; grey dashed = "
-            "FASTA file size on disk."
-        ),
-        (
-            f"![Figure {f_mem}: mode comparison peak RSS](results/figures/mode_comparison_memory.png)"
-        ),
-        (
-            f"**Reading Figure {f_mem}**\n"
-            "- **Legend:** same eight z-fasta lanes plus noodles and samtools as Figure "
-            f"{f_time}.\n"
-            "- Bars: mean peak RSS. `1×` on `z-fasta (.fai)`; other labels = other ÷ baseline.\n"
-            "- Gold dashed line: baseline RSS for that dataset.\n"
-            "- Grey dashed line: file size from `input_bytes`.\n"
-            f"- Details in Table {t_rss_cmp}."
-        ),
-        (
-            "### Time vs memory tradeoff\n\n"
-            "Each panel is one real dataset. Facet titles show on-disk size and record count "
-            "from **Data used**. One point per tool; both axes use log scale. **Lower-left** "
-            "is faster with less RAM; **upper-right** is slower with more RAM."
-        ),
-        (
-            f"**Figure {f_trade}:** Scatter of wall time (y) vs peak RSS (x) for Mode "
-            "Comparison tools. Shared legend sits below the Transcriptome panel."
-        ),
-        (
-            f"![Figure {f_trade}: mode comparison time vs memory]"
-            "(results/figures/mode_comparison_tradeoff.png)"
+            f"![Figure {f_trade}: format and dedup time versus memory]"
+            "(results/figures/product_comparison.png)"
         ),
         (
             f"**Reading Figure {f_trade}**\n"
-            "- One facet per dataset (Genome, Transcriptome, Proteome).\n"
-            "- Facet title: dataset name, file size, and entry count when available.\n"
-            f"- Colors match Figure {f_time}: gold family = `.fai` lanes; orange family = "
-            "`.zfi` lanes; bronze = noodles; grey = samtools.\n"
-            "- Legend is shared under the middle facet."
-        ),
-    ]
-    return "\n\n".join(blocks)
-
-
-def md_zfi_size_prose(index_stats: list[dict]) -> str:
-    """Prose summary of on-disk `.zfi` vs `.fai` from benchmark fixtures."""
-    if not index_stats:
-        return (
-            "No index files found under `bench/shared/data/`. Run "
-            "`bench/shared/download_data.sh` to generate sidecars."
-        )
-
-    lines = [
-        "Each uniform entry is a fixed 40-byte `IndexRecord` (`src/index_format.zig`). "
-        "FAI lines grow with sequence name length plus five tab-separated numeric fields. "
-        "Non-uniform (messy) records add side-table bytes on top of the 40-byte header.",
-    ]
-    by_id = {row["dataset"]: row for row in index_stats}
-
-    tx = by_id.get("Transcriptome")
-    if tx and tx.get("fai_over_zfi") and tx.get("zfi_records"):
-        lines.append(
-            f"On **Transcriptome** ({tx['zfi_records']:,} entries), `.zfi` is "
-            f"{format_file_size(tx['zfi_bytes'])} vs `.fai` "
-            f"{format_file_size(tx['fai_bytes'])} "
-            f"(FAI / ZFI = {tx['fai_over_zfi']:.2f}x; about "
-            f"{tx['zfi_bytes_per_rec']:.0f} B per record vs "
-            f"{tx['fai_bytes_per_line']:.0f} B per FAI line). Long GENCODE names favor "
-            "the binary layout."
-        )
-
-    genome = by_id.get("Genome")
-    if genome and genome.get("fai_over_zfi") and genome.get("zfi_records"):
-        if genome["fai_over_zfi"] < 1.0:
-            lines.append(
-                f"On **Genome** ({genome['zfi_records']:,} sequences), short chromosome names "
-                f"make `.fai` smaller (FAI / ZFI = {genome['fai_over_zfi']:.2f}x; "
-                f"~{genome['fai_bytes_per_line']:.0f} B per FAI line vs "
-                f"~{genome['zfi_bytes_per_rec']:.0f} B per record). Fixed 40-byte records "
-                "carry overhead when names are only a few characters."
-            )
-        else:
-            lines.append(
-                f"On **Genome** ({genome['zfi_records']:,} sequences), "
-                f"FAI / ZFI = {genome['fai_over_zfi']:.2f}x."
-            )
-
-    proteome = by_id.get("Proteome")
-    if proteome and proteome.get("fai_over_zfi") and proteome.get("zfi_records"):
-        if abs(proteome["fai_over_zfi"] - 1.0) < 0.05:
-            lines.append(
-                f"On **Proteome** ({proteome['zfi_records']:,} entries), sizes are about "
-                f"equal (FAI / ZFI = {proteome['fai_over_zfi']:.2f}x) because UniProt IDs "
-                "are already compact in text form."
-            )
-
-    if any(
-        row.get("fai_bytes") and not row.get("zfi_bytes") for row in index_stats
-    ):
-        lines.append(
-            "`.zfi` sidecars were missing on disk when this report was built. "
-            "Run `bash bench/index/run.sh` (real-dataset section) or "
-            "`./zig-out/bin/z-fasta index` on each REAL_* file before regenerating."
-        )
-
-    return " ".join(lines)
-
-
-def md_zfi_index_size_table(stats: list[dict]) -> str:
-    """On-disk `.zfi` vs `.fai` size comparison from benchmark fixtures."""
-    if not stats:
-        return "_No index files found under `bench/shared/data/`._"
-
-    headers = [
-        "Dataset",
-        "Records",
-        "`.zfi`",
-        "`.fai`",
-        "FAI / ZFI",
-        "ZFI B/rec",
-        "FAI B/line",
-    ]
-    lines = [
-        "| " + " | ".join(headers) + " |",
-        "| " + " | ".join(["---"] * len(headers)) + " |",
-    ]
-    for row in sorted(stats, key=lambda r: dataset_sort_key(r["dataset"])):
-        records = row.get("zfi_records") or row.get("fai_records")
-        rec_s = f"{records:,}" if records else "n/a"
-        zfi_s = format_file_size(row["zfi_bytes"]) if row.get("zfi_bytes") else "n/a"
-        fai_s = format_file_size(row["fai_bytes"]) if row.get("fai_bytes") else "n/a"
-        ratio = row.get("fai_over_zfi")
-        ratio_s = f"{ratio:.2f}x" if ratio else "n/a"
-        zfi_bpr = row.get("zfi_bytes_per_rec")
-        fai_bpl = row.get("fai_bytes_per_line")
-        zfi_bpr_s = f"{zfi_bpr:.0f}" if zfi_bpr else "n/a"
-        fai_bpl_s = f"{fai_bpl:.0f}" if fai_bpl else "n/a"
-        lines.append(
-            f"| {row['dataset']} | {rec_s} | {zfi_s} | {fai_s} | {ratio_s} | "
-            f"{zfi_bpr_s} | {fai_bpl_s} |"
-        )
-    return "\n".join(lines)
-
-
-def md_zfi_production_section(
-    perf_df: pd.DataFrame,
-    data_dir: Path,
-    nums: ReportCounters,
-) -> str:
-    """On-disk `.zfi` size, load path, and integrity (timings live in Mode Comparison)."""
-    _ = perf_df
-    index_stats = load_index_format_stats(data_dir)
-    t_size = nums.next_table()
-
-    blocks: list[str] = [
-        (
-            "Cross-tool **Performance** tables use **`z-fasta (.fai)`** so competitors that "
-            "write text `.fai` stay format-fair. CLI default `index` writes binary `.zfi`. "
-            "Build wall time and RSS for every I/O × format × dedup lane are in "
-            "**z-fasta Mode Comparison**; this section is about the on-disk artifact."
-        ),
-        (
-            "### On-disk size\n\n"
-            + md_zfi_size_prose(index_stats)
-            + f"\n\n**Table {t_size}:** Index file size on the three real datasets "
-            "(`bench/shared/data/`). FAI / ZFI above 1.0 means the text `.fai` is larger."
-        ),
-        md_zfi_index_size_table(index_stats),
-        (
-            "### Load path\n\n"
-            "`loadIndex` opens `.zfi` first, then falls back to `.fai`. For `.zfi`, the "
-            "record array is a zero-copy view of mmap'd index bytes, and `lookup_full_map` "
-            "builds a pointer hash over the embedded name blob. For `.fai`, the loader mmaps "
-            "the text index, parses lines into a record array, and points "
-            "`name_offset` / `name_len` into the mmap'd `.fai` (`tryLoadFai` in "
-            "`index_format.zig`). `.zfi` entries store `name_offset` / `name_len` into the "
-            "mmap'd FASTA as well. `stats --index-only` and small `get` batches can load "
-            "either format in `.records_only` mode and skip the name hash; `.fai` stats scans "
-            "use `.stats_scan` (on-demand name reads)."
-        ),
-        (
-            "### Messy FASTA\n\n"
-            "FAI assumes one `line_bases` / `line_bytes` pair per record. z-fasta indexes "
-            "irregular wrap, trailing whitespace, blank lines, and mixed CRLF/LF using "
-            "per-record side tables (see **Messy FASTA Compatibility**). Emit `.fai` only "
-            "with `index --emit-fai` when every record is FAI-representable; otherwise use "
-            "default `.zfi`. Load still falls back to an existing `.fai` for samtools-"
-            "compatible text indexes."
-        ),
-        (
-            "### Integrity\n\n"
-            "`.zfi` stores `source_size` and, on current writers, a `ZFID` embedded FASTA "
-            "mtime. Load rejects size or embedded-mtime mismatch. Legacy `.zfi` without "
-            "`ZFID` keeps the weaker index-file mtime check. `.fai` identity remains "
-            "mtime-only (no embedded source fields)."
+            f"- Panels: {readable_list(datasets)}.\n"
+            "- Gold points: `.fai`; orange points: `.zfi`.\n"
+            "- Lighter points: `--no-dedup`; darker points: dedup.\n"
+            f"- Exact measurements and within-format ratios are in Table {t_effect}."
         ),
     ]
     return "\n\n".join(blocks)
@@ -2555,7 +1845,7 @@ def md_memory_rss_headline_table(df: pd.DataFrame) -> str:
         HEADLINE_PERF_TOOLS,
         "dataset",
         "peak_rss_mb",
-        lambda row: f"{row['peak_rss_mb']:.2f} MB",
+        lambda row: f"{row['peak_rss_mb']:.2f} MiB",
         empty_msg="_No memory data._",
     )
 
@@ -2589,39 +1879,53 @@ def md_memory_usage_real_datasets(df: pd.DataFrame, nums: ReportCounters) -> str
     t_rss = nums.next_table()
     t_cmp = nums.next_table()
     f_mem = nums.next_figure()
+    comparisons = build_headline_ratio_comparisons(
+        filter_headline_perf(df), "peak_rss_mb"
+    )
+    lower = comparisons[comparisons["ratio"] < 1.0]
+    if lower.empty:
+        result = "**Measured result:** no reported peer uses less peak RSS than z-fasta."
+    else:
+        best = lower.loc[lower["ratio"].idxmin()]
+        result = (
+            f"**Measured result:** {best.competitor} uses less peak RSS on {best.dataset} "
+            f"({best.comp_v:.2f} MiB vs {best.zfasta_v:.2f} MiB). The headline z-fasta "
+            "lane includes default duplicate-name tracking."
+        )
     blocks = [
         "Same zebrac runs as **Performance: Real Datasets**. z-fasta (.fai) only; "
-        "modes are in **z-fasta Mode Comparison**.",
+        "other product lanes are in **z-fasta Format and Dedup Comparison**.",
+        result,
         (
             "### Peak RSS\n\n"
             "zebrac starts a new process for each sample and records peak RSS when it "
             "exits. That is the most RAM the process had in use at once (Linux "
             "`ru_maxrss` via `getrusage`). Table and figure show the mean across "
             "samples.\n\n"
-            "Use this to compare tools on the same file and host. mmap the whole FASTA "
-            "and RSS often tracks file size on disk (grey dashed line on the figure). "
-            "A low bar does not always mean less work: stream parsers can stay small here "
-            "and show up instead under page faults."
+            "Use this to compare tools on the same file and host. Grey dashed lines show file "
+            "size as context; output and dedup state can still affect memory. A low bar does "
+            "not always mean less work, so wall time and page faults provide the surrounding "
+            "context."
         ),
-        f"**Table {t_rss}:** Peak RSS (MB, zebrac mean). Same tool order as Performance.",
+        f"**Table {t_rss}:** Peak RSS (MiB, zebrac mean). Same tool order as Performance.",
         md_memory_rss_headline_table(df),
         "<details>",
         f"<summary><strong>Table {t_cmp}:</strong> z-fasta vs each competitor. "
-        "RSS × = competitor peak RSS / z-fasta peak RSS. Same ratios as bar labels on "
+        "RSS ratio = competitor peak RSS / z-fasta peak RSS. Same ratios as bar labels on "
         f"Figure {f_mem}.</summary>",
         "",
         md_zfasta_vs_rss_table(df),
         "</details>",
         '<div style="margin: 1.5em 0"></div>',
         f"**Figure {f_mem}:** Table {t_rss} as grouped bars (log scale). Bar labels = "
-        f"RSS × (see Table {t_cmp}). Gold dashed line = z-fasta RSS; grey dashed = "
+        f"RSS ratio (see Table {t_cmp}). Gold dashed line = z-fasta RSS; grey dashed = "
         "FASTA file size on disk.",
         f"![Figure {f_mem}: real-dataset peak RSS](results/figures/memory.png)",
         (
             f"**Reading Figure {f_mem}**\n"
-            "- Bars: mean peak RSS. `1×` on z-fasta; other labels = competitor / z-fasta.\n"
+            "- Bars: mean peak RSS. `1x` on z-fasta; other labels = competitor / z-fasta.\n"
             "- Gold dashed line: z-fasta RSS for that dataset.\n"
-            "- Grey dashed line: file size from `input_bytes`.\n"
+            "- Grey dashed line: input FASTA size.\n"
             f"- Details in Table {t_cmp}."
         ),
     ]
@@ -2636,7 +1940,7 @@ def md_page_faults_real_datasets(df: pd.DataFrame, nums: ReportCounters) -> str:
     t_major = nums.next_table()
     f_pf = nums.next_figure()
     blocks = [
-        "Same zebrac samples again. Full counter dump is in **Zebrac Counters** below.",
+        "Same zebrac samples as the real-dataset performance and memory sections.",
         (
             "### Page faults\n\n"
             "A **minor** fault maps a page without reading disk. A **major** fault reads "
@@ -2647,7 +1951,7 @@ def md_page_faults_real_datasets(df: pd.DataFrame, nums: ReportCounters) -> str:
         md_page_faults_headline_table(df),
         "<details>",
         f"<summary><strong>Table {t_cmp}:</strong> z-fasta vs each competitor. "
-        "Faults × = competitor minor faults / z-fasta minor faults. Same ratios as bar "
+        "Faults ratio = competitor minor faults / z-fasta minor faults. Same ratios as bar "
         f"labels on Figure {f_pf}.</summary>",
         "",
         md_zfasta_vs_faults_table(df),
@@ -2659,198 +1963,13 @@ def md_page_faults_real_datasets(df: pd.DataFrame, nums: ReportCounters) -> str:
         "</details>",
         '<div style="margin: 1.5em 0"></div>',
         f"**Figure {f_pf}:** Table {t_minor} as grouped bars (log scale). Bar labels = "
-        f"Faults × (see Table {t_cmp}). Gold dashed line = z-fasta minor faults.",
+        f"Faults ratio (see Table {t_cmp}). Gold dashed line = z-fasta minor faults.",
         f"![Figure {f_pf}: real-dataset minor page faults](results/figures/page_faults.png)",
         (
             f"**Reading Figure {f_pf}**\n"
-            "- Bars: mean minor faults. `1×` on z-fasta; other labels = competitor / z-fasta.\n"
+            "- Bars: mean minor faults. `1x` on z-fasta; other labels = competitor / z-fasta.\n"
             "- Gold dashed line: z-fasta count for that dataset.\n"
             "- Lower bar = fewer minor faults.\n"
-            f"- Details in Table {t_cmp}."
-        ),
-    ]
-    return "\n\n".join(blocks)
-
-
-def _fmt_ipc(v: float | None) -> str:
-    if v is None or pd.isna(v):
-        return "n/a"
-    return f"{float(v):.3f}"
-
-
-def _fmt_rate_pct(v: float | None) -> str:
-    if v is None or pd.isna(v):
-        return "n/a"
-    return f"{float(v) * 100:.3f}%"
-
-
-def _fmt_instr_per_mib(v: float | None) -> str:
-    if v is None or pd.isna(v):
-        return "n/a"
-    v = float(v)
-    if v >= 1e9:
-        return f"{v / 1e9:.2f}B"
-    if v >= 1e6:
-        return f"{v / 1e6:.2f}M"
-    if v >= 1e3:
-        return f"{v / 1e3:.1f}K"
-    return f"{v:.0f}"
-
-
-def md_zebrac_instr_per_mib_headline_table(df: pd.DataFrame) -> str:
-    """Instructions per MiB pivot for headline tools."""
-    work = enrich_counter_metrics(filter_headline_perf(df))
-    if work.empty or "instructions_per_mib" not in work.columns:
-        return "_No counter data._"
-    work["cell"] = work["instructions_per_mib"].apply(_fmt_instr_per_mib)
-    pivot = work.pivot(index="dataset", columns="tool", values="cell")
-    return _headline_pivot(pivot).to_markdown()
-
-
-def md_zebrac_secondary_derived_table(df: pd.DataFrame) -> str:
-    """IPC, cache miss rate, and branch miss rate for headline tools."""
-    work = enrich_counter_metrics(filter_headline_perf(df))
-    if work.empty or "ipc" not in work.columns:
-        return "_No counter data._"
-
-    rows: list[dict] = []
-    for ds in sorted(work["dataset"].unique(), key=dataset_sort_key):
-        for tool in HEADLINE_PERF_TOOLS:
-            hit = work[(work["dataset"] == ds) & (work["tool"] == tool)]
-            if hit.empty:
-                continue
-            r = hit.iloc[0]
-            rows.append(
-                {
-                    "Dataset": ds,
-                    "Tool": display_tool(tool),
-                    "IPC": _fmt_ipc(r["ipc"]),
-                    "Cache miss %": _fmt_rate_pct(r["cache_miss_rate"]),
-                    "Branch miss / instr %": _fmt_rate_pct(r["branch_miss_rate"]),
-                }
-            )
-    if not rows:
-        return "_No counter data._"
-    return pd.DataFrame(rows).to_markdown(index=False)
-
-
-def md_zfasta_vs_instr_per_mib_table(df: pd.DataFrame) -> str:
-    work = enrich_counter_metrics(filter_headline_perf(df))
-    comparisons = build_headline_ratio_comparisons(work, "instructions_per_mib")
-    return md_zfasta_vs_ratio_table(
-        comparisons,
-        zf_label="z-fasta",
-        comp_label="Competitor",
-        ratio_label="Work ×",
-        fmt_zf=lambda r: _fmt_instr_per_mib(r.zfasta_v),
-        fmt_comp=lambda r: _fmt_instr_per_mib(r.comp_v),
-    )
-
-
-def md_zebrac_counter_table(df: pd.DataFrame) -> str:
-    cols = [
-        "dataset",
-        "tool",
-        "peak_rss_mb",
-        "minor_faults",
-        "major_faults",
-        "cpu_cycles",
-        "instructions",
-        "cache_references",
-        "cache_misses",
-        "branch_misses",
-    ]
-    have_cols = [c for c in cols if c in df.columns]
-    if "peak_rss_mb" not in have_cols:
-        return ""
-    display = df[have_cols].copy()
-    display["_dataset_order"] = display["dataset"].map(dataset_sort_key)
-    display["_tool_order"] = display["tool"].map(tool_sort_key)
-    display = display.sort_values(["_dataset_order", "_tool_order"]).drop(
-        columns=["_dataset_order", "_tool_order"]
-    )
-    display = display.rename(columns={
-        "dataset": "Dataset",
-        "tool": "Tool",
-        "peak_rss_mb": "Peak RSS (MB)",
-        "minor_faults": "Minor Faults",
-        "major_faults": "Major Faults",
-        "cpu_cycles": "CPU Cycles",
-        "instructions": "Instructions",
-        "cache_references": "Cache References",
-        "cache_misses": "Cache Misses",
-        "branch_misses": "Branch Misses",
-    })
-    if "Tool" in display.columns:
-        display["Tool"] = display["Tool"].map(display_tool)
-    int_cols = (
-        "Minor Faults",
-        "Major Faults",
-        "CPU Cycles",
-        "Instructions",
-        "Cache References",
-        "Cache Misses",
-        "Branch Misses",
-    )
-    for col in int_cols:
-        if col in display.columns:
-            display[col] = display[col].apply(lambda v: f"{int(v):,}" if pd.notna(v) else "")
-    return display.to_markdown(index=False, floatfmt=".2f")
-
-
-def md_zebrac_counters_real_datasets(df: pd.DataFrame, nums: ReportCounters) -> str:
-    """Hardware counters: CPU work per MiB figure, secondary metrics in tables."""
-    t_work = nums.next_table()
-    t_cmp = nums.next_table()
-    t_other = nums.next_table()
-    t_raw = nums.next_table()
-    f_work = nums.next_figure()
-    blocks = [
-        "Same zebrac samples as **Performance: Real Datasets**. z-fasta (.fai) only; "
-        "modes are in **z-fasta Mode Comparison**.",
-        (
-            "### CPU work per MiB\n\n"
-            "**Instructions per MiB** is retired CPU instructions divided by input size "
-            "in MiB (zebrac counters and metadata `input_bytes`). **Lower is better**: "
-            "less work to index the same file.\n\n"
-            "IPC and cache metrics are in Table {other} (collapsed). They help profiling "
-            "but measure per-cycle or cache behavior, not total work per byte."
-        ).format(other=t_other),
-        (
-            f"**Table {t_work}:** Instructions per MiB (zebrac mean). Same tool order as "
-            "Performance. Lower = less CPU work."
-        ),
-        md_zebrac_instr_per_mib_headline_table(df),
-        "<details>",
-        f"<summary><strong>Table {t_cmp}:</strong> z-fasta vs each competitor. "
-        "Work × = competitor instructions/MiB ÷ z-fasta instructions/MiB. Same ratios "
-        f"as bar labels on Figure {f_work}.</summary>",
-        "",
-        md_zfasta_vs_instr_per_mib_table(df),
-        "</details>",
-        "<details>",
-        f"<summary><strong>Table {t_other}:</strong> Other derived metrics: IPC "
-        "(instructions / CPU cycles), cache miss rate (cache misses / cache references), "
-        "branch miss rate (branch misses / instructions). Profiling detail only.</summary>",
-        "",
-        md_zebrac_secondary_derived_table(df),
-        "</details>",
-        "<details>",
-        f"<summary><strong>Table {t_raw}:</strong> Full zebrac counter dump (all tools, "
-        "including z-fasta modes).</summary>",
-        "",
-        md_zebrac_counter_table(df),
-        "</details>",
-        '<div style="margin: 1.5em 0"></div>',
-        f"**Figure {f_work}:** Table {t_work} as grouped bars (log scale). Bar labels = "
-        f"Work × (see Table {t_cmp}). Gold dashed line = z-fasta instructions/MiB.",
-        f"![Figure {f_work}: real-dataset CPU work per MiB](results/figures/zebrac_instructions_per_mib.png)",
-        (
-            f"**Reading Figure {f_work}**\n"
-            "- Bars: mean instructions per MiB (log scale). Lower bar = less CPU work.\n"
-            "- `1×` on z-fasta; other labels = competitor work / z-fasta work "
-            f"(Work ×; see Table {t_cmp}).\n"
-            "- Gold dashed line: z-fasta value for that dataset.\n"
             f"- Details in Table {t_cmp}."
         ),
     ]
@@ -2863,11 +1982,15 @@ def load_messy_index(
     """Load messy FASTA indexing results pinned to the run timestamp."""
     if not manifest or not manifest.get("timestamp"):
         return None
-    d = results_dir / f"messy_{manifest['timestamp']}"
+    configured = (manifest.get("sections") or {}).get("messy")
+    if not configured:
+        configured = (manifest.get("messy") or {}).get("directory")
+    d = results_dir / (configured or f"messy_{manifest['timestamp']}")
     if not d.is_dir():
         return None
     meta_by_command: dict[str, str] = {}
-    meta_path = d / "metadata.jsonl"
+    metadata_name = (manifest.get("messy") or {}).get("metadata") or "metadata.jsonl"
+    meta_path = d / metadata_name
     if meta_path.exists():
         for line in meta_path.read_text().splitlines():
             if not line.strip():
@@ -2908,9 +2031,10 @@ def md_messy_table(df: pd.DataFrame) -> str:
     messy_order = [
         "z-fasta (.zfi)",
         "z-fasta (.fai)",
-        "samtools",
         "noodles",
         "rust-bio",
+        "samtools",
+        "seqkit",
         "fastahack",
         "pyfaidx",
     ]
@@ -2930,7 +2054,7 @@ def md_messy_table(df: pd.DataFrame) -> str:
             elif tool.startswith("z-fasta (.zfi)"):
                 row[tool] = "ok" if sub.iloc[0]["success"] else "fail"
             else:
-                row[tool] = "not compatible"
+                row[tool] = "exit 0" if sub.iloc[0]["success"] else "nonzero"
         rows.append(row)
     return pd.DataFrame(rows).to_markdown(index=False)
 
@@ -2949,11 +2073,17 @@ def md_edge_case_summary_table(df: pd.DataFrame) -> str:
         if subset.empty:
             continue
         matches = int((subset["output_match"] == "MATCH").sum())
+        reviews = int((subset["output_match"] == "REVIEW").sum())
+        result = (
+            f"{reviews}/{len(subset)} review"
+            if class_name == "invalid_input"
+            else f"{matches}/{len(subset)} pass"
+        )
         rows.append(
             {
                 "Contract basis": label,
                 "Cases": len(subset),
-                "Matches": f"{matches}/{len(subset)}",
+                "Result": result,
                 "Comparison": meanings[class_name],
             }
         )
@@ -2966,8 +2096,8 @@ def md_edge_case_section(df: pd.DataFrame, nums: ReportCounters) -> str:
     f_edge = nums.next_figure()
     blocks = [
         (
-            "Structural edge-case fixtures from `bench/index/run.sh` (edge_cases/). Each "
-            "row in the heatmap is one test file. The z-fasta columns separate the "
+            "Each heatmap row is one structural FASTA edge case. The z-fasta columns "
+            "separate the "
             "samtools-compatible FAI attempt from the production `.zfi` index. The "
             "**Contract** column marks whether z-fasta met that test's rules."
         ),
@@ -2990,24 +2120,24 @@ def md_edge_case_section(df: pd.DataFrame, nums: ReportCounters) -> str:
         ),
         (
             f"**Table {t_summary}:** Comparability summary by contract class. Raw exit codes "
-            "are diagnostic; `Matches` applies the class-specific comparison rule."
+            "are diagnostic; `Result` applies the class-specific comparison rule."
         ),
         md_edge_case_summary_table(df),
         '<div style="margin: 1.5em 0"></div>',
         (
             f"**Figure {f_edge}:** Raw per-test exit codes and the composite contract result. "
-            "Green = exit 0; red = non-zero exit; gray = tool not run; orange = contract "
-            "mismatch."
+            "Green = exit 0; red = non-zero exit; gray = tool not run; purple = review; "
+            "orange = contract mismatch."
         ),
         (
             f"![Figure {f_edge}: edge-case exit codes](results/figures/edge_cases.png)"
         ),
         (
             f"**Reading Figure {f_edge}**\n"
-            "- Rows: test case names from `bench/index/run.sh` edge_cases/.\n"
+            "- Rows: structural FASTA edge cases.\n"
             "- Tool columns show the numeric exit code; `n/a` means the optional tool was not run.\n"
-            "- **Contract:** `Y` = MATCH, `N` = mismatch vs test rules.\n"
-            "- Green / red / gray / orange cells match the legend on the chart.\n"
+            "- **Contract:** `Y` = match, `R` = review, `N` = mismatch.\n"
+            "- Cell colors match the legend on the chart.\n"
             f"- Aggregate counts are in Table {t_summary}."
         ),
     ]
@@ -3025,8 +2155,8 @@ def md_messy_section(df: pd.DataFrame, nums: ReportCounters) -> str:
         zf_lane = "no z-fasta lane"
     blocks = [
         (
-            "Proteome-derived fixtures in `bench/shared/cache/messy_perf/`. Each cell is zebrac "
-            "with `--allow-failures` (repeated samples, not a single exit check)."
+            "Proteome-derived messy FASTA fixtures. Each cell is zebrac with "
+            "`--allow-failures` (repeated samples, not a single exit check)."
         ),
         (
             f"**z-fasta lane:** This table must use {zf_lane}. The `.fai` lane is not the "
@@ -3050,11 +2180,10 @@ def md_messy_section(df: pd.DataFrame, nums: ReportCounters) -> str:
             "not a uniformly CRLF-wrapped control file."
         ),
         (
-            f"**Table {t_matrix}:** Indexing success per variant and tool from the messy "
-            "benchmark CSV. The z-fasta `.zfi` lane is `ok` only when every sample exits 0. "
-            "FAI peers are `not compatible` for these variable-width, whitespace, and mixed-"
-            "ending layouts; an exit 0 alone does not prove that their index reproduces the "
-            "sequence correctly."
+            f"**Table {t_matrix}:** Measured process result per variant and tool from the "
+            "messy benchmark data. The z-fasta `.zfi` lane is `ok` only when every sample "
+            "exits 0. Peer cells report only whether every measured sample exited 0; they do "
+            "not claim sequence-retrieval compatibility."
         ),
         md_messy_table(df),
         (
@@ -3062,51 +2191,41 @@ def md_messy_section(df: pd.DataFrame, nums: ReportCounters) -> str:
             "- Rows: messy variant names (`all_messy`, `mixed_crlf`, `mixed_widths`, "
             "`trailing_whitespace`).\n"
             "- Columns: production `z-fasta (.zfi)` followed by FAI peers.\n"
-            "- `not compatible` is a layout contract result, not a raw process exit code.\n"
-            "- Refresh with `bash bench/index/run.sh` (messy zebrac section)."
+            "- `exit 0` and `nonzero` are measured process results, not output validation."
         ),
     ]
     return "\n\n".join(blocks)
 
 
 def md_tools_tested(tools: dict[str, str] | None = None, z_fasta: str | None = None) -> str:
-    """Bullet list of tools in the index suite."""
+    """List each tool once, with z-fasta modes nested under the product version."""
     tools = tools or {}
 
-    def version_note(key: str) -> str:
-        if tools.get(key):
-            return f" ({tools[key]})"
-        pin = VERSION_PINS.get(key)
-        if pin:
-            return f" (pin {pin})"
-        return ""
-
-    zf = f" ({z_fasta})" if z_fasta else ""
-    return (
-        f"- **z-fasta (.fai){zf}:** `index --emit-fai` (mmap, dedup). Peer-comparable "
-        "lane for cross-tool tables and scaling.\n"
-        "- **z-fasta (.fai) --no-dedup:** `index --emit-fai --no-dedup`.\n"
-        "- **z-fasta (.fai) --low-mem:** `index --low-mem --emit-fai` (streaming read).\n"
-        "- **z-fasta (.fai) --low-mem --no-dedup:** `index --low-mem --emit-fai --no-dedup`.\n"
-        "- **z-fasta (.zfi):** `index` (mmap, dedup). CLI default; writes `.zfi` on disk.\n"
-        "- **z-fasta (.zfi) --no-dedup:** `index --no-dedup`.\n"
-        "- **z-fasta (.zfi) --low-mem:** `index --low-mem` (streaming read, `.zfi` out).\n"
-        "- **z-fasta (.zfi) --low-mem --no-dedup:** `index --low-mem --no-dedup`.\n"
-        f"- **samtools{version_note('samtools')}:** `samtools faidx`, industry reference.\n"
-        f"- **seqkit{version_note('seqkit')}:** `seqkit faidx`, Go toolkit.\n"
-        f"- **fastahack{version_note('fastahack')}:** `fastahack -i`, indexes on first access.\n"
-        f"- **pyfaidx{version_note('pyfaidx')}:** `faidx --no-output`, Python wrapper.\n"
-        f"- **noodles{version_note('noodles')}:** `tools/noodles_wrapper index`, "
-        "Tier 2 noodles-fasta wrapper.\n"
-        f"- **rust-bio{version_note('rustbio')}:** `tools/rustbio_wrapper index`. "
-        "Custom CLI because rust-bio has no standalone index command. Strict FAI rules "
-        "aligned with noodles and samtools.\n"
+    zf_version = short_tool_version(z_fasta, "z-fasta ")
+    lines = [
+        f"- **z-fasta ({zf_version})**\n"
+        "  - `.fai`, dedup: peer-comparable cross-tool and scaling lane.\n"
+        "  - `.fai`, no dedup: isolates duplicate-name tracking cost.\n"
+        "  - `.zfi`, dedup: default product mode.\n"
+        "  - `.zfi`, no dedup: default format without duplicate-name tracking."
+    ]
+    specs = (
+        ("noodles", "noodles", "noodles-fasta ", "Rust noodles-fasta wrapper"),
+        ("rustbio", "rust-bio", "rust-bio ", "Rust FASTA library"),
+        ("samtools", "samtools", "samtools ", "reference FAI indexer"),
+        ("seqkit", "seqkit", "seqkit ", "Go FASTA toolkit"),
+        ("fastahack", "fastahack", "fastahack ", "C++ FAI indexer"),
+        ("pyfaidx", "pyfaidx", "", "Python FAI indexer"),
     )
+    for key, label, prefix, description in specs:
+        if key not in tools:
+            continue
+        version = short_tool_version(tools[key], prefix)
+        lines.append(f"- **{label} ({version})**: {description}.")
+    return "\n".join(lines)
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  Main
-# ══════════════════════════════════════════════════════════════════════
+# Main.
 
 
 def main():
@@ -3120,40 +2239,33 @@ def main():
         help="Results directory, defaults to bench/index/results.",
     )
     parser.add_argument(
-        "--allow-incomplete",
-        action="store_true",
-        help="Allow smoke or partial runs to overwrite the tracked report.",
+        "--manifest",
+        type=Path,
+        help="Use this run manifest instead of results/LATEST.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="Explicit report path, defaults to bench/index/REPORT.md.",
     )
     args = parser.parse_args()
 
     script_dir = Path(__file__).resolve().parent
     results_dir = args.results_dir if args.results_dir else script_dir / "results"
-    project_root = results_dir.parent.parent.parent
-    manifest = enrich_manifest(load_run_manifest(results_dir), results_dir)
-    incomplete = is_incomplete_run(
-        manifest,
-        required_sections=(
-            "real",
-            "scale_size",
-            "scale_seqs_budget",
-            "scale_seqs_fixed",
-        ),
-        skip_flags=("skip_real", "skip_scaling", "skip_size"),
+    manifest = enrich_manifest(load_run_manifest(results_dir, args.manifest))
+    if args.output is not None:
+        report_path = args.output.resolve()
+        final_figures_dir = report_path.parent / "results" / "figures"
+    else:
+        report_path = script_dir / "REPORT.md"
+        final_figures_dir = results_dir / "figures"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    final_figures_dir.mkdir(parents=True, exist_ok=True)
+    figure_stage = tempfile.TemporaryDirectory(
+        prefix=".index-report-figures-",
+        dir=report_path.parent,
     )
-    if incomplete and not args.allow_incomplete:
-        timestamp = manifest.get("timestamp", "unknown") if manifest else "unknown"
-        runs = manifest.get("runs", "unknown") if manifest else "unknown"
-        skip_real = manifest.get("skip_real", "unknown") if manifest else "unknown"
-        skip_scaling = manifest.get("skip_scaling", "unknown") if manifest else "unknown"
-        skip_size = manifest.get("skip_size", "unknown") if manifest else "unknown"
-        raise SystemExit(
-            "Refusing to overwrite tracked benchmark report from incomplete run "
-            f"{timestamp} (runs={runs}, skip_real={skip_real}, "
-            f"skip_scaling={skip_scaling}, skip_size={skip_size}). Re-run the full suite "
-            "or pass --allow-incomplete for local smoke analysis."
-        )
-    figures_dir = results_dir / "figures"
-    figures_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir = Path(figure_stage.name)
 
     report_lines: list[str] = []
 
@@ -3162,24 +2274,47 @@ def main():
 
     report_lines.append("# z-fasta Index Benchmark Report")
     report_lines.append("_Auto-generated by `generate_report.py` from zebrac results._")
-    if incomplete:
-        report_lines.append(
-            "> **DRAFT: incomplete run.** Missing required sections, skip flags set, or "
-            "below minimum zebrac sample settings. Do not publish until a full run completes."
-        )
 
     section("Overview")
     report_lines.append(md_overview(manifest))
 
-    section("Run Provenance")
-    report_lines.append(md_run_provenance(manifest, project_root))
+    if manifest:
+        section("Run Provenance")
+        report_lines.append(md_run_provenance(manifest))
+
+    section("Datasets")
+    report_lines.append(md_datasets())
+
+    section("Tools Tested")
+    report_lines.append(
+        md_tools_tested(
+            (manifest or {}).get("tools"),
+            (manifest or {}).get("z_fasta"),
+        )
+    )
 
     generated_figs: list[str] = []
+    has_results = False
     metadata_df = load_metadata(results_dir, manifest)
+    nums = ReportCounters()
+
+    test_df = load_tests(results_dir, manifest)
+    if test_df is not None and len(test_df):
+        has_results = True
+        section("Edge Case Correctness")
+        report_lines.append(md_edge_case_section(test_df, nums))
+        p = fig_edge_heatmap(test_df, figures_dir / "edge_cases.png")
+        generated_figs.append(str(p))
+
+    messy_df = load_messy_index(results_dir, manifest)
+    if messy_df is not None and len(messy_df):
+        has_results = True
+        section("Messy FASTA Compatibility")
+        report_lines.append(md_messy_section(messy_df, nums))
 
     perf_df = load_perf(results_dir, metadata_df, manifest)
-    nums = ReportCounters()
     if perf_df is not None and len(perf_df):
+        has_results = True
         section("Performance: Real Datasets")
         report_lines.append(md_performance_real_datasets(perf_df, nums))
 
@@ -3190,53 +2325,58 @@ def main():
         report_lines.append(md_memory_usage_real_datasets(perf_df, nums))
         p = fig_memory_rss(perf_df, figures_dir / "memory.png")
         generated_figs.append(str(p))
+    product_df = (
+        filter_product_comparison(perf_df, manifest)
+        if perf_df is not None and len(perf_df)
+        else None
+    )
+    if product_df is not None and not product_df.empty:
+        section("z-fasta Format and Dedup Comparison")
+        report_lines.append(md_product_comparison_section(product_df, nums))
+        p = fig_product_comparison_tradeoff(
+            product_df,
+            figures_dir / "product_comparison.png",
+        )
+        if p:
+            generated_figs.append(str(p))
 
+    if perf_df is not None and len(perf_df):
         section("Page Faults: Real Datasets")
         report_lines.append(md_page_faults_real_datasets(perf_df, nums))
         p = fig_page_faults(perf_df, figures_dir / "page_faults.png")
         generated_figs.append(str(p))
 
-        section("Zebrac Counters: Real Datasets")
-        report_lines.append(md_zebrac_counters_real_datasets(perf_df, nums))
-        p = fig_zebrac_instructions_per_mib(
-            perf_df, figures_dir / "zebrac_instructions_per_mib.png"
-        )
-        if p:
-            generated_figs.append(str(p))
-    else:
-        section("Performance: Real Datasets")
-        report_lines.append("_No real-dataset zebrac data found._")
-
     size_df = load_scaling(results_dir, "scale_size", "size_mb", metadata_df, manifest)
     if size_df is not None and len(size_df):
+        has_results = True
         section("Scaling: File Size")
         report_lines.append(
             md_scaling_section(
                 size_df,
                 nums,
                 intro=(
-                    "Synthetic FASTA files from 1 MB to 1 GB (one sequence per file). "
-                    "Same zebrac warm-cache setup as **Performance: Real Datasets**. "
-                    "z-fasta (.fai) only; other modes are in **z-fasta Mode Comparison**."
+                    "Synthetic FASTA files from 1 MiB to 1000 MiB with 100 sequences per file. "
+                    "Uses the zebrac warm-cache setup in **Run Provenance** and the "
+                    "peer-comparable z-fasta `.fai` lane."
                 ),
                 subsection=(
                     "### Wall time vs file size\n\n"
                     "Mean wall time (seconds, zebrac) at each file size. **Lower is better.** "
-                    "Sequence count stays near constant while total bytes on disk grow."
+                    "Record count stays fixed at 100 while total bytes on disk grow."
                 ),
                 param_col="size_mb",
                 param_label="File Size",
                 figure_path="results/figures/scaling_size.png",
                 figure_title="scaling by file size",
                 table_x_label="file size",
-                reading_x_label="file size (MB)",
+                reading_x_label="file size (MiB)",
             )
         )
         p = fig_scaling_headline_lines(
             size_df,
             figures_dir / "scaling_size.png",
             param_col="size_mb",
-            xlabel="File Size (MB, log scale)",
+            xlabel="File Size (MiB, log scale)",
             title="Scaling: Wall Time vs File Size",
             fig_note="One line per tool. Lower wall time is better.",
         )
@@ -3246,26 +2386,26 @@ def main():
         results_dir, "scale_seqs_budget", "seq_count", metadata_df, manifest
     )
     if seq_budget_df is not None and len(seq_budget_df):
-        section("Scaling: Sequence Count (Bounded Bytes)")
+        has_results = True
+        section("Scaling: Sequence Count (Constant File Size)")
         report_lines.append(
             md_scaling_section(
                 seq_budget_df,
                 nums,
                 intro=(
                     "Synthetic FASTA holding about **50 MiB** total per file; sequence length "
-                    "shrinks as record count rises. Same zebrac warm-cache setup as "
-                    "**Performance: Real Datasets**. z-fasta (.fai) only; other modes are in "
-                    "**z-fasta Mode Comparison**."
+                    "shrinks as record count rises. Uses the zebrac warm-cache setup in "
+                    "**Run Provenance** and the peer-comparable z-fasta `.fai` lane."
                 ),
                 subsection=(
-                    "### Wall time vs sequence count (bounded bytes)\n\n"
+                    "### Wall time vs sequence count (constant file size)\n\n"
                     "Mean wall time (seconds, zebrac) at each record count. **Lower is better.** "
                     "Isolates per-record and header overhead at near-constant file size."
                 ),
                 param_col="seq_count",
                 param_label="Sequences",
                 figure_path="results/figures/scaling_seqs_budget.png",
-                figure_title="bounded-bytes sequence scaling",
+                figure_title="constant-size sequence scaling",
                 table_x_label="record count",
                 reading_x_label="sequence count",
             )
@@ -3275,7 +2415,7 @@ def main():
             figures_dir / "scaling_seqs_budget.png",
             param_col="seq_count",
             xlabel="Sequences (log scale)",
-            title="Scaling: Wall Time vs Sequence Count (Bounded ~50 MiB)",
+            title="Scaling: Wall Time vs Sequence Count (Constant ~50 MiB)",
             fig_note="One line per tool. Lower wall time is better.",
         )
         generated_figs.append(str(p))
@@ -3284,6 +2424,7 @@ def main():
         results_dir, "scale_seqs_fixed", "seq_count", metadata_df, manifest
     )
     if seq_fixed_df is not None and len(seq_fixed_df):
+        has_results = True
         section("Scaling: Sequence Count (Fixed Length)")
         report_lines.append(
             md_scaling_section(
@@ -3291,9 +2432,8 @@ def main():
                 nums,
                 intro=(
                     "Synthetic FASTA with **1024 bp** per sequence; total file size grows with "
-                    "record count (100k to 1M). Same zebrac warm-cache setup as "
-                    "**Performance: Real Datasets**. z-fasta (.fai) only; other modes are in "
-                    "**z-fasta Mode Comparison**."
+                    "record count (100k to 1M). Uses the zebrac warm-cache setup in "
+                    "**Run Provenance** and the peer-comparable z-fasta `.fai` lane."
                 ),
                 subsection=(
                     "### Wall time vs sequence count (fixed length)\n\n"
@@ -3318,80 +2458,28 @@ def main():
         )
         generated_figs.append(str(p))
 
-    test_df = load_tests(results_dir, manifest)
-    if perf_df is not None and len(perf_df) and not filter_mode_comparison(perf_df).empty:
-        section("z-fasta Mode Comparison")
-        report_lines.append(md_mode_comparison_section(perf_df, nums))
-        stats_by_id = {
-            entry["id"]: entry
-            for entry in load_real_dataset_stats(project_root / "bench" / "shared" / "data")
-        }
-        p = fig_mode_comparison_throughput(
-            perf_df, figures_dir / "mode_comparison_performance.png"
-        )
-        if p:
-            generated_figs.append(str(p))
-        p = fig_mode_comparison_memory(
-            perf_df, figures_dir / "mode_comparison_memory.png"
-        )
-        if p:
-            generated_figs.append(str(p))
-        p = fig_mode_comparison_tradeoff(
-            perf_df,
-            figures_dir / "mode_comparison_tradeoff.png",
-            stats_by_id=stats_by_id,
-        )
-        if p:
-            generated_figs.append(str(p))
-
-    if perf_df is not None and len(perf_df):
-        index_stats = load_index_format_stats(project_root / "bench" / "shared" / "data")
-        if index_stats:
-            section("z-fasta Production Index (.zfi)")
-            report_lines.append(
-                md_zfi_production_section(
-                    perf_df,
-                    project_root / "bench" / "shared" / "data",
-                    nums,
-                )
-            )
-
-    if test_df is not None and len(test_df):
-        section("Edge Case Correctness")
-        report_lines.append(md_edge_case_section(test_df, nums))
-        p = fig_edge_heatmap(test_df, figures_dir / "edge_cases.png")
-        generated_figs.append(str(p))
-
-    messy_df = load_messy_index(results_dir, manifest)
-    if messy_df is not None and len(messy_df):
-        section("Messy FASTA Compatibility")
-        report_lines.append(md_messy_section(messy_df, nums))
-
-    section("Tools Tested")
-    report_lines.append(
-        md_tools_tested(
-            (manifest or {}).get("tools"),
-            (manifest or {}).get("z_fasta"),
-        )
-    )
-
-    # ── Write report ───────────────────────────────────────────────
-    if not generated_figs and not args.allow_incomplete:
+    # Write report.
+    if not has_results:
         raise SystemExit(
-            "Refusing to overwrite tracked benchmark report because no benchmark "
-            "result data was found. Run the benchmark suite first or pass "
-            "--allow-incomplete for local report drafts."
+            "No benchmark result data found. Run at least one benchmark or correctness "
+            "section first."
         )
 
-    # Write REPORT.md one level up from results/ (into bench/) so it
-    # isn't gitignored with the rest of the generated results data.
-    bench_dir = results_dir.parent
-    report_path = bench_dir / "REPORT.md"
-    report_path.write_text(f"{MARKDOWNLINT_DISABLE}\n\n{normalize_markdown(report_lines)}")
+    published_figs = []
+    for staged_path in map(Path, generated_figs):
+        destination = final_figures_dir / staged_path.name
+        staged_path.replace(destination)
+        published_figs.append(str(destination))
+
+    report_temp = report_path.with_name(f".{report_path.name}.tmp")
+    report_temp.write_text(f"{MARKDOWNLINT_DISABLE}\n\n{normalize_markdown(report_lines)}")
+    report_temp.replace(report_path)
+    prune_stale_pngs(final_figures_dir, [Path(path).name for path in published_figs])
+    figure_stage.cleanup()
 
     print(f"Report: {report_path}")
-    print(f"Figures: {len(generated_figs)}")
-    for f in generated_figs:
+    print(f"Figures: {len(published_figs)}")
+    for f in published_figs:
         print(f"  {f}")
 
 

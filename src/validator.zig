@@ -1,6 +1,6 @@
 //! FASTA structure, alphabet, and header validation with optional fix streaming.
 //!
-//! Events are capped (`max_validate_events`). JSON output escapes arbitrary header bytes.
+//! Events are capped (`MAX_VALIDATE_EVENTS`). JSON output escapes arbitrary header bytes.
 //! Shared sequence-type sampling uses `stats.detectType`.
 
 const std = @import("std");
@@ -18,27 +18,33 @@ const SimdVec = @Vector(SIMD_CHUNK_SIZE, u8);
 
 /// Hard cap on retained validate events. Further issues set `Summary.truncated`
 /// instead of growing an unbounded list.
-pub const max_validate_events: usize = 10_000;
+pub const MAX_VALIDATE_EVENTS: usize = 10_000;
 
 comptime {
     // Keep the validate help line in src/main.zig synchronized with this value.
-    if (max_validate_events != 10_000) {
-        @compileError("update validate help text for max_validate_events");
+    if (MAX_VALIDATE_EVENTS != 10_000) {
+        @compileError("update validate help text for MAX_VALIDATE_EVENTS");
     }
 }
 
+/// Selects the stable text, JSON-lines, or aggregate JSON report.
 pub const OutputMode = enum {
     text,
     json_lines,
     json_summary,
 };
 
+/// Optional header convention checked in addition to ordinary FASTA validation.
 pub const Schema = enum {
     none,
     uniprot,
     refseq,
 };
 
+/// Controls validation, reporting, and format-only rewriting.
+///
+/// `output_path` and `custom_alphabet` are borrowed for the call. Direct CLI-equivalent
+/// callers must pair `fix_format_only` and `output_path` with `fix`.
 pub const Options = struct {
     strict: bool = false,
     output_mode: OutputMode = .text,
@@ -50,6 +56,7 @@ pub const Options = struct {
     max_header_len: usize = DEFAULT_MAX_HEADER_LEN,
 };
 
+/// Severity used for report events and exit-status accounting.
 pub const Level = enum {
     error_level,
     warning,
@@ -69,6 +76,7 @@ pub const Level = enum {
     }
 };
 
+/// Stable validation issue families used by text and JSON reports.
 pub const Kind = enum {
     no_sequences,
     duplicate_name,
@@ -101,6 +109,10 @@ pub const Kind = enum {
     }
 };
 
+const KIND_COUNT = @typeInfo(Kind).@"enum".fields.len;
+
+/// One retained issue. `name` borrows the validated input; other optional fields apply only
+/// to the issue kinds that expose them in the report schema.
 pub const ValidateEvent = struct {
     level: Level,
     kind: Kind,
@@ -113,19 +125,26 @@ pub const ValidateEvent = struct {
     limit: usize = 0,
 };
 
+/// Owns retained events and rewrite widths while borrowing event names from the input.
+/// Counts remain complete when `truncated` is true, although `events` does not.
 pub const Summary = struct {
     events: std.ArrayList(ValidateEvent),
     record_widths: std.ArrayList(u32),
     sequence_type: stats.SequenceType = .nucleotide,
-    /// Bases fed into `detectType` (capped at `stats.validate_type_sample_bases`).
+    /// Bases fed into `detectType` (capped at `stats.VALIDATE_TYPE_SAMPLE_BASES`).
     type_bases_sampled: u64 = 0,
     sequence_count: usize = 0,
     header_count: usize = 0,
     error_count: usize = 0,
     warning_count: usize = 0,
-    /// True when more issues were found after `max_validate_events` were retained.
+    format_warning_count: usize = 0,
+    kind_counts: [KIND_COUNT]usize = .{0} ** KIND_COUNT,
+    /// True when more issues were found after `MAX_VALIDATE_EVENTS` were retained.
     truncated: bool = false,
+    /// Fix blocker found after event retention reached its cap.
+    truncated_fix_rejection: ?Kind = null,
 
+    /// Releases owned storage with the allocator passed to `validateData`.
     pub fn deinit(self: *Summary, allocator: std.mem.Allocator) void {
         self.events.deinit(allocator);
         self.record_widths.deinit(allocator);
@@ -134,7 +153,7 @@ pub const Summary = struct {
 
 const WidthCount = struct {
     width: u32,
-    count: u32,
+    count: usize,
     first_order: usize,
 };
 
@@ -142,7 +161,7 @@ const RecordState = struct {
     active: bool = false,
     name: []const u8 = "",
     header_line: usize = 0,
-    bases: u64 = 0,
+    has_bases: bool = false,
     expected_width: ?u32 = null,
     pending_width: ?u32 = null,
     pending_line: usize = 0,
@@ -154,7 +173,7 @@ const RecordState = struct {
         self.active = false;
         self.name = "";
         self.header_line = 0;
-        self.bases = 0;
+        self.has_bases = false;
         self.expected_width = null;
         self.pending_width = null;
         self.pending_line = 0;
@@ -164,9 +183,9 @@ const RecordState = struct {
     }
 };
 
+/// Validates one FASTA, optionally atomically rewrites it, reports, and exits the process.
+/// Direct callers must supply CLI-valid option combinations.
 pub fn runValidate(io: std.Io, fasta_path: []const u8, options: Options) void {
-    // Mapping ownership matches LoadedIndex: one FileView (or empty), destroyed here.
-    // Validation does not load an index; GET/stats use LoadedIndex.deinit(io) instead.
     const file = std.Io.Dir.cwd().openFile(io, fasta_path, .{}) catch |err| switch (err) {
         error.FileNotFound => printErrorAndExit("error: file not found: {s}\n", .{fasta_path}),
         error.AccessDenied => printErrorAndExit("error: access denied: {s}\n", .{fasta_path}),
@@ -178,21 +197,22 @@ pub fn runValidate(io: std.Io, fasta_path: []const u8, options: Options) void {
         printErrorAndExit("error: failed to stat file: {s}\n", .{fasta_path});
     };
 
-    var fasta_view: ?platform.FileView = null;
-    defer if (fasta_view) |*view| view.destroy(io);
+    var fasta_map: ?std.Io.File.MemoryMap = null;
+    defer if (fasta_map) |*map| map.destroy(io);
 
     const data: []const u8 = if (stat.size == 0)
         &[_]u8{}
     else blk: {
-        fasta_view = platform.FileView.mapFile(io, file, @intCast(stat.size)) catch {
+        const map_len = std.math.cast(usize, stat.size) orelse {
             printErrorAndExit("error: failed to mmap file: {s}\n", .{fasta_path});
         };
-        break :blk fasta_view.?.bytes();
+        fasta_map = platform.mapFileReadOnly(io, file, map_len) catch {
+            printErrorAndExit("error: failed to mmap file: {s}\n", .{fasta_path});
+        };
+        break :blk fasta_map.?.memory;
     };
 
-    if (data.len > 0) {
-        platform.advise(data, .sequential);
-    }
+    if (fasta_map) |*map| platform.adviseSequential(map.memory);
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -200,6 +220,10 @@ pub fn runValidate(io: std.Io, fasta_path: []const u8, options: Options) void {
 
     var summary = validateData(allocator, data, options) catch |err| switch (err) {
         error.OutOfMemory => printErrorAndExit("error: out of memory\n", .{}),
+        error.SequenceLineTooLong => printErrorAndExit(
+            "error: sequence line exceeds the index format limit: {s}\n",
+            .{fasta_path},
+        ),
     };
     defer summary.deinit(allocator);
 
@@ -207,7 +231,9 @@ pub fn runValidate(io: std.Io, fasta_path: []const u8, options: Options) void {
         const output_path = options.output_path orelse {
             printErrorAndExit("error: validate --fix requires -o <output.fa>\n", .{});
         };
-        if (std.mem.eql(u8, fasta_path, output_path)) {
+        if (std.mem.eql(u8, fasta_path, output_path) or
+            outputResolvesToInput(io, file, output_path))
+        {
             printErrorAndExit("error: validate --fix will not overwrite input: {s}\n", .{fasta_path});
         }
         ensureFixAllowed(&summary, options);
@@ -218,7 +244,7 @@ pub fn runValidate(io: std.Io, fasta_path: []const u8, options: Options) void {
 
     var out_buf: [65536]u8 = undefined;
     var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
-    writeSummary(allocator, &stdout_fw.interface, &summary, options) catch {
+    writeSummary(&stdout_fw.interface, &summary, options) catch {
         stdout_fw.flush() catch {};
         printErrorAndExit("error: write failed\n", .{});
     };
@@ -227,24 +253,25 @@ pub fn runValidate(io: std.Io, fasta_path: []const u8, options: Options) void {
     };
 
     if (summary.truncated) {
-        // Event retention is capped for reporting. Scanning (and --fix rewrite via
-        // record_widths) still covers the whole file. Without --fix, stop so callers
-        // know the report is incomplete. With --fix, the rewrite already finished.
+        // An incomplete report is fatal unless the requested rewrite already completed.
         if (!options.fix) {
             printErrorAndExit(
                 "error: validate stopped after {d} events; fix reported issues and re-run\n",
-                .{max_validate_events},
+                .{MAX_VALIDATE_EVENTS},
             );
         }
         std.debug.print(
             "warning: validate event list truncated at {d}; --fix output was still written\n",
-            .{max_validate_events},
+            .{MAX_VALIDATE_EVENTS},
         );
     }
 
     std.process.exit(exitCodeForOptions(&summary, options));
 }
 
+/// Scans all input bytes and returns an owning summary whose event names borrow `data`.
+/// Retained events are capped, but counts, fix blockers, and rewrite widths remain complete.
+/// A sequence line wider than the index format can represent returns `error.SequenceLineTooLong`.
 pub fn validateData(allocator: std.mem.Allocator, data: []const u8, options: Options) !Summary {
     var summary = Summary{
         .events = .empty,
@@ -252,8 +279,8 @@ pub fn validateData(allocator: std.mem.Allocator, data: []const u8, options: Opt
     };
     errdefer summary.deinit(allocator);
 
-    var seen_names = std.StringHashMap(usize).init(allocator);
-    defer seen_names.deinit();
+    var seen_names: std.StringHashMapUnmanaged(usize) = .empty;
+    defer seen_names.deinit(allocator);
 
     var type_counts: [256]u64 = .{0} ** 256;
     var type_total: u64 = 0;
@@ -346,29 +373,25 @@ pub fn validateData(allocator: std.mem.Allocator, data: []const u8, options: Opt
     return summary;
 }
 
+/// Returns the validate status for complete severity counts and strictness.
 pub fn exitCode(error_count: usize, warning_count: usize, strict: bool) u8 {
     if (error_count > 0) return 1;
     if (warning_count > 0) return if (strict) 1 else 2;
     return 0;
 }
 
+/// Returns validate status after excluding warnings repaired by a requested format rewrite.
 pub fn exitCodeForOptions(summary: *const Summary, options: Options) u8 {
     if (!options.fix) return exitCode(summary.error_count, summary.warning_count, options.strict);
 
-    var remaining_errors: usize = 0;
-    var remaining_warnings: usize = 0;
-    for (summary.events.items) |event| {
-        if (isFixedByFormatRewrite(event.kind)) continue;
-        switch (event.level) {
-            .error_level => remaining_errors += 1,
-            .warning => remaining_warnings += 1,
-        }
-    }
-    return exitCode(remaining_errors, remaining_warnings, options.strict);
+    return exitCode(
+        summary.error_count,
+        summary.warning_count - summary.format_warning_count,
+        options.strict,
+    );
 }
 
 fn isFixedByFormatRewrite(kind: Kind) bool {
-    // --fix rewrites only these kinds. Everything else is left unchanged or blocks fix.
     return switch (kind) {
         .utf8_bom,
         .inconsistent_line_widths,
@@ -380,6 +403,7 @@ fn isFixedByFormatRewrite(kind: Kind) bool {
     };
 }
 
+/// Returns the first issue that prevents the requested rewrite, including issues past the cap.
 pub fn fixRejection(summary: *const Summary, options: Options) ?Kind {
     for (summary.events.items) |event| {
         switch (event.kind) {
@@ -388,25 +412,50 @@ pub fn fixRejection(summary: *const Summary, options: Options) ?Kind {
             else => {},
         }
     }
+    if (summary.truncated_fix_rejection) |kind| {
+        if (kind != .invalid_character or !options.fix_format_only) return kind;
+    }
     return null;
 }
 
 fn appendEvent(allocator: std.mem.Allocator, summary: *Summary, event: ValidateEvent) !void {
-    if (summary.events.items.len >= max_validate_events) {
-        summary.truncated = true;
-        return;
-    }
-    try summary.events.append(allocator, event);
     switch (event.level) {
         .error_level => summary.error_count += 1,
         .warning => summary.warning_count += 1,
+    }
+    summary.kind_counts[@intFromEnum(event.kind)] += 1;
+    if (isFixedByFormatRewrite(event.kind)) summary.format_warning_count += 1;
+
+    if (summary.events.items.len >= MAX_VALIDATE_EVENTS) {
+        summary.truncated = true;
+        noteTruncatedFixRejection(summary, event.kind);
+        return;
+    }
+    try summary.events.append(allocator, event);
+}
+
+fn noteTruncatedFixRejection(summary: *Summary, kind: Kind) void {
+    switch (kind) {
+        .invalid_character => {
+            if (summary.truncated_fix_rejection == null) {
+                summary.truncated_fix_rejection = .invalid_character;
+            }
+        },
+        .no_sequences, .duplicate_name, .null_byte => {
+            if (summary.truncated_fix_rejection == null or
+                summary.truncated_fix_rejection == .invalid_character)
+            {
+                summary.truncated_fix_rejection = kind;
+            }
+        },
+        else => {},
     }
 }
 
 fn startRecord(
     allocator: std.mem.Allocator,
     summary: *Summary,
-    seen_names: *std.StringHashMap(usize),
+    seen_names: *std.StringHashMapUnmanaged(usize),
     state: *RecordState,
     line: []const u8,
     line_number: usize,
@@ -421,7 +470,7 @@ fn startRecord(
     while (name_end < line.len and line[name_end] != ' ' and line[name_end] != '\t') : (name_end += 1) {}
     state.name = line[1..name_end];
 
-    const gop = try seen_names.getOrPut(state.name);
+    const gop = try seen_names.getOrPut(allocator, state.name);
     if (gop.found_existing) {
         try appendEvent(allocator, summary, .{
             .level = .error_level,
@@ -467,7 +516,24 @@ fn startRecord(
 fn finalizeRecord(allocator: std.mem.Allocator, summary: *Summary, state: *RecordState) !void {
     if (!state.active) return;
 
-    if (state.bases == 0) {
+    if (!state.width_warning_emitted) {
+        if (state.expected_width) |expected| {
+            if (state.pending_width) |final_width| {
+                if (final_width > expected) {
+                    try appendEvent(allocator, summary, .{
+                        .level = .warning,
+                        .kind = .inconsistent_line_widths,
+                        .line = state.pending_line,
+                        .name = state.name,
+                        .expected_width = expected,
+                        .actual_width = final_width,
+                    });
+                }
+            }
+        }
+    }
+
+    if (!state.has_bases) {
         try appendEvent(allocator, summary, .{
             .level = .warning,
             .kind = .empty_sequence,
@@ -515,8 +581,9 @@ fn scanSequenceLine(
         });
     }
 
-    const width: u32 = @intCast(trimmed.len);
+    const width = std.math.cast(u32, trimmed.len) orelse return error.SequenceLineTooLong;
     if (width > 0) {
+        state.has_bases = true;
         try updateWidth(allocator, state, width);
         if (state.pending_width) |pending_width| {
             const expected = state.expected_width orelse pending_width;
@@ -537,12 +604,11 @@ fn scanSequenceLine(
         state.pending_line = line_number;
     }
 
-    state.bases += width;
     for (trimmed) |byte| {
         byte_counts[byte] += 1;
         if (first_byte_line[byte] == 0) first_byte_line[byte] = line_number;
 
-        if (type_total.* < stats.validate_type_sample_bases) {
+        if (type_total.* < stats.VALIDATE_TYPE_SAMPLE_BASES) {
             type_counts[byte] += 1;
             type_total.* += 1;
         }
@@ -585,7 +651,7 @@ fn updateWidth(allocator: std.mem.Allocator, state: *RecordState, width: u32) !v
 
 fn modalWidth(state: *const RecordState) u32 {
     var best_width: u32 = DEFAULT_FIX_WIDTH;
-    var best_count: u32 = 0;
+    var best_count: usize = 0;
     var best_order: usize = std.math.maxInt(usize);
     for (state.widths.items) |entry| {
         if (entry.count > best_count or (entry.count == best_count and entry.first_order < best_order)) {
@@ -609,7 +675,7 @@ fn appendInvalidCharacterEvents(
         buildAlphabet(custom)
     else switch (sequence_type) {
         .nucleotide => buildAlphabet("ACGTUNRYWSMKHBVDacgtunrywsmkhbvd"),
-        .protein => buildAlphabet("ACDEFGHIKLMNPQRSTVWYUOX*-acdefghiklmnpqrstvwyuox"),
+        .protein => buildAlphabet("ACDEFGHIKLMNPQRSTVWYBZJXUO*-acdefghiklmnpqrstvwybzjxuo"),
     };
 
     for (byte_counts, 0..) |count, i| {
@@ -627,11 +693,9 @@ fn appendInvalidCharacterEvents(
     }
 }
 
-fn buildAlphabet(chars: ?[]const u8) [256]bool {
+fn buildAlphabet(chars: []const u8) [256]bool {
     var table = [_]bool{false} ** 256;
-    if (chars) |bytes| {
-        for (bytes) |byte| table[byte] = true;
-    }
+    for (chars) |byte| table[byte] = true;
     return table;
 }
 
@@ -722,23 +786,41 @@ fn ensureFixAllowed(summary: *const Summary, options: Options) void {
 
 /// Rewrite format-level issues to normalized LF FASTA bytes. Caller must run validateData first.
 /// Allocates the full result for tests and library callers; CLI `--fix` streams via `writeFixed`.
+/// Allocator-backed writer failures are reported as `error.OutOfMemory`.
 pub fn fixData(allocator: std.mem.Allocator, data: []const u8, record_widths: []const u32) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
-    try writeFixedContent(&aw.writer, data, record_widths);
+    writeFixedContent(&aw.writer, data, record_widths) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+    };
     return try aw.toOwnedSlice();
 }
 
 fn writeFixed(io: std.Io, data: []const u8, record_widths: []const u32, output_path: []const u8) !void {
     const cwd = std.Io.Dir.cwd();
-    const out_file = try cwd.createFile(io, output_path, .{ .truncate = true });
-    errdefer cwd.deleteFile(io, output_path) catch {};
-    defer out_file.close(io);
+    var atomic_file = try cwd.createFileAtomic(io, output_path, .{ .replace = true });
+    defer atomic_file.deinit(io);
 
     var out_buf: [65536]u8 = undefined;
-    var file_fw = out_file.writer(io, &out_buf);
+    var file_fw = atomic_file.file.writer(io, &out_buf);
     try writeFixedContent(&file_fw.interface, data, record_widths);
     try file_fw.flush();
+    try atomic_file.replace(io);
+}
+
+fn outputResolvesToInput(io: std.Io, input_file: std.Io.File, output_path: []const u8) bool {
+    const output_file = std.Io.Dir.cwd().openFile(io, output_path, .{}) catch return false;
+    defer output_file.close(io);
+
+    var input_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const input_path_len = input_file.realPath(io, &input_path_buf) catch return false;
+    var output_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const output_path_len = output_file.realPath(io, &output_path_buf) catch return false;
+    return std.mem.eql(
+        u8,
+        input_path_buf[0..input_path_len],
+        output_path_buf[0..output_path_len],
+    );
 }
 
 fn writeFixedContent(writer: *std.Io.Writer, data: []const u8, record_widths: []const u32) !void {
@@ -791,16 +873,14 @@ fn writeFixedContent(writer: *std.Io.Writer, data: []const u8, record_widths: []
 
     if (in_record and line_pos > 0) {
         try writer.writeByte('\n');
-    } else if (in_record and (data.len == 0 or data[data.len - 1] != '\n')) {
-        try writer.writeByte('\n');
     }
 }
 
-fn writeSummary(allocator: std.mem.Allocator, writer: anytype, summary: *const Summary, options: Options) !void {
+fn writeSummary(writer: anytype, summary: *const Summary, options: Options) !void {
     switch (options.output_mode) {
         .text => try writeText(writer, summary),
-        .json_lines => try writeJsonLines(allocator, writer, summary),
-        .json_summary => try writeJsonSummary(allocator, writer, summary),
+        .json_lines => try writeJsonLines(writer, summary),
+        .json_summary => try writeJsonSummary(writer, summary),
     }
 }
 
@@ -812,36 +892,64 @@ fn writeText(writer: anytype, summary: *const Summary) !void {
 
     for (summary.events.items) |event| {
         try writer.print("{s}: line {d}: ", .{ event.level.label(), event.line });
-        try writeHumanMessage(writer, event);
+        try writeMessage(writer, event, false);
         try writer.writeByte('\n');
     }
 }
 
-fn writeHumanMessage(writer: anytype, event: ValidateEvent) !void {
+fn writeMessage(writer: anytype, event: ValidateEvent, comptime escape_names: bool) !void {
     switch (event.kind) {
         .no_sequences => try writer.writeAll("no sequences found"),
-        .duplicate_name => try writer.print("duplicate name '{s}' (first seen line {d})", .{ event.name, event.first_line }),
+        .duplicate_name => {
+            try writer.writeAll("duplicate name '");
+            try writeName(writer, event.name, escape_names);
+            try writer.print("' (first seen line {d})", .{event.first_line});
+        },
         .invalid_character => try writer.print("invalid sequence character 0x{x:0>2}", .{event.byte}),
         .null_byte => try writer.writeAll("null byte found"),
         .utf8_bom => try writer.writeAll("UTF-8 BOM at start of file"),
-        .inconsistent_line_widths => try writer.print("inconsistent line width in '{s}' (expected {d}, found {d})", .{ event.name, event.expected_width, event.actual_width }),
-        .trailing_whitespace => try writer.print("trailing whitespace on sequence line in '{s}'", .{event.name}),
-        .empty_sequence => try writer.print("empty sequence '{s}'", .{event.name}),
+        .inconsistent_line_widths => {
+            try writer.writeAll("inconsistent line width in '");
+            try writeName(writer, event.name, escape_names);
+            try writer.print("' (expected {d}, found {d})", .{ event.expected_width, event.actual_width });
+        },
+        .trailing_whitespace => {
+            try writer.writeAll("trailing whitespace on sequence line in '");
+            try writeName(writer, event.name, escape_names);
+            try writer.writeByte('\'');
+        },
+        .empty_sequence => {
+            try writer.writeAll("empty sequence '");
+            try writeName(writer, event.name, escape_names);
+            try writer.writeByte('\'');
+        },
         .missing_terminal_newline => try writer.writeAll("missing terminal newline"),
         .mixed_line_endings => try writer.writeAll("mixed CRLF and LF line endings"),
         .long_header => try writer.print("header exceeds {d} bytes", .{event.limit}),
-        .schema_violation => try writer.print("header for '{s}' does not match schema", .{event.name}),
+        .schema_violation => {
+            try writer.writeAll("header for '");
+            try writeName(writer, event.name, escape_names);
+            try writer.writeAll("' does not match schema");
+        },
     }
 }
 
-fn writeJsonLines(allocator: std.mem.Allocator, writer: anytype, summary: *const Summary) !void {
+fn writeName(writer: anytype, name: []const u8, comptime escape: bool) !void {
+    if (escape) {
+        try writeJsonStringBytes(writer, name);
+    } else {
+        try writer.writeAll(name);
+    }
+}
+
+fn writeJsonLines(writer: anytype, summary: *const Summary) !void {
     for (summary.events.items) |event| {
-        try writeJsonEventObject(allocator, writer, event);
+        try writeJsonEventObject(writer, event);
         try writer.writeByte('\n');
     }
 }
 
-fn writeJsonSummary(allocator: std.mem.Allocator, writer: anytype, summary: *const Summary) !void {
+fn writeJsonSummary(writer: anytype, summary: *const Summary) !void {
     const type_str: []const u8 = switch (summary.sequence_type) {
         .nucleotide => "nucleotide",
         .protein => "protein",
@@ -852,7 +960,7 @@ fn writeJsonSummary(allocator: std.mem.Allocator, writer: anytype, summary: *con
             if (summary.truncated) "true" else "false",
             type_str,
             summary.type_bases_sampled,
-            stats.validate_type_sample_bases,
+            stats.VALIDATE_TYPE_SAMPLE_BASES,
         },
     );
     for (allKinds(), 0..) |kind, i| {
@@ -865,19 +973,19 @@ fn writeJsonSummary(allocator: std.mem.Allocator, writer: anytype, summary: *con
         if (firstKind(summary, kind)) |event| {
             if (wrote_example) try writer.writeByte(',');
             try writer.print("\"{s}\":", .{kind.text()});
-            try writeJsonEventObject(allocator, writer, event);
+            try writeJsonEventObject(writer, event);
             wrote_example = true;
         }
     }
     try writer.writeAll("}}\n");
 }
 
-fn writeJsonEventObject(allocator: std.mem.Allocator, writer: anytype, event: ValidateEvent) !void {
+fn writeJsonEventObject(writer: anytype, event: ValidateEvent) !void {
     try writer.print(
         "{{\"schema_version\":\"v1\",\"level\":\"{s}\",\"line\":{d},\"kind\":\"{s}\",\"message\":\"",
         .{ event.level.text(), event.line, event.kind.text() },
     );
-    try writeJsonMessage(allocator, writer, event);
+    try writeMessage(writer, event, true);
     try writer.writeByte('"');
     if (event.name.len > 0) {
         try writer.writeAll(",\"name\":\"");
@@ -889,15 +997,7 @@ fn writeJsonEventObject(allocator: std.mem.Allocator, writer: anytype, event: Va
     try writer.writeByte('}');
 }
 
-fn writeJsonMessage(allocator: std.mem.Allocator, writer: anytype, event: ValidateEvent) !void {
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    try writeHumanMessage(&aw.writer, event);
-    try writeJsonStringBytes(writer, aw.written());
-}
-
-/// Write `text` inside a JSON string. ASCII controls and quotes are escaped.
-/// Invalid UTF-8 bytes become `\u00XX` so the overall document stays valid UTF-8 JSON.
+// Invalid UTF-8 bytes become `\u00XX` so the enclosing JSON remains valid UTF-8.
 fn writeJsonStringBytes(writer: anytype, text: []const u8) !void {
     var i: usize = 0;
     while (i < text.len) {
@@ -936,11 +1036,14 @@ fn writeJsonStringBytes(writer: anytype, text: []const u8) !void {
     }
 }
 
-/// Render one JSON event object (no trailing newline). For tests and tooling.
+/// Returns one caller-owned JSON event object without a trailing newline.
+/// Allocator-backed writer failures are reported as `error.OutOfMemory`.
 pub fn renderJsonEvent(allocator: std.mem.Allocator, event: ValidateEvent) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
-    try writeJsonEventObject(allocator, &aw.writer, event);
+    writeJsonEventObject(&aw.writer, event) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+    };
     return try aw.toOwnedSlice();
 }
 
@@ -962,11 +1065,7 @@ fn allKinds() []const Kind {
 }
 
 fn countKind(summary: *const Summary, kind: Kind) usize {
-    var count: usize = 0;
-    for (summary.events.items) |event| {
-        if (event.kind == kind) count += 1;
-    }
-    return count;
+    return summary.kind_counts[@intFromEnum(kind)];
 }
 
 fn firstKind(summary: *const Summary, kind: Kind) ?ValidateEvent {

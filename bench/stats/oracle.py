@@ -1,790 +1,477 @@
 #!/usr/bin/env python3
-"""Stats oracles for bench/stats/run.sh correctness (run_tests) only. Extend in place; no sibling scripts."""
+"""Independent exact oracle for the temporary stats correctness gate."""
 
 from __future__ import annotations
 
+import argparse
 import json
-import re
-import sys
 from collections import Counter
-from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
-from Bio import SeqIO
-
-IUPAC_NUC = "ACGTURYSWKMBDHVNacgturyswkmbdhvn"
-
-AA_CODES = "ARNDCEQGHILKMFPSTWYV"
-AA_NAMES = {
-    "A": "Alanine",
-    "R": "Arginine",
-    "N": "Asparagine",
-    "D": "Aspartate",
-    "C": "Cysteine",
-    "E": "Glutamate",
-    "Q": "Glutamine",
-    "G": "Glycine",
-    "H": "Histidine",
-    "I": "Isoleucine",
-    "L": "Leucine",
-    "K": "Lysine",
-    "M": "Methionine",
-    "F": "Phenylalanine",
-    "P": "Proline",
-    "S": "Serine",
-    "T": "Threonine",
-    "W": "Tryptophan",
-    "Y": "Tyrosine",
-    "V": "Valine",
-}
+IUPAC = b"ACGTURYSWKMBDHVN"
+AMBIGUOUS = "RYSWKMBDHV"
+PROTEIN_FIELDS = (
+    ("a_alanine", "A"), ("r_arginine", "R"), ("n_asparagine", "N"),
+    ("d_aspartate", "D"), ("c_cysteine", "C"), ("e_glutamate", "E"),
+    ("q_glutamine", "Q"), ("g_glycine", "G"), ("h_histidine", "H"),
+    ("i_isoleucine", "I"), ("l_leucine", "L"), ("k_lysine", "K"),
+    ("m_methionine", "M"), ("f_phenylalanine", "F"), ("p_proline", "P"),
+    ("s_serine", "S"), ("t_threonine", "T"), ("w_tryptophan", "W"),
+    ("y_tyrosine", "Y"), ("v_valine", "V"), ("b_asx", "B"),
+    ("z_glx", "Z"), ("j_xle", "J"), ("x_unknown", "X"),
+    ("u_selenocysteine", "U"), ("o_pyrrolysine", "O"),
+)
 
 
-def format_size(num_bytes: int) -> str:
-    gb = num_bytes / (1024**3)
-    mb = num_bytes / (1024**2)
-    kb = num_bytes / 1024
-    if gb >= 1.0:
-        return f"{gb:.1f} GB"
-    if mb >= 1.0:
-        return f"{mb:.1f} MB"
-    if kb >= 1.0:
-        return f"{kb:.1f} KB"
-    return f"{num_bytes} B"
+@dataclass(frozen=True)
+class Record:
+    name: str
+    sequence: bytes
 
 
-def load_indexed_names(fasta: str) -> list[str]:
-    fai = f"{fasta}.fai"
-    if not Path(fai).is_file():
-        return []
-    names: list[str] = []
-    for line in Path(fai).read_text().splitlines():
-        parts = line.split("\t")
-        if parts:
-            names.append(parts[0])
-    return names
+def read_fasta(path: Path) -> list[Record]:
+    records: list[Record] = []
+    name: str | None = None
+    chunks: list[bytes] = []
+    for raw in path.read_bytes().splitlines():
+        if raw.startswith(b">"):
+            if name is not None:
+                records.append(Record(name, b"".join(chunks)))
+            fields = raw[1:].split()
+            name = fields[0].decode("utf-8", errors="replace") if fields else ""
+            chunks = []
+        elif name is not None:
+            chunks.append(bytes(byte for byte in raw if byte > 32))
+    if name is not None:
+        records.append(Record(name, b"".join(chunks)))
+    return records
 
 
-def indexed_records(fasta: str, *, dedup: bool = True) -> list:
-    all_records = list(SeqIO.parse(fasta, "fasta"))
-    if not dedup:
-        return [r for r in all_records if len(r.seq) > 0]
-    indexed = load_indexed_names(fasta)
-    if not indexed:
-        return [r for r in all_records if len(r.seq) > 0]
-    want = set(indexed)
+def retained_records(path: Path, deduplicate: bool = True) -> list[Record]:
+    retained: list[Record] = []
     seen: set[str] = set()
-    out = []
-    for rec in all_records:
-        if rec.id in want and rec.id not in seen and len(rec.seq) > 0:
-            out.append(rec)
-            seen.add(rec.id)
-    return out
+    for record in read_fasta(path):
+        if not record.sequence or (deduplicate and record.name in seen):
+            continue
+        seen.add(record.name)
+        retained.append(record)
+    return retained
 
 
-def detect_type(counts: Counter, total: int) -> str:
-    if total == 0:
-        return "nucleotide"
-    nuc = sum(counts.get(c, 0) for c in IUPAC_NUC)
-    return "nucleotide" if nuc * 10 > total * 9 else "protein"
+def median(values: list[int]) -> int:
+    middle = len(values) // 2
+    return values[middle] if len(values) % 2 else values[middle - 1] + (values[middle] - values[middle - 1]) // 2
 
 
-def top_amino_acids(counts: Counter, total: int) -> list[dict]:
-    entries: list[dict] = []
-    for i, code in enumerate(AA_CODES):
-        cnt = counts.get(code, 0) + counts.get(code.lower(), 0)
-        entries.append({"code": code, "count": cnt, "ord": i})
-    # Match stats.zig: sort by count desc; ties keep amino_acid_names order.
-    entries.sort(key=lambda e: (-e["count"], e["ord"]))
-    out: list[dict] = []
-    for entry in entries[:3]:
-        out.append(
-            {
-                "code": entry["code"],
-                "pct": entry["count"] / total * 100.0 if total else 0.0,
-                "name": AA_NAMES[entry["code"]],
-            }
-        )
-    return out
+def fixed(numerator: int, denominator: int, places: int) -> str:
+    negative = numerator < 0
+    magnitude = abs(numerator)
+    scale = 10**places
+    whole, remainder = divmod(magnitude, denominator)
+    fraction = (remainder * scale + denominator // 2) // denominator
+    if fraction == scale:
+        whole += 1
+        fraction = 0
+    sign = "-" if negative and (whole or fraction) else ""
+    return f"{sign}{whole}.{fraction:0{places}d}"
 
 
-def name_duplicate_extras(names: list[str]) -> int:
-    """Source-level extras: sum(k - 1) for each name occurring k times."""
-    return sum(count - 1 for count in Counter(names).values() if count > 1)
+def letter(counts: Counter[int], code: str) -> int:
+    return counts[ord(code)] + counts[ord(code.lower())]
 
 
-def compute_expected(fasta: str, *, dedup: bool = True) -> dict:
-    all_records = list(SeqIO.parse(fasta, "fasta"))
-    records = indexed_records(fasta, dedup=dedup)
-    lengths = [len(r.seq) for r in records]
-    num_seqs = len(lengths)
-    total_bases = sum(lengths)
-    sorted_desc = sorted(lengths, reverse=True)
-
-    mean = total_bases // num_seqs if num_seqs else 0
-    if num_seqs == 0:
-        median = 0
-        median_half_up = 0
-    elif num_seqs % 2 == 1:
-        median = sorted_desc[num_seqs // 2]
-        median_half_up = median
-    else:
-        central_sum = sorted_desc[num_seqs // 2 - 1] + sorted_desc[num_seqs // 2]
-        median = central_sum // 2  # z-fasta integer floor
-        median_half_up = (central_sum + 1) // 2  # seqkit-style round half up
-
-    threshold_50 = (total_bases + 1) // 2
-    threshold_90 = (total_bases * 9 + 9) // 10
-    bases_seen = au_sum = 0
+def calculate(path: Path, deduplicate: bool = True) -> dict[str, object]:
+    records = retained_records(path, deduplicate)
+    if not records:
+        raise ValueError(f"no retained records in {path}")
+    lengths = [len(record.sequence) for record in records]
+    ascending = sorted(lengths)
+    total = sum(lengths)
+    half = len(lengths) // 2
+    q1 = ascending[0] if len(lengths) == 1 else median(ascending[:half])
+    q3 = ascending[0] if len(lengths) == 1 else median(ascending[-half:])
+    cumulative = 0
+    square_sum = 0
     n50 = l50 = n90 = l90 = 0
-    found_n50 = found_n90 = False
-    for i, length in enumerate(sorted_desc):
-        bases_seen += length
-        au_sum += length * length
-        if not found_n50 and bases_seen >= threshold_50:
-            n50, l50, found_n50 = length, i + 1, True
-        if not found_n90 and bases_seen >= threshold_90:
-            n90, l90, found_n90 = length, i + 1, True
-    au = au_sum // total_bases if total_bases else 0
-
-    shortest_idx = lengths.index(min(lengths))
-    longest_idx = lengths.index(max(lengths))
-
-    counts: Counter = Counter()
-    lowercase = 0
-    comp_total = 0
-    for rec in records:
-        for ch in str(rec.seq):
-            counts[ch] += 1
-            comp_total += 1
-            if ch.islower():
-                lowercase += 1
-
-    seq_type = detect_type(counts, comp_total)
-    fasta_bytes = Path(fasta).stat().st_size
-    source_duplicates = name_duplicate_extras([r.id for r in all_records])
-    # Index-visible extras (--no-dedup path); empty sequences are omitted from indexes.
-    index_duplicates = name_duplicate_extras([r.id for r in records])
-    out: dict = {
-        "dedup_index": dedup,
-        "source_duplicates": source_duplicates,
-        "index_duplicates": index_duplicates,
-        "fasta_bytes": fasta_bytes,
-        "fasta_size": format_size(fasta_bytes),
-        "fasta_name": Path(fasta).name,
-        "num_seqs": num_seqs,
-        "total_bases": total_bases,
-        "shortest_len": min(lengths) if lengths else 0,
-        "shortest_name": records[shortest_idx].id,
-        "longest_len": max(lengths) if lengths else 0,
-        "longest_name": records[longest_idx].id,
-        "mean": mean,
-        "median": median,
-        "median_half_up": median_half_up,
-        "n50": n50,
-        "l50": l50,
-        "n90": n90,
-        "l90": l90,
-        "au": au,
-        "seq_type": seq_type,
-    }
-
-    soft_pct = lowercase / comp_total * 100.0 if comp_total else 0.0
-    if seq_type == "nucleotide":
-        a = counts.get("A", 0) + counts.get("a", 0)
-        c = counts.get("C", 0) + counts.get("c", 0)
-        g = counts.get("G", 0) + counts.get("g", 0)
-        t = counts.get("T", 0) + counts.get("t", 0)
-        n = counts.get("N", 0) + counts.get("n", 0)
-        acgt = a + c + g + t
-        other = comp_total - a - c - g - t - n
-        out.update(
-            {
-                "a_pct": a / comp_total * 100.0 if comp_total else 0.0,
-                "c_pct": c / comp_total * 100.0 if comp_total else 0.0,
-                "g_pct": g / comp_total * 100.0 if comp_total else 0.0,
-                "t_pct": t / comp_total * 100.0 if comp_total else 0.0,
-                "n_pct": n / comp_total * 100.0 if comp_total else 0.0,
-                "n_count": n,
-                "other_pct": other / comp_total * 100.0 if comp_total and other > 0 else 0.0,
-                "has_other": other > 0,
-                "gc_pct": (g + c) / acgt * 100.0 if acgt else 0.0,
-                "gc_excl_n": (n / comp_total * 100.0 if comp_total else 0.0) > 1.0,
-                "gc_skew": (g - c) / (g + c) if (g + c) else 0.0,
-                "has_gc_skew": (g + c) > 0,
-                "soft_pct": soft_pct,
-            }
-        )
-    else:
-        out["soft_pct"] = soft_pct
-        out["top_aa"] = top_amino_acids(counts, comp_total)
-    return out
-
-
-def strip_commas(s: str) -> int:
-    return int(s.replace(",", ""))
-
-
-def parse_zfasta(text: str) -> dict:
-    out: dict = {"top_aa": []}
-    for line in text.splitlines():
-        raw = line
-        line = line.strip()
-
-        m = re.match(r"File:\s+(.+?)\s+\((.+?) on disk\)", line)
-        if m:
-            out["file_path"] = m.group(1).strip()
-            out["file_size"] = m.group(2).strip()
-            continue
-
-        m = re.match(r"Index:\s+(.+)", line)
-        if m:
-            out["index_path"] = m.group(1).strip()
-            continue
-
-        m = re.match(r"^\s*([A-Z]):\s+([\d.]+)%\s+\((.+)\)", line)
-        if m:
-            out["top_aa"].append({"code": m.group(1), "pct": float(m.group(2)), "name": m.group(3)})
-            continue
-
-        if line == "(20 amino acids total)":
-            out["protein_footer"] = True
-            continue
-
-        for pat, key, conv in (
-            (r"Sequences:\s+(.+)", "num_seqs", strip_commas),
-            (r"Total bases:\s+(.+)", "total_bases", strip_commas),
-            (r"Shortest:\s+([\d,]+)\s+\((.+)\)", None, None),
-            (r"Longest:\s+([\d,]+)\s+\((.+)\)", None, None),
-            (r"Mean:\s+(.+)", "mean", strip_commas),
-            (r"Median:\s+(.+)", "median", strip_commas),
-            (r"N50:\s+(.+)", "n50", strip_commas),
-            (r"L50:\s+(.+)", "l50", strip_commas),
-            (r"N90:\s+(.+)", "n90", strip_commas),
-            (r"L90:\s+(.+)", "l90", strip_commas),
-            (r"AU:\s+(.+)", "au", strip_commas),
-            (r"Type:\s+(.+)", "type", str.strip),
-            (r"Duplicates:\s+(\d+)\s*$", "duplicates", int),
-            (r"Duplicates:\s+(n/a(?:\s.*)?)\s*$", "duplicates_na", str.strip),
-            (r"^\s*A:\s+([\d.]+)%", "a_pct", float),
-            (r"^\s*C:\s+([\d.]+)%", "c_pct", float),
-            (r"^\s*G:\s+([\d.]+)%", "g_pct", float),
-            (r"^\s*T:\s+([\d.]+)%", "t_pct", float),
-            (r"^\s*N:\s+([\d.]+)%", "n_pct", float),
-            (r"Other:\s+([\d.]+)%", "other_pct", float),
-            (r"GC:\s+([\d.]+)%", "gc_pct", float),
-            (r"GC skew:\s+([+-]?[\d.]+)", "gc_skew", float),
-            (r"Soft-masked:\s+([\d.]+)%", "soft_pct", float),
-            (r"Lowercase:\s+([\d.]+)%", "soft_pct", float),
-            (r"N content:\s+(.+)", "n_content", strip_commas),
-        ):
-            m = re.search(pat, raw)
-            if not m:
-                continue
-            if key is None:
-                if "Shortest" in pat:
-                    out["shortest_len"] = strip_commas(m.group(1))
-                    out["shortest_name"] = m.group(2)
-                else:
-                    out["longest_len"] = strip_commas(m.group(1))
-                    out["longest_name"] = m.group(2)
-            else:
-                out[key] = conv(m.group(1))
-
-        if "GC:" in line and "(excl. N)" in line:
-            out["gc_excl_n"] = True
-    return out
-
-
-def parse_wrapper(text: str) -> dict:
-    out: dict = {"top_aa": []}
-    for line in text.splitlines():
-        key, _, val = line.partition("\t")
-        if not key:
-            continue
-        if key in (
-            "sequences",
-            "total_bases",
-            "shortest_len",
-            "longest_len",
-            "mean",
-            "median",
-            "n50",
-            "l50",
-            "n90",
-            "l90",
-            "au",
-            "n_content",
-        ):
-            out[key] = int(val)
-        elif key in (
-            "a_pct",
-            "c_pct",
-            "g_pct",
-            "t_pct",
-            "n_pct",
-            "other_pct",
-            "gc_pct",
-            "gc_skew",
-            "soft_pct",
-        ):
-            out[key] = float(val)
-        elif key in ("shortest_name", "longest_name", "type"):
-            out[key] = val
-        elif key.startswith("top_aa_"):
-            # code:pct:name
-            parts = val.split(":", 2)
-            if len(parts) == 3:
-                out["top_aa"].append(
-                    {"code": parts[0], "pct": float(parts[1]), "name": parts[2]}
-                )
-    return out
-
-
-def compare_wrapper_to_expected(tool: str, expected: dict, got: dict, errors: list[str]) -> None:
-    """Compare wrapper TSV stats to BioPython expected (z-fasta field formulas).
-
-    Wrappers are clean-FASTA comparison peers only. They re-parse the FASTA with
-    noodles/rust-bio; they do not strip messy whitespace or use side tables.
-    Require the expanded field set so a stale 2-line binary fails loudly.
-    """
-    required = (
-        "sequences",
-        "total_bases",
-        "shortest_len",
-        "longest_len",
-        "mean",
-        "median",
-        "n50",
-        "l50",
-        "n90",
-        "l90",
-        "au",
-        "type",
-        "soft_pct",
-    )
-    missing = [k for k in required if k not in got]
-    if missing:
-        errors.append(
-            f"{tool}: stale or incomplete stats output (missing {', '.join(missing)}); "
-            f"rebuild tools/{tool}_wrapper --target-dir ./target"
-        )
-        return
-
-    int_ok(errors, f"{tool}.sequences", expected["num_seqs"], got.get("sequences", -2))
-    int_ok(errors, f"{tool}.total_bases", expected["total_bases"], got.get("total_bases", -2))
-    for key in (
-        "shortest_len",
-        "longest_len",
-        "mean",
-        "median",
-        "n50",
-        "l50",
-        "n90",
-        "l90",
-        "au",
-    ):
-        int_ok(errors, f"{tool}.{key}", expected[key], got.get(key, -2))
-    str_ok(errors, f"{tool}.shortest_name", expected["shortest_name"], got.get("shortest_name", "?"))
-    str_ok(errors, f"{tool}.longest_name", expected["longest_name"], got.get("longest_name", "?"))
-    want_type = "nucleotide" if expected["seq_type"] == "nucleotide" else "protein"
-    str_ok(errors, f"{tool}.type", want_type, got.get("type", "?"))
-    float_ok(errors, f"{tool}.soft_pct", expected["soft_pct"], got.get("soft_pct", -1.0))
-
-    if expected["seq_type"] == "nucleotide":
-        for key in ("a_pct", "c_pct", "g_pct", "t_pct", "n_pct", "gc_pct"):
-            if key not in got:
-                errors.append(f"{tool}.{key}: missing from wrapper output")
-                continue
-            float_ok(errors, f"{tool}.{key}", expected[key], got.get(key, -1.0))
-        if expected.get("has_other"):
-            float_ok(errors, f"{tool}.other_pct", expected["other_pct"], got.get("other_pct", -1.0))
-        if expected.get("has_gc_skew"):
-            float_ok(errors, f"{tool}.gc_skew", expected["gc_skew"], got.get("gc_skew", 9.0), tol=0.002)
-        int_ok(errors, f"{tool}.n_content", expected["n_count"], got.get("n_content", -1))
-    else:
-        got_top = got.get("top_aa", [])
-        if len(got_top) < 3:
-            errors.append(f"{tool}.top_aa: expected 3 entries, got {len(got_top)}")
-        for i, want in enumerate(expected.get("top_aa", [])):
-            if i >= len(got_top):
-                errors.append(f"{tool}.top_aa[{i}]: missing")
-                continue
-            float_ok(errors, f"{tool}.top_aa[{i}].pct", want["pct"], got_top[i].get("pct", -1.0))
-            str_ok(errors, f"{tool}.top_aa[{i}].code", want["code"], got_top[i].get("code", "?"))
-            str_ok(errors, f"{tool}.top_aa[{i}].name", want["name"], got_top[i].get("name", "?"))
-
-
-def parse_int_field(s: str) -> int:
-    return int(s.replace(",", ""))
-
-
-def parse_seqkit_assembly(text: str) -> dict:
-    lines = [ln for ln in text.splitlines() if ln.strip() and not ln.startswith("file")]
-    if not lines:
-        return {}
-    # Prefer TSV (-T): header + data. Fall back to whitespace table.
-    raw_lines = [ln for ln in text.splitlines() if ln.strip()]
-    if len(raw_lines) >= 2 and "\t" in raw_lines[0]:
-        headers = raw_lines[0].split("\t")
-        cols = raw_lines[-1].split("\t")
-        if len(cols) < len(headers):
-            return {}
-        by = dict(zip(headers, cols))
-        out: dict = {
-            "num_seqs": parse_int_field(by.get("num_seqs", "-1")),
-            "total_bases": parse_int_field(by.get("sum_len", "-1")),
-            "n50": parse_int_field(by.get("N50", "-1")),
-            "gc_pct": float(by.get("GC(%)", "-2")),
-        }
-        if "Q2" in by:
-            out["q2"] = parse_int_field(by["Q2"])
-        return out
-
-    cols = lines[-1].split()
-    if len(cols) < 18:
-        return {}
+    for rank, length in enumerate(reversed(ascending), start=1):
+        cumulative += length
+        square_sum += length * length
+        if not l50 and cumulative >= (total * 50 + 99) // 100:
+            n50, l50 = length, rank
+        if not l90 and cumulative >= (total * 90 + 99) // 100:
+            n90, l90 = length, rank
+    shortest = min(range(len(records)), key=lambda index: lengths[index])
+    longest = max(range(len(records)), key=lambda index: lengths[index])
+    counts = Counter(byte for record in records for byte in record.sequence)
+    lowercase = sum(value for byte, value in counts.items() if ord("a") <= byte <= ord("z"))
+    nucleotide = sum(letter(counts, chr(code)) for code in IUPAC)
     return {
-        "num_seqs": parse_int_field(cols[3]),
-        "total_bases": parse_int_field(cols[4]),
-        "n50": parse_int_field(cols[12]),
-        "gc_pct": float(cols[17]),
-        # Whitespace table: Q2 is column 10 (0-based index 9) when -a is used.
-        "q2": parse_int_field(cols[9]) if len(cols) > 9 else -1,
+        "records": records, "counts": counts, "count": len(records), "total": total,
+        "shortest_length": lengths[shortest], "shortest_name": records[shortest].name,
+        "longest_length": lengths[longest], "longest_name": records[longest].name,
+        "mean": total // len(records), "q1": q1, "median": median(ascending), "q3": q3,
+        "range": lengths[longest] - lengths[shortest], "n50": n50, "l50": l50,
+        "n90": n90, "l90": l90, "aun_numerator": square_sum,
+        "nucleotide": nucleotide * 10 > total * 9, "lowercase": lowercase,
     }
 
 
-def seqkit_q2_vs_median(expected: dict, q2: int, errors: list[str]) -> None:
-    """Compare seqkit Q2 to z-fasta median.
+def composition_lines(values: dict[str, object]) -> list[str]:
+    counts = values["counts"]
+    assert isinstance(counts, Counter)
+    total = int(values["total"])
+    lowercase = int(values["lowercase"])
+    lines: list[str] = []
+    if values["nucleotide"]:
+        bases = {code: letter(counts, code) for code in "ACGTUN"}
+        ambiguous = sum(letter(counts, code) for code in AMBIGUOUS)
+        invalid = total - sum(bases.values()) - ambiguous
+        if bases["T"] and bases["U"]:
+            type_name = "nucleotide_mixed_tu"
+        elif bases["T"]:
+            type_name = "nucleotide_t"
+        elif bases["U"]:
+            type_name = "nucleotide_u"
+        else:
+            type_name = "nucleotide"
+        lines.extend((f"type\t{type_name}", "percent_denominator\ttotal_symbols"))
+        for key in "acgtun":
+            value = bases[key.upper()]
+            lines.append(f"{key}\t{value}\t{fixed(value * 100, total, 2)}")
+        lines.append(f"iupac_ambiguous\t{ambiguous}\t{fixed(ambiguous * 100, total, 2)}")
+        lines.append(f"invalid\t{invalid}\t{fixed(invalid * 100, total, 2)}")
+        canonical = sum(bases[code] for code in "ACGTU")
+        lines.append(f"gc\t{fixed((bases['G'] + bases['C']) * 100, canonical, 2) if canonical else 'n/a'}")
+        gc_total = bases["G"] + bases["C"]
+        lines.append(f"gc_skew\t{fixed(bases['G'] - bases['C'], gc_total, 3) if gc_total else 'n/a'}")
+    else:
+        lines.extend(("type\tprotein", "percent_denominator\ttotal_symbols"))
+        assigned = 0
+        for key, code in PROTEIN_FIELDS:
+            value = letter(counts, code)
+            assigned += value
+            lines.append(f"{key}\t{value}\t{fixed(value * 100, total, 2)}")
+        stop = counts[ord("*")]
+        lines.append(f"stop\t{stop}\t{fixed(stop * 100, total, 2)}")
+        invalid = total - assigned - stop
+        lines.append(f"invalid\t{invalid}\t{fixed(invalid * 100, total, 2)}")
+    lines.append(f"lowercase\t{lowercase}\t{fixed(lowercase * 100, total, 2)}")
+    return lines
 
-    Odd N: Q2 must equal median.
-    Even N: both average the two central lengths; z-fasta floors, seqkit rounds half up.
-    Example proteome lengths 20 and 51: midpoint 35.5 -> z-fasta 35, seqkit Q2 36.
-    """
-    median = expected["median"]
-    half_up = expected.get("median_half_up", median)
-    n = expected["num_seqs"]
-    if n <= 0:
-        errors.append("seqkit.q2: expected num_seqs > 0")
+
+def shared_lines(values: dict[str, object]) -> list[str]:
+    return [
+        f"indexed_records\t{values['count']}", f"total_symbols\t{values['total']}",
+        f"shortest_length\t{values['shortest_length']}", f"shortest_name\t{values['shortest_name']}",
+        f"longest_length\t{values['longest_length']}", f"longest_name\t{values['longest_name']}",
+        f"mean\t{values['mean']}", f"q1\t{values['q1']}", f"median\t{values['median']}",
+        f"q3\t{values['q3']}", f"range\t{values['range']}", f"n50\t{values['n50']}",
+        f"l50\t{values['l50']}", f"n90\t{values['n90']}", f"l90\t{values['l90']}",
+        f"aun\t{fixed(int(values['aun_numerator']), int(values['total']), 2)}",
+        *composition_lines(values),
+    ]
+
+
+def expected_peer(path: Path) -> str:
+    return "\n".join(shared_lines(calculate(path))) + "\n"
+
+
+def expected_zfasta(path: Path, index_suffix: str, deduplicate: bool = True) -> str:
+    values = calculate(path, deduplicate)
+    shared = shared_lines(values)
+    fields = dict(line.split("\t", 1) for line in shared[:16])
+    lines = [
+        "File:", f"  path: {path}", f"  index: {path}{index_suffix}", f"  size_bytes: {path.stat().st_size}", "",
+        "Lengths:", *[f"  {key}: {fields[key]}" for key in (
+            "indexed_records", "total_symbols", "shortest_length", "shortest_name", "longest_length",
+            "longest_name", "mean", "q1", "median", "q3", "range")], "", "Nx:",
+        *[f"  {key}: {fields[key]}" for key in ("n50", "l50", "n90", "l90", "aun")], "", "Composition:",
+    ]
+    for line in shared[16:]:
+        parts = line.split("\t")
+        if len(parts) == 3:
+            lines.append(f"  {parts[0]}: {parts[1]} {parts[2]}%")
+        elif parts[0] == "gc" and parts[1] != "n/a":
+            lines.append(f"  gc: {parts[1]}%")
+        else:
+            lines.append(f"  {parts[0]}: {parts[1]}")
+    return "\n".join(lines) + "\n"
+
+
+def assert_equal(label: str, expected: str, actual: str) -> None:
+    if actual == expected:
         return
-    if n % 2 == 1:
-        int_ok(errors, "seqkit.q2_vs_median", median, q2)
+    wanted = expected.splitlines()
+    got = actual.splitlines()
+    for index in range(max(len(wanted), len(got))):
+        left = wanted[index] if index < len(wanted) else "<end>"
+        right = got[index] if index < len(got) else "<end>"
+        if left != right:
+            raise SystemExit(f"{label}: line {index + 1}: expected {left!r}, got {right!r}")
+    raise SystemExit(f"{label}: output differs")
+
+
+def assert_fields(label: str, actual: dict[str, object], expected: dict[str, object]) -> None:
+    for key, wanted in expected.items():
+        got = actual[key]
+        if got != wanted:
+            raise AssertionError(f"{label} {key}: expected {wanted!r}, got {got!r}")
+
+
+def composition_fields(values: dict[str, object]) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for line in composition_lines(values):
+        key, value = line.split("\t", 1)
+        fields[key] = value
+    return fields
+
+
+def verify(args: argparse.Namespace) -> None:
+    fasta = Path(args.fasta)
+    zfi_fasta = Path(args.zfi_fasta) if args.zfi_fasta else fasta
+    if zfi_fasta.read_bytes() != fasta.read_bytes():
+        raise SystemExit("z-fasta .zfi: FASTA view differs from oracle input")
+    assert_equal("z-fasta .zfi", expected_zfasta(zfi_fasta, ".zfi", not args.no_dedup), Path(args.zfi).read_text())
+    if args.fai:
+        fai_fasta = Path(args.fai_fasta) if args.fai_fasta else fasta
+        if fai_fasta.read_bytes() != fasta.read_bytes():
+            raise SystemExit("z-fasta .fai: FASTA view differs from oracle input")
+        assert_equal("z-fasta .fai", expected_zfasta(fai_fasta, ".fai", not args.no_dedup), Path(args.fai).read_text())
+    peer = expected_peer(fasta)
+    if args.noodles:
+        assert_equal("noodles", peer, Path(args.noodles).read_text())
+    if args.rustbio:
+        assert_equal("rust-bio", peer, Path(args.rustbio).read_text())
+
+
+def legacy_command(args: argparse.Namespace) -> None:
+    """Serve the permanent runner's small command interface."""
+    if args.command == "expected":
+        values = calculate(Path(args.fasta), not args.no_dedup)
+        print(json.dumps({"num_seqs": values["count"], "no_dedup": args.no_dedup}))
         return
-    int_ok(errors, "seqkit.q2_vs_median_half_up", half_up, q2)
-    if half_up != median and q2 == median:
-        errors.append(
-            f"seqkit.q2_vs_median: got floor {median} but seqkit should half-up to {half_up}"
-        )
+    if args.command == "check":
+        metadata = json.loads(Path(args.expected).read_text())
+        expected = expected_zfasta(Path(args.fasta), f".{args.format}", not metadata["no_dedup"])
+        assert_equal(f"z-fasta .{args.format}", expected, Path(args.output).read_text())
+        return
+    if args.command == "same":
+        left = Path(args.left).read_text().split("Lengths:\n", 1)
+        right = Path(args.right).read_text().split("Lengths:\n", 1)
+        if len(left) != 2 or len(right) != 2:
+            raise SystemExit("cross-format comparison: missing Lengths section")
+        assert_equal("cross-format report", left[1], right[1])
+        return
+    if args.command == "parity":
+        fasta = Path(args.fasta)
+        if args.tool in ("noodles", "rustbio"):
+            assert_equal(args.tool, expected_peer(fasta), Path(args.output).read_text())
+        elif args.tool == "seqkit":
+            verify_seqkit(fasta, Path(args.output).read_text())
+        elif args.tool == "seqtk":
+            verify_seqtk(fasta, Path(args.output).read_text())
+        else:
+            raise SystemExit(f"unsupported peer: {args.tool}")
+        return
+    raise AssertionError(args.command)
 
 
-def parse_seqtk_comp(text: str, indexed_names: list[str]) -> dict:
-    want = set(indexed_names) if indexed_names else None
+def verify_seqkit(fasta: Path, text: str) -> None:
+    lines = [line for line in text.splitlines() if line]
+    if len(lines) < 2:
+        raise SystemExit("seqkit: missing TSV result")
+    fields = dict(zip(lines[0].split("\t"), lines[-1].split("\t"), strict=True))
+    values = calculate(fasta)
+    records = values["records"]
+    assert isinstance(records, list)
+    lengths = sorted(len(record.sequence) for record in records)
+    middle = len(lengths) // 2
+    q2 = lengths[middle] if len(lengths) % 2 else (lengths[middle - 1] + lengths[middle] + 1) // 2
+    expected = {
+        "num_seqs": int(values["count"]), "sum_len": int(values["total"]),
+        "min_len": int(values["shortest_length"]), "max_len": int(values["longest_length"]),
+        "Q2": q2, "N50": int(values["n50"]), "N50_num": int(values["l50"]),
+    }
+    for key, wanted in expected.items():
+        got = int(fields.get(key, "-1").replace(",", ""))
+        if got != wanted:
+            raise SystemExit(f"seqkit {key}: expected {wanted}, got {got}")
+
+
+def verify_seqtk(fasta: Path, text: str) -> None:
+    records = retained_records(fasta)
+    wanted_names = {record.name for record in records}
     seen: set[str] = set()
-    a = c = g = t = n = total = 0
+    got = Counter()
     for line in text.splitlines():
-        if not line.strip():
+        fields = line.split("\t")
+        if len(fields) < 7 or fields[0] not in wanted_names or fields[0] in seen:
             continue
-        cols = line.split("\t")
-        name = cols[0]
-        if want is not None:
-            if name not in want or name in seen:
-                continue
-            seen.add(name)
-        if len(cols) < 6:
-            continue
-        length = int(cols[1])
-        if length == 0:
-            continue
-        a += int(cols[2])
-        c += int(cols[3])
-        g += int(cols[4])
-        t += int(cols[5])
-        n += int(cols[6]) if len(cols) > 6 else 0
-        total += length
-    acgt = a + c + g + t
-    return {
-        "total_bases": total,
-        "a_pct": a / total * 100.0 if total else 0.0,
-        "c_pct": c / total * 100.0 if total else 0.0,
-        "g_pct": g / total * 100.0 if total else 0.0,
-        "t_pct": t / total * 100.0 if total else 0.0,
-        "n_pct": n / total * 100.0 if total else 0.0,
-        "n_count": n,
-        "gc_pct": (g + c) / acgt * 100.0 if acgt else 0.0,
+        seen.add(fields[0])
+        got["total"] += int(fields[1])
+        for key, value in zip(("A", "C", "G", "T", "N"), fields[2:7], strict=True):
+            got[key] += int(value)
+    counts = Counter(byte for record in records for byte in record.sequence)
+    expected = Counter({"total": sum(len(record.sequence) for record in records)})
+    for key in "ACGTN":
+        expected[key] = letter(counts, key)
+    for key, wanted in expected.items():
+        if got[key] != wanted:
+            raise SystemExit(f"seqtk {key}: expected {wanted}, got {got[key]}")
+
+
+def self_test(fixtures: Path, design_fixtures: Path) -> None:
+    assert fixed(1 * 100, 32, 2) == "3.13"
+    assert fixed(226, 16, 2) == "14.13"
+    assert fixed(-30, 32, 3) == "-0.938"
+    assembly = calculate(fixtures / "assembly.fasta")
+    assert [assembly[key] for key in ("count", "total", "q1", "median", "q3", "n50", "l50", "n90", "l90")] == [4, 10, 1, 2, 3, 3, 2, 2, 3]
+    assert calculate(fixtures / "threshold_90.fasta")["nucleotide"] is False
+    assert calculate(fixtures / "threshold_above_90.fasta")["nucleotide"] is True
+
+    length_answers = {
+        "one_t.fasta": (1, 4, 4, "only", 4, "only", 4, 4, 4, 4, 0, 4, 1, 4, 1, 16),
+        "two_u.fasta": (2, 6, 2, "short", 4, "long", 3, 2, 3, 4, 2, 4, 1, 2, 2, 20),
+        "odd_ties_mixed.fasta": (
+            5, 15, 1, "short_first", 5, "long_first", 3, 1, 3, 5, 4, 5, 2, 1, 4, 61,
+        ),
+        "even_lengths.fasta": (4, 10, 1, "a", 4, "d", 2, 1, 2, 3, 3, 3, 2, 2, 3, 30),
+        "nucleotide_categories.fasta": (
+            1, 17, 17, "categories", 17, "categories", 17, 17, 17, 17, 0, 17, 1, 17, 1, 289,
+        ),
+        "ambiguity_only.fasta": (
+            1, 12, 12, "ambiguity", 12, "ambiguity", 12, 12, 12, 12, 0, 12, 1, 12, 1, 144,
+        ),
+        "gc_zero.fasta": (1, 6, 6, "zero", 6, "zero", 6, 6, 6, 6, 0, 6, 1, 6, 1, 36),
+        "exact_90_protein.fasta": (
+            1, 10, 10, "boundary", 10, "boundary", 10, 10, 10, 10, 0, 10, 1, 10, 1, 100,
+        ),
+        "protein_complete.fasta": (
+            1, 30, 30, "protein", 30, "protein", 30, 30, 30, 30, 0, 30, 1, 30, 1, 900,
+        ),
     }
-
-
-def fail(errors: list[str]) -> None:
-    for line in errors:
-        print(line, file=sys.stderr)
-    sys.exit(1)
-
-
-def int_ok(errors: list[str], label: str, expected: int, got: int) -> None:
-    if expected != got:
-        errors.append(f"{label}: expected {expected}, got {got}")
-
-
-def str_ok(errors: list[str], label: str, expected: str, got: str) -> None:
-    if expected != got:
-        errors.append(f"{label}: expected {expected!r}, got {got!r}")
-
-
-def float_ok(errors: list[str], label: str, expected: float, got: float, tol: float = 0.015) -> None:
-    if abs(expected - got) > tol:
-        errors.append(f"{label}: expected {expected:.4f}, got {got:.4f}")
-
-
-def check_header(expected: dict, got: dict, errors: list[str], index_tag: str) -> None:
-    want_suffix = ".zfi" if index_tag == "zfi" else ".fai"
-    index_path = got.get("index_path", "")
-    if not index_path.endswith(want_suffix):
-        errors.append(f"header.index: expected path ending in {want_suffix!r}, got {index_path!r}")
-    if expected["fasta_name"] not in got.get("file_path", ""):
-        errors.append("header.file: fasta name missing from File line")
-    str_ok(errors, "header.file_size", expected["fasta_size"], got.get("file_size", "?"))
-
-
-def compare_duplicates(expected: dict, got: dict, errors: list[str], *, index_only: bool) -> None:
-    """Product policy: full stats report source extras; index-only never fabricates 0."""
-    if "source_duplicates" not in expected:
-        return
-    if index_only:
-        # A number is knowable only when the index retains repeated names.
-        # Unique index names → n/a (dedup may have dropped repeats, or source
-        # may only duplicate empty records the indexer omits).
-        if expected.get("index_duplicates", 0) > 0:
-            int_ok(errors, "duplicates", expected["index_duplicates"], got.get("duplicates", -1))
-        elif "duplicates_na" not in got:
-            errors.append(
-                f"duplicates: expected n/a under index-only with no retained repeats, got {got.get('duplicates', '?')!r}"
-            )
-        return
-    int_ok(errors, "duplicates", expected["source_duplicates"], got.get("duplicates", -1))
-
-
-def compare_index(expected: dict, got: dict, errors: list[str], *, index_only: bool = False) -> None:
-    for key in ("num_seqs", "total_bases", "shortest_len", "longest_len", "mean", "median", "n50", "l50", "n90", "l90", "au"):
-        int_ok(errors, key, expected[key], got.get(key, -1))
-    str_ok(errors, "shortest_name", expected["shortest_name"], got.get("shortest_name", "?"))
-    str_ok(errors, "longest_name", expected["longest_name"], got.get("longest_name", "?"))
-    compare_duplicates(expected, got, errors, index_only=index_only)
-
-
-def compare_full(expected: dict, got: dict, errors: list[str]) -> None:
-    compare_index(expected, got, errors, index_only=False)
-    want_type = "Nucleotide" if expected["seq_type"] == "nucleotide" else "Protein"
-    str_ok(errors, "type", want_type, got.get("type", "?"))
-
-    if expected["seq_type"] == "nucleotide":
-        for key in ("a_pct", "c_pct", "g_pct", "t_pct", "n_pct", "gc_pct", "soft_pct"):
-            float_ok(errors, key, expected[key], got.get(key, -1.0))
-        if expected.get("has_other"):
-            float_ok(errors, "other_pct", expected["other_pct"], got.get("other_pct", -1.0))
-        elif got.get("other_pct") is not None:
-            errors.append("other_pct: expected absent, got value")
-        if expected.get("gc_excl_n"):
-            if not got.get("gc_excl_n"):
-                errors.append("gc_excl_n: expected '(excl. N)' suffix on GC line")
-        if expected.get("has_gc_skew"):
-            float_ok(errors, "gc_skew", expected["gc_skew"], got.get("gc_skew", 9.0), tol=0.002)
-        elif got.get("gc_skew") is not None:
-            errors.append("gc_skew: expected absent when G+C is zero")
-        int_ok(errors, "n_content", expected["n_count"], got.get("n_content", -1))
-    else:
-        float_ok(errors, "soft_pct", expected["soft_pct"], got.get("soft_pct", -1.0))
-        if not got.get("protein_footer"):
-            errors.append("protein_footer: expected '(20 amino acids total)' line")
-        got_top = got.get("top_aa", [])
-        for i, want in enumerate(expected.get("top_aa", [])):
-            if i >= len(got_top):
-                errors.append(f"top_aa[{i}]: missing")
-                continue
-            float_ok(errors, f"top_aa[{i}].pct", want["pct"], got_top[i].get("pct", -1.0))
-            str_ok(errors, f"top_aa[{i}].code", want["code"], got_top[i].get("code", "?"))
-            str_ok(errors, f"top_aa[{i}].name", want["name"], got_top[i].get("name", "?"))
-
-
-def cross_duplicates_ok(a: dict, b: dict, errors: list[str]) -> None:
-    if "duplicates_na" in a or "duplicates_na" in b:
-        if "duplicates_na" not in a or "duplicates_na" not in b:
-            errors.append(
-                f"cross.duplicates: n/a mismatch ({a.get('duplicates_na', a.get('duplicates'))!r} vs {b.get('duplicates_na', b.get('duplicates'))!r})"
-            )
-        return
-    int_ok(errors, "cross.duplicates", a.get("duplicates", -1), b.get("duplicates", -2))
-
-
-def compare_parsed_full(a: dict, b: dict, errors: list[str]) -> None:
-    compare_index(
-        {k: a.get(k, -1) for k in ("num_seqs", "total_bases", "shortest_len", "longest_len", "mean", "median", "n50", "l50", "n90", "l90", "au")}
-        | {"shortest_name": a.get("shortest_name", "?"), "longest_name": a.get("longest_name", "?")},
-        b,
-        errors,
+    length_keys = (
+        "count", "total", "shortest_length", "shortest_name", "longest_length",
+        "longest_name", "mean", "q1", "median", "q3", "range", "n50", "l50",
+        "n90", "l90", "aun_numerator",
     )
-    cross_duplicates_ok(a, b, errors)
-    str_ok(errors, "cross.type", a.get("type", "?"), b.get("type", "!"))
-    if a.get("type") == "Nucleotide":
-        for key in ("a_pct", "c_pct", "g_pct", "t_pct", "n_pct", "gc_pct", "soft_pct", "other_pct"):
-            if key in a or key in b:
-                float_ok(errors, f"cross.{key}", a.get(key, -1.0), b.get(key, -2.0))
-        if "gc_skew" in a or "gc_skew" in b:
-            float_ok(errors, "cross.gc_skew", a.get("gc_skew", 0.0), b.get("gc_skew", 9.0), tol=0.002)
-        int_ok(errors, "cross.n_content", a.get("n_content", -1), b.get("n_content", -2))
-    else:
-        float_ok(errors, "cross.soft_pct", a.get("soft_pct", -1.0), b.get("soft_pct", -2.0))
-        for i in range(min(len(a.get("top_aa", [])), len(b.get("top_aa", [])))):
-            float_ok(errors, f"cross.top_aa[{i}].pct", a["top_aa"][i]["pct"], b["top_aa"][i].get("pct", -2.0))
+    design_values: dict[str, dict[str, object]] = {}
+    for name, answer in length_answers.items():
+        values = calculate(design_fixtures / name)
+        design_values[name] = values
+        assert_fields(name, values, dict(zip(length_keys, answer, strict=True)))
 
+    composition_answers = {
+        "one_t.fasta": {
+            "type": "nucleotide_t", "a": "1\t25.00", "c": "1\t25.00",
+            "g": "1\t25.00", "t": "1\t25.00", "u": "0\t0.00", "n": "0\t0.00",
+            "iupac_ambiguous": "0\t0.00", "invalid": "0\t0.00", "gc": "50.00",
+            "gc_skew": "0.000", "lowercase": "4\t100.00",
+        },
+        "two_u.fasta": {
+            "type": "nucleotide_u", "a": "1\t16.67", "c": "2\t33.33",
+            "g": "0\t0.00", "t": "0\t0.00", "u": "3\t50.00", "n": "0\t0.00",
+            "iupac_ambiguous": "0\t0.00", "invalid": "0\t0.00", "gc": "33.33",
+            "gc_skew": "-1.000", "lowercase": "2\t33.33",
+        },
+        "odd_ties_mixed.fasta": {
+            "type": "nucleotide_mixed_tu", "a": "2\t13.33", "c": "2\t13.33",
+            "g": "2\t13.33", "t": "2\t13.33", "u": "2\t13.33", "n": "5\t33.33",
+            "iupac_ambiguous": "0\t0.00", "invalid": "0\t0.00", "gc": "40.00",
+            "gc_skew": "0.000", "lowercase": "0\t0.00",
+        },
+        "even_lengths.fasta": {
+            "type": "nucleotide_t", "a": "4\t40.00", "c": "3\t30.00",
+            "g": "2\t20.00", "t": "1\t10.00", "u": "0\t0.00", "n": "0\t0.00",
+            "iupac_ambiguous": "0\t0.00", "invalid": "0\t0.00", "gc": "50.00",
+            "gc_skew": "-0.200", "lowercase": "0\t0.00",
+        },
+        "nucleotide_categories.fasta": {
+            "type": "nucleotide_mixed_tu", "a": "1\t5.88", "c": "1\t5.88",
+            "g": "1\t5.88", "t": "1\t5.88", "u": "1\t5.88", "n": "1\t5.88",
+            "iupac_ambiguous": "10\t58.82", "invalid": "1\t5.88", "gc": "40.00",
+            "gc_skew": "0.000", "lowercase": "5\t29.41",
+        },
+        "ambiguity_only.fasta": {
+            "type": "nucleotide", "a": "0\t0.00", "c": "0\t0.00", "g": "0\t0.00",
+            "t": "0\t0.00", "u": "0\t0.00", "n": "2\t16.67",
+            "iupac_ambiguous": "10\t83.33", "invalid": "0\t0.00", "gc": "n/a",
+            "gc_skew": "n/a", "lowercase": "0\t0.00",
+        },
+        "gc_zero.fasta": {
+            "type": "nucleotide_t", "a": "3\t50.00", "c": "0\t0.00",
+            "g": "0\t0.00", "t": "3\t50.00", "u": "0\t0.00", "n": "0\t0.00",
+            "iupac_ambiguous": "0\t0.00", "invalid": "0\t0.00", "gc": "0.00",
+            "gc_skew": "n/a", "lowercase": "6\t100.00",
+        },
+    }
+    for name, answer in composition_answers.items():
+        assert_fields(name, composition_fields(design_values[name]), answer)
 
-def cmd_expected(argv: list[str]) -> None:
-    fasta = argv[2]
-    dedup = not (len(argv) > 3 and argv[3] == "--no-dedup")
-    print(json.dumps(compute_expected(fasta, dedup=dedup)))
-
-
-def cmd_check(argv: list[str]) -> None:
-    mode, index_tag, fasta_path, exp_path, stats_path = argv[2], argv[3], argv[4], argv[5], argv[6]
-    expected = json.loads(Path(exp_path).read_text())
-    text = Path(stats_path).read_text()
-    got = parse_zfasta(text)
-    errors: list[str] = []
-
-    check_header(expected, got, errors, index_tag)
-
-    if mode == "index-only":
-        if "Composition:" in text:
-            errors.append("index-only: composition section present")
-        if "run without --index-only" not in got.get("type", ""):
-            errors.append(f"index-only: bad type placeholder ({got.get('type', '?')!r})")
-        compare_index(expected, got, errors, index_only=True)
-    else:
-        if "Composition:" not in text:
-            errors.append("full: composition section missing")
-        compare_full(expected, got, errors)
-
-    if errors:
-        fail(errors)
-
-
-def cmd_verify_mode(argv: list[str]) -> None:
-    mode, fasta_path, exp_path, zfi_path, fai_path = argv[2], argv[3], argv[4], argv[5], argv[6]
-    expected = json.loads(Path(exp_path).read_text())
-    errors: list[str] = []
-    index_only = mode == "index-only"
-
-    for tag, path in (("zfi", zfi_path), ("fai", fai_path)):
-        text = Path(path).read_text()
-        got = parse_zfasta(text)
-        check_header(expected, got, errors, tag)
-        if index_only:
-            if "Composition:" in text:
-                errors.append(f"{tag}: composition section present")
-            if "run without --index-only" not in got.get("type", ""):
-                errors.append(f"{tag}: bad index-only type placeholder")
-            compare_index(expected, got, errors, index_only=True)
+    exact_90 = composition_fields(design_values["exact_90_protein.fasta"])
+    assert_fields("exact_90_protein.fasta", exact_90, {
+        "type": "protein", "a_alanine": "9\t90.00", "l_leucine": "1\t10.00",
+        "invalid": "0\t0.00", "lowercase": "0\t0.00",
+    })
+    protein = composition_fields(design_values["protein_complete.fasta"])
+    assert protein["type"] == "protein"
+    assert protein["a_alanine"] == "2\t6.67"
+    assert protein["r_arginine"] == "2\t6.67"
+    for key, _ in PROTEIN_FIELDS[2:]:
+        assert protein[key] == "1\t3.33", (key, protein[key])
+    assert_fields("protein_complete.fasta", protein, {
+        "stop": "1\t3.33", "invalid": "1\t3.33", "lowercase": "2\t6.67",
+    })
+    assert_equal("self-test equality", "a\n", "a\n")
+    for changed in ("a\nextra\n", "", "b\n"):
+        try:
+            assert_equal("self-test rejection", "a\n", changed)
+        except SystemExit:
+            pass
         else:
-            if "Composition:" not in text:
-                errors.append(f"{tag}: composition section missing")
-            compare_full(expected, got, errors)
-
-    zfi = parse_zfasta(Path(zfi_path).read_text())
-    fai = parse_zfasta(Path(fai_path).read_text())
-    if index_only:
-        compare_index(
-            {k: zfi.get(k, -1) for k in ("num_seqs", "total_bases", "shortest_len", "longest_len", "mean", "median", "n50", "l50", "n90", "l90", "au")}
-            | {"shortest_name": zfi.get("shortest_name", "?"), "longest_name": zfi.get("longest_name", "?")},
-            fai,
-            errors,
-        )
-        cross_duplicates_ok(zfi, fai, errors)
-    else:
-        compare_parsed_full(zfi, fai, errors)
-
-    if errors:
-        fail(errors)
-
-
-def cmd_parity(argv: list[str]) -> None:
-    fasta, exp_path, zfi_idx, zfi_full = argv[2], argv[3], argv[4], argv[5]
-    expected = json.loads(Path(exp_path).read_text())
-    errors: list[str] = []
-    pos = 6
-    tools_validated = 0
-    while pos < len(argv):
-        tool, path = argv[pos], argv[pos + 1]
-        pos += 2
-        if tool in ("noodles", "rustbio"):
-            got = parse_wrapper(Path(path).read_text())
-            compare_wrapper_to_expected(tool, expected, got, errors)
-            tools_validated += 1
-        elif tool == "seqkit":
-            zf = parse_zfasta(Path(zfi_full).read_text())
-            sk = parse_seqkit_assembly(Path(path).read_text())
-            int_ok(errors, "seqkit.num_seqs", expected["num_seqs"], sk.get("num_seqs", -1))
-            int_ok(errors, "seqkit.total_bases", expected["total_bases"], sk.get("total_bases", -1))
-            int_ok(errors, "seqkit.n50", expected["n50"], sk.get("n50", -1))
-            if "q2" not in sk:
-                errors.append("seqkit.q2: missing (run seqkit stats -a)")
-            else:
-                seqkit_q2_vs_median(expected, sk["q2"], errors)
-            # Cross-check z-fasta printed median against BioPython expected.
-            int_ok(errors, "seqkit.zfasta_median", expected["median"], zf.get("median", -1))
-            if expected["seq_type"] == "nucleotide" and "gc_pct" in zf:
-                float_ok(errors, "seqkit.gc_pct", zf["gc_pct"], sk.get("gc_pct", -2.0))
-            tools_validated += 1
-        elif tool == "seqtk":
-            if expected["seq_type"] != "nucleotide":
-                continue
-            zf = parse_zfasta(Path(zfi_full).read_text())
-            comp = parse_seqtk_comp(Path(path).read_text(), load_indexed_names(fasta))
-            for key in ("a_pct", "c_pct", "g_pct", "t_pct", "n_pct", "gc_pct"):
-                float_ok(errors, f"seqtk.{key}", expected[key], comp.get(key, -1.0))
-            int_ok(errors, "seqtk.n_content", expected["n_count"], comp.get("n_count", -1))
-            float_ok(errors, "seqtk.gc_pct_vs_zfasta", zf.get("gc_pct", -1.0), comp.get("gc_pct", -2.0))
-            tools_validated += 1
-        else:
-            errors.append(f"parity: unknown tool {tool!r}")
-    if tools_validated == 0:
-        fail(["parity: no external tools validated"])
-    if errors:
-        fail(errors)
-
-
-def cmd_same(argv: list[str]) -> None:
-    mode, a_path, b_path = argv[2], argv[3], argv[4]
-    a = parse_zfasta(Path(a_path).read_text())
-    b = parse_zfasta(Path(b_path).read_text())
-    errors: list[str] = []
-
-    if mode == "index-only":
-        compare_index(
-            {k: a.get(k, -1) for k in ("num_seqs", "total_bases", "shortest_len", "longest_len", "mean", "median", "n50", "l50", "n90", "l90", "au")}
-            | {"shortest_name": a.get("shortest_name", "?"), "longest_name": a.get("longest_name", "?")},
-            b,
-            errors,
-        )
-        cross_duplicates_ok(a, b, errors)
-    else:
-        compare_parsed_full(a, b, errors)
-
-    if errors:
-        fail(errors)
-
-
-COMMANDS: dict[str, Callable[[list[str]], None]] = {
-    "expected": cmd_expected,
-    "check": cmd_check,
-    "verify-mode": cmd_verify_mode,
-    "same": cmd_same,
-    "parity": cmd_parity,
-}
+            raise AssertionError("strict comparison accepted changed output")
 
 
 def main() -> None:
-    if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
-        print("usage: oracle.py <expected|check|verify-mode|same|parity> ...", file=sys.stderr)
-        sys.exit(2)
-    COMMANDS[sys.argv[1]](sys.argv)
+    parser = argparse.ArgumentParser()
+    commands = parser.add_subparsers(dest="command", required=True)
+    self_parser = commands.add_parser("self-test")
+    self_parser.add_argument("--fixtures", required=True)
+    self_parser.add_argument("--design-fixtures", required=True)
+    verify_parser = commands.add_parser("verify")
+    verify_parser.add_argument("--fasta", required=True)
+    verify_parser.add_argument("--zfi", required=True)
+    verify_parser.add_argument("--zfi-fasta")
+    verify_parser.add_argument("--fai")
+    verify_parser.add_argument("--fai-fasta")
+    verify_parser.add_argument("--noodles")
+    verify_parser.add_argument("--rustbio")
+    verify_parser.add_argument("--no-dedup", action="store_true")
+    expected_parser = commands.add_parser("expected")
+    expected_parser.add_argument("fasta")
+    expected_parser.add_argument("--no-dedup", action="store_true")
+    check_parser = commands.add_parser("check")
+    check_parser.add_argument("format", choices=("zfi", "fai"))
+    check_parser.add_argument("fasta")
+    check_parser.add_argument("expected")
+    check_parser.add_argument("output")
+    same_parser = commands.add_parser("same")
+    same_parser.add_argument("left")
+    same_parser.add_argument("right")
+    parity_parser = commands.add_parser("parity")
+    parity_parser.add_argument("fasta")
+    parity_parser.add_argument("expected")
+    parity_parser.add_argument("stats")
+    parity_parser.add_argument("tool")
+    parity_parser.add_argument("output")
+    args = parser.parse_args()
+    if args.command == "self-test":
+        self_test(Path(args.fixtures), Path(args.design_fixtures))
+    elif args.command == "verify":
+        verify(args)
+    else:
+        legacy_command(args)
 
 
 if __name__ == "__main__":
