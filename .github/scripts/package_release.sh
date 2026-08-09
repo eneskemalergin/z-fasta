@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version=${1:?usage: package_release.sh VERSION SYSTEM EXE}
-system=${2:?usage: package_release.sh VERSION SYSTEM EXE}
-exe=${3:?usage: package_release.sh VERSION SYSTEM EXE}
+version=${1:?usage: package_release.sh VERSION SYSTEM}
+system=${2:?usage: package_release.sh VERSION SYSTEM}
+exe=z-fasta
 
 bin="zig-out/bin/${exe}"
 [[ -f "$bin" ]] || {
@@ -43,23 +43,14 @@ mkdir -p "$dist" "$smoke" release-out
 cp "$bin" "${dist}/${exe}"
 cp LICENSE "${dist}/LICENSE"
 
-if [[ "$exe" == *.exe ]]; then
-    archive="z-fasta_${version}_${system}.zip"
-    tar -C "$dist" -a -cf "release-out/${archive}" "$exe" LICENSE
-else
-    archive="z-fasta_${version}_${system}.tar.gz"
-    chmod +x "${dist}/${exe}"
-    tar -C "$dist" -czf "release-out/${archive}" "$exe" LICENSE
-fi
+archive="z-fasta_${version}_${system}.tar.gz"
+chmod +x "${dist}/${exe}"
+tar -C "$dist" -czf "release-out/${archive}" "$exe" LICENSE
 
 tar -xf "release-out/${archive}" -C "$smoke"
 (
     cd "$smoke"
-    if [[ "${RUNNER_OS:-}" == "Windows" ]]; then
-        export PATH="/usr/bin:/bin:${SYSTEMROOT}/System32"
-    else
-        export PATH="/usr/bin:/bin:/usr/local/bin"
-    fi
+    export PATH="/usr/bin:/bin:/usr/local/bin"
     command -v zig >/dev/null 2>&1 && {
         echo "zig still on PATH" >&2
         exit 1

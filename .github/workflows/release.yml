@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      # Glob (not regex): digits only, three components. Excludes v0.3.1-rc1 / vfoo.
+      # Glob (not regex): digits only, three components. Excludes v1.2.3-rc1 / vfoo.
       - "v[0-9]+.[0-9]+.[0-9]+"
 
 permissions:
@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Single version gate so the six-way matrix does not re-parse tag/zon/VERSION.
+  # Single version gate so the four-way matrix does not re-parse tag/zon/VERSION.
   gate:
     name: Version gate
     runs-on: ubuntu-24.04
@@ -63,29 +63,12 @@ jobs:
         include:
           - system: linux_x86_64
             os: ubuntu-24.04
-            exe: z-fasta
-            target_flag: ""
           - system: linux_arm64
             os: ubuntu-24.04-arm
-            exe: z-fasta
-            target_flag: ""
           - system: macos_x86_64
             os: macos-15-intel
-            exe: z-fasta
-            target_flag: ""
           - system: macos_arm64
             os: macos-15
-            exe: z-fasta
-            target_flag: ""
-          - system: windows_x86_64
-            os: windows-2025
-            exe: z-fasta.exe
-            target_flag: ""
-          # Zig 0.16.0 aarch64-windows host segfaults; cross-build like ci.yml.
-          - system: windows_arm64
-            os: windows-11-arm
-            exe: z-fasta.exe
-            target_flag: "-Dtarget=aarch64-windows"
 
     steps:
       - uses: actions/checkout@v7
@@ -93,28 +76,21 @@ jobs:
           persist-credentials: false
 
       - name: Setup Zig
-        if: matrix.os != 'windows-11-arm'
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
           use-cache: false
 
-      - name: Setup Zig (Windows arm64 host workaround)
-        if: matrix.os == 'windows-11-arm'
-        shell: bash
-        run: .github/scripts/setup_zig_windows_arm.sh
-
       - name: Build ReleaseFast
         shell: bash
-        run: zig build -Doptimize=ReleaseFast ${{ matrix.target_flag }}
+        run: zig build -Doptimize=ReleaseFast
 
       - name: Package and smoke
         shell: bash
         env:
           VERSION: ${{ needs.gate.outputs.version }}
           SYSTEM: ${{ matrix.system }}
-          EXE: ${{ matrix.exe }}
-        run: .github/scripts/package_release.sh "$VERSION" "$SYSTEM" "$EXE"
+        run: .github/scripts/package_release.sh "$VERSION" "$SYSTEM"
 
       - name: Upload archive
         uses: actions/upload-artifact@v7
@@ -155,8 +131,8 @@ jobs:
           version="$VERSION"
 
           count=$(find artifacts -maxdepth 1 -type f | wc -l)
-          [[ "$count" -eq 6 ]] || {
-            echo "expected 6 archives, found ${count}" >&2
+          [[ "$count" -eq 4 ]] || {
+            echo "expected 4 archives, found ${count}" >&2
             ls -la artifacts || true
             exit 1
           }
@@ -165,8 +141,6 @@ jobs:
             "z-fasta_${version}_linux_arm64.tar.gz"
             "z-fasta_${version}_macos_x86_64.tar.gz"
             "z-fasta_${version}_macos_arm64.tar.gz"
-            "z-fasta_${version}_windows_x86_64.zip"
-            "z-fasta_${version}_windows_arm64.zip"
           )
           for archive in "${expected[@]}"; do
             [[ -f "artifacts/${archive}" ]] || {
@@ -177,7 +151,7 @@ jobs:
 
           cd artifacts
           sha256sum z-fasta_"${version}"_* | sort -k2 > SHA256SUMS.txt
-          [[ "$(wc -l < SHA256SUMS.txt)" -eq 6 ]]
+          [[ "$(wc -l < SHA256SUMS.txt)" -eq 4 ]]
           cd ..
 
           .github/scripts/changelog_section.sh CHANGELOG.md "$version" > notes.md
