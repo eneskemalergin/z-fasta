@@ -30,6 +30,13 @@ I built z-fasta around the four FASTA jobs I use most. One CLI, no runtime depen
 
 z-fasta accepts uncompressed FASTA and writes FASTA or reports. It does not currently handle FASTQ, gzip, or BGZF.
 
+<p align="center">
+  <a href="bench/README.md">
+    <img src="assets/poster-benchmarks.svg" alt="Performance comparison of z-fasta indexing, sequence extraction, and statistics against established FASTA tools on genome, transcriptome, and proteome datasets." width="100%">
+  </a>
+</p>
+<p align="center"><sub>Performance snapshot on real FASTA datasets. See the benchmark reports for methodology and peer definitions.</sub></p>
+
 ## A few honest tradeoffs
 
 I would like to support Windows properly. Right now, keeping the native builds reliable takes more time than I can justify, and I would rather be honest about that than publish an executable I cannot support well. If you use Windows, you can still run z-fasta through WSL with the Linux release. I am sorry for the extra step.

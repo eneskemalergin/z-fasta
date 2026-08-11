@@ -4,6 +4,10 @@
 
 All notable changes to z-fasta will be documented in this file.
 
+## Unreleased
+
+Planned to improve `validate` module, possibly work on scan based alternatives for get, stats, and other options (bypass indexing or using indexed files etc.)
+
 ## [0.3.2] - 2026-08-08
 
 This release moves detailed documentation into a tracked GitHub Wiki and consolidates single-path performance and memory improvements across `index`, `get`, and `stats`, with CLI and validation hardening. Obsolete modes and unsupported native Windows release lanes are removed. No `.zfi` format change. **Re-index not required.**
