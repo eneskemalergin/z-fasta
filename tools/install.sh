@@ -198,26 +198,28 @@ build_wrapper() {
     install -m 755 "$target/release/$binary" "$STAGE_BIN/$output"
 }
 
-install_pyfaidx() {
+install_python_tools() {
     if [[ ! -x "$VENV_DIR/bin/python" ]]; then
         python3 -m venv "$VENV_DIR"
     fi
     echo "install: pyfaidx $PYFAIDX_VERSION"
+    echo "install: report packages matplotlib $MATPLOTLIB_VERSION, pandas $PANDAS_VERSION, tabulate $TABULATE_VERSION"
     PIP_CACHE_DIR="$BUILD_DIR/pip-cache" \
         "$VENV_DIR/bin/python" -m pip install --quiet --disable-pip-version-check \
-        "pyfaidx==$PYFAIDX_VERSION"
+        "pyfaidx==$PYFAIDX_VERSION" \
+        "matplotlib==$MATPLOTLIB_VERSION" \
+        "pandas==$PANDAS_VERSION" \
+        "tabulate==$TABULATE_VERSION"
 }
 
 verify_stage() {
-    local version
     env -u LD_LIBRARY_PATH "$STAGE_BIN/samtools" --version | grep -q "samtools $SAMTOOLS_VERSION"
     "$STAGE_BIN/bedtools" --version | grep -q "v$BEDTOOLS_VERSION"
     "$STAGE_BIN/seqkit" version | grep -q "v$SEQKIT_VERSION"
     { "$STAGE_BIN/seqtk" 2>&1 || true; } | grep -q "Version: $SEQTK_DISPLAY_VERSION"
     "$STAGE_BIN/noodles" --version | grep -q "$NOODLES_VERSION"
     "$STAGE_BIN/rustbio" --version | grep -q "$RUSTBIO_VERSION"
-    version="$("$VENV_DIR/bin/python" -c 'import pyfaidx; print(pyfaidx.__version__)')"
-    [[ "$version" == "$PYFAIDX_VERSION" ]]
+    "$VENV_DIR/bin/python" -c "import matplotlib, pandas, pyfaidx, tabulate; assert matplotlib.__version__ == '$MATPLOTLIB_VERSION'; assert pandas.__version__ == '$PANDAS_VERSION'; assert pyfaidx.__version__ == '$PYFAIDX_VERSION'; assert tabulate.__version__ == '$TABULATE_VERSION'"
     "$TOOLS_DIR/zebrac" --version >/dev/null
 }
 
@@ -245,7 +247,7 @@ build_seqtk
 build_fastahack
 build_wrapper noodles_wrapper noodles_wrapper noodles
 build_wrapper rustbio_wrapper rustbio_wrapper rustbio
-install_pyfaidx
+install_python_tools
 verify_stage
 publish
 

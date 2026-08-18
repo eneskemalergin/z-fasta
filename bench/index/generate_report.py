@@ -13,8 +13,13 @@ Defaults to bench/index/results/ (latest run via results/LATEST).
 
 import json
 import argparse
+import os
 from pathlib import Path
 import tempfile
+
+MPL_CONFIG_DIR = Path(__file__).resolve().parents[2] / "tools" / "build" / "matplotlib"
+MPL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", str(MPL_CONFIG_DIR))
 
 import matplotlib
 matplotlib.use("Agg")

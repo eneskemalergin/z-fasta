@@ -14,6 +14,9 @@ source "$TOOLS_DIR/versions.sh"
 
 VENV="$TOOLS_DIR/venv"
 PYFAIDX_PIN="$PYFAIDX_VERSION"
+MATPLOTLIB_PIN="$MATPLOTLIB_VERSION"
+PANDAS_PIN="$PANDAS_VERSION"
+TABULATE_PIN="$TABULATE_VERSION"
 SEQTK_PIN="$SEQTK_DISPLAY_VERSION"
 SEQKIT_PIN="$SEQKIT_VERSION"
 FASTAHACK_PIN="$FASTAHACK_VERSION"
@@ -49,6 +52,18 @@ ensure_pyfaidx() {
         return 0
     fi
     fail "pyfaidx $PYFAIDX_PIN not found in $VENV (run tools/install.sh)"
+    return 1
+}
+
+ensure_report_python() {
+    local versions=""
+    if [[ -x "$VENV/bin/python" ]]; then
+        versions="$("$VENV/bin/python" -c 'import matplotlib, pandas, tabulate; print(matplotlib.__version__, pandas.__version__, tabulate.__version__)' 2>/dev/null || true)"
+    fi
+    if [[ "$versions" == "$MATPLOTLIB_PIN $PANDAS_PIN $TABULATE_PIN" ]]; then
+        return 0
+    fi
+    fail "report packages are not $MATPLOTLIB_PIN/$PANDAS_PIN/$TABULATE_PIN in $VENV (run tools/install.sh)"
     return 1
 }
 
@@ -157,6 +172,14 @@ main() {
         echo ""
     done
 
+    echo "-- report Python --"
+    if ensure_report_python; then
+        ok "matplotlib $MATPLOTLIB_PIN, pandas $PANDAS_PIN, tabulate $TABULATE_PIN ($VENV/bin/python)"
+    else
+        fail_count=$((fail_count + 1))
+    fi
+    echo ""
+
     echo "Summary"
     echo "-------"
     for name in "${REQUIRED_TOOLS[@]}"; do
@@ -170,7 +193,7 @@ main() {
     echo ""
 
     if [[ "$fail_count" -eq 0 ]]; then
-        echo "All required tools verified."
+        echo "All required tools and report dependencies verified."
     else
         echo "$fail_count tool(s) missing or misconfigured; fix above before running benchmarks."
         exit 1

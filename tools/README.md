@@ -9,7 +9,7 @@ tools/install.sh
 bash bench/shared/install_tools.sh
 ```
 
-`tools/install.sh` is the one builder. When you run it, it downloads the pinned peer sources or release binaries, builds the source-based tools, compiles the Rust wrappers, installs `pyfaidx`, checks the peer versions, and publishes the commands under `tools/bin/`. The build scratch space, downloaded sources, Cargo cache, and Python environment stay under `tools/build/`, `tools/src/`, and `tools/venv/`. The benchmark scripts use `tools/bin/` by default, but you can override an individual command with variables such as `SAMTOOLS`, `BEDTOOLS`, or `SEQKIT`.
+`tools/install.sh` is the one builder. When you run it, it downloads the pinned peer sources or release binaries, builds the source-based tools, compiles the Rust wrappers, installs `pyfaidx` and the report packages, checks the peer versions, and publishes the commands under `tools/bin/`. The build scratch space, downloaded sources, Cargo cache, and Python environment stay under `tools/build/`, `tools/src/`, and `tools/venv/`. The benchmark scripts use `tools/bin/` by default, but you can override an individual command with variables such as `SAMTOOLS`, `BEDTOOLS`, or `SEQKIT`.
 
 The current peer set is [samtools](https://github.com/samtools/samtools) 1.24 with [HTSlib](https://github.com/samtools/htslib) 1.24, [bedtools](https://github.com/arq5x/bedtools2) 2.31.1, [seqkit](https://github.com/shenwei356/seqkit) 2.13.0, [seqtk](https://github.com/lh3/seqtk) 1.5-r133, [fastahack](https://github.com/ekg/fastahack) 1.0.0, and [pyfaidx](https://github.com/mdshw5/pyfaidx) 0.9.0.4.
 
