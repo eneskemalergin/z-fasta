@@ -42,17 +42,43 @@ preload_indexes_for_file() {
     local fa="$1"
     [[ -f "$fa" ]] || return 1
     local need_zfi=false
+    local rebuilt_zfi=false
     if [[ ! -f "${fa}.zfi" ]] || [[ "$fa" -nt "${fa}.zfi" ]] || [[ "$ZFASTA" -nt "${fa}.zfi" ]]; then
         need_zfi=true
     elif ! tail -c 12 "${fa}.zfi" | grep -q 'ZFNM'; then
         need_zfi=true
     fi
     if $need_zfi; then
-        "$ZFASTA" index "$fa" > /dev/null
+        if ! "$ZFASTA" index "$fa" > /dev/null; then
+            echo "error: z-fasta index failed for $fa" >&2
+            return 1
+        fi
+        rebuilt_zfi=true
+    fi
+    if [[ ! -s "${fa}.zfi" ]]; then
+        echo "error: missing or empty ${fa}.zfi after preload" >&2
+        return 1
+    fi
+    # Validate only rebuilt indexes so reusable benchmark inputs are not given
+    # an extra scan that would change their page-cache state.
+    if $rebuilt_zfi; then
+        local validation_error
+        if ! validation_error="$("$ZFASTA" stats "$fa" 2>&1 >/dev/null)"; then
+            echo "error: freshly built ${fa}.zfi failed z-fasta stats validation" >&2
+            [[ -n "$validation_error" ]] && printf '%s\n' "$validation_error" >&2
+            return 1
+        fi
     fi
     if bench_has_tool samtools; then
         if [[ ! -f "${fa}.fai" ]] || [[ "$fa" -nt "${fa}.fai" ]]; then
-            "$SAMTOOLS" faidx "$fa" > /dev/null 2>&1 || true
+            if ! "$SAMTOOLS" faidx "$fa" > /dev/null 2>&1; then
+                echo "error: samtools faidx failed for $fa" >&2
+                return 1
+            fi
+        fi
+        if [[ ! -s "${fa}.fai" ]]; then
+            echo "error: missing or empty ${fa}.fai after preload" >&2
+            return 1
         fi
     fi
 }
