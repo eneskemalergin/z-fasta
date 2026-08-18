@@ -5,7 +5,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/tagline-dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="assets/tagline-light.svg">
-    <img src="assets/tagline-light.svg" alt="Lightning FASTA work without the toolchain sprawl" width="900">
+    <img src="assets/tagline-light.svg" alt="Lightning FASTA work without the toolchain sprawl" width="700">
   </picture>
   <p><strong>Index, extract, validate, and inspect uncompressed FASTA with one static executable built in Zig.</strong></p>
   <p>

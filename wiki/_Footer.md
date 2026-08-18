@@ -1,1 +1,1 @@
-z-fasta v0.3.2 | [Home](Home) | [Quick start](Getting-Started) | [Cheat sheet](Command-Cheat-Sheet) | [Troubleshooting](Troubleshooting) | [Releases](https://github.com/eneskemalergin/z-fasta/releases) | [MIT License](https://github.com/eneskemalergin/z-fasta/blob/main/LICENSE)
+z-fasta v0.3.3 | [Home](Home) | [Quick start](Getting-Started) | [Cheat sheet](Command-Cheat-Sheet) | [Troubleshooting](Troubleshooting) | [Releases](https://github.com/eneskemalergin/z-fasta/releases) | [MIT License](https://github.com/eneskemalergin/z-fasta/blob/main/LICENSE)

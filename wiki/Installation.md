@@ -6,17 +6,17 @@ If you just want to use z-fasta, download a release archive. You get one static 
 
 Open the [z-fasta Releases page](https://github.com/eneskemalergin/z-fasta/releases) and choose the archive that matches your operating system and CPU:
 
-- `z-fasta_0.3.2_linux_x86_64.tar.gz`
-- `z-fasta_0.3.2_linux_arm64.tar.gz`
-- `z-fasta_0.3.2_macos_x86_64.tar.gz`
-- `z-fasta_0.3.2_macos_arm64.tar.gz`
+- `z-fasta_0.3.3_linux_x86_64.tar.gz`
+- `z-fasta_0.3.3_linux_arm64.tar.gz`
+- `z-fasta_0.3.3_macos_x86_64.tar.gz`
+- `z-fasta_0.3.3_macos_arm64.tar.gz`
 
 Extract the archive and place `z-fasta` in a directory on your `PATH`.
 
 ### Linux and macOS
 
 ```bash
-tar -xzf z-fasta_0.3.2_linux_x86_64.tar.gz
+tar -xzf z-fasta_0.3.3_linux_x86_64.tar.gz
 chmod +x z-fasta
 ./z-fasta --version
 ```
@@ -72,7 +72,7 @@ z-fasta --version
 Expected version output:
 
 ```text
-z-fasta 0.3.2
+z-fasta 0.3.3
 ```
 
 Next: [Getting started](Getting-Started).

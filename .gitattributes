@@ -2,15 +2,30 @@
 * text=auto
 
 # Zig source
-*.zig text
+*.zig text eol=lf
+*.zon text eol=lf
 
 # Shell scripts
 *.sh text eol=lf
+*.bash text eol=lf
+
+# Rust and Cargo
+*.rs text eol=lf
+*.toml text eol=lf
+*.lock text eol=lf
+
+# Python
+*.py text eol=lf
 
 # Markdown / config
-*.md text
-*.yml text
-*.json text
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+
+# Text-based assets and manifests
+*.svg text eol=lf
+*.manifest text eol=lf
 
 # FASTA fixtures: LF on every checkout (Windows must not inject \r)
 *.fasta text eol=lf
@@ -20,8 +35,3 @@
 # Exact-byte exceptions: intentional CRLF / corrupt .fai (must clear text AND eol)
 tests/data/validator_indexer_agreement.fasta -text -eol
 tests/data/gates/*.fai -text -eol
-
-# Exclude benchmark infrastructure and wrapper crates from language stats
-bench/** linguist-vendored
-tools/noodles_wrapper/** linguist-vendored
-tools/rustbio_wrapper/** linguist-vendored
