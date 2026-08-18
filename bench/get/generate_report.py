@@ -225,7 +225,7 @@ GET_PEERS = [
         "language": "C",
         "command": "samtools faidx region",
         "version_from": "`samtools --version`",
-        "pin": None,
+        "pin": "1.24",
     },
     {
         "key": "bedtools",
@@ -233,7 +233,7 @@ GET_PEERS = [
         "language": "C++",
         "command": "bedtools getfasta",
         "version_from": "`bedtools --version`",
-        "pin": None,
+        "pin": "2.31.1",
     },
     {
         "key": "noodles",
@@ -241,7 +241,7 @@ GET_PEERS = [
         "language": "Rust",
         "command": "tools/noodles_wrapper get",
         "version_from": "noodles-fasta crate in `tools/noodles_wrapper/Cargo.toml`",
-        "pin": "0.61",
+        "pin": "0.66.0",
     },
     {
         "key": "rustbio",
@@ -249,7 +249,7 @@ GET_PEERS = [
         "language": "Rust",
         "command": "tools/rustbio_wrapper get",
         "version_from": "bio crate in `tools/rustbio_wrapper/Cargo.toml`",
-        "pin": "2.2",
+        "pin": "4.0.1",
     },
     {
         "key": "fastahack",

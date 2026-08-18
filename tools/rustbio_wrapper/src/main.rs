@@ -32,6 +32,12 @@ use bio::io::fasta;
 #[path = "../../stats_peer.rs"]
 mod stats_peer;
 
+const PEER_VERSION: &str = "4.0.1";
+
+fn print_version() {
+    println!("rust-bio {PEER_VERSION} (custom indexer wrapper)");
+}
+
 fn usage() -> ! {
     eprintln!("Usage: rustbio_wrapper <index|get|stats> <args...>");
     eprintln!("  index <fasta>                    Build .fai index");
@@ -527,6 +533,10 @@ fn cmd_stats(fasta_path: &str) -> io::Result<()> {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--version") {
+        print_version();
+        return;
+    }
     if args.len() < 2 {
         usage();
     }
