@@ -14,11 +14,25 @@ BENCH_SHARED_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BENCH_ROOT="$(cd "$BENCH_SHARED_DIR/.." && pwd)"
 PROJECT_ROOT="$(cd "$BENCH_ROOT/.." && pwd)"
 TOOLS_DIR="$PROJECT_ROOT/tools"
+PEER_TOOLS_DIR="$PROJECT_ROOT/.peer-tools"
 
 ZFASTA="${ZFASTA:-$PROJECT_ROOT/zig-out/bin/z-fasta}"
 ZEBRAC="${ZEBRAC:-$TOOLS_DIR/zebrac}"
-SAMTOOLS="${SAMTOOLS:-samtools}"
-BEDTOOLS="${BEDTOOLS:-bedtools}"
+if [[ -n "${SAMTOOLS:-}" ]]; then
+    : # Respect an explicit SAMTOOLS override.
+elif [[ -x "$PEER_TOOLS_DIR/bin/samtools" ]]; then
+    SAMTOOLS="${SAMTOOLS:-$PEER_TOOLS_DIR/bin/samtools}"
+    export LD_LIBRARY_PATH="$PEER_TOOLS_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+else
+    SAMTOOLS="samtools"
+fi
+if [[ -n "${BEDTOOLS:-}" ]]; then
+    : # Respect an explicit BEDTOOLS override.
+elif [[ -x "$PEER_TOOLS_DIR/bin/bedtools" ]]; then
+    BEDTOOLS="$PEER_TOOLS_DIR/bin/bedtools"
+else
+    BEDTOOLS="bedtools"
+fi
 SEQKIT="${SEQKIT:-$TOOLS_DIR/seqkit}"
 SEQTK="${SEQTK:-$TOOLS_DIR/seqtk/seqtk}"
 FASTAHACK="${FASTAHACK:-$TOOLS_DIR/fastahack-1.0.0/fastahack}"
@@ -87,11 +101,8 @@ bench_tool_version() {
         fastahack)
             echo "fastahack 1.0.0 (directory pin)"
             ;;
-        noodles)
-            echo "noodles-fasta 0.61 (wrapper)"
-            ;;
-        rustbio)
-            echo "rust-bio 2.2 (custom indexer wrapper)"
+        noodles|rustbio)
+            [[ -x "$path" ]] && "$path" --version 2>&1 | awk 'NR==1{print; exit}'
             ;;
         *)
             return 1

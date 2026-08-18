@@ -12,10 +12,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/tools.sh"
 
 VENV="$PROJECT_ROOT/.venv"
-PYFAIDX_PIN="0.9.0.3"
+PYFAIDX_PIN="0.9.0.4"
 SEQTK_PIN="1.5-r133"
 SEQKIT_PIN="2.13.0"
 FASTAHACK_PIN="1.0.0"
+SAMTOOLS_PIN="1.24"
+BEDTOOLS_PIN="2.31.1"
+NOODLES_PIN="0.66.0"
+RUSTBIO_PIN="4.0.1"
 
 ok() { printf '  [ok] %s\n' "$*"; }
 warn() { printf '  [warn] %s\n' "$*"; }
@@ -111,19 +115,54 @@ check_tool() {
             local got
             got="$(bench_tool_version seqtk 2>/dev/null | awk '{print $2}' || true)"
             if [[ -n "$got" && "$got" != "$SEQTK_PIN" ]]; then
-                warn "seqtk pin is $SEQTK_PIN; got $got"
+                fail "seqtk pin is $SEQTK_PIN; got $got"
+                return 1
             fi
             ;;
         seqkit)
             local got
             got="$(bench_tool_version seqkit 2>/dev/null || true)"
             if [[ -n "$got" && "$got" != *"v$SEQKIT_PIN"* ]]; then
-                warn "seqkit pin is v$SEQKIT_PIN; got $got"
+                fail "seqkit pin is v$SEQKIT_PIN; got $got"
+                return 1
             fi
             ;;
         fastahack)
             if [[ "$path" != *"/fastahack-${FASTAHACK_PIN}/"* ]]; then
-                warn "fastahack path does not include fastahack-$FASTAHACK_PIN"
+                fail "fastahack path does not include fastahack-$FASTAHACK_PIN"
+                return 1
+            fi
+            ;;
+        samtools)
+            local got
+            got="$(bench_tool_version samtools 2>/dev/null | awk '{print $2}' || true)"
+            if [[ -n "$got" && "$got" != "$SAMTOOLS_PIN" ]]; then
+                fail "samtools latest pin is $SAMTOOLS_PIN; got $got"
+                return 1
+            fi
+            ;;
+        bedtools)
+            local got
+            got="$(bench_tool_version bedtools 2>/dev/null | sed -n 's/.*v\([0-9][0-9.]*\).*/\1/p' || true)"
+            if [[ -n "$got" && "$got" != "$BEDTOOLS_PIN" ]]; then
+                fail "bedtools latest pin is $BEDTOOLS_PIN; got $got"
+                return 1
+            fi
+            ;;
+        noodles)
+            local got
+            got="$(bench_tool_version noodles 2>/dev/null | awk '{print $2}' || true)"
+            if [[ -n "$got" && "$got" != "$NOODLES_PIN" ]]; then
+                fail "noodles-fasta pin is $NOODLES_PIN; got $got"
+                return 1
+            fi
+            ;;
+        rustbio)
+            local got
+            got="$(bench_tool_version rustbio 2>/dev/null | awk '{print $2}' || true)"
+            if [[ -n "$got" && "$got" != "$RUSTBIO_PIN" ]]; then
+                fail "rust-bio pin is $RUSTBIO_PIN; got $got"
+                return 1
             fi
             ;;
     esac

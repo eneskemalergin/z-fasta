@@ -32,6 +32,8 @@ bash bench/get/run.sh --skip-benchmarks --skip-report
 bash bench/stats/run.sh --skip-benchmarks --skip-report
 ```
 
+`bench/shared/tools.sh` prefers the pinned samtools 1.24 and bedtools 2.31.1 from `.peer-tools/` when present; set `SAMTOOLS` or `BEDTOOLS` to override that resolution. `bench/shared/install_tools.sh` rejects stale pinned peers.
+
 Shared skips across suites (old names still work as aliases for one release cycle):
 
 - `--skip-tests` (alias `--skip-verify`): skip correctness

@@ -25,6 +25,7 @@ venv/
 htmlcov/
 
 # Tool binaries / build outputs (source under tools/ stays tracked)
+.peer-tools/
 tools/fastahack-*/
 tools/seqkit
 tools/seqtk/
