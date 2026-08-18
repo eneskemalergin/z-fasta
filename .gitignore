@@ -6,11 +6,6 @@ zig-cache/
 zig-*/
 /zig
 
-# Editor
-.vscode/
-*.swp
-*~
-
 # Python
 __pycache__/
 *.py[cod]
@@ -24,13 +19,13 @@ venv/
 .coverage
 htmlcov/
 
-# Tool binaries / build outputs (source under tools/ stays tracked)
+# Tool binaries / build outputs (install logic and zebrac stay tracked)
 .peer-tools/
-tools/fastahack-*/
-tools/seqkit
-tools/seqtk/
-tools/zebrac
-tools/*/target/
+tools/bin/
+tools/lib/
+tools/src/
+tools/build/
+tools/venv/
 
 # Bench: downloads, on-demand fixtures, raw results (keep figures for REPORT.md)
 # Use results/* (not **) so !figures/ can re-include; ** blocks parent re-include.
