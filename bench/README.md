@@ -63,7 +63,7 @@ These are the executable files currently used by this checkout on Linux x86_64. 
 
 | command     | version or implementation                   |                      file size |
 | ----------- | ------------------------------------------- | -----------------------------: |
-| `z-fasta`   | 0.3.2, Zig `ReleaseFast`, stripped          |        490,056 bytes (479 KiB) |
+| `z-fasta`   | 0.3.3, Zig `ReleaseFast`, stripped          |        490,056 bytes (479 KiB) |
 | `noodles`   | noodles-fasta 0.66.0 wrapper                |        581,416 bytes (568 KiB) |
 | `rustbio`   | rust-bio 4.0.1 wrapper                      |        646,000 bytes (631 KiB) |
 | `samtools`  | 1.24 with HTSlib 1.24                       |     3,324,569 bytes (3.17 MiB) |
