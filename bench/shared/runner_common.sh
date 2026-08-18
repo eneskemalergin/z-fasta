@@ -11,8 +11,8 @@ fi
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/zebrac_runner.sh"
 
 report_python() {
-    if [[ -x "$PROJECT_ROOT/.venv/bin/python" ]]; then
-        echo "$PROJECT_ROOT/.venv/bin/python"
+    if [[ -x "$PROJECT_ROOT/tools/venv/bin/python" ]]; then
+        echo "$PROJECT_ROOT/tools/venv/bin/python"
     else
         echo python3
     fi

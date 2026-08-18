@@ -1,8 +1,8 @@
 # Benchmarking Framework
 
-This is the benchmarking framework for z-fasta. It is used to benchmark the performance of z-fasta and to compare it with other FASTA tools, across its functionality. It measures correctness, timings, peak RSS usage, page faults, and more via the zebrac benchmarking framework.
+This is the benchmarking framework for z-fasta. I use it to compare z-fasta with the reference tools across indexing, sequence extraction, and stats. Each suite checks correctness first, then uses [zebrac](https://github.com/eneskemalergin/zebrac) to measure wall time, peak RSS, and page faults.
 
-Note: [Zebrac](https://github.com/eneskemalergin/zebrac) is a linux-only tool that is similar to `hyperfine`, but also measures RSS, page faults, and more. For performance benches, it is the only tool used here. I added the binary under `tools/`; it is not a dependency of z-fasta, and it does not work on platforms other than Linux for now.
+Zebrac is Linux-only. It is similar to `hyperfine`, but it also records process memory and page faults. It is the runner for the performance sections, not a dependency of z-fasta. The local runner is kept at `tools/zebrac`, separately from the peer-tool installer.
 
 ## Published reports
 
@@ -10,18 +10,19 @@ Note: [Zebrac](https://github.com/eneskemalergin/zebrac) is a linux-only tool th
 - [GET benchmark report](get/REPORT.md)
 - [Stats benchmark report](stats/REPORT.md)
 
-Each report owns its module's methods, field coverage, correctness checks, measurements, and figures.
+Each report describes its own methods, field coverage, correctness checks, measurements, and figures. The suites do not all compare the same operation: stats has complete wrapper lanes and partial SeqKit/Seqtk reference lanes, while GET and index have their own compatibility limits.
 
 ## How to run
 
-Each suite has one entrypoint: `bash bench/<index|get|stats>/run.sh`. That script runs correctness first, then optional zebrac perf, then writes `REPORT.md`. For suite-specific flags, pass `--help` to that script.
+Run these commands from the repository root:
 
 ```bash
-bash bench/shared/download_data.sh   # ~4 GB REAL_* datasets, once
-bash bench/shared/install_tools.sh   # peer tools + zebrac
-zig build -Doptimize=ReleaseFast
+bash bench/shared/download_data.sh   # fetch the REAL_* datasets once
+./zig build -Doptimize=ReleaseFast -Dstrip=true  # build the stripped z-fasta subject
+tools/install.sh                     # build/install the local peer tools
+bash bench/shared/install_tools.sh   # verify the local toolchain
 
-# Full suite (correctness + perf + report)
+# Full suite: correctness, performance, and report
 bash bench/index/run.sh
 bash bench/get/run.sh
 bash bench/stats/run.sh
@@ -32,15 +33,55 @@ bash bench/get/run.sh --skip-benchmarks --skip-report
 bash bench/stats/run.sh --skip-benchmarks --skip-report
 ```
 
-`bench/shared/tools.sh` prefers the pinned samtools 1.24 and bedtools 2.31.1 from `.peer-tools/` when present; set `SAMTOOLS` or `BEDTOOLS` to override that resolution. `bench/shared/install_tools.sh` rejects stale pinned peers.
+Each suite has one entrypoint: `bash bench/<index|get|stats>/run.sh`. It runs correctness first, then optional zebrac measurements, then writes `REPORT.md`. The suites have different default sample counts and warmups, so check `--help` or the generated report when those details matter.
 
-Shared skips across suites (old names still work as aliases for one release cycle):
+The benchmark scripts resolve commands from `tools/bin/` by default. Set `SAMTOOLS`, `BEDTOOLS`, `SEQKIT`, or another tool variable when you intentionally want to compare a different executable. `bench/shared/install_tools.sh` only verifies the local bundle and pinned versions; it does not silently fall back to a command found elsewhere on `PATH`.
 
-- `--skip-tests` (alias `--skip-verify`): skip correctness
-- `--skip-benchmarks` (alias `--skip-perf`): skip zebrac / perf
-- `--skip-report`: skip report generation
-- `--skip-messy`: skip messy *perf* only. It never skips messy cases inside correctness.
+The common skips are `--skip-tests` (`--skip-verify`), `--skip-benchmarks` (`--skip-perf`), `--skip-report`, and `--skip-messy`. The last one skips messy performance work only. It does not skip messy correctness cases.
 
-Helpers live in `bench/shared/` (`tools.sh`, `zebrac_runner.sh`, `runner_common.sh`, `download_data.sh`, `install_tools.sh`, `generate_messy.py`, `generate_scaling.py`). Generated fixtures under `bench/*/data/` and `bench/shared/cache/` are gitignored (messy fixtures/perf, scaling FASTAs). Materialize with `python3 bench/shared/generate_messy.py` and `python3 bench/shared/generate_scaling.py` (`--force` after param edits). Old suite-local `bench/{index,stats}/data/size_*.fasta` / `seqs_*.fasta` trees are obsolete; safe to delete if present. What we keep in git for GitHub is each suite's `REPORT.md` plus `results/figures/*.png`. After a full regen, commit those together so the report images still render.
+## How the tools are built
 
-Get messy perf alone is heavy (lots of samples, long walls). Use `--skip-*` while you are iterating. Run the full suites before a release tag.
+`tools/install.sh` is the central builder. The shared version coordinates live in [`tools/versions.sh`](../tools/versions.sh), and the installer uses those same values when it downloads, builds, verifies, and publishes the tools.
+
+The installer builds [samtools](https://github.com/samtools/samtools) 1.24 against [HTSlib](https://github.com/samtools/htslib) 1.24, [bedtools](https://github.com/arq5x/bedtools2) 2.31.1, [seqtk](https://github.com/lh3/seqtk) 1.5-r133, and [fastahack](https://github.com/ekg/fastahack) 1.0.0 from their source archives or Git tag. It stages [SeqKit](https://github.com/shenwei356/seqkit) 2.13.0 from its Linux amd64 release binary rather than rebuilding it. It installs [pyfaidx](https://github.com/mdshw5/pyfaidx) 0.9.0.4 into the local Python environment and exposes its `faidx` command through `tools/bin/faidx`.
+
+The published commands go under `tools/bin/`. HTSlib shared libraries go under `tools/lib/`. Downloaded sources stay under `tools/src/`, while compiler work, Cargo state, downloaded archives, and the Python package cache stay under `tools/build/`. The virtual environment is `tools/venv/`. The installer stages the compiled command set before publishing it, and samtools carries an origin-relative library path so the published command works without a system `LD_LIBRARY_PATH` setting.
+
+The z-fasta binary is built separately with `./zig build -Doptimize=ReleaseFast -Dstrip=true`. `ReleaseFast` selects the optimization mode; `-Dstrip=true` makes the size comparison use the intended stripped executable. Zebrac is also separate: `tools/install.sh` checks that `tools/zebrac` exists, but does not build it. This keeps the benchmark runner distinct from the tools being compared.
+
+## Rust wrappers
+
+[noodles](https://github.com/zaeleus/noodles) and [rust-bio](https://github.com/rust-bio/rust-bio) are Rust libraries, not matching standalone FASTA CLIs. I compile small release-mode adapters so they can participate in the same benchmark contract and emit the output needed by these suites.
+
+The `noodles` binary uses noodles-fasta 0.66.0, including noodles' FAI indexer. The `rustbio` binary uses rust-bio 4.0.1 and its custom strict FAI scanner. Both adapters expose `index`, `get`, and `stats`; GET also covers the shared region, BED, names, and reverse-complement paths that the benchmark exercises. Their `stats` command re-parses clean FASTA and emits the agreed TSV fields. The shared formulas in [`tools/stats_peer.rs`](../tools/stats_peer.rs) are compiled into both binaries. That file is not another executable and the other peer tools do not use it.
+
+These wrappers add argument parsing, indexing or index reading, output formatting, and the benchmark-specific stats path. Their timings and sizes therefore describe the complete wrapper CLIs, not the upstream Rust crates in isolation. The reports call out where a wrapper is custom or where a peer only covers part of the stats contract.
+
+## Binary sizes
+
+These are the executable files currently used by this checkout on Linux x86_64. The sizes are useful for comparing this local bundle, but they are not universal upstream sizes. Compiler versions, link mode, debug information, stripping, and dependency versions all change them. In this bundle, z-fasta, SeqKit, and zebrac are stripped; the Rust wrappers, samtools, bedtools, seqtk, and fastahack retain debug information or other unstripped sections. The table is therefore a build comparison, not a ranking of the projects.
+
+| command     | version or implementation                   |                      file size |
+| ----------- | ------------------------------------------- | -----------------------------: |
+| `z-fasta`   | 0.3.2, Zig `ReleaseFast`, stripped          |        490,056 bytes (479 KiB) |
+| `noodles`   | noodles-fasta 0.66.0 wrapper                |        581,416 bytes (568 KiB) |
+| `rustbio`   | rust-bio 4.0.1 wrapper                      |        646,000 bytes (631 KiB) |
+| `samtools`  | 1.24 with HTSlib 1.24                       |     3,324,569 bytes (3.17 MiB) |
+| `bedtools`  | 2.31.1                                      |    40,757,024 bytes (38.9 MiB) |
+| `seqkit`    | 2.13.0, upstream Linux amd64 release binary |    20,078,754 bytes (19.2 MiB) |
+| `seqtk`     | 1.5-r133                                    |        252,760 bytes (247 KiB) |
+| `fastahack` | 1.0.0                                       |       102,056 bytes (99.7 KiB) |
+| `faidx`     | pyfaidx 0.9.0.4                             | symlink, not a compiled binary |
+| `zebrac`    | 0.6.2, static stripped binary               |        588,584 bytes (575 KiB) |
+
+The `faidx` entry is intentionally not given a fake binary size: `tools/bin/faidx` is a 17-byte symlink into `tools/venv`, and the actual command is a Python entry point with its environment and installed package outside that link.
+
+## What the numbers do and do not say
+
+I tried to keep the timed paths direct. GET indexes are prepared before zebrac runs, and stats indexes are preloaded before the timed stats commands. The runners do not add an intentional sleep or throttle. Correctness runs remain separate from performance runs, and the reports record the zebrac samples, warmups, duration, tool versions, and workload metadata.
+
+That still does not prove that every lane has identical overhead. The Rust adapters add a CLI and output layer by design. z-fasta has separate `.zfi` and `.fai` paths, and some peers only support a subset of the requested operation. A benchmark may also expose an implementation bottleneck or an accidental headroom that I have not found yet. Read the results as measurements of these concrete commands and inputs, with the scope notes in each report, rather than as a claim about the underlying libraries in the abstract.
+
+Helpers live in `bench/shared/` (`tools.sh`, `zebrac_runner.sh`, `runner_common.sh`, `download_data.sh`, `install_tools.sh`, `generate_messy.py`, and `generate_scaling.py`). Generated fixtures under `bench/*/data/` and `bench/shared/cache/` are gitignored. Materialize them with `python3 bench/shared/generate_messy.py` and `python3 bench/shared/generate_scaling.py`; use `--force` after changing their parameters. After a full regeneration, commit each suite's `REPORT.md` with its `results/figures/*.png` files so the reports still render on GitHub.
+
+GET messy performance is heavy. Use the skip flags while iterating, then run the full suites before a release tag.

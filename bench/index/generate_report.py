@@ -6,7 +6,7 @@ Reads zebrac JSON joined with metadata JSONL from bench/index/results/,
 produces Markdown report + PNG figures using pandas + matplotlib.
 
 Usage:
-    .venv/bin/python bench/index/generate_report.py [results_dir]
+    tools/venv/bin/python bench/index/generate_report.py [results_dir]
 
 Defaults to bench/index/results/ (latest run via results/LATEST).
 """

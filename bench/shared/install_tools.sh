@@ -2,24 +2,25 @@
 # Verify benchmark tools used by bench/*/run.sh.
 #
 # Paths and version helpers come from tools.sh (single source of truth).
-# Optional: install the pinned pyfaidx into .venv when missing.
-# Does not check hyperfine (legacy; suites use zebrac).
+# This script verifies the local installation created by tools/install.sh.
+# It does not install from PATH or mutate a system environment.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tools.sh
 source "$SCRIPT_DIR/tools.sh"
+source "$TOOLS_DIR/versions.sh"
 
-VENV="$PROJECT_ROOT/.venv"
-PYFAIDX_PIN="0.9.0.4"
-SEQTK_PIN="1.5-r133"
-SEQKIT_PIN="2.13.0"
-FASTAHACK_PIN="1.0.0"
-SAMTOOLS_PIN="1.24"
-BEDTOOLS_PIN="2.31.1"
-NOODLES_PIN="0.66.0"
-RUSTBIO_PIN="4.0.1"
+VENV="$TOOLS_DIR/venv"
+PYFAIDX_PIN="$PYFAIDX_VERSION"
+SEQTK_PIN="$SEQTK_DISPLAY_VERSION"
+SEQKIT_PIN="$SEQKIT_VERSION"
+FASTAHACK_PIN="$FASTAHACK_VERSION"
+SAMTOOLS_PIN="$SAMTOOLS_VERSION"
+BEDTOOLS_PIN="$BEDTOOLS_VERSION"
+NOODLES_PIN="$NOODLES_VERSION"
+RUSTBIO_PIN="$RUSTBIO_VERSION"
 
 ok() { printf '  [ok] %s\n' "$*"; }
 warn() { printf '  [warn] %s\n' "$*"; }
@@ -41,39 +42,13 @@ REQUIRED_TOOLS=(
 
 ensure_pyfaidx() {
     local ver=""
-
-    # Prefer an already-resolved faidx CLI at the pin (venv or PATH).
-    if bench_has_tool pyfaidx; then
-        ver="$(bench_tool_version pyfaidx 2>/dev/null || true)"
-        if [[ "$ver" == *"$PYFAIDX_PIN"* ]]; then
-            return 0
-        fi
-    fi
-
     if [[ -x "$VENV/bin/python" ]]; then
         ver="$("$VENV/bin/python" -c "import pyfaidx; print(pyfaidx.__version__)" 2>/dev/null || true)"
-        if [[ "$ver" == "$PYFAIDX_PIN" && -x "$VENV/bin/faidx" ]]; then
-            PYFAIDX="$VENV/bin/faidx"
-            return 0
-        fi
-        if [[ "$ver" != "$PYFAIDX_PIN" ]]; then
-            warn "pyfaidx not at pin $PYFAIDX_PIN in .venv; installing"
-            if "$VENV/bin/pip" install --quiet "pyfaidx==$PYFAIDX_PIN"; then
-                ver="$("$VENV/bin/python" -c "import pyfaidx; print(pyfaidx.__version__)" 2>/dev/null || true)"
-                if [[ "$ver" == "$PYFAIDX_PIN" && -x "$VENV/bin/faidx" ]]; then
-                    PYFAIDX="$VENV/bin/faidx"
-                    return 0
-                fi
-            fi
-        fi
     fi
-    ver="$(python3 -c "import pyfaidx; print(pyfaidx.__version__)" 2>/dev/null || true)"
-    if [[ "$ver" == "$PYFAIDX_PIN" ]] && command -v faidx >/dev/null 2>&1; then
-        PYFAIDX="$(command -v faidx)"
+    if [[ "$ver" == "$PYFAIDX_PIN" && -x "$PYFAIDX" ]]; then
         return 0
     fi
-
-    fail "pyfaidx $PYFAIDX_PIN not found (pip install pyfaidx==$PYFAIDX_PIN into .venv or PATH)"
+    fail "pyfaidx $PYFAIDX_PIN not found in $VENV (run tools/install.sh)"
     return 1
 }
 
@@ -92,12 +67,9 @@ check_tool() {
         case "$name" in
             z-fasta) echo "     Build: ./zig build -Doptimize=ReleaseFast" ;;
             zebrac) echo "     Expected at: $TOOLS_DIR/zebrac" ;;
-            noodles) echo "     Build: (cd tools/noodles_wrapper && cargo build --release)" ;;
-            rustbio) echo "     Build: (cd tools/rustbio_wrapper && cargo build --release)" ;;
-            seqtk) echo "     Build: make -C tools/seqtk" ;;
-            fastahack) echo "     Build: make -C tools/fastahack-1.0.0" ;;
-            seqkit) echo "     Place binary at tools/seqkit" ;;
-            samtools|bedtools) echo "     Install via apt/conda and ensure on PATH" ;;
+            noodles|rustbio|fastahack|seqkit|seqtk|samtools|bedtools)
+                echo "     Build: tools/install.sh"
+                ;;
         esac
         return 1
     fi
@@ -128,8 +100,8 @@ check_tool() {
             fi
             ;;
         fastahack)
-            if [[ "$path" != *"/fastahack-${FASTAHACK_PIN}/"* ]]; then
-                fail "fastahack path does not include fastahack-$FASTAHACK_PIN"
+            if [[ "$(bench_tool_version fastahack 2>/dev/null || true)" != *"$FASTAHACK_PIN"* ]]; then
+                fail "fastahack pin is $FASTAHACK_PIN"
                 return 1
             fi
             ;;

@@ -331,7 +331,7 @@ MESSY_DIR="$BENCH_ROOT/shared/cache/messy_fixtures"
 # Generated on demand under data/ (gitignored). Do not track FASTA here.
 VERIFY_DATA="$SCRIPT_DIR/data/verify"
 LAYOUT_TWINS="$VERIFY_DATA/layout_twins"
-PYTHON="${PYTHON:-$PROJECT_ROOT/.venv/bin/python}"
+PYTHON="${PYTHON:-$PROJECT_ROOT/tools/venv/bin/python}"
 [[ -x "$PYTHON" ]] || PYTHON="$(command -v python3)"
 
 

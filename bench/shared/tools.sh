@@ -14,46 +14,30 @@ BENCH_SHARED_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BENCH_ROOT="$(cd "$BENCH_SHARED_DIR/.." && pwd)"
 PROJECT_ROOT="$(cd "$BENCH_ROOT/.." && pwd)"
 TOOLS_DIR="$PROJECT_ROOT/tools"
-PEER_TOOLS_DIR="$PROJECT_ROOT/.peer-tools"
+TOOLS_BIN_DIR="$TOOLS_DIR/bin"
+TOOLS_LIB_DIR="$TOOLS_DIR/lib"
+TOOLS_VENV_DIR="$TOOLS_DIR/venv"
+# shellcheck source=../../tools/versions.sh
+source "$TOOLS_DIR/versions.sh"
 
 ZFASTA="${ZFASTA:-$PROJECT_ROOT/zig-out/bin/z-fasta}"
 ZEBRAC="${ZEBRAC:-$TOOLS_DIR/zebrac}"
-if [[ -n "${SAMTOOLS:-}" ]]; then
-    : # Respect an explicit SAMTOOLS override.
-elif [[ -x "$PEER_TOOLS_DIR/bin/samtools" ]]; then
-    SAMTOOLS="${SAMTOOLS:-$PEER_TOOLS_DIR/bin/samtools}"
-    export LD_LIBRARY_PATH="$PEER_TOOLS_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-else
-    SAMTOOLS="samtools"
-fi
-if [[ -n "${BEDTOOLS:-}" ]]; then
-    : # Respect an explicit BEDTOOLS override.
-elif [[ -x "$PEER_TOOLS_DIR/bin/bedtools" ]]; then
-    BEDTOOLS="$PEER_TOOLS_DIR/bin/bedtools"
-else
-    BEDTOOLS="bedtools"
-fi
-SEQKIT="${SEQKIT:-$TOOLS_DIR/seqkit}"
-SEQTK="${SEQTK:-$TOOLS_DIR/seqtk/seqtk}"
-FASTAHACK="${FASTAHACK:-$TOOLS_DIR/fastahack-1.0.0/fastahack}"
-NOODLES="${NOODLES:-$TOOLS_DIR/noodles_wrapper/target/release/noodles_wrapper}"
-RUSTBIO="${RUSTBIO:-$TOOLS_DIR/rustbio_wrapper/target/release/rustbio_wrapper}"
-
-if [[ -x "$PROJECT_ROOT/.venv/bin/faidx" ]]; then
-    PYFAIDX="${PYFAIDX:-$PROJECT_ROOT/.venv/bin/faidx}"
-elif command -v faidx >/dev/null 2>&1; then
-    PYFAIDX="${PYFAIDX:-$(command -v faidx)}"
-else
-    PYFAIDX="${PYFAIDX:-}"
-fi
+SAMTOOLS="${SAMTOOLS:-$TOOLS_BIN_DIR/samtools}"
+BEDTOOLS="${BEDTOOLS:-$TOOLS_BIN_DIR/bedtools}"
+SEQKIT="${SEQKIT:-$TOOLS_BIN_DIR/seqkit}"
+SEQTK="${SEQTK:-$TOOLS_BIN_DIR/seqtk}"
+FASTAHACK="${FASTAHACK:-$TOOLS_BIN_DIR/fastahack}"
+NOODLES="${NOODLES:-$TOOLS_BIN_DIR/noodles}"
+RUSTBIO="${RUSTBIO:-$TOOLS_BIN_DIR/rustbio}"
+PYFAIDX="${PYFAIDX:-$TOOLS_BIN_DIR/faidx}"
 
 bench_tool_path() {
     local name="$1"
     case "$name" in
         z-fasta) echo "$ZFASTA" ;;
         zebrac) echo "$ZEBRAC" ;;
-        samtools) command -v "$SAMTOOLS" 2>/dev/null || true ;;
-        bedtools) command -v "$BEDTOOLS" 2>/dev/null || true ;;
+        samtools) echo "$SAMTOOLS" ;;
+        bedtools) echo "$BEDTOOLS" ;;
         seqkit) echo "$SEQKIT" ;;
         seqtk) echo "$SEQTK" ;;
         fastahack) echo "$FASTAHACK" ;;
@@ -88,7 +72,7 @@ bench_tool_version() {
             [[ -x "$path" ]] && "$path" --version 2>&1 | awk 'NR==1{print; exit}'
             ;;
         samtools)
-            command -v "$SAMTOOLS" >/dev/null 2>&1 && "$SAMTOOLS" --version 2>&1 | awk 'NR==1{print; exit}'
+            [[ -x "$path" ]] && "$path" --version 2>&1 | awk 'NR==1{print; exit}'
             ;;
         seqkit)
             [[ -x "$path" ]] && "$path" version 2>&1 | awk 'NR==1{print; exit}'
@@ -99,7 +83,7 @@ bench_tool_version() {
             { "$path" 2>&1 || true; } | awk '/^Version:/{print "seqtk " $2; exit}'
             ;;
         fastahack)
-            echo "fastahack 1.0.0 (directory pin)"
+            echo "fastahack $FASTAHACK_VERSION (local tool bundle)"
             ;;
         noodles|rustbio)
             [[ -x "$path" ]] && "$path" --version 2>&1 | awk 'NR==1{print; exit}'
@@ -120,8 +104,8 @@ file_size_bytes() {
 # Usage: bench_ensure_messy [--force] --fixtures|--perf|--fixtures --perf
 bench_ensure_messy() {
     local py
-    if [[ -x "$PROJECT_ROOT/.venv/bin/python" ]]; then
-        py="$PROJECT_ROOT/.venv/bin/python"
+    if [[ -x "$TOOLS_VENV_DIR/bin/python" ]]; then
+        py="$TOOLS_VENV_DIR/bin/python"
     else
         py=python3
     fi
@@ -132,8 +116,8 @@ bench_ensure_messy() {
 # Usage: bench_ensure_scaling [--force] [--clean-legacy] [--mode all|size|seq]
 bench_ensure_scaling() {
     local py
-    if [[ -x "$PROJECT_ROOT/.venv/bin/python" ]]; then
-        py="$PROJECT_ROOT/.venv/bin/python"
+    if [[ -x "$TOOLS_VENV_DIR/bin/python" ]]; then
+        py="$TOOLS_VENV_DIR/bin/python"
     else
         py=python3
     fi
