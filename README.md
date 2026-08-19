@@ -9,7 +9,7 @@
   </picture>
   <p><strong>Index, extract, validate, and inspect uncompressed FASTA with one static executable built in Zig.</strong></p>
   <p>
-    <a href="https://github.com/eneskemalergin/z-fasta/actions/workflows/ci.yml"><img src="https://github.com/eneskemalergin/z-fasta/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+    <a href="https://github.com/eneskemalergin/z-fasta/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/eneskemalergin/z-fasta/ci.yml?branch=main&amp;style=flat-square&amp;label=CI&amp;logo=githubactions" alt="CI status"></a>
     <a href="https://github.com/eneskemalergin/z-fasta/releases/latest"><img src="https://img.shields.io/github/v/release/eneskemalergin/z-fasta?style=flat-square" alt="Latest release"></a>
     <a href="https://github.com/eneskemalergin/z-fasta/wiki"><img src="https://img.shields.io/badge/wiki-documentation-2563eb?style=flat-square" alt="Wiki"></a>
     <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-history-7c3aed?style=flat-square" alt="Changelog"></a>
@@ -31,11 +31,15 @@ I built z-fasta around the four FASTA jobs I use most. One CLI, no runtime depen
 z-fasta accepts uncompressed FASTA and writes FASTA or reports. It does not currently handle FASTQ, gzip, or BGZF.
 
 <p align="center">
-  <a href="bench/README.md">
-    <img src="assets/poster-benchmarks.svg" alt="Performance comparison of z-fasta indexing, sequence extraction, and statistics against established FASTA tools on genome, transcriptome, and proteome datasets." width="100%">
+  <a href="bench/README.md#high-level-benchmark-summary-figures">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="bench/summary/02-zfasta-reference-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="bench/summary/02-zfasta-reference-light.svg">
+      <img src="bench/summary/02-zfasta-reference-light.svg" alt="Peer-to-z-fasta wall-time and peak-RSS ratios across indexing, positional extraction, and statistics on human genome, transcriptome, and proteome datasets" width="100%">
+    </picture>
   </a>
 </p>
-<p align="center"><sub>Performance snapshot on real FASTA datasets. See the benchmark reports for methodology and peer definitions.</sub></p>
+<p align="center"><sub>Wall-time and peak-memory ratios against the relevant z-fasta path for each real-FASTA workload. Open the benchmark summary for absolute values, ranking views, methods, and peer definitions.</sub></p>
 
 ## A few honest tradeoffs
 
@@ -68,7 +72,7 @@ The Wiki holds the details that would otherwise bury this page:
 
 ## Performance
 
-Selected warm-cache results from an AMD Ryzen 9 3950X are shown below. Lower is better. The linked reports own the complete methods, field coverage, memory results, scaling, and peer definitions.
+Selected warm-cache results from an AMD Ryzen 9 3950X are shown below. Lower is better. The generated summaries keep elapsed time beside process memory; the linked reports own the complete methods, field coverage, scaling, correctness checks, and peer definitions.
 
 ### Index
 
@@ -92,10 +96,6 @@ One 1 kbp positional region through each indexed implementation:
 | Transcriptome |     **4.8 ms** |        27.1 ms | 88.1 ms | 530.5 ms | 292.0 ms |
 | Proteome      |     **2.4 ms** |         3.6 ms |  6.8 ms |  20.0 ms |  12.7 ms |
 
-<p align="center">
-  <a href="bench/get/REPORT.md"><img src="bench/get/results/figures/perf_pos_wall.png" alt="Positional GET wall time across genome, transcriptome, and proteome datasets at four region sizes" width="100%"></a>
-</p>
-
 [GET benchmark report](bench/get/REPORT.md)
 
 ### Stats
@@ -109,6 +109,21 @@ Complete z-fasta and noodles reports, with SeqKit `stats -a` as a partial ecosys
 | Proteome      |    **12.3 ms** |        15.5 ms | 37.0 ms |           59.6 ms |
 
 [Stats benchmark report](bench/stats/REPORT.md) | [Benchmark framework](bench/README.md)
+
+### Speed and memory together
+
+The command tables are useful when I need one concrete number. The ranking ribbons provide the complementary overview: complete lanes are ranked independently for wall time and peak RSS, then connected so that a fast but memory-heavy result, or a memory-efficient but slower result, remains visible instead of being flattened into one score. Partial and reference lanes are shown for context but are not included in the complete ranking.
+
+<p align="center">
+  <a href="bench/README.md#high-level-benchmark-summary-figures">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="bench/summary/03-ranking-ribbons-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="bench/summary/03-ranking-ribbons-light.svg">
+      <img src="bench/summary/03-ranking-ribbons-light.svg" alt="Wall-time and peak-RSS ranking ribbons for complete index, positional extraction, and statistics lanes, with partial and reference work shown separately" width="100%">
+    </picture>
+  </a>
+</p>
+<p align="center"><sub>Rank 1 is the best complete lane for each metric. Labels retain the absolute measurement and the multiple over the best complete result.</sub></p>
 
 ## License
 
