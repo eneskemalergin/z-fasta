@@ -6,9 +6,17 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import statistics
 from pathlib import Path
 
+MPL_CONFIG_DIR = Path(__file__).resolve().parents[2] / "tools" / "build" / "matplotlib"
+MPL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", str(MPL_CONFIG_DIR))
+
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -126,6 +134,20 @@ REGION_ORDER = ["100bp", "1kbp_mid", "10kbp", "full_seq"]
 MESSY_PERF_JSON = SCRIPT_DIR / "messy_perf.json"
 
 
+def load_tool_versions() -> dict[str, str]:
+    """Load the shared installer coordinates without executing shell code."""
+    versions_path = SCRIPT_DIR.parent.parent / "tools" / "versions.sh"
+    versions: dict[str, str] = {}
+    for line in versions_path.read_text(encoding="utf-8").splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key.endswith("_VERSION"):
+            versions[key] = value.strip().strip('"')
+    return versions
+
+
+TOOL_VERSIONS = load_tool_versions()
+
+
 def format_md_table_cell(value: object) -> object:
     """Render pipe-containing strings without breaking markdown table columns (MD056)."""
     if value is None or (isinstance(value, float) and pd.isna(value)):
@@ -225,7 +247,7 @@ GET_PEERS = [
         "language": "C",
         "command": "samtools faidx region",
         "version_from": "`samtools --version`",
-        "pin": None,
+        "pin": TOOL_VERSIONS["SAMTOOLS_VERSION"],
     },
     {
         "key": "bedtools",
@@ -233,7 +255,7 @@ GET_PEERS = [
         "language": "C++",
         "command": "bedtools getfasta",
         "version_from": "`bedtools --version`",
-        "pin": None,
+        "pin": TOOL_VERSIONS["BEDTOOLS_VERSION"],
     },
     {
         "key": "noodles",
@@ -241,7 +263,7 @@ GET_PEERS = [
         "language": "Rust",
         "command": "tools/noodles_wrapper get",
         "version_from": "noodles-fasta crate in `tools/noodles_wrapper/Cargo.toml`",
-        "pin": "0.61",
+        "pin": TOOL_VERSIONS["NOODLES_VERSION"],
     },
     {
         "key": "rustbio",
@@ -249,15 +271,15 @@ GET_PEERS = [
         "language": "Rust",
         "command": "tools/rustbio_wrapper get",
         "version_from": "bio crate in `tools/rustbio_wrapper/Cargo.toml`",
-        "pin": "2.2",
+        "pin": TOOL_VERSIONS["RUSTBIO_VERSION"],
     },
     {
         "key": "fastahack",
         "label": "fastahack",
         "language": "C++",
         "command": "fastahack region",
-        "version_from": "directory pin `tools/fastahack-1.0.0/`",
-        "pin": "1.0.0",
+        "version_from": "local binary `tools/bin/fastahack`",
+        "pin": TOOL_VERSIONS["FASTAHACK_VERSION"],
     },
     {
         "key": "seqtk",

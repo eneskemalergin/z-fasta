@@ -17,7 +17,7 @@
 I built z-fasta to keep four common FASTA jobs in one place: check a file, index it, pull out the records you need, and understand what is inside. When exact behavior matters, this Wiki gets specific about coordinates, sidecars, output, and failure modes.
 
 > [!NOTE]
-> This Wiki documents z-fasta v0.3.2. Run `z-fasta --version` before following version-specific behavior.
+> This Wiki documents z-fasta v0.3.3. Run `z-fasta --version` before following version-specific behavior.
 
 ## Start with this workflow
 

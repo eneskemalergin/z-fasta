@@ -4,5 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-noodles-fasta = "0.61"
+noodles-fasta = "0.66.0"
 noodles-core = "0.20"

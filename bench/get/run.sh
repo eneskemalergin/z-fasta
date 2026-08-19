@@ -602,6 +602,43 @@ diff_oracle() {
     diff -q "$1" "$2" >/dev/null 2>&1 && pass "$3" || fail "$3" "${4:-$1}" "$2"
 }
 
+# samtools 1.24 formats extracted FASTA at a fixed 60-column width. Older
+# samtools releases followed the source record's wrapping, which is also what
+# z-fasta and the wrappers emit. Compare headers and bases here while leaving
+# the repository's own byte-level index/output checks unchanged.
+diff_fasta_oracle() {
+    local expected="$1" got="$2" label="$3"
+    if python3 - "$expected" "$got" <<'PY'
+import sys
+from pathlib import Path
+
+
+def canonical(path: str) -> list[tuple[str, str]]:
+    records: list[tuple[str, str]] = []
+    header: str | None = None
+    sequence: list[str] = []
+    for line in Path(path).read_text(encoding="ascii", errors="replace").splitlines():
+        if line.startswith(">"):
+            if header is not None:
+                records.append((header, "".join(sequence)))
+            header = line
+            sequence = []
+        elif header is not None:
+            sequence.append("".join(line.split()))
+    if header is not None:
+        records.append((header, "".join(sequence)))
+    return records
+
+
+raise SystemExit(0 if canonical(sys.argv[1]) == canonical(sys.argv[2]) else 1)
+PY
+    then
+        pass "$label"
+    else
+        fail "$label" "$expected" "$got"
+    fi
+}
+
 section_hdr() { echo ""; echo "--- [$1] $2 ---"; }
 
 ensure_index() {
@@ -773,7 +810,7 @@ parity_samtools() {
         || { fail "$label (samtools err)"; return; }
     "$ZFASTA" get "$fasta" "$@" > "$TMPDIR/got.tmp" 2>/dev/null \
         || { fail "$label (z-fasta err)"; return; }
-    diff_oracle "$TMPDIR/expected.tmp" "$TMPDIR/got.tmp" "$label"
+    diff_fasta_oracle "$TMPDIR/expected.tmp" "$TMPDIR/got.tmp" "$label"
 }
 
 parity_samtools_region() { parity_samtools "[parity:samtools] $3" "$1" "$2"; }
@@ -789,7 +826,7 @@ parity_samtools_rc() {
         || { fail "$label (samtools err)"; return; }
     "$ZFASTA" get "$fasta" "$region" --rc > "$TMPDIR/got.tmp" 2>/dev/null \
         || { fail "$label (z-fasta err)"; return; }
-    diff_oracle "$TMPDIR/expected.tmp" "$TMPDIR/got.tmp" "$label"
+    diff_fasta_oracle "$TMPDIR/expected.tmp" "$TMPDIR/got.tmp" "$label"
 }
 
 verify_open_ended_region() {
@@ -874,14 +911,14 @@ verify_index() {
 
     "$SAMTOOLS" "${st_get[@]}" > "$TMPDIR/st.out" 2>/dev/null \
         || { fail "[parity:samtools] $tag (samtools err)"; return; }
-    diff_oracle "$TMPDIR/st.out" "$TMPDIR/zfi.out" "[parity:samtools] $tag via .zfi"
+    diff_fasta_oracle "$TMPDIR/st.out" "$TMPDIR/zfi.out" "[parity:samtools] $tag via .zfi"
 
     mv "${fasta}.zfi" "$stash"
     "$ZFASTA" "${zf_get[@]}" > "$TMPDIR/fai.out" 2>/dev/null || {
         mv "$stash" "${fasta}.zfi"; fail "[index:fai] $tag get via .fai failed"; return
     }
     pass "[index:fai] $tag get with .zfi absent"
-    diff_oracle "$TMPDIR/st.out" "$TMPDIR/fai.out" "[parity:samtools] $tag via .fai"
+    diff_fasta_oracle "$TMPDIR/st.out" "$TMPDIR/fai.out" "[parity:samtools] $tag via .fai"
     diff_oracle "$TMPDIR/zfi.out" "$TMPDIR/fai.out" "[index:cross] $tag .zfi == .fai"
     mv "$stash" "${fasta}.zfi"
 }
@@ -956,7 +993,7 @@ parity_bed_samtools() {
     fi
     "$SAMTOOLS" faidx -r "$TMPDIR/st_regions.txt" "$fasta" > "$TMPDIR/expected.tmp" 2>/dev/null \
         || { fail "$label (samtools err)"; return; }
-    diff_oracle "$TMPDIR/expected.tmp" "$TMPDIR/got.tmp" "$label"
+    diff_fasta_oracle "$TMPDIR/expected.tmp" "$TMPDIR/got.tmp" "$label"
 }
 
 parity_bed_rc_composed() {
@@ -983,7 +1020,7 @@ wrapper_vs() {
     local desc="$1" cmp="$2" bin="$3"; shift 3
     [[ -x "$bin" ]] || return 0
     if "$bin" "$@" > "$TMPDIR/wrapper.tmp" 2>/dev/null; then
-        diff_oracle "$cmp" "$TMPDIR/wrapper.tmp" "$desc"
+        diff_fasta_oracle "$cmp" "$TMPDIR/wrapper.tmp" "$desc"
     else
         fail "$desc (wrapper err)"
     fi
@@ -1360,24 +1397,24 @@ section3() {
     names_to_regions "$NAMES" > "$TMPDIR/st_names.txt"
     "$ZFASTA" get "$simple" --names "$NAMES" > "$TMPDIR/got.tmp" 2>/dev/null \
         && "$SAMTOOLS" faidx -r "$TMPDIR/st_names.txt" "$simple" > "$TMPDIR/expected.tmp" 2>/dev/null \
-        && diff_oracle "$TMPDIR/expected.tmp" "$TMPDIR/got.tmp" "[parity:samtools] names file" \
+        && diff_fasta_oracle "$TMPDIR/expected.tmp" "$TMPDIR/got.tmp" "[parity:samtools] names file" \
         || fail "[parity:samtools] names file"
     cat "$NAMES" | "$ZFASTA" get "$simple" --names - > "$TMPDIR/got.tmp" 2>/dev/null \
-        && diff_oracle "$TMPDIR/expected.tmp" "$TMPDIR/got.tmp" "[parity:samtools] names stdin" \
+        && diff_fasta_oracle "$TMPDIR/expected.tmp" "$TMPDIR/got.tmp" "[parity:samtools] names stdin" \
         || fail "[parity:samtools] names stdin"
 
     printf '# names file\r\nseq2\r\n\r\nseq1' > "$TMPDIR/names_crlf.txt"
     printf 'seq2\nseq1\n' > "$TMPDIR/st_names_crlf.txt"
     "$ZFASTA" get "$simple" --names "$TMPDIR/names_crlf.txt" > "$TMPDIR/got.tmp" 2>/dev/null \
         && "$SAMTOOLS" faidx -r "$TMPDIR/st_names_crlf.txt" "$simple" > "$TMPDIR/expected.tmp" 2>/dev/null \
-        && diff_oracle "$TMPDIR/expected.tmp" "$TMPDIR/got.tmp" "[parity:samtools] names CRLF and final line" \
+        && diff_fasta_oracle "$TMPDIR/expected.tmp" "$TMPDIR/got.tmp" "[parity:samtools] names CRLF and final line" \
         || fail "[parity:samtools] names CRLF and final line"
 
     names_to_regions "$NAMES" > "$TMPDIR/st_names.txt"
     "$SAMTOOLS" faidx -r "$TMPDIR/st_names.txt" "$simple" > "$TMPDIR/expected.tmp" 2>/dev/null
     "$ZFASTA" get "$simple" --names "$NAMES" --summary > "$TMPDIR/got.tmp" 2>"$TMPDIR/summary.err" \
         && grep -Eq '^summary: regions=3 total_bases=48 elapsed_s=' "$TMPDIR/summary.err" \
-        && diff_oracle "$TMPDIR/expected.tmp" "$TMPDIR/got.tmp" "[extended:summary] names output and summary" \
+        && diff_fasta_oracle "$TMPDIR/expected.tmp" "$TMPDIR/got.tmp" "[extended:summary] names output and summary" \
         || fail "[extended:summary] names output and summary"
 
     "$ZFASTA" get "$simple" --bed "$BED_SMALL" --summary > "$TMPDIR/got.tmp" 2>"$TMPDIR/summary.err" \
@@ -1494,7 +1531,7 @@ section4() {
     names_to_regions "$nf" > "$TMPDIR/st_rc_names.txt"
     "$SAMTOOLS" faidx -i --mark-strand no -r "$TMPDIR/st_rc_names.txt" "$simple" > "$TMPDIR/expected.tmp" 2>/dev/null \
         && "$ZFASTA" get "$simple" --names "$nf" --rc > "$TMPDIR/got.tmp" 2>/dev/null \
-        && diff_oracle "$TMPDIR/expected.tmp" "$TMPDIR/got.tmp" "[parity:samtools] names --rc" \
+        && diff_fasta_oracle "$TMPDIR/expected.tmp" "$TMPDIR/got.tmp" "[parity:samtools] names --rc" \
         || fail "[parity:samtools] names --rc"
 
     local bed_comp="$TMPDIR/bed_comp.bed" bed_exp="$TMPDIR/bed_comp_expected.fa"
@@ -1557,7 +1594,7 @@ section5() {
         if (( zf_exit == 0 && st_exit == 0 )); then
             printf "%s" "$zf_out" > "$TMPDIR/zf_edge.tmp"
             printf "%s" "$st_out" > "$TMPDIR/st_edge.tmp"
-            diff_oracle "$TMPDIR/st_edge.tmp" "$TMPDIR/zf_edge.tmp" "$tag $desc byte parity"
+            diff_fasta_oracle "$TMPDIR/st_edge.tmp" "$TMPDIR/zf_edge.tmp" "$tag $desc FASTA parity"
         fi
         if (( zf_exit == 0 && st_exit != 0 )); then
             if parse_region_spec "$region"; then
@@ -1637,7 +1674,7 @@ section5() {
         && diff_oracle "$TMPDIR/empty_name_expected.fa" "$TMPDIR/got.tmp" "[extended:empty-name] fai positional first record" \
         || fail "[extended:empty-name] fai positional first record"
     "$SAMTOOLS" faidx "$empty_name" "" > "$TMPDIR/got.tmp" 2>/dev/null \
-        && diff_oracle "$TMPDIR/empty_name_expected.fa" "$TMPDIR/got.tmp" "[parity:samtools] empty identifier" \
+        && diff_fasta_oracle "$TMPDIR/empty_name_expected.fa" "$TMPDIR/got.tmp" "[parity:samtools] empty identifier" \
         || fail "[parity:samtools] empty identifier"
     mv "$TMPDIR/empty_name.zfi" "${empty_name}.zfi"
 

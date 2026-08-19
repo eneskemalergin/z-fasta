@@ -8,6 +8,28 @@ All notable changes to z-fasta will be documented in this file.
 
 Planned to improve `validate` module, possibly work on scan based alternatives for get, stats, and other options (bypass indexing or using indexed files etc.)
 
+## [0.3.3] - 2026-08-18
+
+Benchmark toolchain and report refresh. Peer tools now build and resolve from `tools/`, and GET parity accounts for samtools 1.24 output wrapping. No `.zfi` format change. **Re-index not required.**
+
+### Added
+
+- `tools/install.sh` builds and publishes the local peers under `tools/bin/`, with source and build state kept under `tools/src/`, `tools/build/`, and `tools/venv/`. `tools/versions.sh` is the shared version source for the installer, verifier, benchmark runners, and reports.
+- Noodles 0.66.0 and rust-bio 4.0.1 wrappers expose `index`, `get`, and `stats` CLI lanes. The rust-bio wrapper keeps its custom strict FAI indexer; both wrappers include the benchmark stats output through `tools/stats_peer.rs`.
+- `tools/README.md` and `bench/README.md` document the local build, peer versions, wrapper scope, and current executable sizes.
+
+### Changed
+
+- Benchmark scripts resolve peers from `tools/` by default, while `bench/shared/install_tools.sh` only verifies the local bundle and pins. Report helpers use `tools/venv`.
+- GET FASTA comparisons now ignore line-wrapping differences from samtools 1.24 while still checking headers, sequence content, order, exits, errors, indexes, and non-FASTA output through their existing checks.
+- GET report pins come from `tools/versions.sh`; the z-fasta size comparison uses `./zig build -Doptimize=ReleaseFast -Dstrip=true`.
+
+### Fixed
+
+- False GET parity failures caused by samtools 1.24's fixed output wrapping.
+- Stale `.peer-tools`, `.venv`, wrapper-target, and duplicate-peer path assumptions.
+- Binary-size documentation that confused the `faidx` symlink or Rust wrappers with the underlying installed programs or crates.
+
 ## [0.3.2] - 2026-08-08
 
 This release moves detailed documentation into a tracked GitHub Wiki and consolidates single-path performance and memory improvements across `index`, `get`, and `stats`, with CLI and validation hardening. Obsolete modes and unsupported native Windows release lanes are removed. No `.zfi` format change. **Re-index not required.**

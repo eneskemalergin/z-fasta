@@ -233,12 +233,22 @@ PY
 run_zebrac_tool() {
     local section="$1" workload="$2" tool="$3" family="$4"
     local json_out="$5" script="$6" input_bytes="$7"
-    local t0 t1 elapsed
+    local t0 t1 elapsed direct_error
     echo "  >> $section $workload $tool  (runs=$RUNS warmup=$WARMUP)"
     t0="$(date +%s)"
     zebrac_clear_commands
     stats_add_command "$section" "$workload" "$tool" "$family" "$json_out" "$script" "$input_bytes"
-    bench_group "$json_out"
+    if ! bench_group "$json_out"; then
+        echo "error: zebrac failed for $section $workload $tool" >&2
+        echo "  command: $script" >&2
+        if direct_error="$(bash -c "$script" 2>&1 >/dev/null)"; then
+            echo "  diagnostic: direct command succeeded after zebrac failure" >&2
+        else
+            echo "  diagnostic: direct command failed" >&2
+            [[ -n "$direct_error" ]] && printf '%s\n' "$direct_error" >&2
+        fi
+        return 1
+    fi
     t1="$(date +%s)"
     elapsed=$((t1 - t0))
     echo "  << $section $workload $tool  ${elapsed}s"
@@ -252,15 +262,25 @@ run_zebrac_tool_fai() {
         echo "  warn: missing ${fa}.fai; skip $tool for $workload" >&2
         return 0
     fi
-    mv -f "${fa}.zfi" "${fa}.zfi.stash" 2>/dev/null || true
-    if ! (
-        run_zebrac_tool "$section" "$workload" "$tool" "$family" "$json_out" "$script" "$input_bytes"
-    ); then
-        mv -f "${fa}.zfi.stash" "${fa}.zfi" 2>/dev/null || true
-        echo "error: $tool lane failed for $section $workload" >&2
-        exit 1
+    local had_zfi=false
+    if [[ -e "${fa}.zfi" ]]; then
+        if ! mv -f "${fa}.zfi" "${fa}.zfi.stash"; then
+            echo "error: could not stash ${fa}.zfi for .fai lane" >&2
+            return 1
+        fi
+        had_zfi=true
     fi
-    mv -f "${fa}.zfi.stash" "${fa}.zfi" 2>/dev/null || true
+    if ! run_zebrac_tool "$section" "$workload" "$tool" "$family" "$json_out" "$script" "$input_bytes"; then
+        if $had_zfi && ! mv -f "${fa}.zfi.stash" "${fa}.zfi"; then
+            echo "error: could not restore ${fa}.zfi after failed .fai lane" >&2
+        fi
+        echo "error: $tool lane failed for $section $workload" >&2
+        return 1
+    fi
+    if $had_zfi && ! mv -f "${fa}.zfi.stash" "${fa}.zfi"; then
+        echo "error: could not restore ${fa}.zfi after .fai lane" >&2
+        return 1
+    fi
 }
 
 # Timed tools for one FASTA. One zebrac group per tool so progress is visible.
@@ -331,7 +351,7 @@ MESSY_DIR="$BENCH_ROOT/shared/cache/messy_fixtures"
 # Generated on demand under data/ (gitignored). Do not track FASTA here.
 VERIFY_DATA="$SCRIPT_DIR/data/verify"
 LAYOUT_TWINS="$VERIFY_DATA/layout_twins"
-PYTHON="${PYTHON:-$PROJECT_ROOT/.venv/bin/python}"
+PYTHON="${PYTHON:-$PROJECT_ROOT/tools/venv/bin/python}"
 [[ -x "$PYTHON" ]] || PYTHON="$(command -v python3)"
 
 
@@ -424,7 +444,7 @@ prepare_messy() {
 run_stats() {
     local fasta="$1" out="$2" err="$3"
     if ! "$ZFASTA" stats "$fasta" >"$out" 2>"$err"; then
-        echo "z-fasta stats failed (see stderr)" >"$err"
+        printf 'z-fasta stats failed (see stderr)\n' >>"$err"
         return 1
     fi
 }
@@ -754,6 +774,9 @@ run_tests() {
     bench_ensure_messy --fixtures
     mkdir -p "$LAYOUT_TWINS"
     local verify_tmp="$VERIFY_DATA/work"
+    local previous_tmpdir="${TMPDIR-}"
+    local had_tmpdir=false
+    [[ ${TMPDIR+x} ]] && had_tmpdir=true
     rm -rf "$verify_tmp"
     mkdir -p "$verify_tmp"
     TMPDIR="$verify_tmp"
@@ -768,8 +791,18 @@ run_tests() {
     echo "  skip layout: $SKIP_LAYOUT"
 
     cd "$PROJECT_ROOT"
-    [[ -x "$ZFASTA" ]] || { echo "Error: run ./zig build first"; rm -rf "$TMPDIR"; return 1; }
-    command -v "$SAMTOOLS" &>/dev/null || { echo "Error: samtools not found"; rm -rf "$TMPDIR"; return 1; }
+    if [[ ! -x "$ZFASTA" ]]; then
+        echo "Error: run ./zig build first"
+        rm -rf "$TMPDIR"
+        if $had_tmpdir; then TMPDIR="$previous_tmpdir"; else unset TMPDIR; fi
+        return 1
+    fi
+    if ! command -v "$SAMTOOLS" &>/dev/null; then
+        echo "Error: samtools not found"
+        rm -rf "$TMPDIR"
+        if $had_tmpdir; then TMPDIR="$previous_tmpdir"; else unset TMPDIR; fi
+        return 1
+    fi
 
     prepare_fixtures
     for name in "${FIXTURES[@]}"; do
@@ -797,10 +830,12 @@ run_tests() {
     if [[ "$FAIL" -gt 0 ]]; then
         echo "VERIFICATION FAILED"
         rm -rf "$TMPDIR"
+        if $had_tmpdir; then TMPDIR="$previous_tmpdir"; else unset TMPDIR; fi
         return 1
     fi
     echo "ALL PASSED"
     rm -rf "$TMPDIR"
+    if $had_tmpdir; then TMPDIR="$previous_tmpdir"; else unset TMPDIR; fi
     return 0
 }
 
