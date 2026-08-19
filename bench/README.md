@@ -1,3 +1,5 @@
+<!-- markdownlint-disable MD033 MD041 -->
+
 # Benchmarking Framework
 
 This is the benchmarking framework for z-fasta. I use it to compare z-fasta with the reference tools across indexing, sequence extraction, and stats. Each suite checks correctness first, then uses [zebrac](https://github.com/eneskemalergin/zebrac) to measure wall time, peak RSS, and page faults.
@@ -85,3 +87,57 @@ That still does not prove that every lane has identical overhead. The Rust adapt
 Helpers live in `bench/shared/` (`tools.sh`, `zebrac_runner.sh`, `runner_common.sh`, `download_data.sh`, `install_tools.sh`, `generate_messy.py`, and `generate_scaling.py`). Generated fixtures under `bench/*/data/` and `bench/shared/cache/` are gitignored. Materialize them with `python3 bench/shared/generate_messy.py` and `python3 bench/shared/generate_scaling.py`; use `--force` after changing their parameters. After a full regeneration, commit each suite's `REPORT.md` with its `results/figures/*.png` files so the reports still render on GitHub.
 
 GET messy performance is heavy. Use the skip flags while iterating, then run the full suites before a release tag.
+
+---
+
+## High-level benchmark summary figures
+
+The individual reports above are the source for methods, correctness checks, commands, uncertainty, and the larger benchmark sections. I still wanted a smaller set of figures that gives me a useful overview before I open those reports. A single chart was not enough: absolute measurements, relative differences, and speed-memory tradeoffs answer different questions and can contradict each other in important ways.
+
+These three views therefore use the same selected index, GET, and stats runs but organize them differently. Every view keeps wall time beside peak RSS, covers the same human genome, transcriptome, and proteome inputs, and identifies partial or reference work instead of quietly ranking it as equivalent. They are not three independent benchmark claims and they are not a combined winner score.
+
+GitHub selects the dark or light SVG to match the reader's color scheme.
+
+### Absolute measurements
+
+I use this view when I want to know the practical cost of a command. It shows the measured wall time in seconds and peak process memory in MB on logarithmic axes, with the tools kept in their real units rather than normalized to z-fasta. The points are zebrac means and the horizontal whiskers are one standard deviation.
+
+This is the important counterweight to the ratio view: a large relative difference can still describe two very small absolute times, while similar runtimes can hide a large memory difference.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="summary/01-absolute-matrix-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="summary/01-absolute-matrix-light.svg">
+  <img src="summary/01-absolute-matrix-light.svg" alt="Absolute wall time and peak RSS for index, positional extraction, and statistics across human genome, transcriptome, and proteome FASTA datasets" width="100%">
+</picture>
+
+### z-fasta reference ratios
+
+This view asks how far each measured lane sits from the relevant z-fasta path for the same task and dataset. Index uses z-fasta `.fai` as `1x`; GET and stats use z-fasta `.zfi` as `1x`. A peer to the right of `1x` took more time or memory than that baseline, while a point to the left used less.
+
+Normalization makes the size of a difference easy to scan across workloads with very different absolute scales. It does not replace the absolute plot, and it does not turn partial stats or scan-based reference lanes into equivalent work; those lanes remain open and dashed.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="summary/02-zfasta-reference-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="summary/02-zfasta-reference-light.svg">
+  <img src="summary/02-zfasta-reference-light.svg" alt="Peer-to-z-fasta wall-time and peak-RSS ratios for index, positional extraction, and statistics" width="100%">
+</picture>
+
+### Ranking ribbons
+
+The ribbons show whether a tool's position changes between speed and memory. Complete lanes are ranked independently for wall time and peak RSS within each task and dataset, then connected across the two rankings. Rank `1` is the best complete lane for that metric, and each label retains both the absolute value and the multiple over the best complete result.
+
+I find this useful when a tool is fast but memory-heavy, or memory-flat but slower, because that tradeoff is visible as a crossing ribbon instead of being flattened into one score. Partial and reference lanes are displayed for context but remain outside the complete ranking.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="summary/03-ranking-ribbons-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="summary/03-ranking-ribbons-light.svg">
+  <img src="summary/03-ranking-ribbons-light.svg" alt="Wall-time and peak-RSS ranking ribbons for complete benchmark lanes, with partial and reference lanes shown separately" width="100%">
+</picture>
+
+All six light and dark SVGs are generated from the benchmark results and version coordinates in this repository. Regenerate the editable outputs from the repository root:
+
+```bash
+python3 bench/summary/src/render_01_absolute_matrix.py
+python3 bench/summary/src/render_02_zfasta_reference.py
+python3 bench/summary/src/render_03_ranking_ribbons.py
+```
