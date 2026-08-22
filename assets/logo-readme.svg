@@ -8,6 +8,7 @@
    width="160"
    height="122"
    inkscape:version="1.4.4 (dcaf3e7d9e, 2026-05-05)"
+   sodipodi:docname="logo-readme.svg"
    xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
    xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
    xmlns="http://www.w3.org/2000/svg"
@@ -27,14 +28,14 @@
      inkscape:pagecheckerboard="0"
      inkscape:deskcolor="#d1d1d1"
      inkscape:zoom="8.4322484"
-     inkscape:cx="36.407846"
-     inkscape:cy="79.931232"
-     inkscape:window-width="3840"
-     inkscape:window-height="2089"
-     inkscape:window-x="2160"
-     inkscape:window-y="34"
+     inkscape:cx="36.526438"
+     inkscape:cy="80.049824"
+     inkscape:window-width="3200"
+     inkscape:window-height="1743"
+     inkscape:window-x="0"
+     inkscape:window-y="0"
      inkscape:window-maximized="1"
-     inkscape:current-layer="svg3" />
+     inkscape:current-layer="g6" />
   <title
      id="title">z-fasta</title>
   <desc
@@ -59,7 +60,7 @@
        transform="translate(0,-20.027031)">
       <g
          id="g5"
-         transform="translate(-0.11859233,-0.59296166)">
+         transform="translate(-4.3879163,0.23718466)">
         <g
            fill="#f7a41d"
            id="g12"
@@ -68,21 +69,21 @@
              id="g8"
              transform="translate(28.189329,-3.8881397)">
             <polygon
-               points="62,36 37,44 56,22 "
+               points="37,44 56,22 62,36 "
                id="polygon4" />
             <polygon
-               points="111,44 37,44 56,32 56,22 111,22 "
+               points="37,44 56,32 56,22 111,22 111,44 "
                shape-rendering="crispEdges"
                id="polygon5" />
             <polygon
-               points="97,117 90,104 116,95 "
+               points="90,104 116,95 97,117 "
                id="polygon6" />
             <polygon
-               points="97,117 42,117 42,95 116,95 100,104 "
+               points="42,117 42,95 116,95 100,104 97,117 "
                shape-rendering="crispEdges"
                id="polygon7" />
             <polygon
-               points="3,140 101,22 150,0 52,117 "
+               points="101,22 150,0 52,117 3,140 "
                id="polygon8" />
           </g>
         </g>
@@ -92,7 +93,7 @@
          font-size="25px"
          font-weight="700"
          id="g3"
-         transform="matrix(1.1082014,0,0,1.1082014,-13.794243,-7.5986864)">
+         transform="matrix(1.1082014,0,0,1.1082014,-18.505797,-5.1082474)">
         <g
            id="g4"
            transform="matrix(1.2193877,0,0,1.2193877,-11.169888,-27.415717)">
@@ -102,13 +103,13 @@
              fill="#f4eed7"
              id="text1">-f st</text>
           <text
-             x="78.322853"
-             y="94.677147"
+             x="79.375969"
+             y="96.833611"
              fill="#f7a41d"
              id="text2">&gt;</text>
           <text
-             x="117.87634"
-             y="94.953125"
+             x="122.96642"
+             y="96.833611"
              fill="#f7a41d"
              id="text3">&gt;</text>
         </g>

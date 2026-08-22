@@ -28,14 +28,14 @@
      inkscape:pagecheckerboard="0"
      inkscape:deskcolor="#d1d1d1"
      inkscape:zoom="8.4322484"
-     inkscape:cx="36.407846"
-     inkscape:cy="79.931232"
-     inkscape:window-width="3840"
-     inkscape:window-height="2089"
-     inkscape:window-x="2160"
-     inkscape:window-y="34"
+     inkscape:cx="36.526438"
+     inkscape:cy="80.049824"
+     inkscape:window-width="3200"
+     inkscape:window-height="1743"
+     inkscape:window-x="0"
+     inkscape:window-y="0"
      inkscape:window-maximized="1"
-     inkscape:current-layer="svg3" />
+     inkscape:current-layer="g7" />
   <title
      id="title">z-fasta</title>
   <desc
@@ -60,7 +60,7 @@
        transform="translate(0,-20.027031)">
       <g
          id="g5"
-         transform="translate(-0.11859233,-0.59296166)">
+         transform="translate(-4.1185923,-0.5929617)">
         <g
            fill="#f7a41d"
            id="g12"
@@ -72,48 +72,40 @@
                points="62,36 37,44 56,22 "
                id="polygon4" />
             <polygon
-               points="111,44 37,44 56,32 56,22 111,22 "
+               points="37,44 56,32 56,22 111,22 111,44 "
                shape-rendering="crispEdges"
                id="polygon5" />
             <polygon
                points="97,117 90,104 116,95 "
                id="polygon6" />
             <polygon
-               points="97,117 42,117 42,95 116,95 100,104 "
+               points="42,117 42,95 116,95 100,104 97,117 "
                shape-rendering="crispEdges"
                id="polygon7" />
             <polygon
-               points="3,140 101,22 150,0 52,117 "
+               points="150,0 52,117 3,140 101,22 "
                id="polygon8" />
           </g>
         </g>
       </g>
-      <g
-         font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace"
-         font-size="25px"
-         font-weight="700"
-         id="g3"
-         transform="matrix(1.1082014,0,0,1.1082014,-13.794243,-7.5986864)">
-        <g
-           id="g4"
-           transform="matrix(1.2193877,0,0,1.2193877,-11.169888,-27.415717)">
-          <text
-             x="50"
-             y="94.953125"
-             fill="#f4eed7"
-             id="text1">-f st</text>
-          <text
-             x="78.322853"
-             y="94.677147"
-             fill="#f7a41d"
-             id="text2">&gt;</text>
-          <text
-             x="117.87634"
-             y="94.953125"
-             fill="#f7a41d"
-             id="text3">&gt;</text>
-        </g>
-      </g>
+      <text
+         x="35.393631"
+         y="92.331917"
+         fill="#f4eed7"
+         id="text1"
+         style="font-weight:700;font-size:33.7832px;font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;stroke-width:1.35133">-f st</text>
+      <text
+         x="76.141441"
+         y="94.145447"
+         fill="#f7a41d"
+         id="text2"
+         style="font-weight:700;font-size:33.7832px;font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;stroke-width:1.35133">&gt;</text>
+      <text
+         x="135.47255"
+         y="94.145447"
+         fill="#f7a41d"
+         id="text3"
+         style="font-weight:700;font-size:33.7832px;font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;stroke-width:1.35133">&gt;</text>
     </g>
   </g>
   <metadata
