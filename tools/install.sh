@@ -9,7 +9,6 @@
 set -euo pipefail
 
 TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$TOOLS_DIR/.." && pwd)"
 BIN_DIR="$TOOLS_DIR/bin"
 LIB_DIR="$TOOLS_DIR/lib"
 SOURCE_DIR="$TOOLS_DIR/src"
@@ -22,6 +21,15 @@ VENV_DIR="$TOOLS_DIR/venv"
 source "$TOOLS_DIR/versions.sh"
 
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)}"
+KEEP_BUILD_ARTIFACTS="${KEEP_BUILD_ARTIFACTS:-0}"
+
+case "$KEEP_BUILD_ARTIFACTS" in
+    0|1) ;;
+    *)
+        echo "error: KEEP_BUILD_ARTIFACTS must be 0 or 1" >&2
+        exit 2
+        ;;
+esac
 
 mkdir -p "$BIN_DIR" "$LIB_DIR" "$SOURCE_DIR" "$WORK_DIR" "$DOWNLOAD_DIR" \
     "$BUILD_DIR"
@@ -31,10 +39,23 @@ STAGE_BIN="$STAGE_DIR/bin"
 STAGE_LIB="$STAGE_DIR/lib"
 mkdir -p "$STAGE_BIN" "$STAGE_LIB"
 
-cleanup_stage() {
+cleanup_generated() {
     rm -rf "$STAGE_DIR"
+
+    if [[ "$KEEP_BUILD_ARTIFACTS" == 1 ]]; then
+        return
+    fi
+
+    rm -rf \
+        "$WORK_DIR" \
+        "$BUILD_DIR/cargo-home" \
+        "$BUILD_DIR/cargo-target" \
+        "$BUILD_DIR/pip-cache"
+    find "$BUILD_DIR" -mindepth 1 -maxdepth 1 -type d \
+        \( -name 'seqkit-*' -o -name 'stage.*' \) \
+        -exec rm -rf -- {} +
 }
-trap cleanup_stage EXIT
+trap cleanup_generated EXIT
 
 require_command() {
     command -v "$1" >/dev/null 2>&1 || {
@@ -227,6 +248,10 @@ publish() {
     local name
     mkdir -p "$BIN_DIR" "$LIB_DIR"
     for name in samtools bedtools seqkit seqtk fastahack noodles rustbio; do
+        case "$name" in
+            seqkit) ;;
+            *) strip --strip-unneeded "$STAGE_BIN/$name" ;;
+        esac
         install -m 755 "$STAGE_BIN/$name" "$BIN_DIR/$name"
     done
     cp -a "$STAGE_LIB"/libhts.so* "$LIB_DIR/"
@@ -239,6 +264,7 @@ require_command make
 require_command cargo
 require_command python3
 require_command patchelf
+require_command strip
 
 build_samtools
 build_bedtools
