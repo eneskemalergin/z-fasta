@@ -69,6 +69,7 @@ REGENERATE_FIXTURES=false
 FOCUSED=false
 
 BENCH_VIEW_DIR=""
+TEST_DATA_DIR=""
 declare -A ZFI_VIEWS=()
 declare -A FAI_VIEWS=()
 
@@ -1049,7 +1050,7 @@ wrapper_rc() {
 }
 
 wrapper_bed() {
-    local desc="$1" bed="$2" fasta="${3:-$PROJECT_ROOT/tests/data/simple.fasta}"
+    local desc="$1" bed="$2" fasta="${3:-$TEST_DATA_DIR/simple.fasta}"
     bed_to_regions "$bed" > "$TMPDIR/st_regions.txt"
     "$SAMTOOLS" faidx -r "$TMPDIR/st_regions.txt" "$fasta" > "$TMPDIR/expected.tmp" 2>/dev/null || return 0
     for pair in "noodles:$NOODLES" "rustbio:$RUSTBIO"; do
@@ -1165,8 +1166,8 @@ BED
 section0_index() {
     section_hdr 0 "Index path coverage (.zfi vs .fai)"
     echo "  Uniform fixtures only; cache messy_fixtures stay .zfi-only ([extended:messy])"
-    local simple="tests/data/simple.fasta" proteome="tests/data/proteome.fasta"
-    local edge="tests/data/edge_cases.fasta" mixed="tests/data/mixed_widths.fasta"
+    local simple="$TEST_DATA_DIR/simple.fasta" proteome="$TEST_DATA_DIR/proteome.fasta"
+    local edge="$TEST_DATA_DIR/edge_cases.fasta" mixed="$TEST_DATA_DIR/mixed_widths.fasta"
     local bed_small="$TMPDIR/idx_bed_small.bed" bed_medium="$TMPDIR/idx_bed_medium.bed"
     local bed_large="$TMPDIR/idx_bed_large.bed"
     local mx_bed="$TMPDIR/idx_mx.bed" names="$TMPDIR/idx_names.txt"
@@ -1199,7 +1200,7 @@ BED
     # Spot checks with samtools oracle on both index paths.
     verify_index positional "$simple" "seq1:1-10" "sub-region"
     verify_index positional "$simple" "seq1" "full sequence"
-    verify_index positional tests/data/single.fasta "single_sequence:1-4" "single record"
+    verify_index positional "$TEST_DATA_DIR/single.fasta" "single_sequence:1-4" "single record"
     verify_index positional "$proteome" "sp|P12345|PROT_HUMAN:1-10" "pipe name"
     verify_index positional "$mixed" "mixed1:55-75" "mixed-width record"
     verify_index bed "$simple" "$bed_small" "small BED"
@@ -1285,14 +1286,14 @@ section1() {
         done < "${fasta}.fai"
     }
 
-    for f in tests/data/simple.fasta tests/data/proteome.fasta tests/data/single.fasta tests/data/edge_cases.fasta; do
+    for f in "$TEST_DATA_DIR/simple.fasta" "$TEST_DATA_DIR/proteome.fasta" "$TEST_DATA_DIR/single.fasta" "$TEST_DATA_DIR/edge_cases.fasta"; do
         [[ -f "$f" ]] && { ensure_index "$f"; test_file "$f"; }
     done
-    cp tests/data/mixed_widths.fasta "$TMPDIR/mixed_widths.fasta"
+    cp "$TEST_DATA_DIR/mixed_widths.fasta" "$TMPDIR/mixed_widths.fasta"
     ensure_index "$TMPDIR/mixed_widths.fasta"
     test_file "$TMPDIR/mixed_widths.fasta"
 
-    verify_open_ended_region tests/data/simple.fasta seq1 10 24 "simple open-ended region"
+    verify_open_ended_region "$TEST_DATA_DIR/simple.fasta" seq1 10 24 "simple open-ended region"
 
     echo "  cache/messy_fixtures [extended:messy]"
     for case in "${MESSY_POS_CASES[@]}"; do
@@ -1310,7 +1311,7 @@ section1() {
 
 section2() {
     section_hdr 2 "Multi-region extraction"
-    local simple="tests/data/simple.fasta" proteome="tests/data/proteome.fasta" edge="tests/data/edge_cases.fasta"
+    local simple="$TEST_DATA_DIR/simple.fasta" proteome="$TEST_DATA_DIR/proteome.fasta" edge="$TEST_DATA_DIR/edge_cases.fasta"
     ensure_index "$simple"; ensure_index "$proteome"; ensure_index "$edge"
     local LONG="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
@@ -1363,7 +1364,7 @@ section2() {
 
 section3() {
     section_hdr 3 "BED and names extraction"
-    local simple="$PROJECT_ROOT/tests/data/simple.fasta"
+    local simple="$TEST_DATA_DIR/simple.fasta"
     ensure_index "$simple"
     local BED_SMALL="$TMPDIR/small.bed" BED_MEDIUM="$TMPDIR/medium.bed"
 
@@ -1436,7 +1437,7 @@ BED
         || fail "[extended:header] BED composed identity annotation"
 
     local mx="$TMPDIR/mx.fasta" mx_bed="$TMPDIR/mx.bed"
-    cp "$PROJECT_ROOT/tests/data/mixed_widths.fasta" "$mx"
+    cp "$TEST_DATA_DIR/mixed_widths.fasta" "$mx"
     ensure_index "$mx"
     cat > "$mx_bed" <<'BED'
 mixed1	54	75	mixed1_span	0	+
@@ -1482,8 +1483,8 @@ BED
 
 section4() {
     section_hdr 4 "Reverse complement"
-    local simple="$PROJECT_ROOT/tests/data/simple.fasta" single="$PROJECT_ROOT/tests/data/single.fasta"
-    local edge="$PROJECT_ROOT/tests/data/edge_cases.fasta"
+    local simple="$TEST_DATA_DIR/simple.fasta" single="$TEST_DATA_DIR/single.fasta"
+    local edge="$TEST_DATA_DIR/edge_cases.fasta"
     local iupac chrom
     iupac=$(gen_iupac_fixture); chrom=$(gen_chrom_fixture 500000)
     ensure_index "$iupac"; ensure_index "$chrom"
@@ -1498,7 +1499,7 @@ section4() {
     parity_samtools_rc "$chrom" "chrSynthetic" "chrom full"
 
     local mx="$TMPDIR/mx_rc.fasta"
-    cp "$PROJECT_ROOT/tests/data/mixed_widths.fasta" "$mx"
+    cp "$TEST_DATA_DIR/mixed_widths.fasta" "$mx"
     ensure_index "$mx"
     parity_samtools_rc "$mx" "mixed1:55-75" "mixed-width region"
 
@@ -1563,7 +1564,7 @@ BED
         && diff_oracle "$TMPDIR/iupac_rc_py.fa" "$TMPDIR/got.tmp" "[parity:seq] IUPAC --rc Python oracle" \
         || fail "[parity:seq] IUPAC --rc Python oracle"
 
-    "$ZFASTA" get tests/data/proteome.fasta 'sp|P12345|PROT_HUMAN:1-10' --rc > "$TMPDIR/got.tmp" 2> "$TMPDIR/got.err" \
+    "$ZFASTA" get "$TEST_DATA_DIR/proteome.fasta" 'sp|P12345|PROT_HUMAN:1-10' --rc > "$TMPDIR/got.tmp" 2> "$TMPDIR/got.err" \
         && fail "protein RC rejected (should fail)" \
         || grep -q 'reverse complement is not defined' "$TMPDIR/got.err" \
         && pass "protein RC rejected" || fail "protein RC rejected (wrong err)"
@@ -1571,7 +1572,7 @@ BED
 
 section5() {
     section_hdr 5 "Edge cases and error paths"
-    local E="$PROJECT_ROOT/tests/data"
+    local E="$TEST_DATA_DIR"
 
     verify_edge_case() {
         local desc="$1" fasta="$2" region="$3" exp_zf="$4" exp_st="$5"
@@ -1703,6 +1704,10 @@ run_tests() {
     rm -rf "$verify_tmp"
     mkdir -p "$verify_tmp"
     TMPDIR="$verify_tmp"
+    TEST_DATA_DIR="$TMPDIR/tests_data"
+    mkdir -p "$TEST_DATA_DIR"
+    cp -a "$PROJECT_ROOT/tests/data/." "$TEST_DATA_DIR/"
+    rm -f "$TEST_DATA_DIR"/*.zfi "$TEST_DATA_DIR"/*.fai
     bench_ensure_messy --fixtures
 
 

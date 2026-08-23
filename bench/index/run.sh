@@ -151,7 +151,7 @@ ensure_scaling() {
 
 prepare_benchmark_binary() {
     echo "Building ReleaseFast benchmark subject..."
-    "$PROJECT_ROOT/zig" build -Doptimize=ReleaseFast
+    (cd "$PROJECT_ROOT" && zig build -Doptimize=ReleaseFast)
 }
 
 require_real_datasets() {
@@ -180,8 +180,8 @@ require_real_datasets() {
 write_run_manifest() {
     local manifest="$1" timestamp="$2" metadata="$3"
     local zig_version zig_target optimize
-    zig_version="$("$PROJECT_ROOT/zig" version)"
-    zig_target="$("$PROJECT_ROOT/zig" env | sed -n 's/^[[:space:]]*\.target = "\([^"]*\)",/\1/p')"
+    zig_version="$(zig version)"
+    zig_target="$(zig env | sed -n 's/^[[:space:]]*\.target = "\([^"]*\)",/\1/p')"
     optimize="ReleaseFast"
     python3 - "$manifest" "$timestamp" "$metadata" "$RUNS" "$WARMUP" "$ZEBRAC_DURATION_MS" \
         "$SKIP_REAL" "$SKIP_SCALING" "$SKIP_SIZE" \

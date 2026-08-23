@@ -792,7 +792,7 @@ run_tests() {
 
     cd "$PROJECT_ROOT"
     if [[ ! -x "$ZFASTA" ]]; then
-        echo "Error: run ./zig build first"
+        echo "Error: run zig build first"
         rm -rf "$TMPDIR"
         if $had_tmpdir; then TMPDIR="$previous_tmpdir"; else unset TMPDIR; fi
         return 1

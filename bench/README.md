@@ -20,7 +20,7 @@ Run these commands from the repository root:
 
 ```bash
 bash bench/shared/download_data.sh   # fetch the REAL_* datasets once
-./zig build -Doptimize=ReleaseFast -Dstrip=true  # build the stripped z-fasta subject
+zig build -Doptimize=ReleaseFast -Dstrip=true  # build the stripped z-fasta subject
 tools/install.sh                     # build/install the local peer tools
 bash bench/shared/install_tools.sh   # verify the local toolchain
 
@@ -49,7 +49,7 @@ The installer builds [samtools](https://github.com/samtools/samtools) 1.24 again
 
 The published commands go under `tools/bin/`. HTSlib shared libraries go under `tools/lib/`. Downloaded sources stay under `tools/src/`, while compiler work, Cargo state, downloaded archives, and the Python package cache stay under `tools/build/`. The virtual environment is `tools/venv/`. The installer stages the compiled command set before publishing it, and samtools carries an origin-relative library path so the published command works without a system `LD_LIBRARY_PATH` setting.
 
-The z-fasta binary is built separately with `./zig build -Doptimize=ReleaseFast -Dstrip=true`. `ReleaseFast` selects the optimization mode; `-Dstrip=true` makes the size comparison use the intended stripped executable. Zebrac is also separate: `tools/install.sh` checks that `tools/zebrac` exists, but does not build it. This keeps the benchmark runner distinct from the tools being compared.
+The z-fasta binary is built separately with `zig build -Doptimize=ReleaseFast -Dstrip=true`. `ReleaseFast` selects the optimization mode; `-Dstrip=true` makes the size comparison use the intended stripped executable. Zebrac is also separate: `tools/install.sh` checks that `tools/zebrac` exists, but does not build it. This keeps the benchmark runner distinct from the tools being compared.
 
 ## Rust wrappers
 
@@ -61,18 +61,18 @@ These wrappers add argument parsing, indexing or index reading, output formattin
 
 ## Binary sizes
 
-These are the executable files currently used by this checkout on Linux x86_64. The sizes are useful for comparing this local bundle, but they are not universal upstream sizes. Compiler versions, link mode, debug information, stripping, and dependency versions all change them. In this bundle, z-fasta, SeqKit, and zebrac are stripped; the Rust wrappers, samtools, bedtools, seqtk, and fastahack retain debug information or other unstripped sections. The table is therefore a build comparison, not a ranking of the projects.
+These are the executable files currently used by this checkout on Linux x86_64. The sizes are useful for comparing this local bundle, but they are not universal upstream sizes. Compiler versions, link mode, debug information, stripping, and dependency versions all change them. Every compiled executable in this table is stripped in the current bundle. The table is therefore a build comparison, not a ranking of the projects.
 
 | command     | version or implementation                   |                      file size |
 | ----------- | ------------------------------------------- | -----------------------------: |
 | `z-fasta`   | 0.3.3, Zig `ReleaseFast`, stripped          |        490,056 bytes (479 KiB) |
-| `noodles`   | noodles-fasta 0.66.0 wrapper                |        581,416 bytes (568 KiB) |
-| `rustbio`   | rust-bio 4.0.1 wrapper                      |        646,000 bytes (631 KiB) |
-| `samtools`  | 1.24 with HTSlib 1.24                       |     3,324,569 bytes (3.17 MiB) |
-| `bedtools`  | 2.31.1                                      |    40,757,024 bytes (38.9 MiB) |
+| `noodles`   | noodles-fasta 0.66.0 wrapper                |        449,712 bytes (439 KiB) |
+| `rustbio`   | rust-bio 4.0.1 wrapper                      |        492,712 bytes (481 KiB) |
+| `samtools`  | 1.24 with HTSlib 1.24                       |        869,232 bytes (849 KiB) |
+| `bedtools`  | 2.31.1                                      |     2,098,216 bytes (2.00 MiB) |
 | `seqkit`    | 2.13.0, upstream Linux amd64 release binary |    20,078,754 bytes (19.2 MiB) |
-| `seqtk`     | 1.5-r133                                    |        252,760 bytes (247 KiB) |
-| `fastahack` | 1.0.0                                       |       102,056 bytes (99.7 KiB) |
+| `seqtk`     | 1.5-r133                                    |        77,600 bytes (75.8 KiB) |
+| `fastahack` | 1.0.0                                       |        89,664 bytes (87.6 KiB) |
 | `faidx`     | pyfaidx 0.9.0.4                             | symlink, not a compiled binary |
 | `zebrac`    | 0.6.2, static stripped binary               |        588,584 bytes (575 KiB) |
 
@@ -97,6 +97,14 @@ The individual reports above are the source for methods, correctness checks, com
 These three views therefore use the same selected index, GET, and stats runs but organize them differently. Every view keeps wall time beside peak RSS, covers the same human genome, transcriptome, and proteome inputs, and identifies partial or reference work instead of quietly ranking it as equivalent. They are not three independent benchmark claims and they are not a combined winner score.
 
 GitHub selects the dark or light SVG to match the reader's color scheme.
+
+Regenerate the six SVGs from the selected raw runs configured in `summary/src/representation_common.py` with the existing local Python environment:
+
+```bash
+tools/venv/bin/python bench/summary/src/render_01_absolute_matrix.py
+tools/venv/bin/python bench/summary/src/render_02_zfasta_reference.py
+tools/venv/bin/python bench/summary/src/render_03_ranking_ribbons.py
+```
 
 ### Absolute measurements
 

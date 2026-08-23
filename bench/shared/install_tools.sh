@@ -80,7 +80,7 @@ check_tool() {
         path="$(bench_tool_path "$name" 2>/dev/null || echo '<unknown>')"
         fail "not found or not executable (resolved: $path)"
         case "$name" in
-            z-fasta) echo "     Build: ./zig build -Doptimize=ReleaseFast" ;;
+            z-fasta) echo "     Build: zig build -Doptimize=ReleaseFast" ;;
             zebrac) echo "     Expected at: $TOOLS_DIR/zebrac" ;;
             noodles|rustbio|fastahack|seqkit|seqtk|samtools|bedtools)
                 echo "     Build: tools/install.sh"

@@ -10,6 +10,10 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     exit 1
 fi
 
+# Edge-case checks intentionally pass malformed inputs to peer tools. Keep a
+# peer crash from retaining a core image outside the benchmark directories.
+ulimit -S -c 0 2>/dev/null || true
+
 BENCH_SHARED_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BENCH_ROOT="$(cd "$BENCH_SHARED_DIR/.." && pwd)"
 PROJECT_ROOT="$(cd "$BENCH_ROOT/.." && pwd)"
