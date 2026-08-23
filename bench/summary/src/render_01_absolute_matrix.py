@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
 
+import os
+from pathlib import Path
+
+MPL_CONFIG_DIR = Path(__file__).resolve().parents[3] / "tools" / "build" / "matplotlib"
+MPL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", str(MPL_CONFIG_DIR))
+
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 

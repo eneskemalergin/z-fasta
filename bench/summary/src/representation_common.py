@@ -222,6 +222,7 @@ def configure(name: str) -> Theme:
         "xtick.color": theme.muted,
         "ytick.color": theme.ink,
         "axes.edgecolor": theme.grid,
+        "svg.hashsalt": "z-fasta-benchmark-summary",
     })
     return theme
 
@@ -419,22 +420,23 @@ def save(
     OUT.mkdir(parents=True, exist_ok=True)
     svg_path = OUT / f"{stem}.svg"
     png_path = OUT / f"{stem}.png"
-    fig.savefig(svg_path, metadata={"Creator": stem})
+    fig.savefig(svg_path, metadata={"Creator": stem, "Date": None})
     if embedded_svg is None and render_png:
         fig.savefig(png_path, dpi=150)
     elif embedded_svg is not None:
         if embedded_box is None:
             raise ValueError("embedded_box is required with embedded_svg")
         x, y, width, height = embedded_box
-        import cairosvg
         icon_source = embedded_svg.read_text()
         icon_source = re.sub(
             r'font-family="ui-monospace[^"]*"',
             'font-family="Liberation Mono"',
             icon_source,
         )
-        outlined = cairosvg.svg2svg(bytestring=icon_source.encode("utf-8"))
-        source = ET.fromstring(outlined)
+        if render_png:
+            import cairosvg
+            icon_source = cairosvg.svg2svg(bytestring=icon_source.encode("utf-8"))
+        source = ET.fromstring(icon_source)
         for element in source.iter():
             if "id" in element.attrib:
                 element.attrib["id"] = f"zfasta-logo-{element.attrib['id']}"
@@ -455,4 +457,6 @@ def save(
                 output_width=int(fig.get_figwidth() * 150),
                 output_height=int(fig.get_figheight() * 150),
             )
+    document = svg_path.read_text()
+    svg_path.write_text("\n".join(line.rstrip() for line in document.splitlines()) + "\n")
     plt.close(fig)
