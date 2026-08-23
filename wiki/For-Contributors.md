@@ -67,7 +67,7 @@ When CLI behavior changes, update:
 
 When format behavior changes, also update [Index formats](Index-Formats) and the internal `.zfi` wire contract.
 
-The authored Wiki pages live in `wiki/` in the main repository. Edit and review that directory first. Publication to the GitHub Wiki is manual for now, so do not leave a correction only in the live Wiki.
+The authored Wiki pages live in `wiki/` in the main repository. Edit and review that directory first. Pull requests validate the tracked source. Pushes to `main` validate and publish it to the GitHub Wiki automatically. A manual workflow dispatch can also publish the selected `main` branch after validation. Do not leave a correction only in the live Wiki.
 
 > [!IMPORTANT]
 > Examples are product claims. Verify command, status, stdout, stderr, and filesystem effects before publishing them.

@@ -80,9 +80,9 @@ Selected warm-cache results from an AMD Ryzen 9 3950X are shown below. Lower is 
 
 | Dataset       |     Size |      z-fasta |  noodles | rust-bio | samtools |
 | ------------- | -------: | -----------: | -------: | -------: | -------: |
-| Human genome  | ~2.9 GiB | **0.3714 s** | 1.3337 s | 3.6716 s | 9.0976 s |
-| Transcriptome | ~459 MiB | **0.2124 s** | 0.3658 s | 0.6995 s | 1.8315 s |
-| Proteome      |  ~13 MiB | **0.0105 s** | 0.0174 s | 0.0255 s | 0.0598 s |
+| Human genome  | ~2.9 GiB | **0.3792 s** | 1.1319 s | 3.5430 s | 8.0870 s |
+| Transcriptome | ~459 MiB | **0.2171 s** | 0.3373 s | 0.6720 s | 1.6615 s |
+| Proteome      |  ~13 MiB | **0.0106 s** | 0.0159 s | 0.0245 s | 0.0577 s |
 
 [Index benchmark report](bench/index/REPORT.md)
 
@@ -92,9 +92,9 @@ One 1 kbp positional region through each indexed implementation:
 
 | Dataset       | z-fasta `.zfi` | z-fasta `.fai` | noodles | rust-bio | samtools |
 | ------------- | -------------: | -------------: | ------: | -------: | -------: |
-| Human genome  |     **2.0 ms** |         2.2 ms |  2.6 ms |   2.7 ms |   3.3 ms |
-| Transcriptome |     **4.8 ms** |        27.1 ms | 88.1 ms | 530.5 ms | 292.0 ms |
-| Proteome      |     **2.4 ms** |         3.6 ms |  6.8 ms |  20.0 ms |  12.7 ms |
+| Human genome  |     **2.1 ms** |         2.1 ms |  2.4 ms |   2.7 ms |   7.1 ms |
+| Transcriptome |     **5.0 ms** |        29.5 ms | 94.6 ms | 564.0 ms | 315.8 ms |
+| Proteome      |     **2.4 ms** |         3.8 ms |  7.0 ms |  19.8 ms |  16.6 ms |
 
 [GET benchmark report](bench/get/REPORT.md)
 
@@ -104,9 +104,9 @@ Complete z-fasta and noodles reports, with SeqKit `stats -a` as a partial ecosys
 
 | Dataset       | z-fasta `.zfi` | z-fasta `.fai` | noodles | SeqKit `stats -a` |
 | ------------- | -------------: | -------------: | ------: | ----------------: |
-| Human genome  |    **2.752 s** |        2.757 s | 6.119 s |          17.777 s |
-| Transcriptome |    **0.382 s** |        0.416 s | 1.107 s |           2.403 s |
-| Proteome      |    **12.3 ms** |        15.5 ms | 37.0 ms |           59.6 ms |
+| Human genome  |    **2.708 s** |        2.694 s | 6.289 s |          17.626 s |
+| Transcriptome |    **0.382 s** |        0.415 s | 1.126 s |           2.409 s |
+| Proteome      |    **12.2 ms** |        14.8 ms | 36.9 ms |           58.7 ms |
 
 [Stats benchmark report](bench/stats/REPORT.md) | [Benchmark framework](bench/README.md)
 

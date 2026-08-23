@@ -50,17 +50,17 @@ Index `.fai` examples:
 
 | Dataset | Size | z-fasta | samtools |
 | --- | ---: | ---: | ---: |
-| Human genome | ~2.9 GiB | 0.3714 s | 9.0976 s |
-| Transcriptome | ~459 MiB | 0.2124 s | 1.8315 s |
-| Proteome | ~13 MiB | 0.0105 s | 0.0598 s |
+| Human genome | ~2.9 GiB | 0.3792 s | 8.0870 s |
+| Transcriptome | ~459 MiB | 0.2171 s | 1.6615 s |
+| Proteome | ~13 MiB | 0.0106 s | 0.0577 s |
 
 GET 1 kbp examples through `.zfi`:
 
 | Dataset | z-fasta | samtools |
 | --- | ---: | ---: |
-| Human genome | 2.0 ms | 3.3 ms |
-| Transcriptome | 4.8 ms | 292.0 ms |
-| Proteome | 2.4 ms | 12.7 ms |
+| Human genome | 2.1 ms | 7.1 ms |
+| Transcriptome | 5.0 ms | 315.8 ms |
+| Proteome | 2.4 ms | 16.6 ms |
 
 <details>
 <summary>View the full positional GET chart</summary>
@@ -75,9 +75,9 @@ Complete stats examples through `.zfi`:
 
 | Dataset | z-fasta | SeqKit `stats -a` |
 | --- | ---: | ---: |
-| Human genome | 2.752 s | 17.777 s |
-| Transcriptome | 0.382 s | 2.403 s |
-| Proteome | 12.3 ms | 59.6 ms |
+| Human genome | 2.708 s | 17.626 s |
+| Transcriptome | 0.382 s | 2.409 s |
+| Proteome | 12.2 ms | 58.7 ms |
 
 <details>
 <summary>View the full stats chart</summary>

@@ -8,6 +8,14 @@ All notable changes to z-fasta will be documented in this file.
 
 Planned to improve `validate` module, possibly work on scan based alternatives for get, stats, and other options (bypass indexing or using indexed files etc.)
 
+## [0.3.4] - 2026-08-23?
+
+### Changed
+
+- Build and contributor documentation now requires stable Zig 0.16.0 from `PATH`; obsolete repository wrapper references have been removed from current guidance, benchmark runners, and diagnostics.
+- Landing-page, Wiki, and benchmark documentation now matches the selected 2026-08-18 reports, the current four-platform release matrix, automatic Wiki publication, and the installed stripped benchmark bundle.
+- Benchmark shell paths now prevent retained peer core images, and GET correctness builds fresh private sidecars instead of trusting tracked index mtimes.
+
 ## [0.3.3] - 2026-08-18
 
 Benchmark toolchain and report refresh. Peer tools now build and resolve from `tools/`, and GET parity accounts for samtools 1.24 output wrapping. No `.zfi` format change. **Re-index not required.**
