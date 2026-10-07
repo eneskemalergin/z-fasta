@@ -2839,3 +2839,108 @@ test "[integration] - [index gates]: reject zero ZFI geometry" {
     try main.indexer.writeZfiIndexFile(io, zfi_path, &index, fasta_data.len, try statMtimeNs(fasta_path));
     try std.testing.expectError(error.CorruptIndex, loadIndexChecked(std.testing.allocator, io, fasta_path));
 }
+
+test "[failure] - [matched index loader]: preserves errors for directory sidecars" {
+    const allocator = std.testing.allocator;
+    const fasta_path = try writeFastaArtifact(allocator, "directory-sidecar", ">a\nACGT\n");
+    defer allocator.free(fasta_path);
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    for ([_][]const u8{ ".zfi", ".fai" }) |suffix| {
+        const index_path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ fasta_path, suffix });
+        defer allocator.free(index_path);
+        try std.Io.Dir.cwd().createDirPath(io, index_path);
+        defer std.Io.Dir.cwd().deleteDir(io, index_path) catch {};
+        const child_path = try std.fmt.allocPrint(allocator, "{s}/entry", .{index_path});
+        defer allocator.free(child_path);
+        defer std.Io.Dir.cwd().deleteFile(io, child_path) catch {};
+        const child = try std.Io.Dir.cwd().createFile(io, child_path, .{});
+        child.close(io);
+        const expected = if (loadIndexChecked(allocator, io, fasta_path)) |value| {
+            var unexpected = value;
+            unexpected.deinit();
+            return error.ExpectedInvalidIndex;
+        } else |err| err;
+        try std.testing.expectError(expected, main.index_format.loadIndexCheckedWithMode(allocator, io, fasta_path, .{ .matched = &.{"a"} }));
+    }
+}
+
+test "[integration] - [matched ZFI loader]: retains first matches and required side tables" {
+    const allocator = std.testing.allocator;
+    const fasta = ">other\nAC\nGTA\n>wanted\nAAA\nCCCC\nGG\n>wanted\nTTTT\n>uniform\nACTG\n";
+    var index = try main.indexer.scanZfiData(fasta, false, allocator);
+    defer index.deinit(allocator);
+    const bytes = try main.indexer.zfiIndexToBytes(&index, fasta.len, 0, allocator);
+    defer allocator.free(bytes);
+    const paths = try writeFastaAndRawZfi(allocator, "matched-zfi", fasta, bytes);
+    defer allocator.free(paths.fasta_path);
+    defer allocator.free(paths.zfi_path);
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, paths.zfi_path) catch {};
+
+    var full = try loadIndexChecked(allocator, io, paths.fasta_path);
+    defer full.deinit();
+    const selections = [_]struct { names: []const []const u8, count: usize }{
+        .{ .names = &.{}, .count = 0 },
+        .{ .names = &.{"missing"}, .count = 0 },
+        .{ .names = &.{"wanted"}, .count = 1 },
+        .{ .names = &.{"uniform"}, .count = 1 },
+        .{ .names = &.{ "uniform", "wanted", "wanted", "missing" }, .count = 2 },
+    };
+    for (selections) |selection| {
+        var selected = try main.index_format.loadIndexCheckedWithMode(allocator, io, paths.fasta_path, .{ .matched = selection.names });
+        defer selected.deinit();
+        try std.testing.expect(selected.zfi_map == null);
+        try std.testing.expect(selected.fai_map == null);
+        try std.testing.expect(selected.name_blob == null);
+        try std.testing.expectEqual(selection.count, selected.records.len);
+        if (selection.names.len == 1) try std.testing.expect(selected.name_map == null);
+        try std.testing.expect(selected.lookupName("other") == null);
+        try std.testing.expect(selected.lookupName("missing") == null);
+        for (selected.records, 0..) |rec, i| {
+            const name = selected.recordName(i).?;
+            const original = full.records[full.lookupName(name).?];
+            try std.testing.expectEqual(original.seq_offset, rec.seq_offset);
+            try std.testing.expectEqual(original.seq_len, rec.seq_len);
+            try std.testing.expectEqual(original.line_bases, rec.line_bases);
+            try std.testing.expectEqual(original.line_bytes, rec.line_bytes);
+            try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(full.sideTableLines(original)), std.mem.sliceAsBytes(selected.sideTableLines(rec)));
+        }
+    }
+    try std.testing.checkAllAllocationFailures(allocator, loadAndDeinitForAllocationCheck, .{ paths.fasta_path, main.index_format.LoadMode{ .matched = &.{ "wanted", "uniform" } } });
+    try std.testing.checkAllAllocationFailures(allocator, loadAndDeinitForAllocationCheck, .{ paths.fasta_path, main.index_format.LoadMode{ .matched = &.{"wanted"} } });
+
+    index.records.items[0].seq_len = 0;
+    try main.indexer.writeZfiIndexFile(io, paths.zfi_path, &index, fasta.len, try statMtimeNs(paths.fasta_path));
+    try std.testing.expectError(error.CorruptIndex, main.index_format.loadIndexCheckedWithMode(allocator, io, paths.fasta_path, .{ .matched = &.{"uniform"} }));
+}
+
+test "[edge] - [matched FAI loader]: accepts long decimal fields and ignored extra columns" {
+    const allocator = std.testing.allocator;
+    var text = std.Io.Writer.Allocating.init(allocator);
+    defer text.deinit();
+    try text.writer.writeAll("a\t\t");
+    try text.writer.splatByteAll('0', 70_000);
+    try text.writer.writeAll("4\t3\t4\t5\t");
+    try text.writer.splatByteAll('x', 70_000);
+    try text.writer.writeAll("\nb\t2\t11\t2\t3\n");
+    const paths = try writeFastaAndFai(allocator, "matched-long-fai", ">a\nACGT\n>b\nTT\n", text.written());
+    defer allocator.free(paths.fasta_path);
+    defer allocator.free(paths.fai_path);
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fai_path) catch {};
+
+    var full = try loadIndexChecked(allocator, io, paths.fasta_path);
+    defer full.deinit();
+    var selected = try main.index_format.loadIndexCheckedWithMode(allocator, io, paths.fasta_path, .{ .matched = &.{ "a", "b", "missing" } });
+    defer selected.deinit();
+    try std.testing.expectEqual(@as(usize, 2), selected.records.len);
+    try std.testing.expectEqualStrings("a", selected.recordName(0).?);
+    try std.testing.expectEqualStrings("b", selected.recordName(1).?);
+    for (selected.records, full.records) |actual, expected| {
+        try std.testing.expectEqual(expected.seq_offset, actual.seq_offset);
+        try std.testing.expectEqual(expected.seq_len, actual.seq_len);
+    }
+    try std.testing.checkAllAllocationFailures(allocator, loadAndDeinitForAllocationCheck, .{ paths.fasta_path, main.index_format.LoadMode{ .matched = &.{ "a", "b" } } });
+    try std.testing.expectError(error.CorruptIndex, main.index_format.loadIndexCheckedWithMode(allocator, io, paths.fasta_path, .stats_scan));
+    try std.testing.expectError(error.CorruptIndex, main.index_format.loadIndexCheckedWithMode(allocator, io, paths.fasta_path, .{ .positional = &.{"a"} }));
+}

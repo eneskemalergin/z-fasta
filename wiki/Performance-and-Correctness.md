@@ -39,6 +39,7 @@ I care about correct output before timing. The benchmark harness keeps correctne
 
 - Index reads sequence payload through a fixed 1 MiB buffer. Catalog memory grows with records, identifiers, deduplication, and side tables, not FASTA payload size.
 - GET uses positional reads and fixed input/output buffers. Names and BED requests stream through bounded reusable workspaces.
+- Seekable names and BED files retain only requested index entries after validating the complete sidecar. Lookup memory grows with unique requested identifiers and their required side tables. Stdin and named FIFOs retain the full index lookup.
 - Stats uses one 256 KiB descriptor-backed read window over indexed sequence spans.
 - Validate currently maps the complete FASTA, so its peak RSS can approach input size.
 

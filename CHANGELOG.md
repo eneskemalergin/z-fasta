@@ -6,6 +6,8 @@ All notable changes to z-fasta will be documented in this file.
 
 ## Unreleased
 
+- Seekable BED and names files retain only requested index records, names, and required non-uniform side tables while validating the complete `.zfi` or `.fai` sidecar. Stdin and named FIFOs keep full index loading. Request order, repeated output, first-duplicate selection, and diagnostics stay the same.
+
 Planned to improve `validate` module, possibly work on scan based alternatives for get, stats, and other options (bypass indexing or using indexed files etc.)
 
 ## [0.3.4] - 2026-08-23?

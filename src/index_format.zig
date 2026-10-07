@@ -146,8 +146,8 @@ pub const SideTableLine = extern struct {
 /// Frozen 40-byte record shared by `.zfi` and normalized in-memory `.fai` loads.
 ///
 /// For `.zfi` indexes, `name_offset` / `name_len` point into the embedded name blob.
-/// For full-map `.fai` loads, they point into the mapped `.fai` line. Streamed
-/// `.fai` loads keep copied names separately. Use `LoadedIndex.recordName` when
+/// For full-map `.fai` loads, they point into the mapped `.fai` line. Matched
+/// `.zfi` and streamed `.fai` loads keep copied names separately. Use `LoadedIndex.recordName` when
 /// the index source is not already known.
 ///
 /// `_pad[0] & 1 == 0` selects the uniform O(1) line formula. Non-uniform records
@@ -257,8 +257,10 @@ pub const LoadMode = union(enum) {
     lookup_full_map,
     /// Stats composition: retain every record and only the two report names for streamed FAI.
     stats_scan,
-    /// Positional GET: retain only the first sidecar record for each requested name.
+    /// Positional GET: retain first FAI matches; keep the complete mapped ZFI catalog.
     positional: []const []const u8,
+    /// Seekable batch GET: validate the complete sidecar and retain only first matches.
+    matched: []const []const u8,
 };
 
 /// Loaded FASTA + index state (from `.zfi` or samtools-compatible `.fai`).
@@ -267,11 +269,12 @@ pub const LoadMode = union(enum) {
 /// - **FASTA file**: `fasta_file` remains open until `deinit`.
 /// - **Sidecar maps**: `deinit` destroys the optional `.zfi` / `.fai` maps. Byte
 ///   slices and typed views borrow from those maps.
-/// - **Arena**: owns heap for streamed `.fai` record arrays and retained names,
+/// - **Arena**: owns heap for matched `.zfi` and streamed `.fai` records, names,
+///   and retained side-table bytes,
 ///   plus `name_map` table storage. Reclaimed
 ///   only via `arena.deinit()` (do not `name_map.deinit()` on an arena-backed map).
 /// - **`name_map` keys**: borrowed from a sidecar map for full loads, or from
-///   arena-owned `name_slices` for positional streamed `.fai` loads.
+///   arena-owned `name_slices` for matched loads.
 /// - **`io`**: borrowed for reads and cleanup; caller must keep it alive until `deinit`.
 ///
 /// GET and stats load through this type and only call `deinit()`. Validator maps
@@ -283,15 +286,16 @@ pub const LoadedIndex = struct {
     fai_map: ?std.Io.File.MemoryMap = null,
     records: []const IndexRecord,
     name_map: ?std.StringHashMapUnmanaged(u32) = null,
-    /// Arena-owned names: one per retained positional record, or stats extrema only.
+    /// Arena-owned names: one per retained matched record, or stats extrema only.
     name_slices: []const []const u8 = &.{},
     /// Record indices for the two extrema names retained by streamed FAI stats loads.
     stats_name_indices: ?[2]usize = null,
-    /// Borrow into `zfi_map` when `.zfi` embeds a name blob.
+    /// Borrow into `zfi_map` for a mapped `.zfi` load.
     name_blob: ?[]const u8 = null,
     fai_data: ?platform.MappedBytes = null,
     fasta_size: u64,
-    zfi_data: ?platform.MappedBytes,
+    /// Complete mapped ZFI bytes, or arena-owned side-table bytes for matched loads.
+    zfi_data: ?[]align(@alignOf(SideTableLine)) const u8,
     zfi_side_start: usize = 0,
     zfi_side_end: usize = 0,
     source: IndexSource,
@@ -551,6 +555,11 @@ fn tryLoadZfi(
         return error.StaleIndex;
     }
 
+    if (mode == .matched) {
+        if (zfi_stat.kind == .directory) return error.MmapFailed;
+        return try loadZfiMatched(backing_allocator, io, zfi_file, zfi_stat.size, fasta_file, fasta_stat, mode.matched);
+    }
+
     const zfi_size = std.math.cast(usize, zfi_stat.size) orelse return error.MmapFailed;
     var zfi_map = platform.mapFileReadOnly(io, zfi_file, zfi_size) catch return error.MmapFailed;
     errdefer zfi_map.destroy(io);
@@ -612,6 +621,7 @@ fn tryLoadZfi(
     const build_name_map = switch (mode) {
         .lookup_full_map => true,
         .positional => |names| names.len > 1,
+        .matched => true,
         .stats_scan => false,
     };
 
@@ -632,6 +642,251 @@ fn tryLoadZfi(
         .zfi_data = zfi_data,
         .zfi_side_start = side_region_start,
         .zfi_side_end = side_region_end,
+        .source = .zfi,
+        .arena = arena,
+    };
+}
+
+const ZfiReadWindow = struct {
+    file: std.Io.File,
+    io: std.Io,
+    buffer: []u8,
+    start: u64 = 0,
+    len: usize = 0,
+
+    fn take(self: *ZfiReadWindow, offset: u64, len: usize) LoadIndexError![]const u8 {
+        if (len == 0) return self.buffer[0..0];
+        if (offset >= self.start) {
+            const relative = offset - self.start;
+            if (relative <= self.len and len <= self.len - relative) {
+                return self.buffer[@intCast(relative)..][0..len];
+            }
+        }
+        self.len = std.Io.File.readPositionalAll(self.file, self.io, self.buffer, offset) catch return error.Io;
+        self.start = offset;
+        if (self.len < len) return error.CorruptIndex;
+        return self.buffer[0..len];
+    }
+};
+
+const UNMATCHED_RECORD_INDEX = std.math.maxInt(u32);
+
+fn requestedNameMap(allocator: std.mem.Allocator, names: []const []const u8, reserve_multiplier: u32) LoadIndexError!std.StringHashMapUnmanaged(u32) {
+    var map: std.StringHashMapUnmanaged(u32) = .empty;
+    const count = std.math.cast(u32, names.len) orelse return error.OutOfMemory;
+    // Most catalog names miss this table. Leave spare slots to shorten those probes.
+    const capacity = std.math.mul(u32, count, reserve_multiplier) catch return error.OutOfMemory;
+    try map.ensureTotalCapacity(allocator, capacity);
+    for (names) |name| {
+        const entry = map.getOrPutAssumeCapacity(name);
+        if (!entry.found_existing) entry.value_ptr.* = UNMATCHED_RECORD_INDEX;
+    }
+    return map;
+}
+
+fn discardUnmatchedNames(map: *std.StringHashMapUnmanaged(u32), storage: [][]const u8, matched_count: usize) void {
+    // Unused name slots hold borrowed keys until iteration finishes.
+    var end = matched_count;
+    var iterator = map.iterator();
+    while (iterator.next()) |entry| {
+        if (entry.value_ptr.* != UNMATCHED_RECORD_INDEX) continue;
+        storage[end] = entry.key_ptr.*;
+        end += 1;
+    }
+    for (storage[matched_count..end]) |name| _ = map.remove(name);
+}
+
+const SideTableValidation = struct {
+    expected_base_start: u64 = 0,
+    previous_byte_end: u64 = 0,
+
+    fn accept(self: *SideTableValidation, line: SideTableLine, rec: IndexRecord, fasta_len: u64) bool {
+        if (line.base_start != self.expected_base_start) return false;
+        if (line.line_bases == 0 or line.line_bytes == 0) return false;
+        if (line.line_bytes < line.line_bases) return false;
+        const byte_end = std.math.add(u64, line.byte_offset, line.line_bytes) catch return false;
+        if (byte_end > fasta_len) return false;
+        if (self.expected_base_start == 0) {
+            if (line.byte_offset != rec.seq_offset) return false;
+        } else if (line.byte_offset < self.previous_byte_end) {
+            return false;
+        }
+        self.expected_base_start = std.math.add(u64, self.expected_base_start, line.line_bases) catch return false;
+        self.previous_byte_end = byte_end;
+        return true;
+    }
+};
+
+fn loadZfiSideTable(
+    allocator: std.mem.Allocator,
+    window: *ZfiReadWindow,
+    rec: IndexRecord,
+    side_start: usize,
+    side_end: usize,
+    fasta_len: u64,
+    retained: ?*std.ArrayList(u64),
+) LoadIndexError!usize {
+    const offset = std.math.cast(usize, rec.sideTableOffset()) orelse return error.CorruptIndex;
+    if (offset < side_start or offset >= side_end or offset % @alignOf(u64) != 0) return error.CorruptIndex;
+    const count_end = std.math.add(usize, offset, @sizeOf(u64)) catch return error.CorruptIndex;
+    if (count_end > side_end) return error.CorruptIndex;
+    const count = std.mem.readInt(u64, (try window.take(offset, 8))[0..8], .little);
+    const line_count = std.math.cast(usize, count) orelse return error.CorruptIndex;
+    if (line_count == 0) return error.CorruptIndex;
+    const table_bytes = std.math.mul(usize, line_count, @sizeOf(SideTableLine)) catch return error.CorruptIndex;
+    const table_end = std.math.add(usize, count_end, table_bytes) catch return error.CorruptIndex;
+    if (table_end > side_end) return error.CorruptIndex;
+
+    const destination = if (retained) |words| blk: {
+        const new_words = try words.addManyAsSlice(allocator, 1 + table_bytes / @sizeOf(u64));
+        new_words[0] = count;
+        break :blk std.mem.sliceAsBytes(new_words[1..]);
+    } else null;
+    var validation = SideTableValidation{};
+    for (0..line_count) |i| {
+        const line_bytes = try window.take(count_end + i * @sizeOf(SideTableLine), @sizeOf(SideTableLine));
+        const line = std.mem.bytesToValue(SideTableLine, line_bytes);
+        if (!validation.accept(line, rec, fasta_len)) return error.CorruptIndex;
+        if (destination) |bytes| @memcpy(bytes[i * @sizeOf(SideTableLine) ..][0..@sizeOf(SideTableLine)], line_bytes);
+    }
+    if (validation.expected_base_start != rec.seq_len) return error.CorruptIndex;
+    return table_end;
+}
+
+fn loadZfiMatched(
+    backing_allocator: std.mem.Allocator,
+    io: std.Io,
+    zfi_file: std.Io.File,
+    file_size: u64,
+    fasta_file: std.Io.File,
+    fasta_stat: std.Io.File.Stat,
+    names: []const []const u8,
+) LoadIndexError!LoadedIndex {
+    const zfi_size = std.math.cast(usize, file_size) orelse return error.MmapFailed;
+    if (zfi_size < @sizeOf(ZfiHeader)) return error.CorruptIndex;
+    var record_buffer: [64 * 1024]u8 = undefined;
+    var reader = zfi_file.reader(io, &record_buffer);
+    const header_bytes = reader.interface.takeArray(@sizeOf(ZfiHeader)) catch |err| switch (err) {
+        error.EndOfStream => return error.CorruptIndex,
+        error.ReadFailed => return error.Io,
+    };
+    const header = std.mem.bytesToValue(ZfiHeader, header_bytes);
+    if (!std.mem.eql(u8, &header.magic, &ZFI_MAGIC)) return error.CorruptIndex;
+    if (header.source_size != fasta_stat.size) return error.StaleIndex;
+    if (header.record_count == 0) return error.CorruptIndex;
+    const records_end = zfiRecordsEnd(header.record_count) orelse return error.CorruptIndex;
+    if (records_end > zfi_size) return error.CorruptIndex;
+
+    var tail: [ZFI_NAME_FOOTER_LEGACY_BYTES + ZFI_SOURCE_ID_BYTES]u8 = undefined;
+    const tail_len = @min(tail.len, zfi_size);
+    const tail_start = zfi_size - tail_len;
+    // A small catalog fits in the existing record reader. Its borrowed bytes
+    // stay valid because the record loop cannot refill this complete buffer.
+    const buffered_body = if (zfi_size <= record_buffer.len)
+        reader.interface.peek(zfi_size - @sizeOf(ZfiHeader)) catch |err| switch (err) {
+            error.EndOfStream => return error.CorruptIndex,
+            error.ReadFailed => return error.Io,
+        }
+    else
+        null;
+    const tail_bytes = if (buffered_body) |body|
+        body[body.len - tail_len ..]
+    else tail_read: {
+        const got = std.Io.File.readPositionalAll(zfi_file, io, tail[0..tail_len], tail_start) catch return error.Io;
+        if (got != tail_len) return error.CorruptIndex;
+        break :tail_read tail[0..tail_len];
+    };
+    const trailing = parseZfiTrailingMeta(tail_bytes) orelse return error.CorruptIndex;
+    const payload_end = tail_start + trailing.payload_end;
+    const blob_len = std.math.cast(usize, trailing.name_blob_len) orelse return error.CorruptIndex;
+    const blob_start = std.math.sub(usize, payload_end, blob_len) catch return error.CorruptIndex;
+    if (blob_start < records_end) return error.CorruptIndex;
+    const stale_identity = if (trailing.source_mtime_ns) |stored| stale: {
+        const actual = timestampToNs(fasta_stat.mtime) catch break :stale true;
+        break :stale stored != actual;
+    } else false;
+
+    var arena = std.heap.ArenaAllocator.init(backing_allocator);
+    errdefer arena.deinit();
+    const allocator = arena.allocator();
+    const single_name = if (names.len == 1) names[0] else null;
+    var requested: std.StringHashMapUnmanaged(u32) = if (single_name == null) try requestedNameMap(allocator, names, 4) else .empty;
+    const requested_count = if (single_name != null) 1 else requested.count();
+    const records = try allocator.alloc(IndexRecord, requested_count);
+    const name_slices = try allocator.alloc([]const u8, requested_count);
+    var side_words: std.ArrayList(u64) = .empty;
+    var matched_count: usize = 0;
+    var corrupt_metadata = false;
+    var previous_side_end = records_end;
+    var name_buffer: [64 * 1024]u8 = undefined;
+    var side_buffer: [64 * 1024]u8 = undefined;
+    var name_window = ZfiReadWindow{ .file = zfi_file, .io = io, .buffer = buffered_body orelse &name_buffer, .start = if (buffered_body != null) @sizeOf(ZfiHeader) else 0, .len = if (buffered_body) |body| body.len else 0 };
+    var side_window = ZfiReadWindow{ .file = zfi_file, .io = io, .buffer = buffered_body orelse &side_buffer, .start = if (buffered_body != null) @sizeOf(ZfiHeader) else 0, .len = if (buffered_body) |body| body.len else 0 };
+    for (0..header.record_count) |_| {
+        const bytes = reader.interface.takeArray(@sizeOf(IndexRecord)) catch |err| switch (err) {
+            error.EndOfStream => return error.CorruptIndex,
+            error.ReadFailed => return error.Io,
+        };
+        var rec = std.mem.bytesToValue(IndexRecord, bytes);
+        // The full loader checks every embedded-name flag before source identity
+        // and geometry. Continue the flag scan after a geometry failure.
+        if (!rec.nameInZfi()) return error.CorruptIndex;
+        if (stale_identity or corrupt_metadata) continue;
+        if (!rangeFitsUsize(rec.name_offset, rec.name_len, blob_len)) {
+            corrupt_metadata = true;
+            continue;
+        }
+        const name = try name_window.take(blob_start + rec.name_offset, rec.name_len);
+        const matched = if (single_name == null) requested.getEntry(name) else null;
+        const retain = if (single_name) |wanted|
+            matched_count == 0 and std.mem.eql(u8, name, wanted)
+        else if (matched) |entry|
+            entry.value_ptr.* == UNMATCHED_RECORD_INDEX
+        else
+            false;
+        if (rec.isUniformWidth()) {
+            if (!isValidUniformSequenceGeometry(rec, fasta_stat.size)) {
+                corrupt_metadata = true;
+                continue;
+            }
+        } else {
+            if (rec.seq_len == 0 or rec.seq_offset >= fasta_stat.size or rec.sideTableOffset() < previous_side_end) {
+                corrupt_metadata = true;
+                continue;
+            }
+            const retained_offset = side_words.items.len * @sizeOf(u64);
+            previous_side_end = loadZfiSideTable(allocator, &side_window, rec, records_end, blob_start, fasta_stat.size, if (retain) &side_words else null) catch |err| switch (err) {
+                error.CorruptIndex => {
+                    corrupt_metadata = true;
+                    continue;
+                },
+                else => return err,
+            };
+            if (retain) rec.markNonUniform(retained_offset) catch return error.CorruptIndex;
+        }
+        if (!retain) continue;
+        name_slices[matched_count] = try allocator.dupe(u8, name);
+        records[matched_count] = rec;
+        if (matched) |entry| {
+            entry.key_ptr.* = name_slices[matched_count];
+            entry.value_ptr.* = @intCast(matched_count);
+        }
+        matched_count += 1;
+    }
+    if (stale_identity) return error.StaleIndex;
+    if (corrupt_metadata) return error.CorruptIndex;
+
+    if (single_name == null) discardUnmatchedNames(&requested, name_slices, matched_count);
+    const side_data = std.mem.sliceAsBytes(side_words.items);
+    return .{
+        .io = io,
+        .fasta_file = fasta_file,
+        .records = records[0..matched_count],
+        .name_map = if (single_name != null) null else requested,
+        .name_slices = name_slices[0..matched_count],
+        .fasta_size = fasta_stat.size,
+        .zfi_data = side_data,
+        .zfi_side_end = side_data.len,
         .source = .zfi,
         .arena = arena,
     };
@@ -663,10 +918,10 @@ fn tryLoadFai(
     if (fai_stat.size == 0) {
         return error.CorruptIndex;
     }
+    if (mode == .matched and fai_stat.kind == .directory) return error.MmapFailed;
 
     switch (mode) {
-        .stats_scan => return @as(?LoadedIndex, try loadFaiStreamed(backing_allocator, io, fai_file, fasta_file, fasta_stat, .stats_scan)),
-        .positional => |names| return @as(?LoadedIndex, try loadFaiStreamed(backing_allocator, io, fai_file, fasta_file, fasta_stat, .{ .matched = names })),
+        .stats_scan, .positional, .matched => return @as(?LoadedIndex, try loadFaiStreamed(backing_allocator, io, fai_file, fasta_file, fasta_stat, mode)),
         .lookup_full_map => {},
     }
 
@@ -746,23 +1001,19 @@ fn tryLoadFai(
     };
 }
 
-const FaiStreamMode = union(enum) {
-    matched: []const []const u8,
-    stats_scan,
-};
-
 const FaiNameRef = struct {
     offset: u64,
     len: usize,
 };
 
-fn loadFaiStreamed(
+// Keep one scan body for positional, stats, and file requests.
+noinline fn loadFaiStreamed(
     backing_allocator: std.mem.Allocator,
     io: std.Io,
     fai_file: std.Io.File,
     fasta_file: std.Io.File,
     fasta_stat: std.Io.File.Stat,
-    mode: FaiStreamMode,
+    mode: LoadMode,
 ) LoadIndexError!LoadedIndex {
     var arena = std.heap.ArenaAllocator.init(backing_allocator);
     errdefer arena.deinit();
@@ -770,23 +1021,23 @@ fn loadFaiStreamed(
 
     var records_list: std.ArrayList(IndexRecord) = .empty;
     var slices_list: std.ArrayList([]const u8) = .empty;
-    var requested: std.StringHashMapUnmanaged(bool) = .empty;
-    defer requested.deinit(backing_allocator);
+    const single_name = if (mode == .matched and mode.matched.len == 1) mode.matched[0] else null;
+    var requested: std.StringHashMapUnmanaged(u32) = .empty;
     switch (mode) {
-        .matched => |names| {
-            requested.ensureTotalCapacity(backing_allocator, @intCast(names.len)) catch return error.OutOfMemory;
-            for (names) |name| {
-                const entry = requested.getOrPutAssumeCapacity(name);
-                if (!entry.found_existing) entry.value_ptr.* = false;
-            }
+        .positional, .matched => |names| {
+            if (single_name == null) requested = try requestedNameMap(allocator, names, if (mode == .matched) 4 else 1);
+            const count = if (single_name != null) 1 else requested.count();
+            try records_list.ensureTotalCapacityPrecise(allocator, count);
+            try slices_list.ensureTotalCapacityPrecise(allocator, count);
         },
         .stats_scan => {},
+        .lookup_full_map => unreachable,
     }
 
     var io_buf: [FAI_READER_BUFFER_BYTES]u8 = undefined;
     var file_reader = fai_file.reader(io, &io_buf);
     var saw_record = false;
-    var line_offset: u64 = 0;
+    var long_line_buffer: [FAI_READER_BUFFER_BYTES]u8 = undefined;
     var shortest_ref: FaiNameRef = undefined;
     var longest_ref: FaiNameRef = undefined;
     var shortest_index: usize = 0;
@@ -795,13 +1046,16 @@ fn loadFaiStreamed(
     var longest_len: u64 = 0;
 
     while (true) {
-        const maybe_line = file_reader.interface.takeDelimiter('\n') catch |err| switch (err) {
+        const current_offset = file_reader.logicalPos();
+        const available = file_reader.interface.buffered();
+        const maybe_line = if (std.mem.findScalar(u8, available, '\n')) |end| buffered: {
+            file_reader.interface.toss(end + 1);
+            break :buffered available[0..end];
+        } else file_reader.interface.takeDelimiter('\n') catch |err| switch (err) {
             error.ReadFailed => return error.Io,
-            error.StreamTooLong => return error.CorruptIndex,
+            error.StreamTooLong => if (mode == .matched) try takeLongFaiLine(&file_reader.interface, &long_line_buffer) else return error.CorruptIndex,
         };
         const line = maybe_line orelse break;
-        const current_offset = line_offset;
-        line_offset = std.math.add(u64, line_offset, line.len + 1) catch return error.CorruptIndex;
         if (line.len == 0) continue;
 
         const fields = parseFaiIndexLine(line) catch return error.CorruptIndex;
@@ -817,22 +1071,28 @@ fn loadFaiStreamed(
         if (!isValidUniformSequenceGeometry(rec, fasta_stat.size)) return error.CorruptIndex;
 
         saw_record = true;
+        const matched = if (mode != .stats_scan and single_name == null) requested.getEntry(line[0..fields.name_end]) else null;
         const retain = switch (mode) {
             .stats_scan => true,
-            .matched => blk: {
-                const matched = requested.getPtr(line[0..fields.name_end]) orelse break :blk false;
-                if (matched.*) break :blk false;
-                matched.* = true;
-                break :blk true;
-            },
+            .positional, .matched => if (single_name) |wanted|
+                records_list.items.len == 0 and std.mem.eql(u8, line[0..fields.name_end], wanted)
+            else if (matched) |entry|
+                entry.value_ptr.* == UNMATCHED_RECORD_INDEX
+            else
+                false,
+            .lookup_full_map => unreachable,
         };
         if (!retain) continue;
 
         const rec_index = records_list.items.len;
         switch (mode) {
-            .matched => {
+            .positional, .matched => {
                 const name = allocator.dupe(u8, line[0..fields.name_end]) catch return error.OutOfMemory;
                 try slices_list.append(allocator, name);
+                if (matched) |entry| {
+                    entry.key_ptr.* = name;
+                    entry.value_ptr.* = @intCast(rec_index);
+                }
             },
             .stats_scan => {
                 const name_ref = FaiNameRef{ .offset = current_offset, .len = fields.name_end };
@@ -847,15 +1107,18 @@ fn loadFaiStreamed(
                     longest_len = rec.seq_len;
                 }
             },
+            .lookup_full_map => unreachable,
         }
         try records_list.append(allocator, rec);
     }
 
     if (!saw_record) return error.CorruptIndex;
 
+    if (mode != .stats_scan and single_name == null) discardUnmatchedNames(&requested, slices_list.allocatedSlice(), records_list.items.len);
+
     const owned_records = records_list.toOwnedSlice(allocator) catch return error.OutOfMemory;
     const owned_slices = switch (mode) {
-        .matched => slices_list.toOwnedSlice(allocator) catch return error.OutOfMemory,
+        .positional, .matched => slices_list.toOwnedSlice(allocator) catch return error.OutOfMemory,
         .stats_scan => blk: {
             const names = allocator.alloc([]const u8, 2) catch return error.OutOfMemory;
             names[0] = try readFaiName(allocator, io, fai_file, shortest_ref);
@@ -865,18 +1128,13 @@ fn loadFaiStreamed(
                 try readFaiName(allocator, io, fai_file, longest_ref);
             break :blk names;
         },
+        .lookup_full_map => unreachable,
     };
 
     const name_map: ?std.StringHashMapUnmanaged(u32) = switch (mode) {
-        .matched => blk: {
-            var map: std.StringHashMapUnmanaged(u32) = .empty;
-            map.ensureTotalCapacity(allocator, @intCast(owned_slices.len)) catch return error.OutOfMemory;
-            for (owned_slices, 0..) |name, i| {
-                map.putAssumeCapacity(name, @intCast(i));
-            }
-            break :blk map;
-        },
+        .positional, .matched => if (single_name != null) null else requested,
         .stats_scan => null,
+        .lookup_full_map => unreachable,
     };
 
     return LoadedIndex{
@@ -886,8 +1144,9 @@ fn loadFaiStreamed(
         .name_map = name_map,
         .name_slices = owned_slices,
         .stats_name_indices = switch (mode) {
-            .matched => null,
+            .positional, .matched => null,
             .stats_scan => .{ shortest_index, longest_index },
+            .lookup_full_map => unreachable,
         },
         .fai_data = null,
         .fasta_size = fasta_stat.size,
@@ -908,6 +1167,48 @@ fn readFaiName(
     const got = std.Io.File.readPositionalAll(fai_file, io, name, name_ref.offset) catch return error.Io;
     if (got != name.len) return error.CorruptIndex;
     return name;
+}
+
+fn takeLongFaiLine(reader: *std.Io.Reader, buffer: []u8) LoadIndexError![]u8 {
+    var name_len: usize = 0;
+    while (true) {
+        const byte = reader.takeByte() catch |err| switch (err) {
+            error.ReadFailed => return error.Io,
+            error.EndOfStream => return error.CorruptIndex,
+        };
+        if (byte == '\t') break;
+        if (byte == '\n' or name_len == std.math.maxInt(u16)) return error.CorruptIndex;
+        buffer[name_len] = byte;
+        name_len += 1;
+    }
+    // parseFaiFieldU64 accepts one extra tab before the first numeric field.
+    const first_byte = reader.peekByte() catch |err| switch (err) {
+        error.ReadFailed => return error.Io,
+        error.EndOfStream => return error.CorruptIndex,
+    };
+    if (first_byte == '\t') reader.toss(1);
+    var values: [4]u64 = .{0} ** 4;
+    var field: usize = 0;
+    var has_digit = false;
+    while (true) {
+        const byte = reader.takeByte() catch |err| switch (err) {
+            error.ReadFailed => return error.Io,
+            error.EndOfStream => break,
+        };
+        if (byte == '\n') break;
+        if (field == values.len) continue;
+        if (byte == '\t') {
+            if (!has_digit) return error.CorruptIndex;
+            field += 1;
+            has_digit = false;
+        } else {
+            values[field] = appendFaiDigit(values[field], byte) orelse return error.CorruptIndex;
+            has_digit = true;
+        }
+    }
+    if (field < 3 or (field == 3 and !has_digit)) return error.CorruptIndex;
+    const numeric = std.fmt.bufPrint(buffer[name_len..], "\t{d}\t{d}\t{d}\t{d}", .{ values[0], values[1], values[2], values[3] }) catch return error.CorruptIndex;
+    return buffer[0 .. name_len + numeric.len];
 }
 
 fn parseFaiFieldU64(line: []const u8, field_start: *usize) LoadIndexError!u64 {
@@ -977,12 +1278,15 @@ fn parseFaiAsciiU64(text: []const u8) ?u64 {
     if (text.len == 0) return null;
     var value: u64 = 0;
     for (text) |byte| {
-        if (byte < '0' or byte > '9') return null;
-        const digit: u64 = byte - '0';
-        value = std.math.mul(u64, value, 10) catch return null;
-        value = std.math.add(u64, value, digit) catch return null;
+        value = appendFaiDigit(value, byte) orelse return null;
     }
     return value;
+}
+
+fn appendFaiDigit(value: u64, byte: u8) ?u64 {
+    if (byte < '0' or byte > '9') return null;
+    const shifted = std.math.mul(u64, value, 10) catch return null;
+    return std.math.add(u64, shifted, byte - '0') catch null;
 }
 
 fn parseFaiAsciiU32(text: []const u8) ?u32 {
@@ -1071,7 +1375,7 @@ const ParsedSideTable = struct {
 // and describe `rec.seq_len` bases starting at `rec.seq_offset`. Line byte ranges
 // must be ordered and non-overlapping; checked arithmetic rejects wraps before any slice.
 fn parseSideTable(
-    zfi_data: platform.MappedBytes,
+    zfi_data: []align(@alignOf(SideTableLine)) const u8,
     rec: IndexRecord,
     side_region_start: usize,
     side_region_end: usize,

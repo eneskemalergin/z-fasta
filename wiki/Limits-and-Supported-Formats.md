@@ -49,6 +49,8 @@ FASTQ is coming as a separate project, z-fastq, built around the same priorities
 
 These are memory bounds, not whole-input row caps. Names and BED continue with a fresh reusable batch.
 
+Seekable BED and names files also retain one lookup entry per unique requested identifier. Matched non-uniform `.zfi` records retain their required side tables. This lookup storage is separate from the active output batch; stdin and named FIFOs retain the complete index lookup.
+
 ## Symbol treatment
 
 Index and GET treat bytes greater than ASCII space as sequence symbols. GET side-table extraction ignores ASCII whitespace between symbol runs.
