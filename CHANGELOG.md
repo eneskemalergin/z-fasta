@@ -8,6 +8,11 @@ All notable changes to z-fasta will be documented in this file.
 
 Planned to improve `validate` module, possibly work on scan based alternatives for get, stats, and other options (bypass indexing or using indexed files etc.)
 
+### Changed
+
+- Indexing uses a 256 KiB read buffer and portable Zig vectors for identifier and sequence scanning.
+- Large inputs use compact exact-name references, stream `.zfi` records, and spill name and side-table staging to temporary files. Small inputs retain their in-memory catalogs. The `.zfi` format and first-occurrence duplicate policy stay the same.
+
 ## [0.3.4] - 2026-08-23?
 
 ### Changed
