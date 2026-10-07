@@ -90,9 +90,11 @@ Read [Index formats](Index-Formats) for the operational difference.
 
 ## Publication safety
 
-The default path scans the source, checks that the source path still has the original size and mtime, writes `<fasta>.zfi.tmp`, then renames the completed file to `<fasta>.zfi`.
+The default path builds `.zfi` in an independent temporary file beside the destination. It checks that the source path still has the original size and mtime before replacing `<fasta>.zfi` with the completed file. A handled scan or output failure preserves an existing index and removes temporary output.
 
 The `.fai` path also checks source size and mtime before replaying its spool to stdout. If the source changes during either workflow, indexing fails.
+
+Large `.zfi` inputs may also use temporary files for names and side tables. Spool files use the first writable directory from `TMPDIR`, `TEMP`, or `TMP`, then `/tmp` on Linux and macOS, then the current directory. Temporary disk use grows with the staged index data.
 
 ## Duplicate sidecars
 

@@ -249,6 +249,10 @@ fn runIndex(io: std.Io, environ: std.process.Environ, args: *std.process.Args.It
             "error: sequence line exceeds the index format limit: {s}\n",
             .{path},
         ),
+        error.TooManySequences => printErrorAndExit(
+            "error: sequence count exceeds {d}: {s}\n",
+            .{ std.math.maxInt(u32), path },
+        ),
         error.NonUniformFai => printErrorAndExit(
             "error: cannot emit .fai for non-uniform sequence layout; run 'z-fasta index' (default) to write .zfi\n",
             .{},
