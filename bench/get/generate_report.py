@@ -1425,24 +1425,6 @@ def annotate_headline_comparisons(
     comparisons: pd.DataFrame,
     ir,
 ) -> None:
-    badge_offsets: dict[tuple[str, str], int] = {}
-
-    for dataset in datasets:
-        previous_y: float | None = None
-        level = 0
-        for tool in tools:
-            key = (dataset, tool)
-            if key not in bar_tops:
-                continue
-            current_y = bar_tops[key][1]
-            close = (
-                previous_y is not None
-                and max(previous_y, current_y) / min(previous_y, current_y) <= 1.2
-            )
-            level = (level + 1) % 4 if close else 0
-            badge_offsets[key] = 9 + level * 18
-            previous_y = current_y
-
     baseline_color = ir.COLORS.get(BASELINE, "#F7A41D")
     for dataset in datasets:
         baseline_key = (dataset, BASELINE)
@@ -1467,15 +1449,16 @@ def annotate_headline_comparisons(
         ax.annotate(
             "1x",
             (baseline_x, baseline_y),
-            xytext=(0, badge_offsets[baseline_key]),
+            xytext=(0, 6),
             textcoords="offset points",
             ha="center",
             va="bottom",
-            fontsize=9,
+            rotation=90,
+            fontsize=7,
             fontweight="bold",
             color=baseline_color,
             bbox=dict(
-                boxstyle="round,pad=0.28",
+                boxstyle="round,pad=0.18",
                 facecolor="white",
                 edgecolor=baseline_color,
                 linewidth=1.1,
@@ -1495,16 +1478,17 @@ def annotate_headline_comparisons(
         ax.annotate(
             ir._format_speedup(ratio),
             (xpos, value),
-            xytext=(0, badge_offsets[key]),
+            xytext=(0, 6),
             textcoords="offset points",
             ha="center",
             va="bottom",
-            fontsize=9,
+            rotation=90,
+            fontsize=7,
             fontweight="bold",
             linespacing=0.95,
             color="#111111",
             bbox=dict(
-                boxstyle="round,pad=0.28",
+                boxstyle="round,pad=0.18",
                 facecolor="white",
                 edgecolor=color,
                 linewidth=1.1,
@@ -1631,6 +1615,7 @@ def fig_pos_grouped_bars(
 
         if log_y:
             ax.set_yscale("log")
+        ax.margins(y=0.2)
         ax.set_xticks(x)
         ax.set_xticklabels([REGION_LABELS.get(r, r) for r in regions], fontsize=10)
         ax.set_title(ds, fontsize=11, fontweight="bold")
@@ -1778,6 +1763,7 @@ def fig_multi_grouped_bars(
 
         if log_y:
             ax.set_yscale("log")
+        ax.margins(y=0.2)
         ax.set_xticks(x)
         ax.set_xticklabels(
             [multi_n_label(n) for n in n_vals],
@@ -1923,6 +1909,7 @@ def fig_bed_grouped_bars(
 
         if log_y:
             ax.set_yscale("log")
+        ax.margins(y=0.2)
         ax.set_xticks(x)
         ax.set_xticklabels(
             [bed_row_axis_label(n) for n in row_counts],
@@ -2053,7 +2040,7 @@ def fig_rc_overhead(
     datasets = [d for d in RC_DATASET_ORDER if d in filtered["dataset"].unique()]
     facets = [
         ("mean", "stddev", "Wall Time (s)", True, 1e-6),
-        ("peak_rss_mb", "peak_rss_stddev_mb", "Peak RSS (MB)", False, 0.1),
+        ("peak_rss_mb", "peak_rss_stddev_mb", "Peak RSS (MiB)", False, 0.1),
         ("minor_faults", "minor_faults_stddev", "Minor Page Faults", True, 1.0),
     ]
 
@@ -2208,7 +2195,7 @@ def md_run_provenance(manifest: dict | None, ir) -> str:
 
     lines = [
         f"Run **`{ts}`** used **{runner}** in **{mode}** mode: {runs} measured samples, "
-        f"{warmup} warmup passes, {duration} ms minimum per sample.",
+        f"{warmup} warmup passes, {duration} ms budget per command.",
         f"- **Subject:** {zfasta} (Zig; default `.zfi` get and `.fai` lane)",
         f"- **Runner:** {zebrac}",
     ]
@@ -2268,6 +2255,7 @@ def md_run_provenance(manifest: dict | None, ir) -> str:
             "Indexes (`.zfi` / `.fai`) are built once in preload before timed GET commands. "
             "Timed commands do not delete sidecars."
         )
+    lines.extend(manifest.get("notes") or [])
     return "\n\n".join(lines)
 
 
@@ -2472,7 +2460,7 @@ def md_pos_memory_section(
         figures_dir / "perf_pos_rss.png",
         chart_tools,
         "peak_rss_mb",
-        "Peak RSS (MB)",
+        "Peak RSS (MiB)",
         "Positional GET: Peak RSS vs Region Size",
         "Error bars = zebrac stddev when non-zero. Hatched bars = reference lanes. "
         f"Bar labels = RSS × ({LABEL_PEER_RATIO}).",
@@ -2487,7 +2475,7 @@ def md_pos_memory_section(
         chart_tools,
         ir,
         value_col="peak_rss_mb",
-        formatter=lambda row: f"{row['peak_rss_mb']:.2f} MB",
+        formatter=lambda row: f"{row['peak_rss_mb']:.2f} MiB",
     )
 
     return "\n\n".join(
@@ -2498,7 +2486,7 @@ def md_pos_memory_section(
                 "zebrac starts a new process for each sample and records peak RSS when it "
                 "exits (`ru_maxrss`). Table and figure show the mean across samples."
             ),
-            f"**Table {t_rss}:** Peak RSS (MB, zebrac mean). Same tool order as Performance.",
+            f"**Table {t_rss}:** Peak RSS (MiB, zebrac mean). Same tool order as Performance.",
             rss_md,
             "<details>",
             (
@@ -2513,8 +2501,8 @@ def md_pos_memory_section(
                 "peak_rss_mb",
                 ir,
                 ratio_label="RSS ×",
-                fmt_zf=lambda r: f"{r.zfasta_v:.2f} MB",
-                fmt_comp=lambda r: f"{r.comp_v:.2f} MB",
+                fmt_zf=lambda r: f"{r.zfasta_v:.2f} MiB",
+                fmt_comp=lambda r: f"{r.comp_v:.2f} MiB",
             ),
             "</details>",
             '<div style="margin: 1.5em 0"></div>',
@@ -2525,7 +2513,7 @@ def md_pos_memory_section(
             "![positional RSS](results/figures/perf_pos_rss.png)",
             (
                 f"**Reading Figure {f_rss}**\n"
-                "- Same three-panel layout as positional wall time; linear y-axis (MB).\n"
+                "- Same three-panel layout as positional wall time; linear y-axis (MiB).\n"
                 "- `1×` on z-fasta (.zfi); other labels = "
                 f"{LABEL_PEER_RATIO}.\n"
                 f"- Details in Table {t_cmp}."
@@ -2847,7 +2835,7 @@ def md_multi_memory_section(
         figures_dir / "perf_multi_rss.png",
         chart_tools,
         "peak_rss_mb",
-        "Peak RSS (MB)",
+        "Peak RSS (MiB)",
         "Multi-region GET: Peak RSS vs N",
         (
             "Error bars = zebrac stddev when non-zero."
@@ -2864,7 +2852,7 @@ def md_multi_memory_section(
         chart_tools,
         ir,
         value_col="peak_rss_mb",
-        formatter=lambda row: f"{row['peak_rss_mb']:.2f} MB",
+        formatter=lambda row: f"{row['peak_rss_mb']:.2f} MiB",
     )
 
     return "\n\n".join(
@@ -2875,7 +2863,7 @@ def md_multi_memory_section(
                 "zebrac starts a new process for each sample and records peak RSS when it "
                 "exits (`ru_maxrss`). Table and figure show the mean across samples."
             ),
-            f"**Table {t_rss}:** Peak RSS (MB, zebrac mean). Same tool order as Performance.",
+            f"**Table {t_rss}:** Peak RSS (MiB, zebrac mean). Same tool order as Performance.",
             rss_md,
             "<details>",
             (
@@ -2890,13 +2878,13 @@ def md_multi_memory_section(
                 "peak_rss_mb",
                 ir,
                 ratio_label="RSS ×",
-                fmt_zf=lambda r: f"{r.zfasta_v:.2f} MB",
-                fmt_comp=lambda r: f"{r.comp_v:.2f} MB",
+                fmt_zf=lambda r: f"{r.zfasta_v:.2f} MiB",
+                fmt_comp=lambda r: f"{r.comp_v:.2f} MiB",
             ),
             "</details>",
             '<div style="margin: 1.5em 0"></div>',
             (
-                f"**Figure {f_rss}:** Table {t_rss} as grouped bars (linear y, MB). "
+                f"**Figure {f_rss}:** Table {t_rss} as grouped bars (linear y, MiB). "
                 f"Bar labels = RSS × (see Table {t_cmp})."
             ),
             "![multi-region RSS](results/figures/perf_multi_rss.png)",
@@ -2904,7 +2892,7 @@ def md_multi_memory_section(
                 chart_tools,
                 y_note=(
                     "**Bars:** zebrac mean peak RSS. Error bars when stddev is non-zero. "
-                    "Linear y-axis (MB)."
+                    "Linear y-axis (MiB)."
                 ),
                 ratio_label="RSS × (peer peak RSS ÷ z-fasta peak RSS)",
                 t_cmp=t_cmp,
@@ -3156,7 +3144,7 @@ def md_bed_memory_section(
         figures_dir / "perf_bed_rss.png",
         chart_tools,
         "peak_rss_mb",
-        "Peak RSS (MB)",
+        "Peak RSS (MiB)",
         "BED batch GET: Peak RSS vs Row Count",
         (
             "Error bars = zebrac stddev when non-zero. "
@@ -3172,7 +3160,7 @@ def md_bed_memory_section(
         chart_work,
         chart_tools,
         ir,
-        formatter=lambda row: f"{row['peak_rss_mb']:.2f} MB",
+        formatter=lambda row: f"{row['peak_rss_mb']:.2f} MiB",
     )
 
     return "\n\n".join(
@@ -3183,7 +3171,7 @@ def md_bed_memory_section(
                 "zebrac starts a new process for each sample and records peak RSS when it "
                 "exits (`ru_maxrss`). Table and figure show the mean across samples."
             ),
-            f"**Table {t_rss}:** Peak RSS (MB, zebrac mean). Same tool order as Performance.",
+            f"**Table {t_rss}:** Peak RSS (MiB, zebrac mean). Same tool order as Performance.",
             rss_md,
             "<details>",
             (
@@ -3198,13 +3186,13 @@ def md_bed_memory_section(
                 ir,
                 value_col="peak_rss_mb",
                 ratio_label="RSS ×",
-                fmt_zf=lambda r: f"{r.zfasta_v:.2f} MB",
-                fmt_comp=lambda r: f"{r.comp_v:.2f} MB",
+                fmt_zf=lambda r: f"{r.zfasta_v:.2f} MiB",
+                fmt_comp=lambda r: f"{r.comp_v:.2f} MiB",
             ),
             "</details>",
             '<div style="margin: 1.5em 0"></div>',
             (
-                f"**Figure {f_rss}:** Table {t_rss} as grouped bars (linear y, MB). "
+                f"**Figure {f_rss}:** Table {t_rss} as grouped bars (linear y, MiB). "
                 f"Bar labels = RSS × (see Table {t_cmp})."
             ),
             "![bed batch RSS](results/figures/perf_bed_rss.png)",
@@ -3212,7 +3200,7 @@ def md_bed_memory_section(
                 chart_tools,
                 y_note=(
                     "**Bars:** zebrac mean peak RSS. Error bars when stddev is non-zero. "
-                    "Linear y-axis (MB)."
+                    "Linear y-axis (MiB)."
                 ),
                 ratio_label="RSS × (peer peak RSS ÷ z-fasta peak RSS)",
                 t_cmp=t_cmp,
@@ -3405,7 +3393,7 @@ def md_rc_section(
         tools,
         ir,
         value_col="peak_rss_mb",
-        formatter=lambda row: f"{row['peak_rss_mb']:.2f} MB",
+        formatter=lambda row: f"{row['peak_rss_mb']:.2f} MiB",
     )
     pf_md = md_rc_detail_pivot(
         work,
@@ -3441,7 +3429,7 @@ def md_rc_section(
             "(no index).",
             f"**Table {t_wall}:** Wall time (mean ± stddev, seconds).",
             wall_md,
-            f"**Table {t_rss}:** Peak RSS (MB).",
+            f"**Table {t_rss}:** Peak RSS (MiB).",
             rss_md,
             f"**Table {t_pf}:** Minor page faults.",
             pf_md,
@@ -3537,8 +3525,8 @@ def md_messy_section(df: pd.DataFrame, nums, ir, figures_dir: Path, manifest: di
                 uniform_fmt = fmt_us(u_val)
                 messy_fmt = fmt_us(m_val)
             elif metric == "peak_rss_mb":
-                uniform_fmt = f"{u_val:.2f} MB"
-                messy_fmt = f"{m_val:.2f} MB"
+                uniform_fmt = f"{u_val:.2f} MiB"
+                messy_fmt = f"{m_val:.2f} MiB"
             else:
                 uniform_fmt = f"{int(u_val):,}"
                 messy_fmt = f"{int(m_val):,}"

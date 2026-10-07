@@ -69,6 +69,7 @@ pub const RequestSource = union(enum) {
 
 const MAX_REQUEST_NAME_BYTES = std.math.maxInt(u16);
 const REQUEST_LINE_READER_BUFFER_BYTES = MAX_REQUEST_NAME_BYTES + 4096;
+const REQUEST_NAME_STACK_BYTES = 8 * 1024;
 const ACTIVE_NAME_BYTES = 4 * 1024 * 1024;
 const MAX_ACTIVE_NAME_BYTES = ACTIVE_NAME_BYTES + MAX_REQUEST_NAME_BYTES;
 const NAMES_REQUEST_BATCH_SIZE = 65536;
@@ -527,16 +528,14 @@ fn emitUniformFromSpan(
     writer: anytype,
 ) void {
     var remaining = resolved.num_bases;
-    var base_index = if (resolved.orientation.reverse)
+    const base_index = if (resolved.orientation.reverse)
         resolved.start - 1 + resolved.num_bases - 1
     else
         resolved.start - 1;
+    var column = base_index % resolved.line_bases;
+    var line_start = uniformByteOffset(resolved, base_index) - column;
 
     while (remaining != 0) {
-        const line_number = base_index / resolved.line_bases;
-        const column = base_index % resolved.line_bases;
-        const line_start = uniformByteOffset(resolved, line_number * resolved.line_bases);
-
         const take_u64 = if (resolved.orientation.reverse)
             @min(column + 1, remaining)
         else
@@ -561,9 +560,15 @@ fn emitUniformFromSpan(
         remaining -= take_u64;
         if (remaining == 0) break;
         if (resolved.orientation.reverse) {
-            base_index -= take_u64;
+            line_start = std.math.sub(u64, line_start, resolved.line_bytes) catch {
+                printErrorAndExit("error: corrupt index geometry\n", .{});
+            };
+            column = resolved.line_bases - 1;
         } else {
-            base_index += take_u64;
+            line_start = std.math.add(u64, line_start, resolved.line_bytes) catch {
+                printErrorAndExit("error: corrupt index geometry\n", .{});
+            };
+            column = 0;
         }
     }
 }
@@ -1000,6 +1005,83 @@ const StreamRequestSource = union(enum) {
     },
 };
 
+const RequestedNames = struct {
+    arena: std.heap.ArenaAllocator,
+    stack_allocator: std.heap.StackFallbackAllocator(REQUEST_NAME_STACK_BYTES) = undefined,
+    names: std.ArrayList([]const u8) = .empty,
+    set: std.StringHashMapUnmanaged(void) = .empty,
+
+    fn init(allocator: std.mem.Allocator) RequestedNames {
+        return .{ .arena = std.heap.ArenaAllocator.init(allocator) };
+    }
+
+    fn deinit(self: *RequestedNames) void {
+        self.arena.deinit();
+    }
+
+    fn collect(self: *RequestedNames, reader: *std.Io.Reader, source: StreamRequestSource, stable_input: bool) !void {
+        self.stack_allocator = std.heap.stackFallback(REQUEST_NAME_STACK_BYTES, self.arena.allocator());
+        const allocator = self.stack_allocator.get();
+        const initial_capacity = if (stable_input) @min(128, 1 + std.mem.count(u8, reader.buffered(), "\n")) else 0;
+        var previous_name: ?[]const u8 = null;
+        while (true) {
+            const available = reader.buffered();
+            const line = if (std.mem.findScalar(u8, available, '\n')) |end| buffered: {
+                reader.toss(end + 1);
+                break :buffered available[0..end];
+            } else (reader.takeDelimiter('\n') catch break) orelse break;
+            const name = switch (source) {
+                .names => blk: {
+                    const name = if (line.len > 0 and line[line.len - 1] == '\r') line[0 .. line.len - 1] else line;
+                    if (name.len == 0 or name[0] == '#') continue;
+                    break :blk name;
+                },
+                .bed => bed_parser.requestChrom(line) orelse continue,
+            };
+            // Replay parse/read failures through the original batches to preserve
+            // diagnostic order and any output emitted before a later invalid row.
+            if (name.len > MAX_REQUEST_NAME_BYTES) break;
+            if (previous_name) |previous| {
+                if (std.mem.eql(u8, previous, name)) continue;
+            }
+            if (self.set.getKey(name)) |existing| {
+                previous_name = existing;
+                continue;
+            }
+            if (self.names.items.len == 0 and initial_capacity != 0) {
+                try self.set.ensureTotalCapacity(allocator, @intCast(initial_capacity));
+                try self.names.ensureTotalCapacityPrecise(allocator, initial_capacity);
+            }
+            // A cached small request stays valid until the index has copied its matches.
+            const owned = if (stable_input) name else try allocator.dupe(u8, name);
+            try self.set.put(allocator, owned, {});
+            try self.names.append(allocator, owned);
+            previous_name = owned;
+        }
+    }
+};
+
+const SeekableRequest = struct {
+    file: std.Io.File,
+    size: u64,
+};
+
+fn openSeekableRequest(io: std.Io, path: []const u8) ?SeekableRequest {
+    if (std.mem.eql(u8, path, "-")) return null;
+    const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch return null;
+    if (stat.kind != .file) return null;
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
+    const opened_stat = file.stat(io) catch {
+        file.close(io);
+        return null;
+    };
+    if (opened_stat.kind != .file) {
+        file.close(io);
+        return null;
+    }
+    return .{ .file = file, .size = opened_stat.size };
+}
+
 fn processRequestReader(
     allocator: std.mem.Allocator,
     idx: *LoadedIndex,
@@ -1087,6 +1169,8 @@ fn processRequestPath(
     io: std.Io,
     idx: *LoadedIndex,
     path: []const u8,
+    opened_file: ?SeekableRequest,
+    prepared_reader: ?*std.Io.Reader,
     source: StreamRequestSource,
     annotate_transform: bool,
     writer: anytype,
@@ -1098,15 +1182,16 @@ fn processRequestPath(
         return processRequestReader(allocator, idx, &stdin_reader.interface, source, 0, annotate_transform, writer, fasta_source);
     }
 
-    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
+    const file = if (opened_file) |opened| opened.file else (std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => printErrorAndExit("error: file not found: {s}\n", .{path}),
         error.AccessDenied => printErrorAndExit("error: access denied: {s}\n", .{path}),
         else => printErrorAndExit("error: failed to open file: {s}\n", .{path}),
-    };
-    defer file.close(io);
+    });
+    defer if (opened_file == null) file.close(io);
 
     const name_reservation: usize = switch (source) {
         .names => blk: {
+            if (opened_file) |opened| break :blk @intCast(@min(opened.size, MAX_ACTIVE_NAME_BYTES));
             const stat = file.stat(io) catch break :blk 0;
             break :blk @intCast(@min(stat.size, MAX_ACTIVE_NAME_BYTES));
         },
@@ -1115,7 +1200,7 @@ fn processRequestPath(
 
     var file_buf: [REQUEST_LINE_READER_BUFFER_BYTES]u8 = undefined;
     var file_reader = file.reader(io, &file_buf);
-    return processRequestReader(allocator, idx, &file_reader.interface, source, name_reservation, annotate_transform, writer, fasta_source);
+    return processRequestReader(allocator, idx, prepared_reader orelse &file_reader.interface, source, name_reservation, annotate_transform, writer, fasta_source);
 }
 
 /// Runs one GET source, writing FASTA to stdout and an optional summary to stderr.
@@ -1127,54 +1212,122 @@ pub fn runGetWithOptions(
     options: GetOptions,
 ) void {
     const start_ns = if (options.summary) monotonicNs(io) else 0;
+    switch (options.source) {
+        .positional => |regions| runPositionalGet(backing_allocator, io, fasta_path, options, regions, start_ns),
+        .names, .bed => runFileGet(backing_allocator, io, fasta_path, options, start_ns),
+    }
+}
 
+fn runPositionalGet(
+    backing_allocator: std.mem.Allocator,
+    io: std.Io,
+    fasta_path: []const u8,
+    options: GetOptions,
+    regions: []const []const u8,
+    start_ns: u64,
+) void {
     var input_arena = std.heap.ArenaAllocator.init(backing_allocator);
     defer input_arena.deinit();
     const allocator = input_arena.allocator();
-
     var requests = std.ArrayList(ParsedRequest).empty;
-
-    // Positional requests are known before loading, so `.fai` retains only their
-    // first matching records. Names and BED still require the complete lookup map.
-    const load_mode: index_format.LoadMode = switch (options.source) {
-        .positional => |region_strs| blk: {
-            appendCliRequests(allocator, &requests, region_strs, options.orientation);
-            const names = allocator.alloc([]const u8, requests.items.len) catch {
-                printErrorAndExit("error: out of memory\n", .{});
-            };
-            for (requests.items, names) |request, *name| {
-                name.* = request.region.name;
-            }
-            break :blk .{ .positional = names };
-        },
-        .names, .bed => .lookup_full_map,
+    appendCliRequests(allocator, &requests, regions, options.orientation);
+    const names = allocator.alloc([]const u8, requests.items.len) catch {
+        printErrorAndExit("error: out of memory\n", .{});
     };
-    var idx = index_format.loadIndexForGet(backing_allocator, io, fasta_path, load_mode);
+    for (requests.items, names) |request, *name| name.* = request.region.name;
+    var idx = index_format.loadIndexForGet(backing_allocator, io, fasta_path, .{ .positional = names });
     defer idx.deinit();
+    emitGet(allocator, io, &idx, options, requests.items, null, null, start_ns);
+}
 
-    const fasta_source = fastaSource(&idx);
+// Keep the request collection buffers out of the positional GET stack frame.
+noinline fn runFileGet(
+    backing_allocator: std.mem.Allocator,
+    io: std.Io,
+    fasta_path: []const u8,
+    options: GetOptions,
+    start_ns: u64,
+) void {
+    const request_file = switch (options.source) {
+        .positional => unreachable,
+        .names, .bed => |path| openSeekableRequest(io, path),
+    };
+    defer if (request_file) |opened| opened.file.close(io);
+    var request_buffer: [REQUEST_LINE_READER_BUFFER_BYTES]u8 = undefined;
+    const buffered_requests = if (request_file) |opened| buffered: {
+        if (opened.size == 0 or opened.size > request_buffer.len) break :buffered null;
+        const size: usize = @intCast(opened.size);
+        const got = std.Io.File.readPositionalAll(opened.file, io, request_buffer[0..size], 0) catch break :buffered null;
+        if (got != size) break :buffered null;
+        break :buffered request_buffer[0..size];
+    } else null;
+    var small_reader = std.Io.Reader.fixed(buffered_requests orelse &.{});
+    var request_reader: ?std.Io.File.Reader = if (request_file != null and buffered_requests == null) request_file.?.file.reader(io, &request_buffer) else null;
+
+    var idx = load: {
+        var requested = RequestedNames.init(backing_allocator);
+        defer requested.deinit();
+        const load_mode: index_format.LoadMode = switch (options.source) {
+            .positional => unreachable,
+            .names, .bed => if (request_file != null) matched: {
+                const source: StreamRequestSource = switch (options.source) {
+                    .names => .{ .names = options.orientation },
+                    .bed => .{ .bed = .{ .honor_strand = options.honor_strand, .global_orientation = options.orientation } },
+                    .positional => unreachable,
+                };
+                const reader = if (buffered_requests != null) &small_reader else &request_reader.?.interface;
+                requested.collect(reader, source, buffered_requests != null) catch {
+                    printErrorAndExit("error: out of memory\n", .{});
+                };
+                break :matched .{ .matched = requested.names.items };
+            } else .lookup_full_map,
+        };
+        break :load index_format.loadIndexForGet(backing_allocator, io, fasta_path, load_mode);
+    };
+    defer idx.deinit();
+    if (buffered_requests) |bytes| small_reader = std.Io.Reader.fixed(bytes);
+    if (request_reader != null) request_reader = request_file.?.file.reader(io, &request_buffer);
+
+    emitGet(backing_allocator, io, &idx, options, &.{}, request_file, if (buffered_requests != null) &small_reader else if (request_reader) |*reader| &reader.interface else null, start_ns);
+}
+
+fn emitGet(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    idx: *LoadedIndex,
+    options: GetOptions,
+    requests: []const ParsedRequest,
+    request_file: ?SeekableRequest,
+    prepared_reader: ?*std.Io.Reader,
+    start_ns: u64,
+) void {
+    const fasta_source = fastaSource(idx);
 
     var out_buf: [65536]u8 = undefined;
     var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
     const writer = &stdout_fw.interface;
 
     const totals = switch (options.source) {
-        .positional => processParsedRequests(allocator, &idx, requests.items, &.{}, options.annotate_transform, writer, fasta_source),
+        .positional => processParsedRequests(allocator, idx, requests, &.{}, options.annotate_transform, writer, fasta_source),
         .names => |path| processRequestPath(
-            backing_allocator,
+            allocator,
             io,
-            &idx,
+            idx,
             path,
+            request_file,
+            prepared_reader,
             .{ .names = options.orientation },
             options.annotate_transform,
             writer,
             fasta_source,
         ),
         .bed => |path| processRequestPath(
-            backing_allocator,
+            allocator,
             io,
-            &idx,
+            idx,
             path,
+            request_file,
+            prepared_reader,
             .{ .bed = .{
                 .honor_strand = options.honor_strand,
                 .global_orientation = options.orientation,
@@ -1202,6 +1355,25 @@ pub fn runGetWithOptions(
         stderr_fw.flush() catch {
             printErrorAndExit("error: write failed\n", .{});
         };
+    }
+}
+
+fn collectNamesForAllocationCheck(allocator: std.mem.Allocator, stable_input: bool) !void {
+    var requested = RequestedNames.init(allocator);
+    defer requested.deinit();
+    var buffer: [8192]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writer.writeAll("# skip\na\nb\na\ncolon:name\na\n");
+    for (0..300) |i| try writer.print("name{d}\n", .{i});
+    var reader = std.Io.Reader.fixed(writer.buffered());
+    try requested.collect(&reader, .{ .names = .{} }, stable_input);
+    try std.testing.expectEqual(@as(usize, 303), requested.names.items.len);
+    try std.testing.expectEqualStrings("name299", requested.names.items[302]);
+}
+
+test "[failure] - [get requested names]: releases partial collection" {
+    for ([_]bool{ false, true }) |stable_input| {
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, collectNamesForAllocationCheck, .{stable_input});
     }
 }
 

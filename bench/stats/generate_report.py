@@ -485,7 +485,7 @@ def fig_metric_facets(
     datasets = [d for d in DATASET_ORDER if d in filtered["dataset"].unique()]
     facets = [
         ("mean", "Wall Time (s)", True, 1e-6),
-        ("peak_rss_mb", "Peak RSS (MB)", False, 0.1),
+        ("peak_rss_mb", "Peak RSS (MiB)", False, 0.1),
         ("minor_faults", "Minor Page Faults", True, 1.0),
     ]
 
@@ -573,7 +573,7 @@ def _scaling_legend_patches(tools: list[str], ir, display_map: dict[str, str] | 
 
 SCALING_METRICS = (
     ("mean", "Wall time (s)", True, 1e-6),
-    ("peak_rss_mb", "Peak RSS (MB)", True, 0.1),
+    ("peak_rss_mb", "Peak RSS (MiB)", True, 0.1),
     ("minor_faults", "Minor page faults", True, 1.0),
 )
 
@@ -722,7 +722,7 @@ def fig_scaling_slope_ratios(
         ax.set_xlim(-0.08, 1.55)
         if param_col == "size_mb":
             ax.set_xticks([0, 1])
-            ax.set_xticklabels([f"{int(x0)} MB", f"{int(x1)} MB"])
+            ax.set_xticklabels([f"{int(x0)} MiB", f"{int(x1)} MiB"])
         else:
             ax.set_xticks([0, 1])
             ax.set_xticklabels([f"{int(x0):,}", f"{int(x1):,}"])
@@ -759,7 +759,7 @@ def fmt_wall(row) -> str:
 def fmt_rss(row) -> str:
     mean = float(row["peak_rss_mb"])
     std = float(row["peak_rss_stddev_mb"]) if pd.notna(row.get("peak_rss_stddev_mb")) else 0.0
-    return f"{mean:.1f}±{std:.1f} MB"
+    return f"{mean:.1f}±{std:.1f} MiB"
 
 
 def fmt_faults(row) -> str:
@@ -1021,7 +1021,7 @@ def _scaling_pivot(df: pd.DataFrame, tools: list[str], param_col: str, param_ord
     pivot = pivot[cols]
     pivot = pivot.rename(columns={c: SCALING_DISPLAY.get(c, ir.display_tool(c)) for c in pivot.columns})
     if param_col == "size_mb":
-        pivot.index = [f"{int(v)} MB" for v in pivot.index]
+        pivot.index = [f"{int(v)} MiB" for v in pivot.index]
     else:
         pivot.index = [f"{int(v):,}" for v in pivot.index]
     pivot.index.name = xlabel
@@ -1071,7 +1071,7 @@ def md_scaling_section(
     wall_md = _scaling_pivot(df, tools, param_col, param_order, xlabel, fmt_wall, ir)
 
     peers = peer_tools(tools, BASELINE)
-    label_group = (lambda v: f"{int(v)} MB" if param_col == "size_mb" else f"{int(v):,}")
+    label_group = (lambda v: f"{int(v)} MiB" if param_col == "size_mb" else f"{int(v):,}")
     t_wall_ratio = nums.next_table()
     wall_ratio = ir.md_zfasta_vs_ratio_table(
         ir.build_ratio_comparisons(
@@ -1108,8 +1108,8 @@ def md_scaling_section(
         zf_label="z-fasta",
         comp_label="Peer",
         ratio_label="RSS x",
-        fmt_zf=lambda r: f"{r.zfasta_v:.1f} MB",
-        fmt_comp=lambda r: f"{r.comp_v:.1f} MB",
+        fmt_zf=lambda r: f"{r.zfasta_v:.1f} MiB",
+        fmt_comp=lambda r: f"{r.comp_v:.1f} MiB",
     )
 
     t_pf = nums.next_table()
@@ -1160,7 +1160,7 @@ def md_scaling_section(
             "",
             "</details>",
             "",
-            f"<details><summary><strong>Table {t_rss}:</strong> Peak RSS (MB) by {xlabel}.</summary>",
+            f"<details><summary><strong>Table {t_rss}:</strong> Peak RSS (MiB) by {xlabel}.</summary>",
             "",
             rss_md,
             "",
@@ -1342,8 +1342,8 @@ def main() -> None:
                 zf_label="z-fasta",
                 comp_label="Peer",
                 ratio_label="RSS x",
-                fmt_zf=lambda r: f"{r.zfasta_v:.1f} MB",
-                fmt_comp=lambda r: f"{r.comp_v:.1f} MB",
+                fmt_zf=lambda r: f"{r.zfasta_v:.1f} MiB",
+                fmt_comp=lambda r: f"{r.comp_v:.1f} MiB",
                 display_map=FULL_SECTION_DISPLAY,
             )
         )
@@ -1395,7 +1395,7 @@ def main() -> None:
                 size_df,
                 param_col="size_mb",
                 param_order=SIZE_MB_ORDER,
-                xlabel="File size (MB)",
+                xlabel="File size (MiB)",
                 section_title="Scaling: file size",
                 fig_stem="scaling_size",
                 fig_title="Scaling by file size",

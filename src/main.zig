@@ -11,7 +11,7 @@ pub const validator = @import("validator.zig");
 
 const printErrorAndExit = index_format.printErrorAndExit;
 
-const VERSION = "0.3.3";
+const VERSION = "0.3.4";
 const STRAND_AWARE_FLAG = "--strand-aware";
 const STRAND_AWARE_ALIAS = "--honor-strand";
 const RC_FLAG = "--rc";
@@ -248,6 +248,10 @@ fn runIndex(io: std.Io, environ: std.process.Environ, args: *std.process.Args.It
         error.SequenceLineTooLong => printErrorAndExit(
             "error: sequence line exceeds the index format limit: {s}\n",
             .{path},
+        ),
+        error.TooManySequences => printErrorAndExit(
+            "error: sequence count exceeds {d}: {s}\n",
+            .{ std.math.maxInt(u32), path },
         ),
         error.NonUniformFai => printErrorAndExit(
             "error: cannot emit .fai for non-uniform sequence layout; run 'z-fasta index' (default) to write .zfi\n",

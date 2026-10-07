@@ -8,13 +8,23 @@ All notable changes to z-fasta will be documented in this file.
 
 Planned to improve `validate` module, possibly work on scan based alternatives for get, stats, and other options (bypass indexing or using indexed files etc.)
 
-## [0.3.4] - 2026-08-23?
+## [0.3.4] - 2026-10-07
+
+The `.zfi` file format, `.fai` rows, and first-occurrence duplicate policy are unchanged. **Re-index not required.**
 
 ### Changed
 
+- **Index memory (fixes [#13](https://github.com/eneskemalergin/z-fasta/issues/13)).** Indexing uses a 256 KiB read buffer and portable Zig vectors for identifier and sequence scanning. Large inputs use compact exact-name references, stream `.zfi` records, and spill name and side-table staging to temporary files. Small inputs retain their in-memory catalogs.
+- **GET lookup memory (fixes [#14](https://github.com/eneskemalergin/z-fasta/issues/14)).** Seekable BED and names files retain only requested index records, names, and required non-uniform side tables while validating the complete `.zfi` or `.fai` sidecar. Stdin and named FIFOs keep full index loading. Request order, repeated output, first-duplicate selection, and diagnostic order stay the same.
 - Build and contributor documentation now requires stable Zig 0.16.0 from `PATH`; obsolete repository wrapper references have been removed from current guidance, benchmark runners, and diagnostics.
-- Landing-page, Wiki, and benchmark documentation now matches the selected 2026-08-18 reports, the current four-platform release matrix, automatic Wiki publication, and the installed stripped benchmark bundle.
-- Benchmark shell paths now prevent retained peer core images, and GET correctness builds fresh private sidecars instead of trusting tracked index mtimes.
+- Index, GET, and stats reports, figures, README tables, Wiki tables, and six summary SVGs use the sequential 2026-10-07 benchmark runs. The GET report records historical timing increases and a same-host comparison with `main`; RSS labels use MiB in individual reports and decimal MB in summaries.
+- README, Wiki, and benchmark documentation describes the current four-platform release matrix, automatic Wiki publication, and the installed stripped benchmark bundle. Installation examples use 0.3.4 archive names and version output.
+
+### Fixed
+
+- Indexing rejects more than 4294967295 retained records before emitting the excess record or overflowing the sequence count.
+- Benchmark scripts disable peer core dumps, and GET checks build fresh private sidecars instead of trusting tracked index mtimes.
+- CI checks the current package version's changelog section and rejects a mismatched CLI version instead of checking the 0.3.1 section.
 
 ## [0.3.3] - 2026-08-18
 

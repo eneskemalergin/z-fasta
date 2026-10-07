@@ -39,14 +39,19 @@ def render(frame, theme: Theme, meta, versions):
             references = subset[subset["comparison"] != "complete"].copy()
             complete["time_rank"] = complete["wall"].rank(method="min")
             complete["rss_rank"] = complete["rss"].rank(method="min")
+            for metric in ("time", "rss"):
+                ranks = complete[f"{metric}_rank"]
+                complete[f"{metric}_position"] = ranks + 0.8 * complete.groupby(ranks).cumcount()
             complete["time_multiple"] = complete["wall"] / complete["wall"].min()
             complete["rss_multiple"] = complete["rss"] / complete["rss"].min()
             references = references.sort_values("wall").reset_index(drop=True)
             references["time_rank"] = len(complete) + 0.8 + references.index * 0.8
             references = references.sort_values("rss").reset_index(drop=True)
             references["rss_rank"] = len(complete) + 0.8 + references.index * 0.8
+            references["time_position"] = references["time_rank"]
+            references["rss_position"] = references["rss_rank"]
             subset = pd.concat([complete, references], ignore_index=True)
-            n = max(float(subset["time_rank"].max()), float(subset["rss_rank"].max()))
+            n = max(float(subset["time_position"].max()), float(subset["rss_position"].max()))
 
             for record in subset.itertuples():
                 tool = str(record.tool)
@@ -54,13 +59,13 @@ def render(frame, theme: Theme, meta, versions):
                 secondary = record.comparison != "complete"
                 color = plot_color(task, tool, theme)
                 ax.plot(
-                    [0, 1], [record.time_rank, record.rss_rank],
+                    [0, 1], [record.time_position, record.rss_position],
                     color=color, linewidth=3.2 if is_zfasta else 1.45,
                     alpha=1 if is_zfasta else 0.78,
                     linestyle="--" if secondary else "-",
                 )
                 ax.scatter(
-                    [0, 1], [record.time_rank, record.rss_rank],
+                    [0, 1], [record.time_position, record.rss_position],
                     facecolor=theme.background if secondary else color,
                     edgecolor=color, s=36 if is_zfasta else 23,
                     linewidth=1.1, zorder=3,
@@ -74,12 +79,12 @@ def render(frame, theme: Theme, meta, versions):
                 weight = "bold" if is_zfasta else "normal"
                 text_color = theme.ink if is_zfasta else theme.muted
                 ax.text(
-                    -0.035, record.time_rank, f"{record.display}  {time_value}",
+                    -0.035, record.time_position, f"{record.display}  {time_value}",
                     ha="right", va="center", fontsize=6.0,
                     color=text_color, fontweight=weight,
                 )
                 ax.text(
-                    1.055, record.rss_rank, f"{rss_value}  {record.display}",
+                    1.055, record.rss_position, f"{rss_value}  {record.display}",
                     ha="left", va="center", fontsize=6.0,
                     color=text_color, fontweight=weight,
                 )

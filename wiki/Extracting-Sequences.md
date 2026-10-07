@@ -84,6 +84,8 @@ printf 'chr1\nchr2\n' | z-fasta get genome.fa --names -
 
 Names input streams in reusable batches and has no whole-input row limit.
 
+Seekable names and BED files are read twice: first to collect unique requested identifiers, then to emit requests in their original order. GET validates the complete sidecar while retaining only matching records, names, and required non-uniform side tables. Lookup memory grows with the unique requested identifiers rather than the complete index. Repeated requests still produce repeated output. Stdin and named FIFOs load the full index because their requests cannot be replayed.
+
 ## Identifiers containing colons
 
 GET checks the rightmost colon for a valid decimal coordinate suffix. This keeps Ensembl-style identifiers usable:

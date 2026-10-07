@@ -41,8 +41,14 @@ fn parseStrand(field: []const u8) BedStrand {
 }
 
 fn parseCoordinate(field: []const u8) ?u64 {
-    if (std.mem.findScalar(u8, field, '_') != null) return null;
-    return std.fmt.parseUnsigned(u64, field, 10) catch null;
+    if (field.len == 0) return null;
+    var value: u64 = 0;
+    for (field) |byte| {
+        if (byte < '0' or byte > '9') return null;
+        value = std.math.mul(u64, value, 10) catch return null;
+        value = std.math.add(u64, value, byte - '0') catch return null;
+    }
+    return value;
 }
 
 /// Parses one BED row into a 1-based inclusive request.
@@ -51,12 +57,7 @@ fn parseCoordinate(field: []const u8) ?u64 {
 /// contain only decimal digits and satisfy `end > start`. `chrom` borrows
 /// from `line`.
 pub fn parseBedLine(line: []const u8) ParseError!ParseResult {
-    const trimmed = if (line.len > 0 and line[line.len - 1] == '\r') line[0 .. line.len - 1] else line;
-
-    if (trimmed.len == 0) return .skip;
-    if (trimmed[0] == '#') return .skip;
-    if (std.mem.eql(u8, trimmed, "track") or std.mem.startsWith(u8, trimmed, "track ")) return .skip;
-    if (std.mem.eql(u8, trimmed, "browser") or std.mem.startsWith(u8, trimmed, "browser ")) return .skip;
+    const trimmed = requestLine(line) orelse return .skip;
 
     var fields = std.mem.splitScalar(u8, trimmed, '\t');
 
@@ -86,4 +87,20 @@ pub fn parseBedLine(line: []const u8) ParseError!ParseResult {
         .end_1based = end_0based,
         .strand = strand,
     } };
+}
+
+/// Borrows a chromosome for lookup collection. Output callers still parse the complete row.
+pub fn requestChrom(line: []const u8) ?[]const u8 {
+    const trimmed = requestLine(line) orelse return null;
+    const end = std.mem.findScalar(u8, trimmed, '\t') orelse trimmed.len;
+    if (end == 0) return null;
+    return trimmed[0..end];
+}
+
+fn requestLine(line: []const u8) ?[]const u8 {
+    const trimmed = if (line.len > 0 and line[line.len - 1] == '\r') line[0 .. line.len - 1] else line;
+    if (trimmed.len == 0 or trimmed[0] == '#') return null;
+    if (std.mem.eql(u8, trimmed, "track") or std.mem.startsWith(u8, trimmed, "track ")) return null;
+    if (std.mem.eql(u8, trimmed, "browser") or std.mem.startsWith(u8, trimmed, "browser ")) return null;
+    return trimmed;
 }
