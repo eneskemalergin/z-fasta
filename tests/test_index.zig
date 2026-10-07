@@ -99,6 +99,14 @@ fn expectDirectoryEmpty(path: []const u8) !void {
     try std.testing.expectEqual(null, try entries.next(io));
 }
 
+fn writeLargeIndexDescription(writer: *std.Io.Writer) !void {
+    // An empty record's description selects large-file storage without a large catalog.
+    const padding = [_]u8{'x'} ** 4096;
+    try writer.writeAll(">ignored ");
+    for (0..32 * 1024 * 1024 / padding.len) |_| try writer.writeAll(&padding);
+    try writer.writeAll("\n");
+}
+
 fn markFileStaleOneHourAgo(file: std.Io.File) !void {
     if (!supportsPosixFutimens()) return error.SkipZigTest;
 
@@ -441,6 +449,175 @@ test "[cli] - [index]: atomically replaces ZFI and applies duplicate-name policy
         try std.testing.expectEqual(@as(u64, 2), idx.records[1].seq_len);
     }
     try std.Io.Dir.cwd().access(io, tmp_path, .{});
+}
+
+test "[cli] - [index]: large catalogs preserve both formats and duplicate policy" {
+    const allocator = std.testing.allocator;
+    for ([_]bool{ false, true }) |compressed| {
+        for ([_]bool{ false, true }) |non_uniform| {
+            const fasta_path = try uniqueArtifactPath(allocator, "index-large-catalog", "fa");
+            defer allocator.free(fasta_path);
+            defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+            const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+            defer allocator.free(zfi_path);
+            defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+            var expected_fai = std.Io.Writer.Allocating.init(allocator);
+            defer expected_fai.deinit();
+            var expected_all_fai = std.Io.Writer.Allocating.init(allocator);
+            defer expected_all_fai.deinit();
+            {
+                const file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+                defer file.close(io);
+                var buffer: [4096]u8 = undefined;
+                var output = file.writer(io, &buffer);
+                try writeLargeIndexDescription(&output.interface);
+                for (0..2) |pass| {
+                    for (0..128) |i| {
+                        var name_buffer: [64]u8 = undefined;
+                        const name = if (compressed)
+                            try std.fmt.bufPrint(&name_buffer, "ENST000000{d:0>6}.1", .{i})
+                        else
+                            try std.fmt.bufPrint(&name_buffer, "name-{d}", .{i});
+                        const seq_offset = output.logicalPos() + name.len + 2;
+                        try output.interface.print(">{s}\n{s}", .{
+                            name,
+                            if (pass == 0) "ACGT\nAC\n" else "TTTT\nTT\n",
+                        });
+                        if (non_uniform and i % 2 != 0) try output.interface.writeAll("GGGG\n");
+                        if (pass == 0) try expected_fai.writer.print("{s}\t6\t{d}\t4\t5\n", .{ name, seq_offset });
+                        try expected_all_fai.writer.print("{s}\t6\t{d}\t4\t5\n", .{ name, seq_offset });
+                    }
+                }
+                try output.flush();
+            }
+            const file = try std.Io.Dir.cwd().openFile(io, fasta_path, .{});
+            defer file.close(io);
+            const stat = try file.stat(io);
+            for ([_]bool{ true, false }) |enable_dedup| {
+                var buffer: [4096]u8 = undefined;
+                var reader = file.reader(io, &buffer);
+                try reader.seekTo(0);
+                var read_buffer: [4096]u8 = undefined;
+                var expected_index = try main.indexer.scanZfiReader(
+                    &reader.interface,
+                    &read_buffer,
+                    enable_dedup,
+                    allocator,
+                );
+                defer expected_index.deinit(allocator);
+                const expected_zfi = try main.indexer.zfiIndexToBytes(
+                    &expected_index,
+                    stat.size,
+                    try main.index_format.timestampToNs(stat.mtime),
+                    allocator,
+                );
+                defer allocator.free(expected_zfi);
+                const message = try std.fmt.allocPrint(
+                    allocator,
+                    "wrote {s} ({d} sequences)\n",
+                    .{ zfi_path, if (enable_dedup) @as(usize, 128) else 256 },
+                );
+                defer allocator.free(message);
+                const zfi_args: []const []const u8 = if (enable_dedup)
+                    &.{ ZFASTA_BIN, "index", fasta_path }
+                else
+                    &.{ ZFASTA_BIN, "index", "--no-dedup", fasta_path };
+                try expectCliResult(allocator, zfi_args, 0, "", message);
+                const actual_zfi = try readTestFile(allocator, zfi_path);
+                defer allocator.free(actual_zfi);
+                try std.testing.expectEqualSlices(u8, expected_zfi, actual_zfi);
+                const fai_args: []const []const u8 = if (enable_dedup)
+                    &.{ ZFASTA_BIN, "index", "--emit-fai", fasta_path }
+                else
+                    &.{ ZFASTA_BIN, "index", "--emit-fai", "--no-dedup", fasta_path };
+                if (non_uniform) {
+                    try expectCliFailure(
+                        allocator,
+                        fai_args,
+                        1,
+                        "error: cannot emit .fai for non-uniform sequence layout; run 'z-fasta index' (default) to write .zfi\n",
+                    );
+                } else {
+                    const expected = if (enable_dedup) expected_fai.written() else expected_all_fai.written();
+                    try expectCliResult(allocator, fai_args, 0, expected, "");
+                }
+            }
+        }
+    }
+}
+
+test "[cli] - [index]: large late failures preserve the prior index and remove temporary files" {
+    const allocator = std.testing.allocator;
+    const source_dir_path = try uniqueArtifactDirPath(allocator, "index-large-failure");
+    defer allocator.free(source_dir_path);
+    defer std.Io.Dir.cwd().deleteTree(io, source_dir_path) catch {};
+    const spool_dir_path = try uniqueArtifactDirPath(allocator, "index-large-spool");
+    defer allocator.free(spool_dir_path);
+    defer std.Io.Dir.cwd().deleteTree(io, spool_dir_path) catch {};
+    const fasta_path = try std.fmt.allocPrint(allocator, "{s}/source.fa", .{source_dir_path});
+    defer allocator.free(fasta_path);
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    defer allocator.free(zfi_path);
+    {
+        const file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{});
+        defer file.close(io);
+        var buffer: [4096]u8 = undefined;
+        var output = file.writer(io, &buffer);
+        try writeLargeIndexDescription(&output.interface);
+        for (0..2000) |i| try output.interface.print(">name-{d}\nACGT\n", .{i});
+        try output.interface.writeByte('>');
+        for (0..16) |_| try output.interface.writeAll(&([_]u8{'A'} ** 4096));
+        try output.interface.writeAll("\nACGT\n");
+        try output.flush();
+    }
+    {
+        const previous = try std.Io.Dir.cwd().createFile(io, zfi_path, .{});
+        defer previous.close(io);
+        try previous.writePositionalAll(io, "previous index", 0);
+    }
+    var env = try std.testing.environ.createMap(allocator);
+    defer env.deinit();
+    try env.put("TMPDIR", spool_dir_path);
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const expected_error = try std.fmt.allocPrint(
+        allocator,
+        "error: sequence name exceeds 65535 bytes: {s}\n",
+        .{fasta_path},
+    );
+    defer allocator.free(expected_error);
+    for ([_][]const []const u8{
+        &.{ ZFASTA_BIN, "index", fasta_path },
+        &.{ ZFASTA_BIN, "index", "--no-dedup", fasta_path },
+        &.{ ZFASTA_BIN, "index", "--emit-fai", fasta_path },
+        &.{ ZFASTA_BIN, "index", "--emit-fai", "--no-dedup", fasta_path },
+    }) |argv| {
+        const result = try std.process.run(allocator, threaded.io(), .{
+            .argv = argv,
+            .environ_map = &env,
+            .stdout_limit = .limited(128 * 1024),
+            .stderr_limit = .limited(64 * 1024),
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+        try std.testing.expectEqualStrings("", result.stdout);
+        try std.testing.expectEqualStrings(expected_error, result.stderr);
+        const previous = try readTestFile(allocator, zfi_path);
+        defer allocator.free(previous);
+        try std.testing.expectEqualStrings("previous index", previous);
+        try expectDirectoryEmpty(spool_dir_path);
+        var source_dir = try std.Io.Dir.cwd().openDir(io, source_dir_path, .{ .iterate = true });
+        defer source_dir.close(io);
+        var entries = source_dir.iterate();
+        var count: usize = 0;
+        while (try entries.next(io)) |entry| {
+            try std.testing.expect(std.mem.eql(u8, entry.name, "source.fa") or
+                std.mem.eql(u8, entry.name, "source.fa.zfi"));
+            count += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 2), count);
+    }
 }
 
 test "[unit] - [FASTA scanner]: records names and fixed-width geometry" {

@@ -32,6 +32,7 @@ FASTQ is coming as a separate project, z-fastq, built around the same priorities
 ## Input limits
 
 - Indexed identifier: 65535 bytes.
+- Retained index records: 4294967295 per file, after skipping empty records and applying the selected duplicate policy.
 - Positional GET regions: 1024 per invocation.
 - Names file identifier: 65535 bytes.
 - BED chromosome or identifier: 65535 bytes.

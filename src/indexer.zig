@@ -20,6 +20,7 @@ const SIMD_CHUNK_SIZE = 32;
 const SimdVec = @Vector(SIMD_CHUNK_SIZE, u8);
 const STRIDE_VECTOR_LEN = std.simd.suggestVectorLength(u8) orelse 1;
 const STRIDE_VALIDATION_BLOCK_LINES = 256;
+/// Size in bytes of the scanner's sequence read buffer.
 pub const INDEX_READ_BUFFER_SIZE = 256 * 1024;
 const FILE_IO_BUF_SIZE = 8 * 1024;
 const INDEX_OUTPUT_BUFFER_SIZE = 64 * 1024;
@@ -33,8 +34,10 @@ const FAI_SPOOL_NAME_BUFFER_SIZE = 64;
 const FAI_U64_DECIMAL_DIGITS = 20;
 const FAI_SUFFIX_BUFFER_SIZE = 4 * (1 + FAI_U64_DECIMAL_DIGITS) + 1;
 const FAI_SPOOL_CREATE_ATTEMPTS = 16;
+/// Maximum identifier length in bytes for both index formats.
 pub const MAX_INDEX_NAME_LEN = std.math.maxInt(u16);
 
+/// Reader policy; identifier limits may be stricter than `MAX_INDEX_NAME_LEN`.
 pub const ScanOptions = struct {
     enable_dedup: bool,
     max_name_len: ?usize = null,
@@ -42,6 +45,7 @@ pub const ScanOptions = struct {
     require_initial_header: bool = false,
 };
 
+/// Selects CLI output format and first-occurrence duplicate filtering.
 pub const IndexOptions = struct {
     emit_fai: bool = false,
     enable_dedup: bool = true,
@@ -96,6 +100,7 @@ fn NameDedupWith(comptime Context: type) type {
 
         const Self = @This();
 
+        /// Owns a name set using `allocator` until `deinit`.
         pub fn init(allocator: std.mem.Allocator) Self {
             return .{
                 .map = std.HashMap([]const u8, void, Context, std.hash_map.default_max_load_percentage).init(allocator),
@@ -129,6 +134,7 @@ fn NameDedupWith(comptime Context: type) type {
             try self.map.ensureTotalCapacity(min_cap);
         }
 
+        /// Releases the map and its owned names.
         pub fn deinit(self: *Self) void {
             if (self.ref_map) |*rm| {
                 rm.deinit();
@@ -141,7 +147,7 @@ fn NameDedupWith(comptime Context: type) type {
             self.name_blob = null;
         }
 
-        // Returns true when `name` was already observed (caller should skip the record).
+        /// Returns true for an existing exact name; otherwise retains a stable copy.
         pub fn observe(self: *Self, name: []const u8) !bool {
             if (self.name_blob) |blob| {
                 var rm = &(self.ref_map orelse unreachable);
@@ -181,6 +187,7 @@ fn NameDedupWith(comptime Context: type) type {
 pub const NameDedup = NameDedupWith(std.hash_map.StringContext);
 
 /// One parsed FASTA record passed to reader emit callbacks.
+/// Name and side-table slices are borrowed only for the callback's duration.
 pub const FastaRecordEmit = struct {
     record: IndexRecord,
     name: []const u8,
@@ -192,11 +199,13 @@ pub const FastaRecordEmit = struct {
     name_embedded: bool = false,
 };
 
+/// Owned records, side tables, and names; release with `deinit` using the scan allocator.
 pub const ZfiIndex = struct {
     records: std.ArrayList(IndexRecord),
     side_tables: std.ArrayList(u8),
     name_blob: std.ArrayList(u8),
 
+    /// Releases all catalog storage with the allocator used to create it.
     pub fn deinit(self: *ZfiIndex, allocator: std.mem.Allocator) void {
         self.records.deinit(allocator);
         self.side_tables.deinit(allocator);
@@ -511,6 +520,7 @@ fn embedZfiName(
     rec._pad[0] |= index_format.NAME_IN_ZFI_FLAG;
 }
 
+/// Collects an owned `.zfi` catalog; `read_buf` must be nonempty and remains caller-owned.
 pub fn scanZfiReader(
     reader: *std.Io.Reader,
     read_buf: []u8,
@@ -561,11 +571,11 @@ fn scanZfiReaderWithOptions(
     var ctx = Ctx{ .index = &index, .allocator = allocator };
     // One catalog avoids a second copy of embedded names.
     var blob_dedup: ?NameDedup = null;
+    defer if (blob_dedup) |*seen| seen.deinit();
     if (options.enable_dedup) {
         blob_dedup = NameDedup.initOwningBlob(allocator, &index.name_blob);
         try blob_dedup.?.ensureCapacity(DEDUP_INITIAL_CAPACITY);
     }
-    defer if (blob_dedup) |*seen| seen.deinit();
     const external_dedup: ?*NameDedup = if (blob_dedup) |*s| s else null;
     _ = try scanFastaReader(
         reader,
@@ -584,6 +594,7 @@ fn scanZfiReaderWithOptions(
     return index;
 }
 
+/// Collects an owned `.zfi` catalog from borrowed FASTA bytes.
 pub fn scanZfiData(
     data: []const u8,
     enable_dedup: bool,
@@ -594,8 +605,7 @@ pub fn scanZfiData(
     return scanZfiReader(&r, &read_buf, enable_dedup, allocator);
 }
 
-// Single on-disk `.zfi` serialization path:
-// header, records, side tables, name blob, `ZFID` source identity, `ZFNM` footer.
+// Collected and streamed catalogs use the same frozen section order.
 fn writeZfiIndex(
     writer: *std.Io.Writer,
     index: *const ZfiIndex,
@@ -617,6 +627,7 @@ fn writeZfiIndex(
     try writer.writeAll(&index_format.encodeZfiNameFooter(index.name_blob.items.len));
 }
 
+/// Writes a collected catalog directly to `path`; the CLI owns atomic publication.
 pub fn writeZfiIndexFile(
     io: std.Io,
     path: []const u8,
@@ -985,6 +996,11 @@ const ChunkParseState = struct {
             }
         }
 
+        if (record_count.* == std.math.maxInt(u32)) {
+            @branchHint(.cold);
+            return error.TooManySequences;
+        }
+
         var side_table_slice: []const u8 = &.{};
         if (seq_info.uses_uniform_formula) {
             // Short final wrap was deferred and never needed; drop it.
@@ -1159,6 +1175,9 @@ fn processChunkBytes(
     }
 }
 
+/// Scans records through a nonempty caller-owned buffer and returns the retained count.
+/// Callback slices expire on return; an external name set is borrowed and may be updated.
+/// Returns `TooManySequences` before emitting more than 4294967295 retained records.
 pub fn scanFastaReader(
     reader: *std.Io.Reader,
     read_buf: []u8,
@@ -1168,14 +1187,14 @@ pub fn scanFastaReader(
     ctx: anytype,
     comptime emitRecord: fn (@TypeOf(ctx), FastaRecordEmit) anyerror!void,
 ) !u32 {
-    return scanFastaReaderWithDedup(reader, read_buf, options, allocator, external_dedup, ctx, emitRecord);
+    return scanFastaReaderWithDedup(allocator, reader, read_buf, options, external_dedup, ctx, emitRecord);
 }
 
 fn scanFastaReaderWithDedup(
+    allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
     read_buf: []u8,
     options: ScanOptions,
-    allocator: std.mem.Allocator,
     external_dedup: anytype,
     ctx: anytype,
     comptime emitRecord: fn (@TypeOf(ctx), FastaRecordEmit) anyerror!void,
@@ -1183,6 +1202,7 @@ fn scanFastaReaderWithDedup(
     // The public reader keeps arena-backed keys without a 32-bit name-pool limit.
     // PackedNames is used only for CLI inputs bounded by SMALL_INDEX_MAX_BYTES.
     var owned_original: ?NameDedup = null;
+    defer if (owned_original) |*seen| seen.deinit();
     const Dedup = if (@TypeOf(external_dedup) == ?*SourceAdapter) SourceAdapter else if (@TypeOf(external_dedup) == ?*PackedNames) PackedNames else NameDedup;
     const external: ?*Dedup = external_dedup;
     const dedup_ptr: ?*Dedup = blk: {
@@ -1198,7 +1218,6 @@ fn scanFastaReaderWithDedup(
         }
         break :blk null;
     };
-    defer if (owned_original) |*seen| seen.deinit();
 
     var state = ChunkParseState{
         .allocator = allocator,
@@ -1392,14 +1411,15 @@ fn scanFaiReader(
     options: ScanOptions,
     allocator: std.mem.Allocator,
 ) !u32 {
-    return scanFaiReaderWithDedup(reader, read_buf, writer, options, allocator, @as(?*NameDedup, null));
+    return scanFaiReaderWithDedup(allocator, reader, read_buf, writer, options, @as(?*NameDedup, null));
 }
+
 fn scanFaiReaderWithDedup(
+    allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
     read_buf: []u8,
     writer: anytype,
     options: ScanOptions,
-    allocator: std.mem.Allocator,
     dedup: anytype,
 ) !u32 {
     var fai_buf = FaiEmitBuffer{ .writer = writer };
@@ -1421,11 +1441,12 @@ fn scanFaiReaderWithDedup(
         }
     }
     var ctx = Ctx{ .buffer = &fai_buf };
-    const count = try scanFastaReaderWithDedup(reader, read_buf, options, allocator, dedup, &ctx, Ctx.emit);
+    const count = try scanFastaReaderWithDedup(allocator, reader, read_buf, options, dedup, &ctx, Ctx.emit);
     try fai_buf.flush();
     return count;
 }
 
+/// Writes `.fai` rows to `writer`; errors may leave a prefix in this low-level API.
 pub fn scanFaiData(
     data: []const u8,
     writer: anytype,
@@ -1437,6 +1458,8 @@ pub fn scanFaiData(
     return scanFaiReader(&r, &read_buf, writer, .{ .enable_dedup = enable_dedup }, allocator);
 }
 
+/// Indexes a file with source size/mtime rechecks and cleans temporary storage on failure.
+/// `.zfi` replaces its sidecar atomically; `.fai` reaches stdout only after a valid scan.
 pub fn runIndex(
     io: std.Io,
     environ: std.process.Environ,
@@ -1488,15 +1511,16 @@ noinline fn runIndexSmall(
         var tmp_fw = spool.file.writer(io, &tmp_io_buf);
 
         const record_count = scanFaiReaderWithDedup(
+            allocator,
             &file_reader.interface,
             &read_buf,
             &tmp_fw.interface,
             .{ .enable_dedup = options.enable_dedup, .require_initial_header = true },
-            allocator,
             dedup,
         ) catch |err| switch (err) {
             error.HeaderTooLong,
             error.SequenceLineTooLong,
+            error.TooManySequences,
             error.NotFasta,
             error.NonUniformFai,
             error.FaiSpoolWriteFailed,
@@ -1544,6 +1568,7 @@ noinline fn runIndexSmall(
     ) catch |err| switch (err) {
         error.HeaderTooLong,
         error.SequenceLineTooLong,
+        error.TooManySequences,
         error.NotFasta,
         error.SourceReadFailed,
         error.OutOfMemory,
@@ -1604,15 +1629,16 @@ noinline fn runIndexLarge(
         var tmp_fw = spool.file.writer(io, &tmp_io_buf);
 
         const record_count = scanFaiReaderWithDedup(
+            allocator,
             &file_reader.interface,
             &read_buf,
             &tmp_fw.interface,
             .{ .enable_dedup = options.enable_dedup, .require_initial_header = true },
-            allocator,
             dedup,
         ) catch |err| switch (err) {
             error.HeaderTooLong,
             error.SequenceLineTooLong,
+            error.TooManySequences,
             error.NotFasta,
             error.NonUniformFai,
             error.FaiSpoolWriteFailed,
@@ -1659,15 +1685,22 @@ noinline fn runIndexLarge(
     source_names.replay_context = &catalog;
     source_names.replay_fn = StreamedCatalog.replayNames;
     const record_count = scanFastaReaderWithDedup(
+        allocator,
         &file_reader.interface,
         &read_buf,
         .{ .enable_dedup = options.enable_dedup, .require_initial_header = true, .collect_side_tables = true },
-        allocator,
         dedup,
         &catalog,
         StreamedCatalog.emit,
     ) catch |err| switch (err) {
-        error.HeaderTooLong, error.SequenceLineTooLong, error.NotFasta, error.SourceReadFailed, error.SourceChanged, error.OutOfMemory => return err,
+        error.HeaderTooLong,
+        error.SequenceLineTooLong,
+        error.TooManySequences,
+        error.NotFasta,
+        error.SourceReadFailed,
+        error.SourceChanged,
+        error.OutOfMemory,
+        => return err,
         else => return error.ProcessingFailed,
     };
     if (record_count == 0) return error.NoValidSequences;
@@ -1708,16 +1741,16 @@ const PackedNames = struct {
     };
     const Map = std.HashMap(Ref, void, Context, std.hash_map.default_max_load_percentage);
 
-    pub fn init(allocator: std.mem.Allocator) @This() {
+    fn init(allocator: std.mem.Allocator) @This() {
         return .{ .allocator = allocator, .map = Map.initContext(allocator, .{ .owner = undefined }) };
     }
 
-    pub fn ensureCapacity(self: *@This(), capacity: u32) !void {
+    fn ensureCapacity(self: *@This(), capacity: u32) !void {
         self.map.ctx.owner = self;
         try self.map.ensureTotalCapacity(capacity);
     }
 
-    pub fn deinit(self: *@This()) void {
+    fn deinit(self: *@This()) void {
         self.map.deinit();
         for (self.blocks.items) |block| self.allocator.free(block);
         self.blocks.deinit(self.allocator);
@@ -1728,7 +1761,7 @@ const PackedNames = struct {
         return self.blocks.items[ref.offset / BLOCK_BYTES][ref.offset % BLOCK_BYTES ..][0..ref.len];
     }
 
-    pub fn observeAt(self: *@This(), name: []const u8, source_offset: u64) !bool {
+    fn observeAt(self: *@This(), name: []const u8, source_offset: u64) !bool {
         _ = source_offset;
         self.map.ctx.owner = self;
         const entry = try self.map.getOrPutAdapted(name, Lookup{ .owner = self });
@@ -1782,7 +1815,7 @@ const SourceDedup = struct {
     replay_fn: ?*const fn (*anyopaque, *SourceDedup) anyerror!void = null,
     read_failed: bool = false,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, file: std.Io.File, size: u64) @This() {
+    fn init(allocator: std.mem.Allocator, io: std.Io, file: std.Io.File, size: u64) @This() {
         return .{
             .allocator = allocator,
             .io = io,
@@ -1791,7 +1824,7 @@ const SourceDedup = struct {
         };
     }
 
-    pub fn deinit(self: *@This()) void {
+    fn deinit(self: *@This()) void {
         switch (self.tables) {
             .narrow => |*set| set.deinit(),
             .wide => |*set| set.deinit(),
@@ -1802,12 +1835,12 @@ const SourceDedup = struct {
         self.hot_blocks.deinit(self.allocator);
     }
 
-    pub fn setChunk(self: *@This(), data: []const u8, offset: u64) void {
+    fn setChunk(self: *@This(), data: []const u8, offset: u64) void {
         self.chunk = data;
         self.chunk_offset = offset;
     }
 
-    pub fn observe(self: *@This(), name: []const u8, offset: u64) !bool {
+    fn observe(self: *@This(), name: []const u8, offset: u64) !bool {
         return switch (self.tables) {
             .narrow => |*set| if (offset >= Tables(u32).CACHE_FLAG)
                 error.SourceChanged
@@ -1897,14 +1930,14 @@ const SourceDedup = struct {
             std.mem.eql(u8, name[name.len - suffix ..], anchor[anchor.len - suffix ..]);
     }
 
-    pub fn retainAt(self: *@This(), ordinal: u32, name: []const u8) !void {
+    fn retainAt(self: *@This(), ordinal: u32, name: []const u8) !void {
         switch (self.tables) {
             .narrow => |*set| try set.retainAt(self, ordinal, name),
             .wide => |*set| try set.retainAt(self, ordinal, name),
         }
     }
 
-    pub fn uniqueCount(self: *const @This()) u32 {
+    fn uniqueCount(self: *const @This()) u32 {
         return switch (self.tables) {
             .narrow => |*set| set.count(),
             .wide => |*set| set.count(),
@@ -2127,6 +2160,10 @@ fn Tables(comptime Offset: type) type {
                     position = group + empty;
                     break;
                 }
+            }
+            if (self.len == std.math.maxInt(u32)) {
+                @branchHint(.cold);
+                return error.TooManySequences;
             }
             if ((@as(usize, self.len) + 1) * 5 > self.buckets.len * 4) {
                 try self.grow();
@@ -2556,6 +2593,82 @@ const StagedNames = struct {
     }
 };
 
+fn checkPackedNameAllocations(allocator: std.mem.Allocator) !void {
+    var names = PackedNames.init(allocator);
+    defer names.deinit();
+    try names.ensureCapacity(16);
+    var name = [_]u8{'A'} ** MAX_INDEX_NAME_LEN;
+    for (0..3) |i| {
+        name[0] = @intCast('A' + i);
+        try std.testing.expect(!try names.observeAt(&name, 0));
+    }
+    for (0..300) |i| {
+        var buffer: [32]u8 = undefined;
+        const short = try std.fmt.bufPrint(&buffer, "name-{d}", .{i});
+        try std.testing.expect(!try names.observeAt(short, 0));
+    }
+    for (0..3) |i| {
+        name[0] = @intCast('A' + i);
+        try std.testing.expect(try names.observeAt(&name, 0));
+    }
+}
+
+fn checkSourceNameAllocations(allocator: std.mem.Allocator, data: []const u8) !void {
+    // Every compared name is in this chunk, so no source-file read is needed.
+    var names = SourceDedup.init(allocator, std.testing.io, undefined, data.len);
+    defer names.deinit();
+    names.setChunk(data, 0);
+    for ([_]bool{ false, true }) |duplicate| {
+        var lines = std.mem.tokenizeScalar(u8, data, '\n');
+        while (lines.next()) |name| {
+            const offset = @intFromPtr(name.ptr) - @intFromPtr(data.ptr);
+            try std.testing.expectEqual(duplicate, try names.observe(name, offset));
+        }
+    }
+    try std.testing.expectEqual(@as(u32, 5000), names.uniqueCount());
+}
+
+fn checkStagedNameReplay(allocator: std.mem.Allocator, data: []const u8, compressed: bool) !void {
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const file = try temporary.dir.createFile(io, "source.fa", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, data, 0);
+    var names = SourceDedup.init(allocator, io, file, data.len);
+    defer names.deinit();
+    names.cache_full = true;
+    var adapter = SourceAdapter{ .source_names = &names };
+    const storage = CatalogBytes{ .allocator = allocator, .io = io, .environ = .empty };
+    var catalog = StreamedCatalog{ .io = io, .dir = temporary.dir, .path = "out.zfi", .names = .{ .raw = storage, .compressed = .{ .encoded = storage } }, .sides = storage };
+    defer catalog.deinit();
+    names.replay_context = &catalog;
+    names.replay_fn = StreamedCatalog.replayNames;
+    var reader = std.Io.Reader.fixed(data);
+    var read_buffer: [31]u8 = undefined;
+    const count = try scanFastaReaderWithDedup(
+        allocator,
+        &reader,
+        &read_buffer,
+        .{ .enable_dedup = true, .collect_side_tables = true },
+        @as(?*SourceAdapter, &adapter),
+        &catalog,
+        StreamedCatalog.emit,
+    );
+    try std.testing.expectEqual(@as(u32, 128), count);
+    try std.testing.expect(names.hydrated);
+    try std.testing.expectEqual(compressed, catalog.names.mode == .compressed);
+
+    names.setChunk(&.{}, 0);
+    try file.setLength(io, 0);
+    var lines = std.mem.splitScalar(u8, data, '\n');
+    while (lines.next()) |line| {
+        if (line.len != 0 and line[0] == '>') {
+            try std.testing.expect(try names.observe(line[1..], 0));
+        }
+    }
+}
+
 test "[property] - [stride scanner]: matches scalar structural boundaries" {
     const line_bases: u32 = 4;
     const line_count = 520;
@@ -2712,6 +2825,55 @@ test "[failure] - [FASTA scanner]: rejects sequence lines above u32 geometry" {
     try std.testing.expectError(error.SequenceLineTooLong, state.commitPendingLine(false));
 }
 
+test "[edge] - [index count]: rejects excess records before emitting" {
+    var state = ChunkParseState{ .allocator = std.testing.allocator };
+    defer state.name.deinit(std.testing.allocator);
+    defer state.side_table.deinit(std.testing.allocator);
+    try state.name.appendSlice(std.testing.allocator, "limit");
+    try state.recordSequenceLine(1, 2, true, 1, 7);
+    const Ctx = struct {
+        count: usize = 0,
+        fn emit(self: *@This(), _: FastaRecordEmit) !void {
+            self.count += 1;
+        }
+    };
+    var ctx = Ctx{};
+    var count: u32 = std.math.maxInt(u32) - 1;
+    try state.emitRecordIfReady(&ctx, null, Ctx.emit, &count);
+    try std.testing.expectEqual(std.math.maxInt(u32), count);
+    try std.testing.expectError(error.TooManySequences, state.emitRecordIfReady(&ctx, null, Ctx.emit, &count));
+    try std.testing.expectEqual(@as(usize, 1), ctx.count);
+    try std.testing.expectEqual(std.math.maxInt(u32), count);
+
+    var seen = NameDedup.init(std.testing.allocator);
+    defer seen.deinit();
+    try std.testing.expect(!try seen.observe("limit"));
+    try state.emitRecordIfReady(&ctx, @as(?*NameDedup, &seen), Ctx.emit, &count);
+    state.line_builder = .{};
+    try state.emitRecordIfReady(&ctx, null, Ctx.emit, &count);
+    try std.testing.expectEqual(@as(usize, 1), ctx.count);
+    try std.testing.expectEqual(std.math.maxInt(u32), count);
+}
+
+test "[edge] - [index count]: full source tables retain duplicate lookups" {
+    inline for (.{ u32, u64 }) |Offset| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var source = SourceDedup.init(failing.allocator(), std.testing.io, undefined, if (Offset == u32) 0 else std.math.maxInt(u32));
+        defer source.deinit();
+        source.cache_full = true;
+        source.setChunk("alpha\nbeta\n", 0);
+        const set = if (Offset == u32) &source.tables.narrow else &source.tables.wide;
+        try std.testing.expect(!try set.observeWithFingerprint(&source, "alpha", 0, 0));
+        set.len = std.math.maxInt(u32);
+        // Reject any attempted growth without allocating storage for the logical count.
+        failing.fail_index = failing.alloc_index;
+        try std.testing.expect(try set.observeWithFingerprint(&source, "alpha", 0, 0));
+        try std.testing.expectError(error.TooManySequences, set.observeWithFingerprint(&source, "beta", 6, 0));
+        try std.testing.expect(!failing.has_induced_failure);
+        try std.testing.expectEqual(std.math.maxInt(u32), set.len);
+    }
+}
+
 test "[property] - [name deduplication]: remains exact under hash collisions" {
     const CollisionContext = struct {
         pub fn hash(_: @This(), _: []const u8) u64 {
@@ -2811,7 +2973,7 @@ test "[integration] - [source identity]: detects path replacement" {
     try std.testing.expect(!try sourcePathUnchanged(std.testing.io, tmp.dir, "source.fa", before));
 }
 
-test "source references compare complete names under fingerprint collisions" {
+test "[property] - [source names]: complete names resolve fingerprint collisions" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     const io = std.testing.io;
@@ -2833,7 +2995,7 @@ test "source references compare complete names under fingerprint collisions" {
     try std.testing.expect(!try set.observeWithFingerprint(&source, long, 0, 0));
 }
 
-test "source references compare names in the current input chunk" {
+test "[unit] - [source names]: exact comparisons use the current input chunk" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     const io = std.testing.io;
@@ -2850,7 +3012,7 @@ test "source references compare names in the current input chunk" {
     try std.testing.expect(try set.observeWithFingerprint(&source, "alpha", 20, 0));
 }
 
-test "source references retain offsets above four GiB" {
+test "[edge] - [source names]: retain offsets above four GiB" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     const io = std.testing.io;
@@ -2858,17 +3020,19 @@ test "source references retain offsets above four GiB" {
     defer file.close(io);
     const offset: u64 = @as(u64, std.math.maxInt(u32)) + 64;
     const data = "alpha\nalphabet\nbeta\nalpha\n";
-    try file.writePositionalAll(io, data, offset);
     var source = SourceDedup.init(std.testing.allocator, io, file, offset + data.len);
     defer source.deinit();
     source.cache_full = true;
+    source.setChunk(data, offset);
     const set = &source.tables.wide;
     try std.testing.expect(!try set.observeWithFingerprint(&source, "alpha", offset, 0));
     try std.testing.expect(!try set.observeWithFingerprint(&source, "alphabet", offset + 6, 0));
     try std.testing.expect(try set.observeWithFingerprint(&source, "alpha", offset + 20, 0));
+    try std.testing.expectEqual(offset, set.keyAt(0).offset);
+    try std.testing.expectEqual(@as(u64, 0), (try file.stat(io)).size);
 }
 
-test "cached source references compare complete names under fingerprint collisions" {
+test "[property] - [source names]: cached names resolve fingerprint collisions" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     const io = std.testing.io;
@@ -2885,7 +3049,7 @@ test "cached source references compare complete names under fingerprint collisio
     try std.testing.expect(try set.observeWithFingerprint(&source, "alpha", 20, 0));
 }
 
-test "source comparison reports read errors and cleans the unfinished insertion" {
+test "[failure] - [source names]: read errors leave the insertion unfinished" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     const io = std.testing.io;
@@ -2904,13 +3068,15 @@ test "source comparison reports read errors and cleans the unfinished insertion"
 
 test "[property] - [portable scanner]: whitespace counts match scalar counts" {
     var data: [12289]u8 = undefined;
-    for (&data, 0..) |*byte, i| byte.* = @truncate(i * 17 + i / 31);
     const lengths = [_]usize{ 0, 15, 16, 31, 32, 127, 128, 2047, 2048, 2049, 4095, 4096, 4097, 8191, 8192, 8193, data.len };
-    for (lengths) |len| {
-        var expected: usize = 0;
-        for (data[0..len]) |byte| expected += @intFromBool(byte <= ' ');
-        inline for (.{ 1, 8, 16, 32 }) |width| {
-            try std.testing.expectEqual(expected, countWhitespace(width, data[0..len]));
+    for ([_]?u8{ null, ' ', 'X' }) |fill| {
+        for (&data, 0..) |*byte, i| byte.* = fill orelse @as(u8, @truncate(i * 17 + i / 31));
+        for (lengths) |len| {
+            var expected: usize = 0;
+            for (data[0..len]) |byte| expected += @intFromBool(byte <= ' ');
+            inline for (.{ 1, 8, 16, 32, 64 }) |width| {
+                try std.testing.expectEqual(expected, countWhitespace(width, data[0..len]));
+            }
         }
     }
 }
@@ -2928,43 +3094,8 @@ test "[property] - [portable scanner]: name delimiters match scalar scanning" {
     }
 }
 
-fn checkPackedNameAllocations(allocator: std.mem.Allocator) !void {
-    var names = PackedNames.init(allocator);
-    defer names.deinit();
-    try names.ensureCapacity(16);
-    var name = [_]u8{'A'} ** MAX_INDEX_NAME_LEN;
-    for (0..3) |i| {
-        name[0] = @intCast('A' + i);
-        try std.testing.expect(!try names.observeAt(&name, 0));
-    }
-    for (0..300) |i| {
-        var buffer: [32]u8 = undefined;
-        const short = try std.fmt.bufPrint(&buffer, "name-{d}", .{i});
-        try std.testing.expect(!try names.observeAt(short, 0));
-    }
-    for (0..3) |i| {
-        name[0] = @intCast('A' + i);
-        try std.testing.expect(try names.observeAt(&name, 0));
-    }
-}
-
 test "[failure] - [packed names]: block growth cleans every allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, checkPackedNameAllocations, .{});
-}
-
-fn checkSourceNameAllocations(allocator: std.mem.Allocator, data: []const u8) !void {
-    // Every compared name is in this chunk, so no source-file read is needed.
-    var names = SourceDedup.init(allocator, std.testing.io, undefined, data.len);
-    defer names.deinit();
-    names.setChunk(data, 0);
-    for ([_]bool{ false, true }) |duplicate| {
-        var lines = std.mem.tokenizeScalar(u8, data, '\n');
-        while (lines.next()) |name| {
-            const offset = @intFromPtr(name.ptr) - @intFromPtr(data.ptr);
-            try std.testing.expectEqual(duplicate, try names.observe(name, offset));
-        }
-    }
-    try std.testing.expectEqual(@as(u32, 5000), names.uniqueCount());
 }
 
 test "[failure] - [source names]: table and entry growth clean every allocation failure" {
@@ -3048,42 +3179,7 @@ test "[integration] - [catalog staging]: spill replay preserves bytes and remove
     try std.testing.expectError(error.FileNotFound, spool_dir.?.statFile(io, spool_name[0..spool_name_len], .{}));
 }
 
-fn checkStreamedCatalog(data: []const u8, enable_dedup: bool, compressed: bool) !void {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
-    var temporary = std.testing.tmpDir(.{});
-    defer temporary.cleanup();
-    const file = try temporary.dir.createFile(io, "source.fa", .{ .read = true });
-    defer file.close(io);
-    try file.writePositionalAll(io, data, 0);
-    var expected_index = try scanZfiData(data, enable_dedup, allocator);
-    defer expected_index.deinit(allocator);
-    const expected = try zfiIndexToBytes(&expected_index, data.len, 0, allocator);
-    defer allocator.free(expected);
-    var names = SourceDedup.init(allocator, io, file, data.len);
-    defer names.deinit();
-    names.cache_full = true;
-    var adapter = SourceAdapter{ .source_names = &names };
-    const storage = CatalogBytes{ .allocator = allocator, .io = io, .environ = .empty };
-    var catalog = StreamedCatalog{ .io = io, .dir = temporary.dir, .path = "out.zfi", .names = .{ .raw = storage, .compressed = .{ .encoded = storage } }, .sides = storage };
-    defer catalog.deinit();
-    names.replay_context = &catalog;
-    names.replay_fn = StreamedCatalog.replayNames;
-    var reader = std.Io.Reader.fixed(data);
-    var read_buffer: [31]u8 = undefined;
-    const dedup: ?*SourceAdapter = if (enable_dedup) &adapter else null;
-    const count = try scanFastaReaderWithDedup(&reader, &read_buffer, .{ .enable_dedup = enable_dedup, .collect_side_tables = true }, allocator, dedup, &catalog, StreamedCatalog.emit);
-    try std.testing.expectEqual(expected_index.records.items.len, count);
-    if (enable_dedup) try std.testing.expect(names.hydrated);
-    try std.testing.expectEqual(compressed, catalog.names.mode == .compressed);
-    try catalog.finish(count, data.len, 0);
-    try catalog.atomic_file.?.replace(io);
-    const actual = try temporary.dir.readFileAlloc(io, "out.zfi", allocator, .limited(expected.len + 1));
-    defer allocator.free(actual);
-    try std.testing.expectEqualSlices(u8, expected, actual);
-}
-
-test "[integration] - [streamed ZFI]: raw and compressed replay preserve frozen bytes" {
+test "[property] - [source names]: raw and compressed replay retain exact names" {
     const allocator = std.testing.allocator;
     for ([_]bool{ false, true }) |compressed| {
         var data: std.ArrayList(u8) = .empty;
@@ -3099,11 +3195,11 @@ test "[integration] - [streamed ZFI]: raw and compressed replay preserve frozen 
                 try data.appendSlice(allocator, if (i % 2 == 0) "ACGT\nAC\n" else "ACGT\nAC\nTTTT\n");
             }
         }
-        for ([_]bool{ true, false }) |enable_dedup| try checkStreamedCatalog(data.items, enable_dedup, compressed);
+        try std.testing.checkAllAllocationFailures(allocator, checkStagedNameReplay, .{ data.items, compressed });
     }
 }
 
-test "[failure] - [streamed ZFI]: late parse errors preserve the prior index and clean temporary output" {
+test "[failure] - [streamed ZFI]: parse errors precede record write failures" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var data: std.ArrayList(u8) = .empty;
@@ -3112,35 +3208,30 @@ test "[failure] - [streamed ZFI]: late parse errors preserve the prior index and
     try data.append(allocator, '>');
     try data.appendNTimes(allocator, 'A', MAX_INDEX_NAME_LEN + 1);
     try data.appendSlice(allocator, "\nACGT\n");
-    for ([_][]const u8{ "out.zfi", "missing/out.zfi" }) |path| {
-        var temporary = std.testing.tmpDir(.{ .iterate = true });
-        defer temporary.cleanup();
-        {
-            const previous = try temporary.dir.createFile(io, "out.zfi", .{});
-            defer previous.close(io);
-            try previous.writePositionalAll(io, "previous index", 0);
-        }
-        {
-            const storage = CatalogBytes{ .allocator = allocator, .io = io, .environ = .empty };
-            var catalog = StreamedCatalog{ .io = io, .dir = temporary.dir, .path = path, .names = .{ .raw = storage, .compressed = .{ .encoded = storage } }, .sides = storage };
-            defer catalog.deinit();
-            var reader = std.Io.Reader.fixed(data.items);
-            var buffer: [8192]u8 = undefined;
-            try std.testing.expectError(error.HeaderTooLong, scanFastaReader(&reader, &buffer, .{ .enable_dedup = false }, allocator, null, &catalog, StreamedCatalog.emit));
-            if (std.mem.startsWith(u8, path, "missing")) {
-                try std.testing.expect(catalog.write_failed);
-                try std.testing.expectError(error.ZfiWriteFailed, catalog.finish(2000, data.items.len, 0));
-            } else {
-                try std.testing.expect(catalog.atomic_file != null);
-            }
-        }
-        const previous = try temporary.dir.readFileAlloc(io, "out.zfi", allocator, .limited(100));
-        defer allocator.free(previous);
-        try std.testing.expectEqualStrings("previous index", previous);
-        var entries = temporary.dir.iterate();
-        try std.testing.expectEqualStrings("out.zfi", (try entries.next(io)).?.name);
-        try std.testing.expectEqual(null, try entries.next(io));
-    }
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const storage = CatalogBytes{ .allocator = allocator, .io = io, .environ = .empty };
+    var catalog = StreamedCatalog{
+        .io = io,
+        .dir = temporary.dir,
+        .path = "missing/out.zfi",
+        .names = .{ .raw = storage, .compressed = .{ .encoded = storage } },
+        .sides = storage,
+    };
+    defer catalog.deinit();
+    var reader = std.Io.Reader.fixed(data.items);
+    var buffer: [8192]u8 = undefined;
+    try std.testing.expectError(error.HeaderTooLong, scanFastaReader(
+        &reader,
+        &buffer,
+        .{ .enable_dedup = false },
+        allocator,
+        null,
+        &catalog,
+        StreamedCatalog.emit,
+    ));
+    try std.testing.expect(catalog.write_failed);
+    try std.testing.expectError(error.ZfiWriteFailed, catalog.finish(2000, data.items.len, 0));
 }
 
 test "[failure] - [source names]: source offsets cannot overlap cache flags" {
