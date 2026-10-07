@@ -39,6 +39,8 @@ Each suite has one entrypoint: `bash bench/<index|get|stats>/run.sh`. It runs co
 
 The benchmark scripts resolve commands from `tools/bin/` by default. Set `SAMTOOLS`, `BEDTOOLS`, `SEQKIT`, or another tool variable when you intentionally want to compare a different executable. `bench/shared/install_tools.sh` only verifies the local bundle and pinned versions; it does not silently fall back to a command found elsewhere on `PATH`.
 
+The v0.3.4 refresh uses Zig 0.16.0 and zebrac 0.6.2 from `PATH`, with `ZEBRAC="$(command -v zebrac)"` passed to each suite. Index, GET, and stats run in that order without overlapping measurements. Each main section uses five measured samples, three warmups, and a 5,000 ms budget per command. Messy sections retain their separately documented sampling settings.
+
 The common skips are `--skip-tests` (`--skip-verify`), `--skip-benchmarks` (`--skip-perf`), `--skip-report`, and `--skip-messy`. The last one skips messy performance work only. It does not skip messy correctness cases.
 
 ## How the tools are built
@@ -65,7 +67,7 @@ These are the executable files currently used by this checkout on Linux x86_64. 
 
 | command     | version or implementation                   |                      file size |
 | ----------- | ------------------------------------------- | -----------------------------: |
-| `z-fasta`   | 0.3.3, Zig `ReleaseFast`, stripped          |        490,056 bytes (479 KiB) |
+| `z-fasta`   | 0.3.4, Zig `ReleaseFast`, stripped          |        550,184 bytes (537 KiB) |
 | `noodles`   | noodles-fasta 0.66.0 wrapper                |        449,712 bytes (439 KiB) |
 | `rustbio`   | rust-bio 4.0.1 wrapper                      |        492,712 bytes (481 KiB) |
 | `samtools`  | 1.24 with HTSlib 1.24                       |        869,232 bytes (849 KiB) |
@@ -88,6 +90,27 @@ Helpers live in `bench/shared/` (`tools.sh`, `zebrac_runner.sh`, `runner_common.
 
 GET messy performance is heavy. Use the skip flags while iterating, then run the full suites before a release tag.
 
+## v0.3.4 measurements
+
+The refresh compares matched z-fasta commands with the previously published runs. A wall-time increase is flagged when it exceeds both 10% and 1 ms; an RSS increase is flagged when it exceeds both 10% and 1 MiB. The August and October measurements are separate sessions, so their differences do not isolate code changes.
+
+The checks cover 30 index, 118 GET, and 28 stats measurements for z-fasta. Index and stats have no threshold crossings. No RSS increase crosses the threshold in any suite; the eight historical GET wall-time flags are discussed below. Smaller increases remain in the reports, including proteome stats at 12.9 ms through `.zfi` versus 12.2 ms previously.
+
+The largest transcriptome memory reductions appear in indexing ([#13](https://github.com/eneskemalergin/z-fasta/issues/13)) and seekable BED lookup ([#14](https://github.com/eneskemalergin/z-fasta/issues/14)):
+
+| Transcriptome operation | Previous wall (ms) | v0.3.4 wall (ms) | Previous RSS (MiB) | v0.3.4 RSS (MiB) |
+| --- | ---: | ---: | ---: | ---: |
+| Index `.fai`, dedup | 217.1 | 138.0 | 37.90 | 5.83 |
+| Index `.zfi`, dedup | 188.2 | 151.9 | 43.50 | 5.87 |
+| GET `.zfi`, 10,000 BED rows | 44.6 | 36.6 | 49.47 | 5.56 |
+| GET `.fai`, 10,000 BED rows | 75.0 | 51.0 | 54.77 | 5.51 |
+
+Index remains faster than every reported peer on all three real datasets. It remains fastest at every measured sequence-count point, while noodles is faster at the 1 MiB file-size point. Deduplication's largest measured RSS cost drops from 11.17x to 1.73x. Rust-bio still uses less RSS for transcriptome FAI indexing (3.38 MiB versus 5.83 MiB).
+
+The GET comparison flags eight historical transcriptome `.zfi` timing cells, representing seven distinct commands. A same-host comparison of `main` at `389f041` and the merged source at `1a2f7f1`, both rebuilt with ReleaseFast and stripping, stays below both thresholds. Its largest time increase is 0.146 ms (2.46%), and its largest RSS increase is 0.25 MiB. The [GET report](get/REPORT.md#run-provenance) retains the historical timings and the full control table. The small-region `.zfi` path still favors speed over `.fai` memory use on transcriptome; the batch lookup savings do not apply to positional GET or stdin/FIFO requests.
+
+For complete genome stats, rust-bio now finishes ahead of noodles: 7.452 s versus 10.012 s, compared with 6.957 s versus 6.289 s previously. Z-fasta remains close to its previous times at 2.685 s through `.zfi` and 2.687 s through `.fai`. This change in peer order comes from the measured peer commands; it is not a z-fasta slowdown.
+
 ---
 
 ## High-level benchmark summary figures
@@ -95,6 +118,8 @@ GET messy performance is heavy. Use the skip flags while iterating, then run the
 The individual reports above are the source for methods, correctness checks, commands, uncertainty, and the larger benchmark sections. I still wanted a smaller set of figures that gives me a useful overview before I open those reports. A single chart was not enough: absolute measurements, relative differences, and speed-memory tradeoffs answer different questions and can contradict each other in important ways.
 
 These three views therefore use the same selected index, GET, and stats runs but organize them differently. Every view keeps wall time beside peak RSS, covers the same human genome, transcriptome, and proteome inputs, and identifies partial or reference work instead of quietly ranking it as equivalent. They are not three independent benchmark claims and they are not a combined winner score.
+
+The selected v0.3.4 runs are index `20261007_084027`, GET `20261007_091005`, and stats `20261007_092810`. Summary RSS uses decimal MB (1,000,000 bytes); the individual reports use MiB (1,048,576 bytes). GET summaries select a single 1 kbp positional request. The seekable BED and names changes in [#14](https://github.com/eneskemalergin/z-fasta/issues/14) affect batch lookup; their measurements are in the [GET report](get/REPORT.md#performance-bed-batch).
 
 GitHub selects the dark or light SVG to match the reader's color scheme.
 
@@ -132,7 +157,7 @@ Normalization makes the size of a difference easy to scan across workloads with 
 
 ### Ranking ribbons
 
-The ribbons show whether a tool's position changes between speed and memory. Complete lanes are ranked independently for wall time and peak RSS within each task and dataset, then connected across the two rankings. Rank `1` is the best complete lane for that metric, and each label retains both the absolute value and the multiple over the best complete result.
+The ribbons show whether a tool's position changes between speed and memory. Complete lanes are ranked independently for wall time and peak RSS within each task and dataset, then connected across the two rankings. Rank `1` is the best complete lane for that metric, and each label retains both the absolute value and the multiple over the best complete result. Exact ties share a rank; their labels are separated vertically for readability.
 
 I find this useful when a tool is fast but memory-heavy, or memory-flat but slower, because that tradeoff is visible as a crossing ribbon instead of being flattened into one score. Partial and reference lanes are displayed for context but remain outside the complete ranking.
 

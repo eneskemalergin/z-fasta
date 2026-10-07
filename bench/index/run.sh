@@ -151,7 +151,7 @@ ensure_scaling() {
 
 prepare_benchmark_binary() {
     echo "Building ReleaseFast benchmark subject..."
-    (cd "$PROJECT_ROOT" && zig build -Doptimize=ReleaseFast)
+    (cd "$PROJECT_ROOT" && zig build -Doptimize=ReleaseFast -Dstrip=true)
 }
 
 require_real_datasets() {
