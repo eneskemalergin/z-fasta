@@ -14,8 +14,8 @@ The `.zfi` file format, `.fai` rows, and first-occurrence duplicate policy are u
 
 ### Changed
 
-- Indexing uses a 256 KiB read buffer and portable Zig vectors for identifier and sequence scanning.
-- Large inputs use compact exact-name references, stream `.zfi` records, and spill name and side-table staging to temporary files. Small inputs retain their in-memory catalogs.
+- **Index memory (fixes [#13](https://github.com/eneskemalergin/z-fasta/issues/13)).** Indexing uses a 256 KiB read buffer and portable Zig vectors for identifier and sequence scanning. Large inputs use compact exact-name references, stream `.zfi` records, and spill name and side-table staging to temporary files. Small inputs retain their in-memory catalogs.
+- **GET lookup memory (fixes [#14](https://github.com/eneskemalergin/z-fasta/issues/14)).** Seekable BED and names files retain only requested index records, names, and required non-uniform side tables while validating the complete `.zfi` or `.fai` sidecar. Stdin and named FIFOs keep full index loading. Request order, repeated output, first-duplicate selection, and diagnostic order stay the same.
 - Build and contributor documentation now requires stable Zig 0.16.0 from `PATH`; obsolete repository wrapper references have been removed from current guidance, benchmark runners, and diagnostics.
 - Landing-page, Wiki, and benchmark documentation now matches the selected 2026-08-18 reports, the current four-platform release matrix, automatic Wiki publication, and the installed stripped benchmark bundle.
 - Benchmark shell paths now prevent retained peer core images, and GET correctness builds fresh private sidecars instead of trusting tracked index mtimes.
