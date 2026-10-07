@@ -8,18 +8,21 @@ All notable changes to z-fasta will be documented in this file.
 
 Planned to improve `validate` module, possibly work on scan based alternatives for get, stats, and other options (bypass indexing or using indexed files etc.)
 
+## [0.3.4]
+
+The `.zfi` file format, `.fai` rows, and first-occurrence duplicate policy are unchanged. **Re-index not required.**
+
 ### Changed
 
 - Indexing uses a 256 KiB read buffer and portable Zig vectors for identifier and sequence scanning.
-- Large inputs use compact exact-name references, stream `.zfi` records, and spill name and side-table staging to temporary files. Small inputs retain their in-memory catalogs. The `.zfi` format and first-occurrence duplicate policy stay the same.
-
-## [0.3.4] - 2026-08-23?
-
-### Changed
-
+- Large inputs use compact exact-name references, stream `.zfi` records, and spill name and side-table staging to temporary files. Small inputs retain their in-memory catalogs.
 - Build and contributor documentation now requires stable Zig 0.16.0 from `PATH`; obsolete repository wrapper references have been removed from current guidance, benchmark runners, and diagnostics.
 - Landing-page, Wiki, and benchmark documentation now matches the selected 2026-08-18 reports, the current four-platform release matrix, automatic Wiki publication, and the installed stripped benchmark bundle.
 - Benchmark shell paths now prevent retained peer core images, and GET correctness builds fresh private sidecars instead of trusting tracked index mtimes.
+
+### Fixed
+
+- Indexing rejects more than 4294967295 retained records before emitting the excess record or overflowing the sequence count.
 
 ## [0.3.3] - 2026-08-18
 

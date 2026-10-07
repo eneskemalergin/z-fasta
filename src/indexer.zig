@@ -2241,19 +2241,6 @@ const CatalogBytes = struct {
         self.buffered = 0;
     }
 
-    fn read(self: *@This(), destination: []u8, offset: u64) !usize {
-        if (offset > self.len) return error.ReadFailed;
-        const n: usize = @intCast(@min(destination.len, self.len - offset));
-        if (self.spool) |spool| {
-            const actual = try spool.file.readPositionalAll(self.io, destination[0..n], offset);
-            if (actual != n) return error.ReadFailed;
-        } else {
-            const start: usize = @intCast(offset);
-            @memcpy(destination[0..n], self.bytes.items[start..][0..n]);
-        }
-        return n;
-    }
-
     fn copyTo(self: *@This(), writer: *std.Io.Writer) !void {
         try self.flush();
         if (self.spool == null) {
@@ -2263,7 +2250,9 @@ const CatalogBytes = struct {
         var offset: u64 = 0;
         var buffer: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
         while (offset < self.len) {
-            const n = try self.read(&buffer, offset);
+            const wanted: usize = @intCast(@min(buffer.len, self.len - offset));
+            const n = try self.spool.?.file.readPositionalAll(self.io, buffer[0..wanted], offset);
+            if (n != wanted) return error.ReadFailed;
             try writer.writeAll(buffer[0..n]);
             offset += n;
         }
@@ -2277,7 +2266,6 @@ const CompressedNames = struct {
     anchor_len: usize = 0,
     block_bytes: usize = 0,
     count: u32 = 0,
-    raw_len: u64 = 0,
 
     fn deinit(self: *@This()) void {
         self.encoded.deinit();
@@ -2306,7 +2294,6 @@ const CompressedNames = struct {
         try self.encoded.append(&header);
         try self.encoded.append(middle);
         self.block_bytes += 6 + middle.len;
-        self.raw_len += name.len;
         self.count += 1;
     }
 
