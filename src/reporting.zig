@@ -324,7 +324,6 @@ fn sourcePrefix(failure: *const diagnostics.Failure, id: diagnostics.SourceId, b
     };
     var count: usize = @min(bytes.len, buffer.len);
     @memcpy(buffer[0..count], bytes[0..count]);
-    // A suffix on an incomplete base would no longer be a true source prefix.
     if (!lower_bound and count == original) {
         const appended = @min(suffix.len, buffer.len - count);
         @memcpy(buffer[count..][0..appended], suffix[0..appended]);

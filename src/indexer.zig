@@ -26,9 +26,7 @@ pub const INDEX_READ_BUFFER_SIZE = 256 * 1024;
 const FILE_IO_BUF_SIZE = 8 * 1024;
 const INDEX_OUTPUT_BUFFER_SIZE = 64 * 1024;
 const INDEX_PATH_BUFFER_SIZE = std.Io.Dir.max_path_bytes;
-// Small CLI inputs retain their catalogs; larger inputs stream records and stage names.
 const SMALL_INDEX_MAX_BYTES = 32 * 1024 * 1024;
-// Catalogs start modestly and grow with records or names, never sequence payload bytes.
 const ZFI_INITIAL_RECORD_CAPACITY = 4096;
 const DEDUP_INITIAL_CAPACITY: u32 = 16384;
 const FAI_SPOOL_NAME_BUFFER_SIZE = 64;
@@ -135,7 +133,6 @@ const Diagnostics = struct {
     }
 };
 
-// Offset into a name blob for `.zfi` catalog dedup (one store for map and output).
 const NameBlobRef = struct { offset: u32, len: u32 };
 
 fn NameDedupWith(comptime Context: type) type {
@@ -143,10 +140,8 @@ fn NameDedupWith(comptime Context: type) type {
         diag: Diagnostics = .{},
         map: std.HashMap([]const u8, void, Context, std.hash_map.default_max_load_percentage),
         key_arena: ?std.heap.ArenaAllocator = null,
-        // When set, `.zfi` dedup stores `NameBlobRef` keys into this blob (not `map`).
         name_blob: ?*std.ArrayList(u8) = null,
         ref_map: ?BlobRefMap = null,
-        // After a successful first-seen `observe` in blob mode, the embedded span.
         last_offset: u32 = 0,
         last_len: u16 = 0,
 
@@ -198,7 +193,6 @@ fn NameDedupWith(comptime Context: type) type {
             return self.observe(name);
         }
 
-        // `.zfi`: one catalog in `blob` for both dedup and embedded names.
         fn initOwningBlob(allocator: std.mem.Allocator, blob: *std.ArrayList(u8)) Self {
             return .{
                 .map = std.HashMap([]const u8, void, Context, std.hash_map.default_max_load_percentage).init(allocator),
@@ -225,7 +219,6 @@ fn NameDedupWith(comptime Context: type) type {
                 rm.deinit();
                 self.ref_map = null;
             }
-            // Map entries borrow arena memory; free the table first, then the arena.
             self.map.deinit();
             if (self.key_arena) |*arena| arena.deinit();
             self.key_arena = null;
@@ -259,7 +252,6 @@ fn NameDedupWith(comptime Context: type) type {
             const arena = &(self.key_arena orelse unreachable);
             const gop = self.map.getOrPut(name) catch return self.diag.oom(.dedup_table, null);
             if (gop.found_existing) return true;
-            // Replace the temporary lookup key with an arena-owned copy (stable until deinit).
             const owned = arena.allocator().dupe(u8, name) catch {
                 _ = self.map.remove(name);
                 return self.diag.oom(.names, name.len);
@@ -310,8 +302,6 @@ const LineMetrics = struct {
     line_bytes: u32 = 0,
     is_uniform_width: bool = true,
     line_count: u64 = 0,
-    // First base line: every content byte was a base (no trailing space/tab) and the
-    // on-wire separator was LF or CRLF. Needed so `AAAA \\n` is not treated as CRLF-dense.
     first_content_dense: bool = false,
 };
 
@@ -359,8 +349,6 @@ fn lineSliceHasWhitespace(data: []const u8, start: usize, end: usize) bool {
     return false;
 }
 
-// Bases in one sequence line's content slice (no trailing `\n`/`\r`).
-// Dense lines use length only; other lines fall back to `countBases`.
 fn countBasesInLineSlice(data: []const u8, start: usize, end: usize) u32 {
     if (start >= end) return 0;
     if (!lineSliceHasWhitespace(data, start, end)) {
@@ -372,8 +360,6 @@ fn countBasesInLineSlice(data: []const u8, start: usize, end: usize) u32 {
 fn firstLineIsDense(line_bases: u32, line_bytes: u32) bool {
     if (line_bases == 0 or line_bytes <= line_bases) return false;
     const sep_len = line_bytes - line_bases;
-    // Count-only check: callers that saw the bytes must also require content density
-    // (`LineMetrics.first_content_dense`) so space+LF is not mistaken for CRLF.
     return (sep_len == 1 or sep_len == 2) and line_bases + sep_len == line_bytes;
 }
 
@@ -486,7 +472,6 @@ fn validatedStrideRun(
     return accepted_lines;
 }
 
-// Portable vector operations; the compiler chooses instructions for the target.
 fn findNameDelimiter(data: []const u8, start: usize) usize {
     const width = 16;
     const Vec = @Vector(width, u8);
@@ -522,14 +507,10 @@ const LineMetricsBuilder = struct {
     pending_actual_bytes: u32 = 0,
     pending_content_len: u32 = 0,
     have_pending: bool = false,
-    // Blank seen after at least one base line; applied only when another base line follows.
-    // Trailing blanks before EOF or the next header do not change record geometry.
     blank_after_bases: bool = false,
 
     fn ingestLine(self: *LineMetricsBuilder, bases: u32, actual_bytes: u32, has_lf: bool, content_len: u32) void {
         if (bases == 0) {
-            // Leading blanks are ignored. Trailing blanks remain pending until a later base
-            // line proves that they were interior.
             if (self.metrics.line_count > 0) {
                 self.blank_after_bases = true;
             }
@@ -552,11 +533,9 @@ const LineMetricsBuilder = struct {
             self.first_content_len = content_len;
             self.metrics.line_bases = bases;
             self.metrics.line_bytes = if (has_lf) actual_bytes else actual_bytes + 1;
-            // Dense FAI geometry: content is all bases; trailing bytes are only LF or CRLF.
             const sep_len = if (has_lf) actual_bytes -| content_len else @as(u32, 1);
             self.metrics.first_content_dense = bases == content_len and (sep_len == 1 or sep_len == 2);
         } else if (self.have_pending) {
-            // Interior full wraps must match on-wire bytes. LF vs CRLF is a real break.
             if (self.pending_bases != self.metrics.line_bases or
                 self.pending_actual_bytes != self.first_actual_bytes)
             {
@@ -572,11 +551,8 @@ const LineMetricsBuilder = struct {
     }
 
     fn finish(self: *LineMetricsBuilder) LineMetrics {
-        // Trailing blanks do not break uniformity.
         self.blank_after_bases = false;
         if (self.metrics.line_count > 1 and self.have_pending) {
-            // CRLF vs LF on the final wrap does not break uniformity when content width
-            // does not grow.
             if (self.pending_bases > self.metrics.line_bases or
                 self.pending_content_len > self.first_content_len)
             {
@@ -649,7 +625,6 @@ fn scanZfiReaderWithOptions(
         .name_blob = .empty,
     };
     errdefer index.deinit(allocator);
-    // Bounds fixed catalog startup cost; larger catalogs grow geometrically.
     const diag = Diagnostics{ .failure = options.failure };
     try checkReadBufferSize(read_buf.len, options.failure);
     index.records.ensureTotalCapacity(allocator, ZFI_INITIAL_RECORD_CAPACITY) catch return diag.oom(.records, ZFI_INITIAL_RECORD_CAPACITY * @sizeOf(IndexRecord));
@@ -674,7 +649,6 @@ fn scanZfiReaderWithOptions(
     };
 
     var ctx = Ctx{ .index = &index, .allocator = allocator, .diag = diag };
-    // One catalog avoids a second copy of embedded names.
     var blob_dedup: ?NameDedup = null;
     defer if (blob_dedup) |*seen| seen.deinit();
     if (options.enable_dedup) {
@@ -712,8 +686,6 @@ pub fn scanZfiData(
     return scanZfiReader(allocator, &r, &read_buf, enable_dedup);
 }
 
-// Collected and streamed catalogs use the same frozen section order.
-// Callers prove the record count fits u32 before allocating or opening output.
 fn writeZfiIndex(
     writer: *std.Io.Writer,
     index: *const ZfiIndex,
@@ -729,8 +701,6 @@ fn writeZfiIndex(
     try writer.writeAll(std.mem.sliceAsBytes(index.records.items));
     try writer.writeAll(index.side_tables.items);
     try writer.writeAll(index.name_blob.items);
-    // Identity before the name footer so legacy loaders that seek `ZFNM` at EOF still
-    // find the footer; they ignore the orphan `ZFID` gap between blob and footer.
     try writer.writeAll(&index_format.encodeZfiSourceId(source_mtime_ns));
     try writer.writeAll(&index_format.encodeZfiNameFooter(index.name_blob.items.len));
 }
@@ -800,7 +770,6 @@ const ChunkParseState = struct {
     in_pending_line: bool = false,
     pending_line_bases: u32 = 0,
     pending_line_bytes: u32 = 0,
-    // Pre-LF byte count. The LF is counted when the line commits.
     pending_pre_lf_bytes: u32 = 0,
     pending_pre_lf_ends_with_cr: bool = false,
     pending_line_file_offset: u64 = 0,
@@ -812,8 +781,6 @@ const ChunkParseState = struct {
         actual_bytes: u32,
         line_file_offset: u64,
     } = null,
-    // A short final line remains FAI-uniform. Side-table rows stay deferred until a later
-    // base line proves the short line was interior.
     deferred_short_tail: ?struct {
         bases: u32,
         actual_bytes: u32,
@@ -833,7 +800,6 @@ const ChunkParseState = struct {
         self.side_table.appendSlice(self.allocator, std.mem.asBytes(&line_count)) catch return self.recordDiagnostics().oom(.side_tables, @sizeOf(u64));
     }
 
-    // Materialize uniform stride rows only after the record proves non-uniform.
     fn activateSideTable(self: *ChunkParseState, lines_to_materialize: u64) !void {
         if (self.side_table_active) return;
         self.side_table_active = true;
@@ -893,7 +859,6 @@ const ChunkParseState = struct {
         self.side_base_start += bases;
     }
 
-    // Flush a deferred short tail once the current line proves it was interior.
     fn flushDeferredShortTailThen(
         self: *ChunkParseState,
         metrics_line_count: u64,
@@ -903,7 +868,6 @@ const ChunkParseState = struct {
     ) !void {
         const short = self.deferred_short_tail orelse return self.recordDiagnostics().consistency(.missing_side_table, error.MissingSideTable);
         self.deferred_short_tail = null;
-        // Uniform stride rows before the short line, then short, then current.
         if (metrics_line_count < 2) return self.recordDiagnostics().consistency(.missing_side_table, error.MissingSideTable);
         try self.activateSideTable(metrics_line_count - 2);
         try self.appendSideTableLine(short.bases, short.actual_bytes, short.line_file_offset);
@@ -922,8 +886,6 @@ const ChunkParseState = struct {
 
         if (!self.collect_side_tables) return;
 
-        // Blank lines never become side-table rows.
-        // Interior blanks flip uniformity when the next base line arrives.
         if (bases == 0) return;
 
         const metrics = self.line_builder.metrics;
@@ -934,7 +896,6 @@ const ChunkParseState = struct {
         const can_use_formula = metrics.is_uniform_width and matches_stride and dense;
 
         if (can_use_formula) {
-            // The first line anchors reconstruction if a later line forces a side table.
             if (metrics.line_count == 1) {
                 self.deferred_side_line = .{
                     .bases = bases,
@@ -945,21 +906,17 @@ const ChunkParseState = struct {
             return;
         }
 
-        // A later base line proves the deferred short line was interior.
         if (self.deferred_short_tail != null) {
             try self.flushDeferredShortTailThen(metrics.line_count, bases, actual_bytes, line_file_offset);
             return;
         }
 
-        // Short-or-equal mismatch: same rule as `LineMetricsBuilder.finish` (only a *longer*
-        // final line flips non-uniform). Defer materialization so Genome-scale uniform
-        // records with a short final wrap do not allocate O(lines) side-table RAM.
         const short_ok_if_final = metrics.is_uniform_width and
             metrics.line_bases > 0 and
             dense and
             bases <= metrics.line_bases and
             content_len <= self.line_builder.first_content_len and
-            actual_bytes <= self.line_builder.first_actual_bytes + 1; // allow final CRLF vs LF (+1)
+            actual_bytes <= self.line_builder.first_actual_bytes + 1;
         if (short_ok_if_final) {
             self.deferred_short_tail = .{
                 .bases = bases,
@@ -969,32 +926,24 @@ const ChunkParseState = struct {
             return;
         }
 
-        // Wider line or other hard break: reconstruct the uniform prefix, then append.
         try self.activateSideTable(metrics.line_count - 1);
         try self.appendSideTableLine(bases, actual_bytes, line_file_offset);
     }
 
     fn noteSeqOffset(self: *ChunkParseState, line_file_offset: u64) void {
         if (self.seq_offset_set) return;
-        // `seq_offset` is the first base-bearing line start (side-table invariant).
         self.seq_offset = line_file_offset;
         self.seq_offset_set = true;
     }
 
-    // True when further body wraps can use fixed `line_bytes` strides.
     fn strideEligible(self: *const ChunkParseState) bool {
         if (!self.active or self.in_header or self.in_pending_line) return false;
         if (self.side_table_active or self.deferred_short_tail != null) return false;
-        // Interior blank must hit `ingestLine` so uniformity flips.
         if (self.line_builder.blank_after_bases) return false;
         const m = self.line_builder.metrics;
         if (m.line_count == 0 or !m.is_uniform_width) return false;
         if (!m.first_content_dense or !firstLineIsDense(m.line_bases, m.line_bytes)) return false;
-        // Stride uses the first line's on-wire byte length (includes LF/CRLF).
         if (self.line_builder.first_actual_bytes != m.line_bytes) return false;
-        // FAI skips `deferred_short_tail`, so a mid-body CRLF vs LF mismatch lives only in
-        // `pending_*` until the next `ingestLine`. Do not stride over that next line or the
-        // pending comparison (and uniformity flip) is skipped.
         if (self.line_builder.have_pending and
             (self.line_builder.pending_bases != m.line_bases or
                 self.line_builder.pending_actual_bytes != self.line_builder.first_actual_bytes))
@@ -1004,7 +953,6 @@ const ChunkParseState = struct {
         return true;
     }
 
-    // Bulk-account full wraps only after `strideEligible` and block validation prove them.
     fn ingestStrideRun(self: *ChunkParseState, n_lines: u64) void {
         std.debug.assert(n_lines >= 1);
         std.debug.assert(self.line_builder.metrics.line_count >= 1);
@@ -1098,8 +1046,6 @@ const ChunkParseState = struct {
     }
 
     fn finalizeHeader(self: *ChunkParseState) void {
-        // Dedup runs at emit time (after seq_len > 0), so empty sequences never claim a
-        // name. Blob-backed `.zfi` also embeds only kept records.
         self.in_header = false;
         self.at_line_start = true;
     }
@@ -1145,12 +1091,8 @@ const ChunkParseState = struct {
 
         var side_table_slice: []const u8 = &.{};
         if (seq_info.uses_uniform_formula) {
-            // Short final wrap was deferred and never needed; drop it.
             self.deferred_short_tail = null;
         } else if (self.collect_side_tables) {
-            // finish() can mark non-uniform after every line looked formula-ready (e.g. last
-            // line longer than the stride). Materialize the full uniform-looking prefix then.
-            // A deferred short tail becomes the final side-table row if finish rejects it.
             if (self.deferred_short_tail) |short| {
                 if (!self.side_table_active) {
                     if (metrics.line_count < 1) return self.recordDiagnostics().consistency(.missing_side_table, error.MissingSideTable);
@@ -1269,8 +1211,6 @@ fn processChunkBytes(
             continue;
         }
 
-        // After the first dense full-width line, accept blocks only when every separator is
-        // exact and every other byte is greater than space. The next header remains in-band.
         if (state.at_line_start and state.strideEligible()) {
             const line_bases = state.line_builder.metrics.line_bases;
             const line_bytes = state.line_builder.metrics.line_bytes;
@@ -1286,11 +1226,8 @@ fn processChunkBytes(
                 i += run_lines * @as(usize, line_bytes);
             }
             if (i >= data.len) return;
-            // Next header: re-enter so the `>` branch runs. Blank/invalid: fall through
-            // to the line machine once (must not re-enter stride on the same offset).
             if (data[i] == '>') continue;
             if (data.len - i < line_bytes) {
-                // A partial chunk has no complete line when LF is absent.
                 if (findNextNewline(data, i, data.len) >= data.len) {
                     try state.appendPendingFragment(
                         data[i..],
@@ -1339,7 +1276,6 @@ pub fn scanFastaReader(
     return scanFastaReaderWithDedup(allocator, reader, read_buf, options, external_dedup, ctx, emitRecord);
 }
 
-// Callers validate the buffer or pass a fixed nonempty buffer that fits u32.
 fn scanFastaReaderWithDedup(
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
@@ -1349,8 +1285,6 @@ fn scanFastaReaderWithDedup(
     ctx: anytype,
     comptime emitRecord: fn (@TypeOf(ctx), FastaRecordEmit) anyerror!void,
 ) !u32 {
-    // The public reader keeps arena-backed keys without a 32-bit name-pool limit.
-    // PackedNames is used only for CLI inputs bounded by SMALL_INDEX_MAX_BYTES.
     var owned_original: ?NameDedup = null;
     defer if (owned_original) |*seen| seen.deinit();
     const Dedup = if (@TypeOf(external_dedup) == ?*SourceAdapter) SourceAdapter else if (@TypeOf(external_dedup) == ?*PackedNames) PackedNames else NameDedup;
@@ -1912,8 +1846,6 @@ fn runIndexLarge(io: std.Io, environ: std.process.Environ, path: []const u8, opt
     return count;
 }
 
-// Used for CLI inputs up to 32 MiB, so block padding cannot exhaust 32-bit offsets.
-// Fixed blocks keep names stable and avoid copying growing name arrays.
 const PackedNames = struct {
     diag: Diagnostics = .{},
     allocator: std.mem.Allocator,
@@ -1989,8 +1921,6 @@ const PackedNames = struct {
     }
 };
 
-// Exact duplicate-name checks using a bounded cache and source-file references.
-
 const CACHE_BYTES = 512 * 1024;
 const CACHE_BLOCK_BYTES: usize = 128 * 1024;
 
@@ -2008,7 +1938,6 @@ const SourceDedup = struct {
     allocation_failed: bool = false,
     source_match: bool = false,
     source_name_hits: u32 = 0,
-    // Repeated source reads trigger one replay from the already emitted name catalog.
     hydrated: bool = false,
     hot_blocks: std.ArrayList([]u8) = .empty,
     hot_len: usize = 0,
@@ -2214,8 +2143,6 @@ const SourceDedup = struct {
             return false;
         };
         if (read != needed) {
-            // A shorter stored name can end near EOF under a hash collision.
-            // Without a delimiter, a short read means the scanned source changed.
             for (self.scratch.items[0..read]) |byte| {
                 switch (byte) {
                     ' ', '\t', '\r', '\n' => return false,
@@ -2268,8 +2195,6 @@ fn commonSuffix(a: []const u8, b: []const u8, prefix: usize) usize {
     return matched;
 }
 
-// Buckets contain entry numbers. Entries grow in fixed blocks without copying names.
-// Portable byte vectors filter buckets before loading dense entries.
 fn Tables(comptime Offset: type) type {
     return struct {
         const CACHE_FLAG: u64 = @as(u64, 1) << (@bitSizeOf(Offset) - 1);
@@ -2319,7 +2244,6 @@ fn Tables(comptime Offset: type) type {
             while ((@as(u128, self.len) + 1) * 5 > required * 4) required *= 2;
             const capacity = std.math.cast(usize, required) orelse return diag.capacity(.name_map, std.math.maxInt(usize), required, error.OutOfMemory);
             if (required * @sizeOf(u32) > std.math.maxInt(usize)) return diag.capacity(.name_map, std.math.maxInt(usize), required * @sizeOf(u32), error.OutOfMemory);
-            // Entries retain the hashes needed to rebuild; old buckets can be freed first.
             self.allocator.free(self.buckets);
             self.allocator.free(self.metadata);
             self.buckets = &.{};
@@ -2412,7 +2336,6 @@ fn Tables(comptime Offset: type) type {
     };
 }
 
-// Catalog bytes stay in memory up to 1 MiB, then use a buffered temporary file.
 const CatalogBytes = struct {
     diag: Diagnostics = .{},
     allocator: std.mem.Allocator,
@@ -2487,7 +2410,6 @@ const CatalogBytes = struct {
     }
 };
 
-// Prefix/suffix compression applies only to staging; the published names stay raw.
 const CompressedNames = struct {
     encoded: CatalogBytes,
     anchor: [MAX_INDEX_NAME_LEN]u8 = undefined,
@@ -2640,7 +2562,6 @@ const StreamedCatalog = struct {
     }
 
     fn emit(self: *@This(), info: FastaRecordEmit) !void {
-        // Complete parsing so its errors retain priority over output failures.
         if (self.write_failed) return;
         self.emitInner(info) catch |err| {
             if (err == error.OutOfMemory) return err;
@@ -2748,7 +2669,6 @@ const FaiNameReplay = struct {
     }
 };
 
-// Choose raw or compressed staging from the first eight kept names.
 const StagedNames = struct {
     raw: CatalogBytes,
     compressed: CompressedNames,
@@ -2875,7 +2795,6 @@ fn checkSourceNameAllocations(allocator: std.mem.Allocator, data: []const u8) !v
         }
     }
 
-    // Every compared name is in this chunk, so no source-file read is needed.
     var names = SourceDedup.init(allocator, std.testing.io, undefined, data.len);
     names.diag = diag;
     defer names.deinit();
@@ -3163,7 +3082,6 @@ test "[edge] - [index count]: full source tables retain duplicate lookups" {
         const set = if (Offset == u32) &source.tables.narrow else &source.tables.wide;
         try std.testing.expect(!try set.observeWithFingerprint(&source, "alpha", 0, 0));
         set.len = std.math.maxInt(u32);
-        // Reject any attempted growth without allocating storage for the logical count.
         failing.fail_index = failing.alloc_index;
         try std.testing.expect(try set.observeWithFingerprint(&source, "alpha", 0, 0));
         try std.testing.expectError(error.TooManySequences, set.observeWithFingerprint(&source, "beta", 6, 0));
@@ -3290,7 +3208,6 @@ test "[property] - [source names]: complete names resolve fingerprint collisions
     try file.writePositionalAll(io, data, 0);
     var source = SourceDedup.init(std.testing.allocator, io, file, data.len);
     defer source.deinit();
-    // Disable copied names so every equality check reads the source file.
     source.cache_full = true;
     const set = &source.tables.narrow;
     const start = long.len + 1;

@@ -410,8 +410,6 @@ fn detectRegionType(source: FastaSource, resolved: ResolvedRegion, diag: *Diagno
     return stats.detectType(&counts, total);
 }
 
-// --- Sequence emission ---
-
 const FastaSource = struct {
     io: std.Io,
     file: std.Io.File,
@@ -789,7 +787,6 @@ fn emitRegionFromSpan(
     }
     if (output.bases_written != resolved.num_bases) return diag.mismatch(resolved, span, output.bases_written);
     try output.finish(writer);
-    // The owning operation starts at zero and checks the batch count before emission.
     diag.output().records = (diag.output().records orelse 0) + 1;
 }
 
@@ -844,7 +841,6 @@ fn emitRegion(
 
     if (output.bases_written != resolved.num_bases) return diag.mismatch(resolved, span, output.bases_written);
     try output.finish(writer);
-    // The owning operation starts at zero and checks the batch count before emission.
     diag.output().records = (diag.output().records orelse 0) + 1;
 }
 
@@ -1097,8 +1093,6 @@ const RequestedNames = struct {
                 },
                 .bed => bed_parser.requestChrom(line) orelse continue,
             };
-            // Required replay owns parse/read failures. Interrupted discovery cannot
-            // supply a complete name set, so its caller falls back to the full catalog.
             if (name.len > MAX_REQUEST_NAME_BYTES) return false;
             if (previous_name) |previous| {
                 if (std.mem.eql(u8, previous, name)) continue;
@@ -1111,7 +1105,6 @@ const RequestedNames = struct {
                 try self.set.ensureTotalCapacity(allocator, @intCast(initial_capacity));
                 try self.names.ensureTotalCapacityPrecise(allocator, initial_capacity);
             }
-            // A cached small request stays valid until the index has copied its matches.
             const owned = if (stable_input) name else try allocator.dupe(u8, name);
             try self.set.put(allocator, owned, {});
             try self.names.append(allocator, owned);
@@ -1217,7 +1210,6 @@ fn processRequestReader(
         if (workspace.requests.items.len == 0) break;
         const batch = try processParsedRequests(workspace.scratch.allocator(), idx, workspace.requests.items, workspace.names.items, annotate_transform, writer, fasta_source, diag, total.region_count, total.total_bases, buffers);
         total.region_count = if (requests_fit) total.region_count + batch.region_count else @intCast(try diag.add(.requests, total.region_count, batch.region_count));
-        // Each emitted region already checks the operation total before writing.
         total.total_bases += batch.total_bases;
         workspace.clearRetainingCapacity();
         if (reached_end) break;
@@ -1719,8 +1711,6 @@ test "[failure] - [GET request replay]: detects metadata changes and limits equa
     try std.testing.expectError(error.InputChanged, checkRequestSource(io, opened, &context));
     try std.testing.expect(failure.primary().?.details.@"input.changed".changed_fields.size);
 
-    // A size/mtime match is not byte equality. Replay against the retained
-    // catalog must not claim that a changed name is absent from the full index.
     try file.setLength(io, before.size);
     try file.setTimestamps(io, .{ .modify_timestamp = .{ .new = before.mtime } });
     failure.reset(.get);

@@ -9,8 +9,6 @@ const builtin = @import("builtin");
 const platform = @import("platform.zig");
 pub const diagnostics = @import("diagnostics");
 
-// --- Types shared by indexer, getter, and stats ---
-
 /// Four-byte magic and version for the supported `.zfi` wire format.
 pub const ZFI_MAGIC: [4]u8 = .{ 'Z', 'F', 'I', 0x01 };
 
@@ -19,8 +17,6 @@ const NON_UNIFORM_WIDTH_FLAG: u8 = 1;
 pub const NAME_IN_ZFI_FLAG: u8 = 2;
 const SIDE_TABLE_OFFSET_BYTES = 5;
 pub const MAX_SIDE_TABLE_OFFSET = (1 << (SIDE_TABLE_OFFSET_BYTES * 8)) - 1;
-// Holds the maximum u16 name, four tabs, four maximum-width numeric fields,
-// and the line delimiter.
 const FAI_READER_BUFFER_BYTES: usize = 65_600;
 
 pub const ZFI_NAME_FOOTER_MAGIC: [4]u8 = .{ 'Z', 'F', 'N', 'M' };
@@ -67,7 +63,6 @@ fn decodeZfiSourceIdBytes(id_bytes: []const u8) ?u64 {
     return std.mem.readInt(u64, id_bytes[4..12], .little);
 }
 
-// Legacy on-disk footer written before tight layout (16 bytes: magic + 4 pad + u64).
 const ZFI_NAME_FOOTER_LEGACY_BYTES: usize = 16;
 
 /// Converts a non-negative timestamp to the unsigned `.zfi` representation.
@@ -75,9 +70,6 @@ pub fn timestampToNs(ts: std.Io.Timestamp) error{TimestampOutOfRange}!u64 {
     return std.math.cast(u64, ts.nanoseconds) orelse error.TimestampOutOfRange;
 }
 
-// Trailing layout after records/side tables:
-// `[name blob][optional ZFID][ZFNM footer]`.
-// `ZFID` sits before the footer so legacy loaders that seek `ZFNM` at EOF still work.
 const ZfiTrailingMeta = struct {
     payload_end: usize,
     name_blob_len: u64,
@@ -118,7 +110,6 @@ fn parseZfiNameFooterAtEnd(zfi_data: []const u8) ?struct {
         }
     }
 
-    // Legacy 16-byte footer: magic + 4 pad bytes + little-endian u64 length.
     if (zfi_data.len >= ZFI_NAME_FOOTER_LEGACY_BYTES) {
         const tail = zfi_data[zfi_data.len - ZFI_NAME_FOOTER_LEGACY_BYTES ..];
         if (std.mem.eql(u8, tail[0..4], &ZFI_NAME_FOOTER_MAGIC)) {
@@ -200,8 +191,6 @@ pub const IndexRecord = extern struct {
     }
 };
 
-// Frozen wire layout (`plan/docs/zfi-format.md`). `asBytes` / mmap views are valid only when
-// native endianness and struct layout match the little-endian contract.
 comptime {
     if (builtin.cpu.arch.endian() != .little) {
         @compileError(".zfi wire format requires little-endian (see plan/docs/zfi-format.md); big-endian codec not implemented");
@@ -334,8 +323,6 @@ pub const LoadedIndex = struct {
     pub fn deinit(self: *LoadedIndex) void {
         if (self.zfi_map) |*m| m.destroy(self.io);
         if (self.fai_map) |*m| m.destroy(self.io);
-        // `name_map` table bytes and copied names are arena-owned. The arena
-        // reclaims them together; individual container deinit calls are redundant.
         self.arena.deinit();
         self.fasta_file.close(self.io);
     }
@@ -405,8 +392,6 @@ pub const LoadIndexError = error{
     NoIndexFound,
     OutOfMemory,
 };
-
-// --- Shared index loader ---
 
 /// Loads a complete catalog. Reset Failure once in the owning operation before
 /// calling. Path labels borrow fasta_path through handling or Failure.reset.
@@ -582,8 +567,6 @@ const Diagnostics = struct {
     }
 };
 
-// Current indexes embed every name and end with `[name blob][ZFID][ZFNM footer]`.
-// The source-identity block remains optional for supported early embedded-name files.
 const ZfiNameLayout = struct {
     bytes: []const u8,
     start: usize,
@@ -591,8 +574,6 @@ const ZfiNameLayout = struct {
     source_mtime_offset: ?usize,
 };
 
-// Magic inside a legacy name is not identity metadata. Only reconsider it
-// when its proposed placement overlaps records or the final side table.
 fn disambiguateZfiTrailingMeta(window: *ZfiReadWindow, original: ZfiTrailingMeta, records_end: usize, context: *Diagnostics) diagnostics.Error!ZfiTrailingMeta {
     if (original.source_mtime_ns == null) return original;
     const legacy_end = original.payload_end + ZFI_SOURCE_ID_BYTES;
@@ -627,8 +608,6 @@ fn disambiguateZfiTrailingMeta(window: *ZfiReadWindow, original: ZfiTrailingMeta
     }
     if (candidate_start >= minimum_start) return original;
 
-    // An inflated footer length must not hide a genuine stale identity.
-    // Require a name to reach the end of the proposed legacy blob.
     var maximum_name_end: u64 = 0;
     var offset: usize = ZFI_HEADER_BYTES;
     while (offset < records_end) : (offset += ZFI_INDEX_RECORD_BYTES) {
@@ -702,13 +681,10 @@ fn tryLoadZfi(
 
     const zfi_stat = zfi_file.stat(io) catch |err| return context.ioFailure(.stat, err);
 
-    // Check for 0-byte file before mmap (POSIX returns EINVAL)
     if (zfi_stat.size == 0) {
         return context.truncated(.header, ZFI_HEADER_BYTES, zfi_stat.size);
     }
 
-    // Staleness: index file older than FASTA (both formats). `.fai` has no embedded
-    // source size/mtime, so this plus "index not older" is its entire identity check.
     if (zfi_stat.mtime.nanoseconds < fasta_stat.mtime.nanoseconds) {
         return context.fail(.{ .@"index.older_than_source" = .{ .index_mtime_ns = zfi_stat.mtime.nanoseconds, .source_mtime_ns = fasta_stat.mtime.nanoseconds } });
     }
@@ -737,11 +713,9 @@ fn tryLoadZfi(
         return context.fail(.{ .@"index.source_size_mismatch" = .{ .stored_bytes = header.source_size, .actual_bytes = fasta_stat.size } });
     }
 
-    // Empty catalogs are not useful and match the `.fai` reject-empty policy.
     context.at.location.offset = 4;
     if (header.record_count == 0) return context.fail(.{ .@"index.no_records" = .{ .format = .zfi } });
 
-    // Checked records extent before forming the typed record slice.
     const records_end = try zfiRecordsEnd(header.record_count, context);
     if (zfi_data.len < records_end) return context.truncated(.records, records_end, zfi_data.len);
 
@@ -755,16 +729,11 @@ fn tryLoadZfi(
     const name_layout = try resolveZfiNameLayout(zfi_data, records_end, records, &metadata_window, context);
     const name_blob = name_layout.bytes;
 
-    // Strong identity: production trailers store the FASTA mtime at index time.
-    // Exact match catches same-size content replacement even when the `.zfi` file
-    // mtime was touched forward. Legacy files without a trailer keep the weaker
-    // index-mtime check above only.
     if (name_layout.source_mtime_ns) |stored_mtime| {
         context.at.location.offset = name_layout.source_mtime_offset;
         try checkSourceTime(stored_mtime, fasta_stat.mtime.nanoseconds, context);
     }
 
-    // Side tables live after records and before the embedded name blob.
     const side_region_start = records_end;
     const side_region_end = name_layout.start;
 
@@ -835,7 +804,6 @@ const UNMATCHED_RECORD_INDEX = std.math.maxInt(u32);
 fn requestedNameMap(allocator: std.mem.Allocator, names: []const []const u8, reserve_multiplier: u32, context: *Diagnostics) diagnostics.Error!std.StringHashMapUnmanaged(u32) {
     var map: std.StringHashMapUnmanaged(u32) = .empty;
     const count = std.math.cast(u32, names.len) orelse return context.capacity(.name_map, std.math.maxInt(u32), names.len);
-    // Most catalog names miss this table. Leave spare slots to shorten those probes.
     const capacity = std.math.mul(u32, count, reserve_multiplier) catch return context.capacity(.name_map, std.math.maxInt(u32), @as(u128, count) * reserve_multiplier);
     map.ensureTotalCapacity(allocator, capacity) catch return context.allocation(.name_map, null);
     for (names) |name| {
@@ -846,7 +814,6 @@ fn requestedNameMap(allocator: std.mem.Allocator, names: []const []const u8, res
 }
 
 fn discardUnmatchedNames(map: *std.StringHashMapUnmanaged(u32), storage: [][]const u8, matched_count: usize) void {
-    // Unused name slots hold borrowed keys until iteration finishes.
     var end = matched_count;
     var iterator = map.iterator();
     while (iterator.next()) |entry| {
@@ -964,8 +931,6 @@ fn checkSourceTime(stored: u64, actual: i128, context: *Diagnostics) diagnostics
     if (actual < 0 or actual > std.math.maxInt(u64) or stored != @as(u64, @intCast(actual))) return context.fail(.{ .@"index.source_mtime_mismatch" = .{ .stored_mtime_ns = stored, .actual_mtime_ns = actual } });
 }
 
-// The mapped loader checks flags before trailers. Scan flags on this error path
-// only, so matched success still reads each record once with bounded storage.
 fn rejectMatchedTrailer(reader: *std.Io.File.Reader, count: u32, context: *Diagnostics, details: diagnostics.Details) diagnostics.Error {
     const trailer = diagnostics.Diagnostic{ .details = details, .stage = Diagnostics.failureStage(details), .at = context.at };
     checkMatchedNameFlags(reader, count, context) catch |err| {
@@ -1159,8 +1124,6 @@ fn tryLoadFai(
 
     const fai_stat = fai_file.stat(io) catch |err| return context.ioFailure(.stat, err);
 
-    // `.fai` identity is mtime-only: the text format has no source size or mtime field.
-    // Same-size FASTA replacement is detected only when the FASTA mtime moves forward.
     if (fai_stat.mtime.nanoseconds < fasta_stat.mtime.nanoseconds) {
         return context.fail(.{ .@"index.older_than_source" = .{ .index_mtime_ns = fai_stat.mtime.nanoseconds, .source_mtime_ns = fasta_stat.mtime.nanoseconds } });
     }
@@ -1189,12 +1152,10 @@ fn tryLoadFai(
 
     const fai_data: platform.MappedBytes = fai_map.memory;
 
-    // Newline count undercounts by one when the final `.fai` line has no trailing `\n`.
     var approx_records = std.mem.count(u8, fai_data, "\n");
     if (fai_data.len > 0 and fai_data[fai_data.len - 1] != '\n') {
         approx_records = std.math.add(usize, approx_records, 1) catch return context.overflow(.record_count, .add, approx_records, 1, std.math.maxInt(usize));
     }
-    // Reject sizes that would overflow the records allocation.
     _ = std.math.mul(usize, approx_records, @sizeOf(IndexRecord)) catch return context.overflow(.record_count, .multiply, approx_records, @sizeOf(IndexRecord), std.math.maxInt(usize));
     if (approx_records == 0) return context.fail(.{ .@"index.no_records" = .{ .format = .fai } });
     const records = allocator.alloc(IndexRecord, approx_records) catch return context.allocation(.records, @as(u64, approx_records) * @sizeOf(IndexRecord));
@@ -1207,7 +1168,6 @@ fn tryLoadFai(
         const rel_eol = std.mem.findScalar(u8, fai_data[pos..], '\n') orelse fai_data.len - pos;
         const line_len = rel_eol;
         const line_end = std.math.add(usize, line_start, line_len) catch return context.overflow(.offset, .add, line_start, line_len, std.math.maxInt(usize));
-        // Advance past `\n` only when present; a final line may omit it.
         if (line_end < fai_data.len) {
             pos = std.math.add(usize, line_end, 1) catch return context.overflow(.offset, .add, line_end, 1, std.math.maxInt(usize));
         } else {
@@ -1269,7 +1229,6 @@ const StreamedFaiMode = union(enum) {
     matched: []const []const u8,
 };
 
-// Keep one scan body for positional, stats, and file requests.
 fn loadFaiStreamed(
     backing_allocator: std.mem.Allocator,
     io: std.Io,
@@ -1479,8 +1438,6 @@ fn checkFaiInteger(value: u64, lexical: bool, overflow: bool, bytes: u64, prefix
     return value;
 }
 
-// Keep successful decimal parsing independent of diagnostics. Only rejected
-// fields need a complete lexical scan, value preview, and original location.
 fn parseFaiAsciiU64(line: []const u8, start: usize) ?struct { value: u64, end: usize } {
     var end = start;
     var value: u64 = 0;
@@ -1529,8 +1486,6 @@ fn parseFaiIndexLine(line: []const u8, context: *Diagnostics) diagnostics.Error!
     return .{ .name_end = name_end, .name_len = name_len, .seq_len = values[0], .seq_offset = values[1], .line_bases = @intCast(values[2]), .line_bytes = @intCast(values[3]) };
 }
 
-// Parse long rows from their original bytes with bounded field previews. Names
-// remain in the caller's fixed buffer; numeric fields are not reconstructed.
 fn takeLongFaiLine(file_reader: *std.Io.File.Reader, buffer: []u8, context: *Diagnostics) diagnostics.Error!struct { name: []const u8, fields: FaiLineFields } {
     const reader = &file_reader.interface;
     var name_bytes: u64 = 0;

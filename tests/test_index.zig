@@ -33,7 +33,6 @@ fn loadAndDeinitForAllocationCheck(allocator: std.mem.Allocator, fasta_path: []c
     defer idx.deinit();
 }
 
-// Patch a raw `.zfi` source identity so malformed-index tests reach structural checks.
 fn writeFastaAndRawZfi(allocator: std.mem.Allocator, stem: []const u8, fasta: []const u8, zfi_bytes: []const u8) !struct { fasta_path: []u8, zfi_path: []u8 } {
     const fasta_path = try writeFastaArtifact(allocator, stem, fasta);
     errdefer allocator.free(fasta_path);
@@ -42,14 +41,12 @@ fn writeFastaAndRawZfi(allocator: std.mem.Allocator, stem: []const u8, fasta: []
     errdefer allocator.free(zfi_path);
     errdefer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
 
-    // Re-open for mtime: Windows `stat` on the create handle can return AccessDenied.
     const fasta_mtime = try statMtimeNs(fasta_path);
 
     var zfi_copy = try allocator.dupe(u8, zfi_bytes);
     defer allocator.free(zfi_copy);
     const footer_len = main.index_format.ZFI_NAME_FOOTER_BYTES;
     const id_len = main.index_format.ZFI_SOURCE_ID_BYTES;
-    // Production layout: `[name blob][ZFID][ZFNM footer]`.
     if (zfi_copy.len >= footer_len + id_len) {
         const id_off = zfi_copy.len - footer_len - id_len;
         if (std.mem.eql(u8, zfi_copy[id_off..][0..4], &main.index_format.ZFI_SOURCE_ID_MAGIC)) {
@@ -101,7 +98,6 @@ fn expectDirectoryEmpty(path: []const u8) !void {
 }
 
 fn writeLargeIndexDescription(writer: *std.Io.Writer) !void {
-    // An empty record's description selects large-file storage without a large catalog.
     const padding = [_]u8{'x'} ** 4096;
     try writer.writeAll(">ignored ");
     for (0..32 * 1024 * 1024 / padding.len) |_| try writer.writeAll(&padding);
@@ -202,7 +198,6 @@ fn fuzzFastaScanner(_: void, smith: *std.testing.Smith) !void {
     }
 }
 
-// In-repo fixtures are required; absence is a test failure, not a skip.
 fn requireFixturePath(path: []const u8) !void {
     std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => {
@@ -1130,7 +1125,6 @@ test "[edge] - [index scanners]: use the first base-bearing line after a blank" 
     var records = try scanRecordsForTest(allocator, data);
     defer records.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), records.items.len);
-    // First base-bearing line starts after the blank line (`>seq\n\n` = 6 bytes).
     try std.testing.expectEqual(@as(u64, 6), records.items[0].seq_offset);
     try std.testing.expectEqual(@as(u32, 4), records.items[0].line_bases);
     try std.testing.expectEqual(@as(u32, 5), records.items[0].line_bytes);
@@ -1149,7 +1143,6 @@ test "[edge] - [FAI scanner]: accepts a short final line without terminal newlin
 }
 
 test "[failure] - [index scanners]: reject trailing space as non-uniform FAI" {
-    // `AAAA ` + LF looks like sep_len==2 by counts alone but is not CRLF.
     const data = ">s\nAAAA \n";
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1216,7 +1209,6 @@ test "[integration] - [index scanners]: preserves whitespace before the next hea
 }
 
 test "[edge] - [index scanners]: accept final CRLF after a uniform LF body" {
-    // Final CRLF is a terminator, not a wider wrap.
     const data = ">seq\nAAAA\nAAAA\r\n";
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1234,7 +1226,6 @@ test "[edge] - [index scanners]: accept final CRLF after a uniform LF body" {
 }
 
 test "[failure] - [index scanners]: reject mixed interior LF and CRLF as non-uniform FAI" {
-    // Unlike a trailing CRLF, an interior CRLF breaks fixed-width stride.
     const data = ">seq\nAAAA\nAAAA\r\nAAAA\n";
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1278,7 +1269,6 @@ test "[edge] - [FAI scanner]: skips empty records" {
 }
 
 test "[integration] - [index loaders]: resolve an empty sequence name" {
-    // `>\nACGT\n`: samtools writes `.fai` with an empty name field (line starts with tab).
     const data = ">\nACGT\n";
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1287,7 +1277,6 @@ test "[integration] - [index loaders]: resolve an empty sequence name" {
     var fai = std.Io.Writer.Allocating.init(allocator);
     defer fai.deinit();
     _ = try scanFaiData(allocator, data, &fai.writer, true);
-    // Samtools shape: empty name, seq_len=4, seq_offset=2, line_bases=4, line_bytes=5.
     try std.testing.expectEqualStrings("\t4\t2\t4\t5\n", fai.written());
 
     var index = try main.indexer.scanZfiData(allocator, data, true);
@@ -1446,7 +1435,6 @@ test "[failure] - [ZFI loader]: rejects a record count beyond the file" {
     var zfi_buf: std.ArrayList(u8) = .empty;
     defer zfi_buf.deinit(allocator);
     try appendZfiHeader(&zfi_buf, allocator, 2, 11);
-    // Only one record body follows the header.
     const rec = IndexRecord{ .name_offset = 1, .name_len = 4, .seq_offset = 6, .seq_len = 4, .line_bases = 4, .line_bytes = 5 };
     try zfi_buf.appendSlice(allocator, std.mem.asBytes(&rec));
 
@@ -1487,8 +1475,6 @@ test "[failure] - [ZFI loader]: rejects a name blob overlapping records" {
     var zfi_bytes = try main.indexer.zfiIndexToBytes(allocator, &index, fasta_data.len, 0);
     defer allocator.free(zfi_bytes);
 
-    // Inflate footer blob length so blob_start falls inside the record array.
-    // Footer is at EOF; identity sits immediately before it.
     const footer = main.index_format.encodeZfiNameFooter(zfi_bytes.len);
     @memcpy(zfi_bytes[zfi_bytes.len - footer.len ..], &footer);
 
@@ -1509,7 +1495,6 @@ test "[failure] - [ZFI loader]: rejects a side table offset inside records" {
     defer index.deinit(allocator);
     try std.testing.expect(!index.records.items[0].isUniformWidth());
 
-    // Point the side table into the header/records region.
     try index.records.items[0].markNonUniform(@sizeOf(ZfiHeader));
 
     const zfi_bytes = try main.indexer.zfiIndexToBytes(allocator, &index, fasta_data.len, 0);
@@ -1534,7 +1519,6 @@ test "[failure] - [ZFI loader]: rejects an empty side table" {
     const offset: usize = @intCast(index.records.items[0].sideTableOffset());
     const zfi_bytes = try main.indexer.zfiIndexToBytes(allocator, &index, fasta_data.len, 0);
     defer allocator.free(zfi_bytes);
-    // Zero the line_count header at the side-table offset.
     @memset(zfi_bytes[offset .. offset + @sizeOf(u64)], 0);
 
     const paths = try writeFastaAndRawZfi(allocator, "zfi-side-zero-lines", fasta_data, zfi_bytes);
@@ -1645,7 +1629,6 @@ test "[failure] - [ZFI loader]: rejects mixed embedded-name flags" {
     try std.testing.expect(index.records.items.len >= 2);
     try std.testing.expect(index.records.items[0].nameInZfi());
 
-    // Clear NAME_IN_ZFI on the second record only.
     index.records.items[1].flags_and_offset[0] &= ~@as(u8, 2);
 
     const zfi_bytes = try main.indexer.zfiIndexToBytes(allocator, &index, fasta_data.len, 0);
@@ -2383,8 +2366,6 @@ test "[integration] - [FAI workflow]: uses a separate spool and cleans it after 
     var source_dir = try std.Io.Dir.cwd().openDir(io, source_dir_path, .{ .iterate = true });
     defer source_dir.close(io);
     const source_permissions = (try source_dir.stat(io)).permissions;
-    // A Windows directory's read-only attribute does not deny child creation.
-    // POSIX enforces the non-writable source-directory part of this integration test.
     if (comptime builtin.os.tag != .windows) {
         try source_dir.setPermissions(io, source_permissions.setReadOnly(true));
     }
@@ -2508,8 +2489,6 @@ test "[failure] - [ZFI loader]: rejects a same-size source replacement" {
     defer index.deinit(allocator);
     try main.indexer.writeZfiIndexFile(io, zfi_path, &index, fasta_a.len, mtime_a);
 
-    // Replacement updates content; force mtime forward so ZFID staleness is visible
-    // even when the clock has not moved (Windows CI can keep the same stamp).
     {
         const fasta_file = try std.Io.Dir.cwd().createFile(io, fasta_path, .{ .truncate = true });
         defer fasta_file.close(io);
@@ -2614,7 +2593,6 @@ test "[integration] - [ZFI loader]: accepts a legacy index without source identi
     var zfi_bytes = try main.indexer.zfiIndexToBytes(allocator, &index, fasta_data.len, 0);
     defer allocator.free(zfi_bytes);
 
-    // Strip production ZFID (between blob and footer): legacy weak identity.
     const footer_len = main.index_format.ZFI_NAME_FOOTER_BYTES;
     const id_len = main.index_format.ZFI_SOURCE_ID_BYTES;
     try std.testing.expect(zfi_bytes.len >= footer_len + id_len);
@@ -2709,7 +2687,7 @@ test "[failure] - [ZFI loader]: rejects truncation inside a record" {
     var zfi_buf: std.ArrayList(u8) = .empty;
     defer zfi_buf.deinit(allocator);
     try appendZfiHeader(&zfi_buf, allocator, 1, 11);
-    try zfi_buf.appendSlice(allocator, &[_]u8{0} ** 20); // half an IndexRecord
+    try zfi_buf.appendSlice(allocator, &[_]u8{0} ** 20);
 
     const paths = try writeFastaAndRawZfi(allocator, "zfi-trunc-record", ">seq1\nACGT\n", zfi_buf.items);
     defer std.Io.Dir.cwd().deleteFile(io, paths.fasta_path) catch {};
@@ -2807,8 +2785,6 @@ test "[edge] - [index scanners]: reject an interior blank after a uniform stride
 }
 
 test "[edge] - [ZFI scanner]: keeps many full lines and a short final line uniform" {
-    // Many full-width lines plus a short last wrap remain formula-uniform without
-    // materializing O(lines) side-table rows.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -2877,7 +2853,7 @@ test "[edge] - [ZFI scanner]: keeps a short final line across the read boundary 
     var fasta: std.ArrayList(u8) = .empty;
     defer fasta.deinit(allocator);
     try fasta.appendSlice(allocator, ">seq\n");
-    const full_line = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"; // 60 + nl
+    const full_line = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n";
     while (fasta.items.len + full_line.len < INDEX_READ_BUFFER_SIZE + 200) {
         try fasta.appendSlice(allocator, full_line);
     }
@@ -2999,8 +2975,6 @@ test "[property] - [ZFI scanner]: keeps multiple uniform bodies uniform" {
 }
 
 test "[regression] - [ZFI scanner]: preserves a header spanning the prior stride width" {
-    // Genome chr10→chr11: `NN\\n` + `>11 ... REF\\n` is exactly line_bytes (61). Stride must
-    // not treat that span as one wrap or the next record is swallowed into the previous.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -3008,14 +2982,12 @@ test "[regression] - [ZFI scanner]: preserves a header spanning the prior stride
     var fasta: std.ArrayList(u8) = .empty;
     defer fasta.deinit(allocator);
     try fasta.appendSlice(allocator, ">a\n");
-    const full = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"; // 60+nl
+    const full = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n";
     var i: usize = 0;
     while (i < 5) : (i += 1) {
         try fasta.appendSlice(allocator, full);
     }
-    // short final (2) + nl + header line crafted so short+header == 61 bytes
     try fasta.appendSlice(allocator, "NN\n");
-    // 58-byte header line (incl. `\n`) so `NN\n` + header == 61 == line_bytes.
     const hdr = ">b xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n";
     try std.testing.expectEqual(@as(usize, 58), hdr.len);
     try fasta.appendSlice(allocator, hdr);
@@ -3073,7 +3045,6 @@ test "[integration] - [index gates]: enforce the header length boundary" {
     const reject_data = try readTestFile(allocator, "tests/data/gates/long_header_reject.fasta");
     defer allocator.free(reject_data);
     try std.testing.expectEqual(@as(u8, '>'), reject_data[0]);
-    // Fixture must stay LF-only; a Windows CRLF checkout makes indexOf('\\n')-1 count the '\\r'.
     try std.testing.expectEqual(null, std.mem.findScalar(u8, reject_data, '\r'));
     try std.testing.expectEqual(main.indexer.MAX_INDEX_NAME_LEN + 1, std.mem.findScalar(u8, reject_data, '\n').? - 1);
     try std.testing.expectError(error.HeaderTooLong, main.indexer.scanZfiData(allocator, reject_data, true));
@@ -3090,7 +3061,6 @@ test "[integration] - [index gates]: preserve invalid UTF-8 header bytes" {
 
     var index = try main.indexer.scanZfiData(allocator, data, true);
     defer index.deinit(allocator);
-    // Duplicate headers: first-wins keeps one record with the raw name bytes.
     try std.testing.expectEqual(@as(usize, 1), index.records.items.len);
     const name0 = index.name_blob.items[index.records.items[0].name_offset..][0..index.records.items[0].name_len];
     try std.testing.expectEqualSlices(u8, "bad\xffname", name0);
@@ -3106,7 +3076,6 @@ test "[integration] - [index gates]: reject invalid FAI geometry fixtures" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    // Copy into temp paths so a stray checked-in `.zfi` cannot mask the `.fai` case.
     try expectCorruptFaiFixture(allocator, "tests/data/gates/seq1_zero_geometry");
     try expectCorruptFaiFixture(allocator, "tests/data/gates/seq1_large_offset");
 }

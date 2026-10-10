@@ -551,7 +551,6 @@ test "[edge] - [validate JSON]: escapes invalid UTF-8 name bytes" {
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
     defer parsed.deinit();
-    // JSON \u00ff decodes to Unicode U+00FF, not the raw invalid FASTA byte.
     try std.testing.expectEqualStrings("seq\u{00ff}name", parsed.value.object.get("name").?.string);
 }
 
@@ -1007,7 +1006,6 @@ test "[integration] - [validator and indexer]: agree on messy record catalog and
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    // Fixture bytes must actually contain each layout feature (not only related warnings).
     try std.testing.expect(std.mem.indexOf(u8, data, "\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, data, "\n\n") != null);
     try std.testing.expect(!std.mem.endsWith(u8, data, "\n"));
@@ -1015,7 +1013,6 @@ test "[integration] - [validator and indexer]: agree on messy record catalog and
     try std.testing.expect(std.mem.indexOf(u8, data, ">empty_rec\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, data, " \n") != null or std.mem.indexOf(u8, data, "\t\n") != null);
 
-    // Validator must expose every layout feature encoded by the fixture.
     var summary = try validator.validateData(allocator, data, .{});
     defer summary.deinit(allocator);
 
@@ -1029,7 +1026,6 @@ test "[integration] - [validator and indexer]: agree on messy record catalog and
     try std.testing.expectEqual(@as(usize, 6), summary.header_count);
     try std.testing.expectEqual(@as(usize, 5), summary.sequence_count);
 
-    // Indexer must retain the same non-empty catalog and mark messy geometry.
     var index = try scanZfi(allocator, data);
     defer index.deinit(allocator);
 
@@ -1045,11 +1041,9 @@ test "[integration] - [validator and indexer]: agree on messy record catalog and
     for (expected_names, 0..) |want, i| {
         try std.testing.expectEqualStrings(want, zfiEmbeddedName(&index, i));
     }
-    // Empty source record is validated but not indexed.
     for (0..index.records.items.len) |i| {
         try std.testing.expect(!std.mem.eql(u8, zfiEmbeddedName(&index, i), "empty_rec"));
     }
-    // Near validate default --max-header-len (1024): still indexable, triggers long_header.
     const long_name = zfiEmbeddedName(&index, 4);
     try std.testing.expect(long_name.len > 1024);
     try std.testing.expectEqual(@as(usize, 1025), long_name.len);

@@ -377,7 +377,6 @@ const SIMD_CHUNK_SIZE = 32;
 const SimdVec = @Vector(SIMD_CHUNK_SIZE, u8);
 
 comptime {
-    // Keep the validate help line in src/main.zig synchronized with this value.
     if (MAX_VALIDATE_EVENTS != 10_000) {
         @compileError("update validate help text for MAX_VALIDATE_EVENTS");
     }
@@ -1052,8 +1051,6 @@ fn checkRewriteDestination(io: std.Io, input_file: std.Io.File, input_path: []co
         .stage = .check_identity,
         .at = .{ .source = .output },
     });
-    // Atomic replacement replaces the output directory entry. A distinct hard
-    // link is safe: replacing that entry leaves the input entry and inode intact.
 }
 
 fn checkRewriteSource(io: std.Io, input: std.Io.File, before: std.Io.File.Stat, failure: *diagnostics.Failure) diagnostics.Error!void {
@@ -1248,8 +1245,6 @@ fn writeJsonEventObject(writer: anytype, event: Event) !void {
     try writer.writeByte('}');
 }
 
-// Invalid UTF-8 bytes become `\u00XX` in legacy v1. The result is valid JSON,
-// but it cannot distinguish those bytes from the corresponding Unicode text.
 fn writeJsonStringBytes(writer: anytype, text: []const u8) !void {
     var i: usize = 0;
     while (i < text.len) {

@@ -7,7 +7,6 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const test_filter = b.option([]const u8, "test-filter", "Run tests whose names contain this text");
     const test_filters: []const []const u8 = if (test_filter) |filter| &.{filter} else &.{};
-    // ReleaseSmall regresses the text hot path; ReleaseFast is the supported ship mode.
     if (optimize == .ReleaseSmall) {
         std.debug.print(
             "error: ReleaseSmall is unsupported; use -Doptimize=ReleaseFast (strips by default)\n",
@@ -15,7 +14,6 @@ pub fn build(b: *std.Build) void {
         );
         std.process.exit(1);
     }
-    // ReleaseFast does not enable stripping automatically.
     const strip = b.option(bool, "strip", "Strip debug info") orelse (optimize != .Debug);
 
     const diagnostics_module = b.createModule(.{
@@ -45,7 +43,6 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run z-fasta");
     run_step.dependOn(&run_cmd.step);
 
-    // Test modules stay unstripped; ship strip applies to the installed exe only.
     const main_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -68,7 +65,6 @@ pub fn build(b: *std.Build) void {
             .{ .name = "test_options", .module = test_options_module },
         },
     });
-    // Timestamp tests call POSIX time functions through std.c.
     test_index_module.link_libc = true;
     const run_test_index = b.addRunArtifact(b.addTest(.{ .filters = test_filters, .root_module = test_index_module }));
 
@@ -205,7 +201,6 @@ pub fn build(b: *std.Build) void {
         }),
     }));
     const fixture_root = prepare_fixtures.addOutputDirectoryArg("test-fixtures");
-    // Only declared fixtures enter the test directory, excluding local sidecars.
     for ([_][]const u8{
         "tests/data/edge_cases.fasta",
         "tests/data/empty.fasta",

@@ -400,7 +400,5 @@ fn allocationCheck(allocator: std.mem.Allocator) !void {
 
 test "[failure] - [diagnostics]: every partial allocation cleans up without diagnostic allocation" {
     try testing.checkAllAllocationFailures(testing.allocator, allocationCheck, .{});
-    // The separate consumer also injects second-allocation OOM and handles a
-    // later parser failure after progress, with success resource transfer.
     try caller.exercise(testing.allocator);
 }

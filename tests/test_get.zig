@@ -705,7 +705,6 @@ test "[failure] - [BED parser]: retains field locations and distinguishes decima
         .{ .row = "seq\t18446744073709551616000x\t1", .code = .@"request.bed.invalid_coordinate", .column = 5, .legacy = error.InvalidStart, .value = "18446744073709551616000x" },
         .{ .row = "seq\t2\t2", .code = .@"request.bed.invalid_interval", .column = 5, .legacy = error.EmptyInterval },
         .{ .row = "seq\t2\t1", .code = .@"request.bed.invalid_interval", .column = 5, .legacy = error.EmptyInterval },
-        // Preserve the existing missing-field check before coordinate parsing.
         .{ .row = "seq\tx", .code = .@"request.bed.field_missing", .column = 6, .legacy = error.MissingEnd },
     };
     for (cases) |case| {

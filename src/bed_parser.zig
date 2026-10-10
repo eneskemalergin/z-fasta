@@ -115,8 +115,6 @@ fn parseCoordinate(field: []const u8) Coordinate {
     return .{ .value = value };
 }
 
-// A later invalid byte still makes an overflowing field non-decimal. Only
-// rejected fields need this remaining lexical scan.
 fn rejectedCoordinate(remaining: []const u8) Coordinate {
     for (remaining) |byte| if (byte < '0' or byte > '9') return .invalid;
     return .out_of_range;

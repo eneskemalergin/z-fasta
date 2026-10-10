@@ -128,8 +128,6 @@ fn parseTransformFlags(
 
 const ErrorFormat = enum { text, json };
 
-// Renderer selection observes option arity. Values are not renderer options.
-// Valid repetitions use the last value; invalid values use the static fallback.
 fn selectErrorFormat(args: std.process.Args.Iterator, operation: diagnostics.Operation, initial: ErrorFormat) error{InvalidFormat}!ErrorFormat {
     var probe = args;
     var format = initial;
@@ -194,7 +192,6 @@ const Cli = struct {
     }
 };
 
-// A failed diagnostic sink receives no recursive report or unframed fallback.
 fn reportFailure(io: std.Io, format: ErrorFormat, failure: *diagnostics.Failure) u8 {
     var buffer: [4096]u8 = undefined;
     var fw = std.Io.File.Writer.initStreaming(.stderr(), io, &buffer);
@@ -230,7 +227,6 @@ fn bootstrap(reason: reporting.Bootstrap) u8 {
     var buffer: [512]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     reporting.writeBootstrap(&writer, reason) catch return 1;
-    // No usable preference/result exists. A failed fallback is never retried.
     std.Io.File.writeStreamingAll(.stderr(), threaded.io(), writer.buffered()) catch {};
     return 1;
 }
@@ -270,7 +266,6 @@ fn runCli(init: std.process.Init.Minimal) u8 {
         command = args.next();
     }
     const terminal_command = if (command) |cmd| std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h") or std.mem.eql(u8, cmd, "--version") or std.mem.eql(u8, cmd, "-V") else false;
-    // Preserve the ordinary help/version fast path, but observe write failure.
     if (command) |cmd| {
         if (format == .text and terminal_command) {
             const bytes = if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) USAGE else "z-fasta " ++ VERSION ++ "\n";

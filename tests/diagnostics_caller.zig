@@ -59,7 +59,6 @@ fn acquire(
             });
         };
         failure.outputs.file.state = .staged;
-        // This fixture selects parser-before-deferred-output priority.
         return failure.fail(.{
             .details = .{ .@"index.fai.invalid_integer" = .{ .field = .length, .value = preview } },
             .stage = .parse,
@@ -106,8 +105,6 @@ pub fn exercise(allocator: std.mem.Allocator) !void {
         try require(failure.secondaryItems()[0].cause.?.zig == error.WriteFailed);
         try require(failure.outputs.file.state == .staged);
     }
-    // Both operation buffers have been released by errdefer. The source label
-    // is still this caller's path; the copied preview owns its retained bytes.
     try require(failure.sources.get(.fasta).?.label.borrowed.ptr == &caller_path);
 
     var report_buffer: [reporting.JSON_BYTES_LIMIT]u8 = undefined;

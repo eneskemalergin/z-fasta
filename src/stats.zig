@@ -73,7 +73,6 @@ pub fn detectType(counts: *const [256]u64, total: u64) SequenceType {
         counts['N'] + counts['n'] +
         counts['U'] + counts['u'];
 
-    // u128 avoids overflow on genome-scale totals (total * 9 and nuc * 10).
     if (@as(u128, nuc_count) * 10 > @as(u128, total) * 9) {
         return .nucleotide;
     }
@@ -248,7 +247,6 @@ fn summarizeLengths(records: []const IndexRecord, lengths: []u64, diag: *Diagnos
         if (record.seq_len < records[shortest_index].seq_len) shortest_index = i;
         if (record.seq_len > records[longest_index].seq_len) longest_index = i;
         const square = @as(u128, record.seq_len) * @as(u128, record.seq_len);
-        // A fitting u64 sum bounds sum(length squared) by sum(length) squared.
         aun_numerator = std.math.add(u128, aun_numerator, square) catch return diag.consistency(.numeric_buffer);
     }
 
@@ -693,8 +691,6 @@ fn recordsInSeqOffsetOrder(records: []const IndexRecord) bool {
     return true;
 }
 
-// Counts and lowercase counts cannot exceed the represented total. Checking
-// room for one whole slice keeps the SIMD loop free of per-byte guards.
 fn countSliceChecked(data: []const u8, comp: *CompositionStats, diag: *Diagnostics) diagnostics.Error!void {
     if (data.len > std.math.maxInt(u64) - comp.total_bases) return diag.overflow(.total_symbols, comp.total_bases, data.len, std.math.maxInt(u64), .fasta);
     countCompositionSlice(data, comp);
@@ -705,7 +701,6 @@ fn countFilteredChecked(data: []const u8, comp: *CompositionStats, diag: *Diagno
         countCompositionFiltered(data, comp);
         return;
     }
-    // Whitespace does not count. Near the limit, check only accepted symbols.
     for (data) |byte| {
         if (byte <= ' ') continue;
         if (comp.total_bases == std.math.maxInt(u64)) return diag.overflow(.total_symbols, comp.total_bases, 1, std.math.maxInt(u64), .fasta);
