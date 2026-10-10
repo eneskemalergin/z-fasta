@@ -656,7 +656,64 @@ fn runValidateCmd(io: std.Io, args: *std.process.Args.Iterator) void {
         printErrorAndExit("error: usage: z-fasta validate [options] <file.fasta>\n", .{});
     };
 
-    validator.runValidate(io, path, options);
+    var failure: index_format.diagnostics.Failure = undefined;
+    const result = validator.runValidate(std.heap.page_allocator, io, path, options, &failure) catch printValidateFailure(path, options, &failure);
+    if (result.truncated) {
+        var buffer: [512]u8 = undefined;
+        var stderr_fw = std.Io.File.Writer.initStreaming(.stderr(), io, &buffer);
+        failure.sources.set(.stderr, .{ .label = .{ .borrowed = "stderr" }, .kind = .stream });
+        failure.outputs.stderr.state = .streaming;
+        failure.outputs.stderr.may_be_partial = true;
+        writeValidateCapNotice(&stderr_fw.interface, result.fix_written) catch |err| {
+            switch (failure.fail(.{ .details = .{ .@"io.write_failed" = {} }, .stage = .report, .at = .{ .source = .stderr }, .cause = .{ .zig = stderr_fw.err orelse err } })) {
+                else => {},
+            }
+            printValidateFailure(path, options, &failure);
+        };
+        stderr_fw.flush() catch |err| {
+            failure.outputs.stderr.final_flush = .failed;
+            switch (failure.fail(.{ .details = .{ .@"io.flush_failed" = {} }, .stage = .flush, .at = .{ .source = .stderr }, .cause = .{ .zig = stderr_fw.err orelse err } })) {
+                else => {},
+            }
+            printValidateFailure(path, options, &failure);
+        };
+        failure.outputs.stderr.final_flush = .succeeded;
+    }
+    std.process.exit(result.status);
+}
+
+fn writeValidateCapNotice(writer: *std.Io.Writer, fixed: bool) std.Io.Writer.Error!void {
+    if (fixed) try writer.print("warning: validate event list truncated at {d}; --fix output was still written\n", .{validator.MAX_VALIDATE_EVENTS}) else try writer.print("error: validate retained {d} events; scanning and counting completed; fix reported issues and re-run\n", .{validator.MAX_VALIDATE_EVENTS});
+}
+
+// Temporary legacy messages; C10 selects common rendering/status after cleanup.
+fn printValidateFailure(path: []const u8, options: validator.Options, failure: *const index_format.diagnostics.Failure) noreturn {
+    const primary = failure.primary().?;
+    switch (primary.code()) {
+        .@"io.file_not_found" => printErrorAndExit("error: file not found: {s}\n", .{path}),
+        .@"io.access_denied" => printErrorAndExit("error: access denied: {s}\n", .{path}),
+        .@"io.open_failed", .@"io.invalid_path" => printErrorAndExit("error: failed to open file: {s}\n", .{path}),
+        .@"io.stat_failed" => printErrorAndExit("error: failed to stat file: {s}\n", .{path}),
+        .@"io.map_failed", .@"resource.capacity_limit_exceeded" => printErrorAndExit("error: failed to mmap file: {s}\n", .{path}),
+        .@"resource.out_of_memory" => printErrorAndExit("error: out of memory\n", .{}),
+        .@"index.sequence_line_too_long" => printErrorAndExit("error: sequence line exceeds the index format limit: {s}\n", .{path}),
+        .@"repair.output_is_input" => printErrorAndExit("error: validate --fix will not overwrite input: {s}\n", .{path}),
+        .@"repair.output_identity_unknown" => printErrorAndExit("error: validate --fix cannot establish output identity: {s}\n", .{options.output_path orelse ""}),
+        .@"repair.blocked" => switch (primary.details.@"repair.blocked".blocker) {
+            .content_before_header => printErrorAndExit("error: validate --fix refuses content before the first header at line {d}\n", .{primary.at.location.line orelse 1}),
+            .invalid_symbol => printErrorAndExit("error: validate --fix refuses character-level errors; use --fix-format-only to keep them unchanged\n", .{}),
+            .duplicate_identifier => printErrorAndExit("error: validate --fix cannot repair duplicate_name\n", .{}),
+            .no_records => printErrorAndExit("error: validate --fix cannot repair no_sequences\n", .{}),
+            .header_control_byte, .sequence_control_byte => printErrorAndExit("error: validate --fix cannot repair null_byte\n", .{}),
+        },
+        .@"usage.option_requires" => printErrorAndExit("error: validate --fix requires -o <output.fa>\n", .{}),
+        .@"io.create_failed", .@"io.publish_failed", .@"input.changed" => printErrorAndExit("error: failed to write fixed FASTA: {s}\n", .{options.output_path orelse ""}),
+        .@"io.write_failed", .@"io.flush_failed" => if (primary.at.source == .output)
+            printErrorAndExit("error: failed to write fixed FASTA: {s}\n", .{options.output_path orelse ""})
+        else
+            printErrorAndExit("error: write failed\n", .{}),
+        else => printErrorAndExit("error: validation failed: {s}\n", .{path}),
+    }
 }
 
 fn parseValidateSchema(raw: []const u8) validator.Schema {

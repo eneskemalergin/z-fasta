@@ -25,7 +25,9 @@ I built z-fasta around the four FASTA jobs I use most. One CLI, no runtime depen
 
 - `index`: Build the default `.zfi` index or emit a samtools-compatible `.fai` for representable FASTA.
 - `get`: Extract records, regions, names files, or BED intervals with optional strand and orientation transforms.
-- `validate`: Report structural, alphabet, header, and layout problems, with supported repair to a separate file.
+- `validate`: Report structural, alphabet, header, and layout problems, with supported repair to a separate file. `--fix` refuses non-format content before the first header and refuses output when required identity checks fail.
+
+Validation retains at most 10,000 examples while scanning and counting the full input. Text reports escape unsafe identifier bytes. JSON reports keep schema `v1`; invalid UTF-8 bytes use `\u00XX` escapes, which produce valid JSON but do not preserve the original byte identity.
 - `stats`: Report indexed length, Nx, DNA, RNA, or protein statistics through a bounded sequence scan.
 
 z-fasta accepts uncompressed FASTA and writes FASTA or reports. It does not currently handle FASTQ, gzip, or BGZF.

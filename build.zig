@@ -86,6 +86,14 @@ pub fn build(b: *std.Build) void {
     }));
     run_test_stats.step.dependOn(b.getInstallStep());
 
+    const run_test_validator_unit = b.addRunArtifact(b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/validator.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    }));
+
     // Generate ignored sidecars so tests also pass on a clean checkout.
     const gen_simple_index = b.addRunArtifact(exe);
     gen_simple_index.addArgs(&.{ "index", "tests/data/simple.fasta" });
@@ -93,6 +101,7 @@ pub fn build(b: *std.Build) void {
     run_test_get.step.dependOn(&gen_simple_index.step);
     run_test_main_unit.step.dependOn(&gen_simple_index.step);
     run_test_stats.step.dependOn(&gen_simple_index.step);
+    run_test_validator_unit.step.dependOn(&gen_simple_index.step);
 
     const gen_proteome_index = b.addRunArtifact(exe);
     gen_proteome_index.addArgs(&.{ "index", "tests/data/proteome.fasta" });
@@ -173,4 +182,5 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_test_indexer_unit.step);
     test_step.dependOn(&run_test_stats.step);
     test_step.dependOn(&run_test_validate.step);
+    test_step.dependOn(&run_test_validator_unit.step);
 }

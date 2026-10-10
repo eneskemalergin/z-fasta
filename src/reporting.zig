@@ -365,8 +365,9 @@ fn actionSource(diagnostic: *const diagnostics.Diagnostic) ?diagnostics.SourceId
     };
 }
 
-fn escaped(writer: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Error!void {
-    try writer.writeByte('"');
+/// Writes printable ASCII verbatim and escapes controls, opaque bytes, quotes
+/// and backslashes without adding enclosing quotes. Does not allocate.
+pub fn writeEscapedBytes(writer: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Error!void {
     for (bytes) |byte| switch (byte) {
         '"', '\\' => {
             try writer.writeByte('\\');
@@ -375,6 +376,11 @@ fn escaped(writer: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Error!void {
         0x20...0x21, 0x23...0x5b, 0x5d...0x7e => try writer.writeByte(byte),
         else => try writer.print("\\x{x:0>2}", .{byte}),
     };
+}
+
+fn escaped(writer: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Error!void {
+    try writer.writeByte('"');
+    try writeEscapedBytes(writer, bytes);
     try writer.writeByte('"');
 }
 
