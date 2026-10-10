@@ -1284,6 +1284,8 @@ fn loadFaiStreamed(
     const allocator = arena.allocator();
 
     var records_list: std.ArrayList(IndexRecord) = .empty;
+    const records_allocator = if (mode == .stats_scan) backing_allocator else allocator;
+    defer if (mode == .stats_scan) records_list.deinit(backing_allocator);
     var slices_list: std.ArrayList([]const u8) = .empty;
     const single_name = if (mode == .matched and mode.matched.len == 1) mode.matched[0] else null;
     var requested: std.StringHashMapUnmanaged(u32) = .empty;
@@ -1385,14 +1387,17 @@ fn loadFaiStreamed(
                 }
             },
         }
-        records_list.append(allocator, rec) catch return context.allocation(.records, null);
+        records_list.append(records_allocator, rec) catch return context.allocation(.records, null);
     }
 
     if (!saw_record) return context.fail(.{ .@"index.no_records" = .{ .format = .fai } });
 
     if (mode != .stats_scan and single_name == null) discardUnmatchedNames(&requested, slices_list.allocatedSlice(), records_list.items.len);
 
-    const owned_records = records_list.toOwnedSlice(allocator) catch return context.allocation(.records, null);
+    const owned_records = if (mode == .stats_scan)
+        allocator.dupe(IndexRecord, records_list.items) catch return context.allocation(.records, null)
+    else
+        records_list.toOwnedSlice(allocator) catch return context.allocation(.records, null);
     const owned_slices = switch (mode) {
         .positional, .matched => slices_list.toOwnedSlice(allocator) catch return context.allocation(.name_slices, null),
         .stats_scan => blk: {
@@ -1476,14 +1481,16 @@ fn checkFaiInteger(value: u64, lexical: bool, overflow: bool, bytes: u64, prefix
 
 // Keep successful decimal parsing independent of diagnostics. Only rejected
 // fields need a complete lexical scan, value preview, and original location.
-fn parseFaiAsciiU64(text: []const u8) ?u64 {
-    if (text.len == 0) return null;
+fn parseFaiAsciiU64(line: []const u8, start: usize) ?struct { value: u64, end: usize } {
+    var end = start;
     var value: u64 = 0;
-    for (text) |byte| {
+    while (end < line.len and line[end] != '\t') : (end += 1) {
+        const byte = line[end];
         if (byte < '0' or byte > '9') return null;
         value = appendFaiDigit(value, byte) orelse return null;
     }
-    return value;
+    if (end == start) return null;
+    return .{ .value = value, .end = end };
 }
 
 fn faiIntegerFailure(text: []const u8, field: diagnostics.FaiField, max: u64, context: *Diagnostics) diagnostics.Error {
@@ -1506,18 +1513,18 @@ fn parseFaiIndexLine(line: []const u8, context: *Diagnostics) diagnostics.Error!
     var values: [4]u64 = undefined;
     inline for (FAI_NUMERIC_FIELDS, 0..) |field, i| {
         if (start < line.len and line[start] == '\t') start += 1;
-        const end = std.mem.findScalarPos(u8, line, start, '\t') orelse line.len;
-        const text = line[start..end];
         const max = if (i < 2) std.math.maxInt(u64) else std.math.maxInt(u32);
-        values[i] = parseFaiAsciiU64(text) orelse {
+        const parsed = parseFaiAsciiU64(line, start) orelse {
+            const end = std.mem.findScalarPos(u8, line, start, '\t') orelse line.len;
             var field_context = faiFieldContext(context, start);
-            return faiIntegerFailure(text, field, max, &field_context);
+            return faiIntegerFailure(line[start..end], field, max, &field_context);
         };
+        values[i] = parsed.value;
         if (values[i] > max) {
             var field_context = faiFieldContext(context, start);
-            return faiIntegerFailure(text, field, max, &field_context);
+            return faiIntegerFailure(line[start..parsed.end], field, max, &field_context);
         }
-        start = end;
+        start = parsed.end;
     }
     return .{ .name_end = name_end, .name_len = name_len, .seq_len = values[0], .seq_offset = values[1], .line_bases = @intCast(values[2]), .line_bytes = @intCast(values[3]) };
 }

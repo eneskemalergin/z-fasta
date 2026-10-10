@@ -27,9 +27,9 @@ pub fn runStats(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8
     var idx = try index_format.loadIndexCheckedWithMode(allocator, io, fasta_path, .stats_scan, failure);
     defer idx.deinit();
     var computed: ComputedStats = undefined;
-    try computeStats(allocator, &idx, &computed, &diag);
-    var out_buf: [65536]u8 = undefined;
-    var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
+    var buffer: [STATS_READ_BUFFER_BYTES]u8 = undefined;
+    try computeStats(allocator, &idx, &computed, &buffer, &diag);
+    var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, buffer[0..65536]);
     errdefer {
         stdout_fw.interface.end = 0;
         if (stdout_fw.err) |cause| {
@@ -473,7 +473,7 @@ const ComputedStats = struct {
     longest_name: []const u8,
 };
 
-fn computeStats(allocator: std.mem.Allocator, idx: *const LoadedIndex, computed: *ComputedStats, diag: *Diagnostics) diagnostics.Error!void {
+fn computeStats(allocator: std.mem.Allocator, idx: *const LoadedIndex, computed: *ComputedStats, buffer: []u8, diag: *Diagnostics) diagnostics.Error!void {
     diag.index_source = if (idx.source == .zfi) .zfi else .fai;
     const records = idx.records;
     if (records.len == 0) return diag.fail(.{ .@"index.no_records" = .{ .format = if (idx.source == .zfi) .zfi else .fai } }, .scan, diag.index_source, null, null);
@@ -483,7 +483,7 @@ fn computeStats(allocator: std.mem.Allocator, idx: *const LoadedIndex, computed:
     const shortest_name = try retainedName(idx, summary.shortest_index, .retained_shortest_name, diag);
     const longest_name = try retainedName(idx, summary.longest_index, .retained_longest_name, diag);
     diag.record = null;
-    computed.comp = try scanComposition(allocator, idx, diag);
+    try scanComposition(allocator, idx, buffer, &computed.comp, diag);
     try checkTotal(summary.total_symbols, computed.comp.total_bases, diag);
     computed.composition = try summarizeComposition(&computed.comp, diag);
     computed.summary = summary;
@@ -648,21 +648,20 @@ fn scanRecord(
     }
 }
 
-fn scanComposition(allocator: std.mem.Allocator, idx: *const LoadedIndex, diag: *Diagnostics) diagnostics.Error!CompositionStats {
-    var comp: CompositionStats = .{};
-    var buffer: [STATS_READ_BUFFER_BYTES]u8 = undefined;
+fn scanComposition(allocator: std.mem.Allocator, idx: *const LoadedIndex, buffer: []u8, comp: *CompositionStats, diag: *Diagnostics) diagnostics.Error!void {
+    comp.* = .{};
     var reader = BoundedFastaReader{
         .io = idx.io,
         .file = idx.fasta_file,
         .file_size = idx.fasta_size,
-        .buffer = &buffer,
+        .buffer = buffer,
         .diag = diag,
     };
 
     if (recordsInSeqOffsetOrder(idx.records)) {
         for (idx.records, 0..) |rec, i| {
             diag.record = i + 1;
-            try scanRecord(&reader, rec, idx.sideTableLines(rec), &comp);
+            try scanRecord(&reader, rec, idx.sideTableLines(rec), comp);
         }
     } else {
         const indices = allocator.alloc(usize, idx.records.len) catch return diag.oom(.traversal_order);
@@ -676,13 +675,12 @@ fn scanComposition(allocator: std.mem.Allocator, idx: *const LoadedIndex, diag: 
         for (indices) |rec_index| {
             const rec = idx.records[rec_index];
             diag.record = rec_index + 1;
-            try scanRecord(&reader, rec, idx.sideTableLines(rec), &comp);
+            try scanRecord(&reader, rec, idx.sideTableLines(rec), comp);
         }
     }
 
     diag.record = null;
     comp.seq_type = detectType(&comp.counts, comp.total_bases);
-    return comp;
 }
 
 fn recordsInSeqOffsetOrder(records: []const IndexRecord) bool {
@@ -783,12 +781,12 @@ fn checkStatsAllocationFailure(allocator: std.mem.Allocator, path: []const u8, s
     };
     defer idx.deinit();
     var computed: ComputedStats = undefined;
-    computeStats(allocator, &idx, &computed, &diag) catch |err| {
+    var buffer: [STATS_READ_BUFFER_BYTES]u8 = undefined;
+    computeStats(allocator, &idx, &computed, &buffer, &diag) catch |err| {
         try recordStatsAllocationFailure(err, &failure, seen);
         return error.OutOfMemory;
     };
-    var storage: [8192]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&storage);
+    var writer = std.Io.Writer.fixed(buffer[0..8192]);
     try writeComputedReport(&writer, path, &idx, &computed, &diag);
     try std.testing.expect(failure.work_complete and !failure.complete);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Composition:\n") != null);

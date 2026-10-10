@@ -140,18 +140,20 @@ fn jsonField(json: *std.json.Stringify, failure: *const diagnostics.Failure, com
     } else if (@TypeOf(value) == diagnostics.Measurement) {
         switch (value) {
             .exact => |number| {
-                try json.objectField(name);
-                try jsonValue(json, failure, number);
+                try jsonNamedValue(json, failure, name, number);
             },
             .at_least => |number| {
-                try json.objectField(name ++ "_min");
-                try jsonValue(json, failure, number);
+                try jsonNamedValue(json, failure, name ++ "_min", number);
             },
         }
     } else {
-        try json.objectField(name);
-        try jsonValue(json, failure, value);
+        try jsonNamedValue(json, failure, name, value);
     }
+}
+
+fn jsonNamedValue(json: *std.json.Stringify, failure: *const diagnostics.Failure, name: []const u8, value: anytype) std.Io.Writer.Error!void {
+    try json.objectField(name);
+    try jsonValue(json, failure, value);
 }
 
 fn jsonStructFields(json: *std.json.Stringify, failure: *const diagnostics.Failure, value: anytype) std.Io.Writer.Error!void {

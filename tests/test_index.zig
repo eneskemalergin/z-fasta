@@ -1712,22 +1712,32 @@ test "[failure] - [index loaders]: release partial allocations" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const fasta_path = try writeFastaArtifact(allocator, "fai-allocation-failures", ">a\nAAAA\n>b\nCC\n");
-    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
-    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
-    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
-
-    {
-        const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{});
-        defer fai_file.close(io);
-        try std.Io.File.writeStreamingAll(fai_file, io, "a\t4\t3\t4\t5\nb\t2\t11\t2\t3\n");
+    var fasta = std.Io.Writer.Allocating.init(allocator);
+    defer fasta.deinit();
+    var fai = std.Io.Writer.Allocating.init(allocator);
+    defer fai.deinit();
+    var last_offset: usize = 0;
+    for (0..64) |i| {
+        try fasta.writer.print(">r{d}\n", .{i});
+        last_offset = fasta.written().len;
+        try fasta.writer.writeAll("ACGT\n");
+        try fai.writer.print("r{d}\t4\t{d}\t4\t5\n", .{ i, last_offset });
     }
+    const paths = try writeFastaAndFai(allocator, "fai-allocation-failures", fasta.written(), fai.written());
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fai_path) catch {};
 
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
         loadAndDeinitForAllocationCheck,
-        .{ fasta_path, main.index_format.LoadMode.stats_scan },
+        .{ paths.fasta_path, main.index_format.LoadMode.stats_scan },
     );
+    var idx = try main.index_format.loadIndexCheckedWithModeLegacy(std.testing.allocator, io, paths.fasta_path, .stats_scan);
+    defer idx.deinit();
+    try std.testing.expectEqual(@as(usize, 64), idx.records.len);
+    try std.testing.expectEqual(@as(u64, last_offset), idx.records[63].seq_offset);
+    try std.testing.expectEqual(@as(u64, 4), idx.records[63].seq_len);
+    try std.testing.expectEqualStrings("r0", idx.recordName(0).?);
 }
 
 test "[property] - [ZFI loader]: modes select the first duplicate" {
@@ -3403,6 +3413,31 @@ test "[failure] - [index diagnostics]: FAI fields retain original rows and byte 
             }
             try std.testing.expectEqualStrings(paths.fasta_path, failure.sourceLabel(.fai).?);
             try std.testing.expectEqual(diagnostics.Suffix.fai, failure.sources.get(.fai).?.suffix);
+        }
+    }
+}
+
+test "[failure] - [index diagnostics]: FAI sequence extents retain wide products and remainders" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { row: []const u8, required_end: u128 }{
+        .{ .row = "a\t18446744073709551615\t3\t1\t4294967295\n", .required_end = 79228162495817593511244464134 },
+        .{ .row = "a\t18446744073709551615\t3\t4\t5\n", .required_end = 23058430092136939521 },
+        .{ .row = "a\t8\t3\t4\t5\n", .required_end = 12 },
+    };
+    for (cases) |case| {
+        const paths = try writeFastaAndFai(allocator, "fai-wide-extent", ">a\nACGT\n", case.row);
+        defer allocator.free(paths.fasta_path);
+        defer allocator.free(paths.fai_path);
+        defer std.Io.Dir.cwd().deleteFile(io, paths.fasta_path) catch {};
+        defer std.Io.Dir.cwd().deleteFile(io, paths.fai_path) catch {};
+        for ([_]main.index_format.LoadMode{ .lookup_full_map, .{ .positional = &.{"a"} }, .{ .matched = &.{"missing"} }, .stats_scan }) |mode| {
+            var failure: diagnostics.Failure = undefined;
+            try expectIndexLoadCode(allocator, paths.fasta_path, mode, .@"index.sequence_span_out_of_bounds", &failure);
+            const facts = failure.primary().?.details.@"index.sequence_span_out_of_bounds";
+            try std.testing.expectEqual(case.required_end, facts.required_end);
+            try std.testing.expectEqual(@as(u64, 8), facts.source_bytes);
+            try std.testing.expectEqual(diagnostics.BoundSource.actual, facts.bound_source);
+            try std.testing.expectEqual(@as(u64, 1), failure.primary().?.at.record.?);
         }
     }
 }
