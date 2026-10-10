@@ -182,7 +182,7 @@ pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const
     diag.at = .{ .source = .fasta };
     if (options.fix) {
         const output_path = options.output_path orelse return diag.fail(.{ .@"usage.option_requires" = .{ .option = .fix, .required = .output } }, .arguments, .fasta, null);
-        try checkRewriteDestination(io, file, fasta_path, output_path, failure);
+        try checkRewriteDestination(io, fasta_path, output_path, failure);
         try fixRejectionChecked(&summary, options, failure);
         try writeFixed(io, data, summary.record_widths.items, output_path, file, stat, failure);
     }
@@ -371,6 +371,8 @@ const UTF8_BOM = "\xEF\xBB\xBF";
 const DEFAULT_MAX_HEADER_LEN = 1024;
 
 const DEFAULT_FIX_WIDTH = 60;
+
+const MAX_LINK_HOPS = 32;
 
 const SIMD_CHUNK_SIZE = 32;
 
@@ -1031,7 +1033,7 @@ fn unknownOutputIdentity(failure: *diagnostics.Failure, source: diagnostics.Sour
     });
 }
 
-fn checkRewriteDestination(io: std.Io, input_file: std.Io.File, input_path: []const u8, output_path: []const u8, failure: *diagnostics.Failure) diagnostics.Error!void {
+fn checkRewriteDestination(io: std.Io, input_path: []const u8, output_path: []const u8, failure: *diagnostics.Failure) diagnostics.Error!void {
     if (std.mem.eql(u8, input_path, output_path)) return failure.fail(.{
         .details = .{ .@"repair.output_is_input" = .{ .input = .fasta, .output = .output, .comparison = .lexical_path } },
         .stage = .check_identity,
@@ -1041,16 +1043,45 @@ fn checkRewriteDestination(io: std.Io, input_file: std.Io.File, input_path: []co
         if (err == error.FileNotFound) return;
         return unknownOutputIdentity(failure, .output, err);
     };
-    defer output_file.close(io);
+    output_file.close(io);
     var input_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const input_len = input_file.realPath(io, &input_buf) catch |err| return unknownOutputIdentity(failure, .fasta, err);
+    const input_entry = canonicalEntry(io, input_path, &input_buf) catch |err| return unknownOutputIdentity(failure, .fasta, err);
     var output_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const output_len = output_file.realPath(io, &output_buf) catch |err| return unknownOutputIdentity(failure, .output, err);
-    if (std.mem.eql(u8, input_buf[0..input_len], output_buf[0..output_len])) return failure.fail(.{
+    const output_entry = canonicalEntry(io, output_path, &output_buf) catch |err| return unknownOutputIdentity(failure, .output, err);
+    if (std.mem.eql(u8, input_entry, output_entry)) return failure.fail(.{
         .details = .{ .@"repair.output_is_input" = .{ .input = .fasta, .output = .output, .comparison = .canonical_path } },
         .stage = .check_identity,
         .at = .{ .source = .output },
     });
+}
+
+fn canonicalEntry(io: std.Io, path: []const u8, out: *[std.Io.Dir.max_path_bytes]u8) ![]const u8 {
+    var hop_bufs: [2][std.Io.Dir.max_path_bytes]u8 = undefined;
+    var target_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var current = path;
+    var hops: usize = 0;
+    while (true) : (hops += 1) {
+        if (hops == MAX_LINK_HOPS) return error.SymLinkLoop;
+        const target_len = std.Io.Dir.cwd().readLink(io, current, &target_buf) catch |err| switch (err) {
+            error.NotLink => break,
+            else => return err,
+        };
+        const target = target_buf[0..target_len];
+        const next = &hop_bufs[hops % 2];
+        const parent = std.fs.path.dirname(current);
+        current = if (std.fs.path.isAbsolute(target) or parent == null)
+            std.fmt.bufPrint(next, "{s}", .{target}) catch return error.NameTooLong
+        else
+            std.fmt.bufPrint(next, "{s}{c}{s}", .{ parent.?, std.fs.path.sep, target }) catch return error.NameTooLong;
+    }
+    const name = std.fs.path.basename(current);
+    var dir = try std.Io.Dir.cwd().openDir(io, std.fs.path.dirname(current) orelse ".", .{});
+    defer dir.close(io);
+    const dir_len = try dir.realPath(io, out);
+    if (dir_len + 1 + name.len > out.len) return error.NameTooLong;
+    out[dir_len] = std.fs.path.sep;
+    @memcpy(out[dir_len + 1 ..][0..name.len], name);
+    return out[0 .. dir_len + 1 + name.len];
 }
 
 fn checkRewriteSource(io: std.Io, input: std.Io.File, before: std.Io.File.Stat, failure: *diagnostics.Failure) diagnostics.Error!void {
@@ -1314,22 +1345,25 @@ test "[failure] - [rewrite safety]: keeps original preamble location and identit
     try std.testing.expect(failure.primary() == null);
 
     const Fault = struct {
-        fn realPath(_: ?*anyopaque, _: std.Io.File, _: []u8) std.Io.File.RealPathError!usize {
+        fn realPath(_: ?*anyopaque, _: std.Io.Dir, _: []u8) std.Io.Dir.RealPathError!usize {
             return error.AccessDenied;
         }
     };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const input = try tmp.dir.createFile(std.testing.io, "input.fa", .{ .read = true });
-    defer input.close(std.testing.io);
+    const input = try tmp.dir.createFile(std.testing.io, "input.fa", .{});
+    input.close(std.testing.io);
     const output = try tmp.dir.createFile(std.testing.io, "output.fa", .{});
     output.close(std.testing.io);
+    const input_path = try tmp.dir.realPathFileAlloc(std.testing.io, "input.fa", std.testing.allocator);
+    defer std.testing.allocator.free(input_path);
     const output_path = try tmp.dir.realPathFileAlloc(std.testing.io, "output.fa", std.testing.allocator);
     defer std.testing.allocator.free(output_path);
     var vtable = std.testing.io.vtable.*;
-    vtable.fileRealPath = Fault.realPath;
+    vtable.dirRealPath = Fault.realPath;
     failure.reset(.validate);
-    try std.testing.expectError(error.RepairRefused, checkRewriteDestination(.{ .userdata = std.testing.io.userdata, .vtable = &vtable }, input, "input.fa", output_path, &failure));
+    try std.testing.expectError(error.RepairRefused, checkRewriteDestination(.{ .userdata = std.testing.io.userdata, .vtable = &vtable }, input_path, output_path, &failure));
+    try std.testing.expectEqual(diagnostics.SourceId.fasta, failure.primary().?.at.source.?);
     try std.testing.expectEqual(diagnostics.Code.@"repair.output_identity_unknown", failure.primary().?.code());
     try std.testing.expectEqual(error.AccessDenied, failure.primary().?.cause.?.zig);
 }
