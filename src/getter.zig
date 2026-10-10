@@ -1078,7 +1078,7 @@ const RequestedNames = struct {
         self.arena.deinit();
     }
 
-    fn collect(self: *RequestedNames, reader: *std.Io.Reader, source: StreamRequestSource, stable_input: bool) !void {
+    fn collect(self: *RequestedNames, reader: *std.Io.Reader, source: StreamRequestSource, stable_input: bool) !bool {
         self.stack_allocator = std.heap.stackFallback(REQUEST_NAME_STACK_BYTES, self.arena.allocator());
         const allocator = self.stack_allocator.get();
         const initial_capacity = if (stable_input) @min(128, 1 + std.mem.count(u8, reader.buffered(), "\n")) else 0;
@@ -1088,7 +1088,7 @@ const RequestedNames = struct {
             const line = if (std.mem.findScalar(u8, available, '\n')) |end| buffered: {
                 reader.toss(end + 1);
                 break :buffered available[0..end];
-            } else (reader.takeDelimiter('\n') catch break) orelse break;
+            } else (reader.takeDelimiter('\n') catch return false) orelse return true;
             const name = switch (source) {
                 .names => blk: {
                     const name = if (line.len > 0 and line[line.len - 1] == '\r') line[0 .. line.len - 1] else line;
@@ -1097,9 +1097,9 @@ const RequestedNames = struct {
                 },
                 .bed => bed_parser.requestChrom(line) orelse continue,
             };
-            // Replay parse/read failures through the original batches to preserve
-            // diagnostic order and any output emitted before a later invalid row.
-            if (name.len > MAX_REQUEST_NAME_BYTES) break;
+            // Required replay owns parse/read failures. Interrupted discovery cannot
+            // supply a complete name set, so its caller falls back to the full catalog.
+            if (name.len > MAX_REQUEST_NAME_BYTES) return false;
             if (previous_name) |previous| {
                 if (std.mem.eql(u8, previous, name)) continue;
             }
@@ -1332,7 +1332,8 @@ fn runFileGet(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path: []co
         defer requested.deinit();
         const load_mode: index_format.LoadMode = if (request_file != null) matched: {
             const reader = if (buffered_requests != null) &small_reader else &request_reader.?.interface;
-            requested.collect(reader, source, buffered_requests != null) catch return diag.oom(.request_collection);
+            const complete = requested.collect(reader, source, buffered_requests != null) catch return diag.oom(.request_collection);
+            if (!complete) break :matched .lookup_full_map;
             if (buffered_requests == null) diag.lookup_scope = .retained_matches;
             break :matched .{ .matched = requested.names.items };
         } else .lookup_full_map;
@@ -1396,7 +1397,7 @@ fn collectNamesForAllocationCheck(allocator: std.mem.Allocator, stable_input: bo
     try writer.writeAll("# skip\na\nb\na\ncolon:name\na\n");
     for (0..300) |i| try writer.print("name{d}\n", .{i});
     var reader = std.Io.Reader.fixed(writer.buffered());
-    try requested.collect(&reader, .{ .names = .{} }, stable_input);
+    try std.testing.expect(try requested.collect(&reader, .{ .names = .{} }, stable_input));
     try std.testing.expectEqual(@as(usize, 303), requested.names.items.len);
     try std.testing.expectEqualStrings("name299", requested.names.items[302]);
 }
@@ -1785,4 +1786,104 @@ test "[failure] - [GET request IO]: retains required read and comparison causes"
     try std.testing.expectEqual(@as(?u64, 0), failure.primary().?.at.location.offset);
     try std.testing.expect(failure.primary().?.at.location.column == null);
     try std.testing.expectEqual(@as(usize, 0), writer.written().len);
+}
+
+test "[regression] - [GET discovery]: retries interrupted discovery with the full catalog" {
+    const io = std.testing.io;
+    const Fault = struct {
+        var scenario: enum { first, partial, persistent } = .first;
+        var request_handle: ?std.Io.File.Handle = null;
+        var read_count: usize = 0;
+        var first_row_bytes: usize = 0;
+        var failed: bool = false;
+        var output: [128]u8 = undefined;
+        var output_len: usize = 0;
+
+        fn read(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
+            if (request_handle == null) request_handle = file.handle;
+            if (file.handle == request_handle.?) {
+                const attempt = read_count;
+                read_count += 1;
+                if (scenario == .persistent or (!failed and attempt == @as(usize, if (scenario == .partial) 1 else 0))) {
+                    failed = true;
+                    return error.InputOutput;
+                }
+                if (scenario == .partial and attempt == 0) {
+                    return std.testing.io.vtable.fileReadPositional(userdata, file, &.{data[0][0..first_row_bytes]}, offset);
+                }
+            }
+            return std.testing.io.vtable.fileReadPositional(userdata, file, data, offset);
+        }
+
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            switch (operation) {
+                .file_write_streaming => |write| {
+                    const start = output_len;
+                    @memcpy(output[output_len..][0..write.header.len], write.header);
+                    output_len += write.header.len;
+                    for (write.data, 0..) |part, i| {
+                        const repeats = if (i + 1 == write.data.len) write.splat else 1;
+                        for (0..repeats) |_| {
+                            @memcpy(output[output_len..][0..part.len], part);
+                            output_len += part.len;
+                        }
+                    }
+                    return .{ .file_write_streaming = output_len - start };
+                },
+                else => return std.testing.io.vtable.operate(userdata, operation),
+            }
+        }
+    };
+    var directory = std.testing.tmpDir(.{});
+    defer directory.cleanup();
+    const path = try directory.dir.realPathFileAlloc(io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(path);
+    const request_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/requests.txt", .{path});
+    defer std.testing.allocator.free(request_path);
+    var vtable = io.vtable.*;
+    vtable.fileReadPositional = Fault.read;
+    vtable.operate = Fault.operate;
+    const fault_io = std.Io{ .userdata = io.userdata, .vtable = &vtable };
+    for ([_]bool{ false, true }) |bed| {
+        const first = if (bed) "seq1\t0\t2\n" else "seq1\n";
+        const last = if (bed) "seq2\t0\t2\n" else "seq2\n";
+        const padding = "#\n" ** (REQUEST_LINE_READER_BUFFER_BYTES / 2 + 1);
+        {
+            const file = try directory.dir.createFile(io, "requests.txt", .{});
+            defer file.close(io);
+            try file.writePositionalAll(io, first, 0);
+            try file.writePositionalAll(io, padding, first.len);
+            try file.writePositionalAll(io, last, first.len + padding.len);
+        }
+        const options = Options{ .source = if (bed) .{ .bed = request_path } else .{ .names = request_path } };
+        for ([_]@TypeOf(Fault.scenario){ .first, .partial, .persistent }) |scenario| {
+            Fault.scenario = scenario;
+            Fault.request_handle = null;
+            Fault.read_count = 0;
+            Fault.first_row_bytes = first.len;
+            Fault.failed = false;
+            Fault.output_len = 0;
+            var failure: diagnostics.Failure = undefined;
+            if (scenario == .persistent) {
+                try std.testing.expectError(error.Io, runGetWithOptions(std.testing.allocator, fault_io, "tests/data/simple.fasta", options, &failure));
+                const primary = failure.primary().?;
+                try std.testing.expectEqual(diagnostics.Code.@"io.read_failed", primary.code());
+                try std.testing.expectEqual(error.InputOutput, primary.cause.?.zig);
+                try std.testing.expectEqual(if (bed) diagnostics.SourceId.bed else .names, primary.at.source);
+                try std.testing.expectEqual(@as(?u64, 1), primary.at.location.line);
+                try std.testing.expectEqual(@as(?u64, 0), primary.at.location.offset);
+                try std.testing.expectEqual(@as(usize, 0), Fault.output_len);
+                try std.testing.expect(!failure.complete and !failure.work_complete);
+            } else {
+                const result = try runGetWithOptions(std.testing.allocator, fault_io, "tests/data/simple.fasta", options, &failure);
+                try std.testing.expectEqual(@as(usize, 2), result.region_count);
+                try std.testing.expectEqual(@as(u64, if (bed) 4 else 36), result.total_bases);
+                const expected = if (bed) ">seq1:1-2\nAC\n>seq2:1-2\nGG\n" else ">seq1\nACGTACGTACGTACGTACGTACGT\n>seq2\nGGGGCCCCAAAA\n";
+                try std.testing.expectEqualStrings(expected, Fault.output[0..Fault.output_len]);
+                try std.testing.expect(failure.primary() == null);
+                try std.testing.expect(failure.complete and failure.work_complete);
+            }
+            try std.testing.expect(Fault.failed);
+        }
+    }
 }
