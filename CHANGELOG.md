@@ -6,7 +6,7 @@ All notable changes to z-fasta will be documented in this file.
 
 ## [0.3.5]
 
-The `.zfi` file format and valid `.fai` rows are unchanged. **Re-index not required.** Existing successful FASTA, FAI, statistics and validator JSON v1 output keeps its format.
+The `.zfi` file format and valid `.fai` rows are unchanged. **Re-index FASTA files that have a space or tab inside or at the end of a sequence line after a record's first line.** Version 0.3.4 indexed those records as fixed-width, so their `.zfi` and `.fai` sidecars report wrong lengths and GET returns the whitespace bytes; the stale-index check does not detect this. Other indexes remain valid. Existing successful FASTA, FAI, statistics and validator JSON v1 output keeps its format.
 
 ### Added
 
@@ -23,6 +23,8 @@ The `.zfi` file format and valid `.fai` rows are unchanged. **Re-index not requi
 
 ### Fixed
 
+- Indexing no longer treats a record as fixed-width when a sequence line after the first contains a space or tab. Such records get correct lengths and non-uniform `.zfi` geometry, and `--emit-fai` rejects them.
+- Legacy `.zfi` files without a source-identity block load correctly when a sequence name contains `ZFID`; the name is no longer mistaken for identity metadata.
 - FAI parsing rejects a missing required column instead of shifting later fields into it, including long rows. Valid leading-zero decimals and ignored trailing columns remain accepted.
 - Repair refuses non-null content before the first header instead of silently dropping it. Required unresolved output identity and observed source size/mtime changes prevent publication, preserving an existing destination. Separate hard-link destinations remain safe to replace; input aliases remain refused.
 - Failed required stdout or stderr delivery returns failure, including help/version and post-work notices. Broken report sinks receive no recursive report attempt.
