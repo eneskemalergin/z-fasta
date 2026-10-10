@@ -38,7 +38,7 @@ git -C "$wiki_repo" diff --cached --name-status
 
 git -C "$wiki_repo" config user.name 'github-actions[bot]'
 git -C "$wiki_repo" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-git -C "$wiki_repo" commit --quiet -m "Sync wiki from ${source_sha}"
+git -C "$wiki_repo" commit --quiet -m "docs: sync wiki from ${source_sha}"
 
 git -c "http.extraheader=AUTHORIZATION: basic ${auth_header}" \
   -C "$wiki_repo" push --quiet origin "HEAD:${wiki_branch}"

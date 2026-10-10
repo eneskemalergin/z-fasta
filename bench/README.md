@@ -12,6 +12,8 @@ Zebrac is Linux-only. It is similar to `hyperfine`, but it also records process 
 - [GET benchmark report](get/REPORT.md)
 - [Stats benchmark report](stats/REPORT.md)
 
+The published reports and figures describe the measured 0.3.5 runs.
+
 Each report describes its own methods, field coverage, correctness checks, measurements, and figures. The suites do not all compare the same operation: stats has complete wrapper lanes and partial SeqKit/Seqtk reference lanes, while GET and index have their own compatibility limits.
 
 ## How to run
@@ -31,17 +33,50 @@ bash bench/stats/run.sh
 
 # Correctness only
 bash bench/index/run.sh --skip-benchmarks --skip-messy --skip-report
-bash bench/get/run.sh --skip-benchmarks --skip-report
-bash bench/stats/run.sh --skip-benchmarks --skip-report
+bash bench/get/run.sh --skip-benchmarks --skip-messy --skip-report
+bash bench/stats/run.sh --skip-benchmarks --skip-messy --skip-report
 ```
 
 Each suite has one entrypoint: `bash bench/<index|get|stats>/run.sh`. It runs correctness first, then optional zebrac measurements, then writes `REPORT.md`. The suites have different default sample counts and warmups, so check `--help` or the generated report when those details matter.
 
 The benchmark scripts resolve commands from `tools/bin/` by default. Set `SAMTOOLS`, `BEDTOOLS`, `SEQKIT`, or another tool variable when you intentionally want to compare a different executable. `bench/shared/install_tools.sh` only verifies the local bundle and pinned versions; it does not silently fall back to a command found elsewhere on `PATH`.
 
-The v0.3.4 refresh uses Zig 0.16.0 and zebrac 0.6.2 from `PATH`, with `ZEBRAC="$(command -v zebrac)"` passed to each suite. Index, GET, and stats run in that order without overlapping measurements. Each main section uses five measured samples, three warmups, and a 5,000 ms budget per command. Messy sections retain their separately documented sampling settings.
+The v0.3.5 refresh uses Zig 0.16.0 and zebrac 0.6.2 from `PATH`, with `ZEBRAC="$(command -v zebrac)"` passed to each suite. Index, GET, and stats run in that order without overlapping measurements. Each main section uses five measured samples, three warmups, and a 5,000 ms budget per command. The suites' default warmups differ, so pass these settings explicitly. Messy sections retain their separately documented sampling settings.
 
 The common skips are `--skip-tests` (`--skip-verify`), `--skip-benchmarks` (`--skip-perf`), `--skip-report`, and `--skip-messy`. The last one skips messy performance work only. It does not skip messy correctness cases.
+
+## Refresh reports for a new version
+
+Finish executable changes and run the correctness checks before collecting the release measurements. Build the selected source and check the actual executable version:
+
+```bash
+git rev-parse HEAD
+zig version
+zig build -Doptimize=ReleaseFast -Dstrip=true
+zig-out/bin/z-fasta --version
+```
+
+Record the committed source, whether it has local changes, binary identity, compiler, build mode, host, input identities and runner settings with the results. The suite manifests record tool versions and sampling settings; they do not alone identify the source commit or prove that the executable matches it. For a comparison, build the earlier source separately and use the same host, inputs and modes. Preserve slower or larger results as well as favorable ones.
+
+Run the full suites sequentially, with the verified zebrac executable:
+
+```bash
+ZEBRAC=$(command -v zebrac) bash bench/index/run.sh --runs 5 --warmup 3 --duration 5000
+ZEBRAC=$(command -v zebrac) bash bench/get/run.sh --runs 5 --warmup 3 --duration 5000
+ZEBRAC=$(command -v zebrac) bash bench/stats/run.sh --runs 5 --warmup 3 --duration 5000
+```
+
+Check each command's exit status before starting the next suite. Review its manifest, output checks, complete workload set and report before updating README or Wiki summaries. Keep units and measured populations consistent between tables and figures. Do not relabel an older report as the new version. If executable code or the measurement method changes afterward, repeat the affected checks and measurements before regenerating its report.
+
+The correctness-only commands above disable both ordinary and messy measurements and report generation. They cannot supply timing, RSS, allocation, stack or binary-size evidence for a report refresh.
+
+## Source and executable records
+
+New raw metadata and run manifests record `z_fasta_build`: the checkout Git revision and dirty state, plus the executable path, file size, mtime, ctime, device and inode. These cheap file facts do not prove byte equality or that the executable was built from the current checkout. No input hashing is added.
+
+`declared_build` records `BENCH_BUILD_REVISION`, `BENCH_BUILD_ZIG_VERSION`, `BENCH_BUILD_OPTIMIZE` and `BENCH_BUILD_TARGET` when supplied by the builder. Missing facts remain JSON null. The index runner records its own ReleaseFast build mode/compiler and records a revision only for a clean checkout when it builds the default subject. GET/stats use the existing executable and leave undeclared build facts unknown. Report readers retain these records and new reports display them; historical 0.3.4 reports keep their existing labels.
+
+Stats resumes retain a prior verification result only when the recorded source, executable, fixture and peer-tool file facts match and the checkout is clean. Missing records, dirty source or changed file facts leave the resumed run unverified. A timestamp or green log cannot override that result. Historical manifests keep their original report interpretation. These comparisons use file metadata, not byte equality.
 
 ## How the tools are built
 
@@ -63,11 +98,11 @@ These wrappers add argument parsing, indexing or index reading, output formattin
 
 ## Binary sizes
 
-These are the executable files currently used by this checkout on Linux x86_64. The sizes are useful for comparing this local bundle, but they are not universal upstream sizes. Compiler versions, link mode, debug information, stripping, and dependency versions all change them. Every compiled executable in this table is stripped in the current bundle. The table is therefore a build comparison, not a ranking of the projects.
+These sizes describe the Linux x86_64 tool bundle used for the 0.3.5 reports. Compiler versions, link mode, debug information, stripping, and dependency versions all change the sizes. Every compiled executable in this historical table was stripped. The table compares that build bundle; it does not rank the projects.
 
 | command     | version or implementation                   |                      file size |
 | ----------- | ------------------------------------------- | -----------------------------: |
-| `z-fasta`   | 0.3.4, Zig `ReleaseFast`, stripped          |        550,184 bytes (537 KiB) |
+| `z-fasta`   | 0.3.5, Zig `ReleaseFast`, stripped          |        819,416 bytes (800 KiB) |
 | `noodles`   | noodles-fasta 0.66.0 wrapper                |        449,712 bytes (439 KiB) |
 | `rustbio`   | rust-bio 4.0.1 wrapper                      |        492,712 bytes (481 KiB) |
 | `samtools`  | 1.24 with HTSlib 1.24                       |        869,232 bytes (849 KiB) |
@@ -90,26 +125,17 @@ Helpers live in `bench/shared/` (`tools.sh`, `zebrac_runner.sh`, `runner_common.
 
 GET messy performance is heavy. Use the skip flags while iterating, then run the full suites before a release tag.
 
-## v0.3.4 measurements
+## v0.3.5 measurements
 
-The refresh compares matched z-fasta commands with the previously published runs. A wall-time increase is flagged when it exceeds both 10% and 1 ms; an RSS increase is flagged when it exceeds both 10% and 1 MiB. The August and October measurements are separate sessions, so their differences do not isolate code changes.
+The refresh compares matched z-fasta commands with the v0.3.4 runs from 2026-10-07 on the same host. A wall-time increase is flagged when it exceeds both 10% and 1 ms; an RSS increase is flagged when it exceeds both 10% and 1 MiB. Peer commands also moved by up to a few percent between the two sessions, so small differences do not isolate code changes.
 
-The checks cover 30 index, 118 GET, and 28 stats measurements for z-fasta. Index and stats have no threshold crossings. No RSS increase crosses the threshold in any suite; the eight historical GET wall-time flags are discussed below. Smaller increases remain in the reports, including proteome stats at 12.9 ms through `.zfi` versus 12.2 ms previously.
+The checks cover 30 index, 118 GET, and 28 stats measurements for z-fasta. 26 wall-time increases and one RSS increase cross the thresholds:
 
-The largest transcriptome memory reductions appear in indexing ([#13](https://github.com/eneskemalergin/z-fasta/issues/13)) and seekable BED lookup ([#14](https://github.com/eneskemalergin/z-fasta/issues/14)):
+- **Index:** 15 of 30 cases, from 10% to 40% slower, with peak RSS within 0.4 MiB. Human genome `.fai` takes 382.4 ms (previously 321.2 ms); the 1,000,000-sequence scaling input takes 445.8 ms (previously 317.5 ms). 0.3.5 adds coded diagnostics to indexing and validates whitespace before accepting fixed-width records; this run does not attribute the increase to either change.
+- **GET:** ten transcriptome `.zfi` cases take 1.2 to 1.9 ms longer, such as the 1 kbp region at 8.2 ms (previously 6.3 ms), plus one genome `.fai` batch of 10,000 BED rows at 18.8 ms (previously 16.8 ms). Genome and proteome positional GET stay within the thresholds.
+- **Stats:** the 500,000-sequence `.fai` scaling input uses 39.0 MiB (previously 35.0 MiB). Stats times stay within the thresholds.
 
-| Transcriptome operation | Previous wall (ms) | v0.3.4 wall (ms) | Previous RSS (MiB) | v0.3.4 RSS (MiB) |
-| --- | ---: | ---: | ---: | ---: |
-| Index `.fai`, dedup | 217.1 | 138.0 | 37.90 | 5.83 |
-| Index `.zfi`, dedup | 188.2 | 151.9 | 43.50 | 5.87 |
-| GET `.zfi`, 10,000 BED rows | 44.6 | 36.6 | 49.47 | 5.56 |
-| GET `.fai`, 10,000 BED rows | 75.0 | 51.0 | 54.77 | 5.51 |
-
-Index remains faster than every reported peer on all three real datasets. It remains fastest at every measured sequence-count point, while noodles is faster at the 1 MiB file-size point. Deduplication's largest measured RSS cost drops from 11.17x to 1.73x. Rust-bio still uses less RSS for transcriptome FAI indexing (3.38 MiB versus 5.83 MiB).
-
-The GET comparison flags eight historical transcriptome `.zfi` timing cells, representing seven distinct commands. A same-host comparison of `main` at `389f041` and the merged source at `1a2f7f1`, both rebuilt with ReleaseFast and stripping, stays below both thresholds. Its largest time increase is 0.146 ms (2.46%), and its largest RSS increase is 0.25 MiB. The [GET report](get/REPORT.md#run-provenance) retains the historical timings and the full control table. The small-region `.zfi` path still favors speed over `.fai` memory use on transcriptome; the batch lookup savings do not apply to positional GET or stdin/FIFO requests.
-
-For complete genome stats, rust-bio now finishes ahead of noodles: 7.452 s versus 10.012 s, compared with 6.957 s versus 6.289 s previously. Z-fasta remains close to its previous times at 2.685 s through `.zfi` and 2.687 s through `.fai`. This change in peer order comes from the measured peer commands; it is not a z-fasta slowdown.
+Transcriptome `.fai` stats uses less memory: 20.2 MiB, down from 23.7 MiB. Index, GET, and stats remain faster than every reported peer on all three real datasets.
 
 ---
 
@@ -119,7 +145,7 @@ The individual reports above are the source for methods, correctness checks, com
 
 These three views therefore use the same selected index, GET, and stats runs but organize them differently. Every view keeps wall time beside peak RSS, covers the same human genome, transcriptome, and proteome inputs, and identifies partial or reference work instead of quietly ranking it as equivalent. They are not three independent benchmark claims and they are not a combined winner score.
 
-The selected v0.3.4 runs are index `20261007_084027`, GET `20261007_091005`, and stats `20261007_092810`. Summary RSS uses decimal MB (1,000,000 bytes); the individual reports use MiB (1,048,576 bytes). GET summaries select a single 1 kbp positional request. The seekable BED and names changes in [#14](https://github.com/eneskemalergin/z-fasta/issues/14) affect batch lookup; their measurements are in the [GET report](get/REPORT.md#performance-bed-batch).
+The selected v0.3.5 runs are index `20261010_140037`, GET `20261010_143023`, and stats `20261010_143519`. Summary RSS uses decimal MB (1,000,000 bytes); the individual reports use MiB (1,048,576 bytes). GET summaries select a single 1 kbp positional request. The seekable BED and names changes in [#14](https://github.com/eneskemalergin/z-fasta/issues/14) affect batch lookup; their measurements are in the [GET report](get/REPORT.md#performance-bed-batch).
 
 GitHub selects the dark or light SVG to match the reader's color scheme.
 

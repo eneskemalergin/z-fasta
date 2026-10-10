@@ -4,7 +4,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const main = @import("main");
 
-pub const ZFASTA_BIN = if (builtin.os.tag == .windows) "zig-out\\bin\\z-fasta.exe" else "zig-out/bin/z-fasta";
+const test_options = @import("test_options");
+pub const ZFASTA_BIN = if (std.fs.path.isAbsolute(test_options.binary_path)) test_options.binary_path else test_options.build_root ++ std.fs.path.sep_str ++ test_options.binary_path;
 
 pub fn expectCliResult(
     allocator: std.mem.Allocator,
@@ -40,6 +41,42 @@ pub fn expectCliFailure(
     try expectCliResult(allocator, argv, exit_code, "", expected_stderr);
 }
 
+pub fn expectDiagnostic(allocator: std.mem.Allocator, bytes: []const u8, code: main.index_format.diagnostics.Code) !void {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+    const object = parsed.value.object;
+    try std.testing.expectEqualStrings("v2", object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("failure", object.get("kind").?.string);
+    try std.testing.expect(!object.get("accepted").?.bool);
+    try std.testing.expect(!object.get("operation").?.object.get("complete").?.bool);
+    const primary = object.get("failure").?.object.get("primary").?.object;
+    try std.testing.expectEqualStrings(@tagName(code), primary.get("code").?.string);
+    try std.testing.expectEqualStrings("error", primary.get("severity").?.string);
+    try std.testing.expectEqualStrings(@tagName(main.index_format.diagnostics.metadata(code).category), primary.get("category").?.string);
+}
+
+pub fn expectCliCodeResult(allocator: std.mem.Allocator, argv: []const []const u8, exit_code: u8, stdout: []const u8, code: main.index_format.diagnostics.Code) !void {
+    const args = try allocator.alloc([]const u8, argv.len + 1);
+    defer allocator.free(args);
+    @memcpy(args[0..argv.len], argv);
+    args[argv.len] = "--error-format=json";
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const result = try std.process.run(allocator, threaded.io(), .{ .argv = args, .stdout_limit = .limited(128 * 1024), .stderr_limit = .limited(64 * 1024) });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    switch (result.term) {
+        .exited => |status| try std.testing.expectEqual(exit_code, status),
+        else => return error.ChildProcessFailed,
+    }
+    try std.testing.expectEqualStrings(stdout, result.stdout);
+    try expectDiagnostic(allocator, result.stderr, code);
+}
+
+pub fn expectCliFailureCode(allocator: std.mem.Allocator, argv: []const []const u8, code: main.index_format.diagnostics.Code) !void {
+    try expectCliCodeResult(allocator, argv, 1, "", code);
+}
+
 pub fn expectCliSuccess(
     allocator: std.mem.Allocator,
     argv: []const []const u8,
@@ -53,7 +90,7 @@ pub fn expectUnknownOptionRejected(
     argv: []const []const u8,
     unknown: []const u8,
 ) !void {
-    const expected = try std.fmt.allocPrint(allocator, "error: unknown option: {s}\n", .{unknown});
+    const expected = try std.fmt.allocPrint(allocator, "error [usage.unknown_option] {s}: Unknown option. option=\"{s}\"\nhint: Correct the command arguments; use --help for accepted options.\n", .{ argv[1], unknown });
     defer allocator.free(expected);
     try expectCliFailure(allocator, argv, 1, expected);
 }
@@ -85,7 +122,7 @@ pub fn writeZfi(
     enable_dedup: bool,
 ) !void {
     const io = std.testing.io;
-    var index = try main.indexer.scanZfiData(data, enable_dedup, allocator);
+    var index = try main.indexer.scanZfiData(allocator, data, enable_dedup);
     defer index.deinit(allocator);
 
     var path_buffer: [4096]u8 = undefined;
@@ -98,12 +135,13 @@ pub fn captureExtractRegion(
     fasta_path: []const u8,
     region: []const u8,
 ) ![]u8 {
-    var index = try main.index_format.loadIndexChecked(allocator, std.testing.io, fasta_path);
+    var index = try main.index_format.loadIndexCheckedLegacy(allocator, std.testing.io, fasta_path);
     defer index.deinit();
 
     var output = std.Io.Writer.Allocating.init(allocator);
     errdefer output.deinit();
-    main.getter.extractRegion(&index, region, &output.writer);
+    var failure: main.index_format.diagnostics.Failure = undefined;
+    try main.getter.extractRegion(&index, region, &output.writer, &failure);
     return output.toOwnedSlice();
 }
 

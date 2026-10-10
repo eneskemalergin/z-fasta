@@ -11,12 +11,12 @@ pub const MappedBytes = []align(std.heap.page_size_min) const u8;
 ///
 /// Zig 0.16's Windows `NtCreateSection` path requires `.populate = true`; false
 /// produces `STATUS_INVALID_PARAMETER`. Call `MemoryMap.destroy` when finished.
-pub fn mapFileReadOnly(io: std.Io, file: std.Io.File, len: usize) error{MmapFailed}!std.Io.File.MemoryMap {
+pub fn mapFileReadOnly(io: std.Io, file: std.Io.File, len: usize) std.Io.File.MemoryMap.CreateError!std.Io.File.MemoryMap {
     return file.createMemoryMap(io, .{
         .len = len,
         .protection = .{ .read = true, .write = false },
         .populate = builtin.os.tag == .windows,
-    }) catch error.MmapFailed;
+    });
 }
 
 /// Hints that a mapped region will be read sequentially. No-op on Windows.

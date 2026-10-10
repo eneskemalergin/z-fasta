@@ -45,8 +45,9 @@ jobs:
           zig fmt --check build.zig build.zig.zon src tests
           while IFS= read -r -d '' script; do
             bash -n "$script"
-          done < <(find .github bench -type f -name '*.sh' -print0)
+          done < <(find .github bench tests -type f -name '*.sh' -print0)
           shellcheck .github/scripts/*.sh
+          bash bench/shared/test_zebrac_runner.sh --metadata-only
           python3 -m compileall -q bench
           .ci-tools/actionlint
           version=$(sed -n 's/^[[:space:]]*\.version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' build.zig.zon | head -n1)
@@ -105,6 +106,14 @@ jobs:
       - name: Run tests (ReleaseFast ship mode)
         shell: bash
         run: zig build test -Doptimize=ReleaseFast --summary all
+
+      - name: Build installed ReleaseFast executable
+        shell: bash
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Check diagnostic consumer
+        shell: bash
+        run: bash tests/check_diagnostics.sh "${{ matrix.binary }}"
 
       - name: Smoke test
         shell: bash

@@ -78,25 +78,35 @@ MULTI_COUNTS=(1 10 100 1000)
 BED_COUNTS=(10 100 1000 10000)
 POS_LABELS=(100bp 1kbp_mid 10kbp full_seq)
 
-# Mirror getter.parseRegion: only the rightmost colon can start START-END or START-.
+# Count GET bases with indexed bounds; closed messy-fixture ranges are prevalidated.
 region_span_bases() {
     local region="$1"
     local fasta="${2:-}"
     python3 - "$region" "$fasta" <<'PY'
+import re
 import sys
 
-region = sys.argv[1].strip()
+region = sys.argv[1]
 fasta = sys.argv[2] or None
 
 
 def fai_length(name: str) -> int | None:
     if not fasta:
         return None
-    for line in open(fasta + ".fai", encoding="ascii", errors="replace"):
-        parts = line.split("\t")
-        if parts[0] == name:
-            return int(parts[1])
+    with open(fasta + ".fai", encoding="utf-8", errors="surrogateescape") as index:
+        for line in index:
+            parts = line.split("\t")
+            if parts[0] == name:
+                return int(parts[1])
     return None
+
+
+def parse_u64(value: str) -> int | None:
+    # Zig parseInt accepts a sign and interior underscores, including repeats.
+    if re.fullmatch(r"[+-]?[0-9](?:[0-9_]*[0-9])?", value) is None:
+        return None
+    number = int(value.replace("_", ""))
+    return number if 0 <= number <= 2**64 - 1 else None
 
 
 def parse_suffix(suffix: str) -> tuple[int, int | None] | None:
@@ -104,14 +114,13 @@ def parse_suffix(suffix: str) -> tuple[int, int | None] | None:
     if dash < 0:
         return None
     start_s, end_s = suffix[:dash], suffix[dash + 1 :]
-    if not start_s.isdigit():
+    start = parse_u64(start_s)
+    if start is None:
         return None
-    start = int(start_s)
     if end_s == "":
         return start, None
-    if not end_s.isdigit():
-        return None
-    return start, int(end_s)
+    end = parse_u64(end_s)
+    return None if end is None else (start, end)
 
 
 colon_pos = region.rfind(":")
@@ -119,15 +128,23 @@ if colon_pos >= 0:
     parsed = parse_suffix(region[colon_pos + 1 :])
     if parsed is not None:
         start, end = parsed
+        length = fai_length(region[:colon_pos])
+        if (start < 1 or (length is not None and start > length)
+                or (end is not None and end < start)):
+            raise SystemExit(f"region_span_bases: {region!r} has invalid bounds")
+        if fasta and length is None:
+            raise SystemExit(f"region_span_bases: {region!r} not found in index")
         if end is None:
-            length = fai_length(region[:colon_pos])
-            print(length - start + 1 if length is not None else 1)
-        else:
-            print(end - start + 1)
+            if length is None:
+                raise SystemExit(f"region_span_bases: {region!r} needs an indexed length")
+            end = length
+        elif length is not None:
+            end = min(end, length)
+        print(end - start + 1)
         raise SystemExit(0)
 
 length = fai_length(region)
-if length is not None:
+if length is not None and length > 0:
     print(length)
     raise SystemExit(0)
 raise SystemExit(f"region_span_bases: {region!r} not found in index")
@@ -245,6 +262,8 @@ export_manifest_tool_versions() {
 
 write_run_manifest() {
     local manifest="$1" timestamp="$2" metadata="$3"
+    BENCH_ZFASTA_BUILD="$(bench_build_identity)" || return 1
+    export BENCH_ZFASTA_BUILD
     python3 - "$manifest" "$timestamp" "$metadata" "$RUNS" "$WARMUP" "$ZEBRAC_DURATION_MS" \
         "$DO_TESTS" "$DO_POS" "$DO_MULTI" "$DO_BED" "$DO_RC" "$DO_MESSY" \
         "${SECTION_POS:-}" "${SECTION_MULTI:-}" "${SECTION_BED:-}" "${SECTION_RC:-}" "${SECTION_MESSY:-}" \
@@ -286,6 +305,7 @@ out = {
     "profile": "focused" if focused else "publication",
     "zebrac": os.environ.get("BENCH_VER_ZEBRAC", ""),
     "z_fasta": os.environ.get("BENCH_VER_ZFASTA", ""),
+    "z_fasta_build": json.loads(os.environ["BENCH_ZFASTA_BUILD"]),
     "runs": int(runs),
     "warmup": int(warmup),
     "duration_ms": int(duration),
@@ -1564,10 +1584,14 @@ BED
         && diff_oracle "$TMPDIR/iupac_rc_py.fa" "$TMPDIR/got.tmp" "[parity:seq] IUPAC --rc Python oracle" \
         || fail "[parity:seq] IUPAC --rc Python oracle"
 
-    "$ZFASTA" get "$TEST_DATA_DIR/proteome.fasta" 'sp|P12345|PROT_HUMAN:1-10' --rc > "$TMPDIR/got.tmp" 2> "$TMPDIR/got.err" \
-        && fail "protein RC rejected (should fail)" \
-        || grep -q 'reverse complement is not defined' "$TMPDIR/got.err" \
-        && pass "protein RC rejected" || fail "protein RC rejected (wrong err)"
+    local protein_status=0
+    "$ZFASTA" get "$TEST_DATA_DIR/proteome.fasta" 'sp|P12345|PROT_HUMAN:1-10' --rc > "$TMPDIR/got.tmp" 2> "$TMPDIR/got.err" || protein_status=$?
+    if [[ "$protein_status" == 1 ]] && grep -Fq 'error [transform.complement_on_protein]' "$TMPDIR/got.err"; then
+        pass "protein RC rejected"
+    else
+        fail "protein RC rejected (wrong status or code)"
+        cat "$TMPDIR/got.err"
+    fi
 }
 
 section5() {
@@ -1607,12 +1631,12 @@ section5() {
             fi
         fi
         if [[ -x "$NOODLES" && "$exp_noo" != "-" ]]; then
-            local noo_exit=0; noo_out=$("$NOODLES" get "$fasta" "$region" 2>/dev/null) || noo_exit=$?
+            local noo_exit=0; "$NOODLES" get "$fasta" "$region" >/dev/null 2>&1 || noo_exit=$?
             (( (exp_noo == 0 && noo_exit == 0) || (exp_noo == 1 && noo_exit != 0) )) \
                 && pass "$tag $desc noodles exit ok" || fail "$tag $desc noodles (expected $exp_noo, got $noo_exit)"
         fi
         if [[ -x "$RUSTBIO" && "$exp_rb" != "-" ]]; then
-            local rb_exit=0; rb_out=$("$RUSTBIO" get "$fasta" "$region" 2>/dev/null) || rb_exit=$?
+            local rb_exit=0; "$RUSTBIO" get "$fasta" "$region" >/dev/null 2>&1 || rb_exit=$?
             (( (exp_rb == 0 && rb_exit == 0) || (exp_rb == 1 && rb_exit != 0) )) \
                 && pass "$tag $desc rustbio exit ok" || fail "$tag $desc rustbio (expected $exp_rb, got $rb_exit)"
         fi
@@ -2201,8 +2225,9 @@ run_perf_multi() {
             bench_has_tool noodles && get_add_command perf_multi "$workload" noodles noodles "$json" "$nd_cmd" "$nbytes" "$total_bases"
             bench_has_tool rustbio && get_add_command perf_multi "$workload" rustbio-custom-get rustbio "$json" "$rb_cmd" "$nbytes" "$total_bases"
             if [[ "${GET_MULTI_REFERENCE:-}" == "1" ]]; then
-                local seqtk_loop="while IFS= read -r r; do printf '%s\\n' \"\$r\" | $qt subseq $qfai - > /dev/null; done < $(quote_arg "$path")"
-                local fh_loop="while IFS= read -r r; do $qh -r \"\$r\" $qfai > /dev/null; done < $(quote_arg "$path")"
+                local seqtk_loop fh_loop
+                seqtk_loop="while IFS= read -r r; do printf '%s\\n' \"\$r\" | $qt subseq $qfai - > /dev/null; done < $(quote_arg "$path")"
+                fh_loop="while IFS= read -r r; do $qh -r \"\$r\" $qfai > /dev/null; done < $(quote_arg "$path")"
                 bench_has_tool seqtk && get_add_command perf_multi "$workload" seqtk-reference seqtk "$json" "$seqtk_loop" "$nbytes" "$total_bases"
                 bench_has_tool fastahack && get_add_command perf_multi "$workload" fastahack-reference fastahack "$json" "$fh_loop" "$nbytes" "$total_bases"
             fi

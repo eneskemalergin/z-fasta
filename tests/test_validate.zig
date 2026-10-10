@@ -65,8 +65,10 @@ fn renderAndFreeForAllocationCheck(allocator: std.mem.Allocator, name: []const u
 
 fn fuzzValidator(_: void, smith: *std.testing.Smith) !void {
     var storage: [512]u8 = undefined;
-    const data = storage[0..smith.slice(&storage)];
+    try checkValidatorProperties(storage[0..smith.slice(&storage)]);
+}
 
+fn checkValidatorProperties(data: []const u8) !void {
     var summary = try validator.validateData(std.testing.allocator, data, .{});
     defer summary.deinit(std.testing.allocator);
 
@@ -79,25 +81,30 @@ fn fuzzValidator(_: void, smith: *std.testing.Smith) !void {
     try std.testing.expect(summary.format_warning_count <= summary.warning_count);
     for (summary.record_widths.items) |width| try std.testing.expect(width > 0);
 
-    if (validator.fixRejection(&summary, .{}) == null) {
-        const fixed = try validator.fixData(std.testing.allocator, data, summary.record_widths.items);
-        defer std.testing.allocator.free(fixed);
+    var failure: main.index_format.diagnostics.Failure = undefined;
+    failure.reset(.validate);
+    validator.fixRejectionChecked(&summary, .{}, &failure) catch |err| switch (err) {
+        error.RepairRefused => return,
+        else => return err,
+    };
+    const fixed = try validator.fixData(std.testing.allocator, data, summary.record_widths.items);
+    defer std.testing.allocator.free(fixed);
 
-        var fixed_summary = try validator.validateData(std.testing.allocator, fixed, .{});
-        defer fixed_summary.deinit(std.testing.allocator);
-        try std.testing.expect(validator.fixRejection(&fixed_summary, .{}) == null);
-        const fixed_again = try validator.fixData(
-            std.testing.allocator,
-            fixed,
-            fixed_summary.record_widths.items,
-        );
-        defer std.testing.allocator.free(fixed_again);
-        try std.testing.expectEqualStrings(fixed, fixed_again);
-    }
+    var fixed_summary = try validator.validateData(std.testing.allocator, fixed, .{});
+    defer fixed_summary.deinit(std.testing.allocator);
+    failure.reset(.validate);
+    try validator.fixRejectionChecked(&fixed_summary, .{}, &failure);
+    const fixed_again = try validator.fixData(
+        std.testing.allocator,
+        fixed,
+        fixed_summary.record_widths.items,
+    );
+    defer std.testing.allocator.free(fixed_again);
+    try std.testing.expectEqualStrings(fixed, fixed_again);
 }
 
 fn scanZfi(allocator: std.mem.Allocator, data: []const u8) !main.indexer.ZfiIndex {
-    return main.indexer.scanZfiData(data, true, allocator);
+    return main.indexer.scanZfiData(allocator, data, true);
 }
 
 fn expectHasSideTable(index: *const main.indexer.ZfiIndex) !void {
@@ -182,8 +189,31 @@ fn zfiEmbeddedName(index: *const main.indexer.ZfiIndex, rec_idx: usize) []const 
     return index.name_blob.items[rec.name_offset..][0..rec.name_len];
 }
 
-// --- Validation and report contracts ---
+fn checkNativeValidatorAllocations(allocator: std.mem.Allocator, data: []const u8) !void {
+    const diagnostics = main.index_format.diagnostics;
+    var failure: diagnostics.Failure = undefined;
+    var summary = validator.validateDataChecked(allocator, data, .{}, &failure) catch |err| {
+        try std.testing.expectEqual(error.OutOfMemory, err);
+        try std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", failure.primary().?.code());
+        try std.testing.expectEqual(error.OutOfMemory, failure.primary().?.cause.?.zig);
+        return error.OutOfMemory;
+    };
+    defer summary.deinit(allocator);
+    const fixed = validator.fixDataChecked(allocator, data, summary.record_widths.items, &failure) catch |err| {
+        try std.testing.expectEqual(error.OutOfMemory, err);
+        try std.testing.expectEqual(diagnostics.AllocationRole.rewrite_bytes, failure.primary().?.details.@"resource.out_of_memory".allocation_role);
+        return error.OutOfMemory;
+    };
+    defer allocator.free(fixed);
+    const json = validator.renderJsonEventChecked(allocator, .{ .level = .warning, .kind = .empty_sequence, .line = 1, .name = "seq" }, &failure) catch |err| {
+        try std.testing.expectEqual(error.OutOfMemory, err);
+        try std.testing.expectEqual(diagnostics.AllocationRole.serialized_event, failure.primary().?.details.@"resource.out_of_memory".allocation_role);
+        return error.OutOfMemory;
+    };
+    defer allocator.free(json);
+}
 
+// --- Validation and report contracts ---
 test "[cli] - [validate]: rejects unknown options regardless of position" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -195,14 +225,14 @@ test "[cli] - [validate]: rejects unknown options regardless of position" {
         &.{ ZFASTA_BIN, "validate", "--not-a-flag", fasta },
         1,
         "",
-        "error: unknown option: --not-a-flag\n",
+        "error [usage.unknown_option] validate: Unknown option. option=\"--not-a-flag\"\nhint: Correct the command arguments; use --help for accepted options.\n",
     );
     try expectCliResult(
         allocator,
         &.{ ZFASTA_BIN, "validate", fasta, "--not-a-flag" },
         1,
         "",
-        "error: unknown option: --not-a-flag\n",
+        "error [usage.unknown_option] validate: Unknown option. option=\"--not-a-flag\"\nhint: Correct the command arguments; use --help for accepted options.\n",
     );
 }
 
@@ -214,55 +244,55 @@ test "[cli] - [validate]: rejects invalid arguments with exact diagnostics" {
     const cases = [_]struct { argv: []const []const u8, stderr: []const u8 }{
         .{
             .argv = &.{ ZFASTA_BIN, "validate", "--summary", "tests/data/simple.fasta" },
-            .stderr = "error: validate --summary requires --json\n",
+            .stderr = "error [usage.option_requires] validate: An option prerequisite is missing. option=summary required=json\nhint: Correct the command arguments; use --help for accepted options.\n",
         },
         .{
             .argv = &.{ ZFASTA_BIN, "validate", "--fix-format-only", "tests/data/simple.fasta" },
-            .stderr = "error: validate --fix-format-only requires --fix\n",
+            .stderr = "error [usage.option_requires] validate: An option prerequisite is missing. option=fix_format_only required=fix\nhint: Correct the command arguments; use --help for accepted options.\n",
         },
         .{
             .argv = &.{ ZFASTA_BIN, "validate", "-o", "zig-cache/test-artifacts/unused.fasta", "tests/data/simple.fasta" },
-            .stderr = "error: validate -o requires --fix\n",
+            .stderr = "error [usage.option_requires] validate: An option prerequisite is missing. option=output required=fix\nhint: Correct the command arguments; use --help for accepted options.\n",
         },
         .{
             .argv = &.{ ZFASTA_BIN, "validate" },
-            .stderr = "error: usage: z-fasta validate [options] <file.fasta>\n",
+            .stderr = "error [usage.missing_argument] validate: A required argument is missing. argument=fasta_path\nhint: Correct the command arguments; use --help for accepted options.\n",
         },
         .{
             .argv = &.{ ZFASTA_BIN, "validate", "tests/data/definitely-missing-cli-failure.fasta" },
-            .stderr = "error: file not found: tests/data/definitely-missing-cli-failure.fasta\n",
+            .stderr = "error [io.file_not_found] validate: \"tests/data/definitely-mi\" (47 bytes): Required file was not found.; cause=\"FileNotFound\"\nhint: Check the named input/output and retained I/O cause.\n",
         },
         .{
             .argv = &.{ ZFASTA_BIN, "validate", "tests/data/simple.fasta", "tests/data/single.fasta" },
-            .stderr = "error: validate accepts exactly one FASTA path\n",
+            .stderr = "error [usage.extra_argument] validate: Too many arguments. argument=fasta_path allowed_count=1\nhint: Correct the command arguments; use --help for accepted options.\n",
         },
         .{
             .argv = &.{ ZFASTA_BIN, "validate", "-o" },
-            .stderr = "error: -o requires an output path\n",
+            .stderr = "error [usage.missing_option_value] validate: A required option value is missing. option=output expected=path\nhint: Correct the command arguments; use --help for accepted options.\n",
         },
         .{
             .argv = &.{ ZFASTA_BIN, "validate", "--schema" },
-            .stderr = "error: --schema requires uniprot or refseq\n",
+            .stderr = "error [usage.missing_option_value] validate: A required option value is missing. option=schema expected=schema\nhint: Correct the command arguments; use --help for accepted options.\n",
         },
         .{
             .argv = &.{ ZFASTA_BIN, "validate", "--schema", "ena", "tests/data/simple.fasta" },
-            .stderr = "error: --schema must be uniprot or refseq\n",
+            .stderr = "error [usage.invalid_option_value] validate: Invalid option value. option=schema expected=schema value=\"ena\"\nhint: Correct the command arguments; use --help for accepted options.\n",
         },
         .{
             .argv = &.{ ZFASTA_BIN, "validate", "--custom-alphabet" },
-            .stderr = "error: --custom-alphabet requires characters\n",
+            .stderr = "error [usage.missing_option_value] validate: A required option value is missing. option=custom_alphabet expected=alphabet\nhint: Correct the command arguments; use --help for accepted options.\n",
         },
         .{
             .argv = &.{ ZFASTA_BIN, "validate", "--max-header-len" },
-            .stderr = "error: --max-header-len requires a positive integer\n",
+            .stderr = "error [usage.missing_option_value] validate: A required option value is missing. option=max_header_len expected=positive_usize\nhint: Correct the command arguments; use --help for accepted options.\n",
         },
         .{
             .argv = &.{ ZFASTA_BIN, "validate", "--max-header-len", "0", "tests/data/simple.fasta" },
-            .stderr = "error: --max-header-len requires a positive integer\n",
+            .stderr = "error [usage.invalid_option_value] validate: Invalid option value. option=max_header_len expected=positive_usize value=\"0\"\nhint: Correct the command arguments; use --help for accepted options.\n",
         },
         .{
             .argv = &.{ ZFASTA_BIN, "validate", "--fix", "tests/data/simple.fasta" },
-            .stderr = "error: validate --fix requires -o <output.fa>\n",
+            .stderr = "error [usage.option_requires] validate: \"tests/data/simple.fasta\": An option prerequisite is missing. option=fix required=output\nhint: Correct the command arguments; use --help for accepted options.\n",
         },
     };
     for (cases) |case| {
@@ -385,11 +415,16 @@ test "[failure] - [validate operations]: release partial allocations" {
     );
 }
 
+test "[regression] - [validate scan]: repair properties accept safe preamble refusal" {
+    try checkValidatorProperties("junk\n>seq1\nACGT\n");
+}
+
 test "[fuzz] - [validate scan]: returns bounded summaries and idempotent allowed fixes" {
     try std.testing.fuzz({}, fuzzValidator, .{ .corpus = &.{
         "",
         ">a\nA\n",
         ">a description\r\nAC\r\nGT",
+        "junk\n>seq1\nACGT\n",
         ">a\nAAA \nCC\nGGGG\n",
         ">bad\xffname\nA\x00C\n",
     } });
@@ -539,7 +574,6 @@ test "[edge] - [validate JSON]: escapes invalid UTF-8 name bytes" {
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
     defer parsed.deinit();
-    // JSON \u00ff decodes to Unicode U+00FF, not the raw invalid FASTA byte.
     try std.testing.expectEqualStrings("seq\u{00ff}name", parsed.value.object.get("name").?.string);
 }
 
@@ -765,7 +799,6 @@ test "[property] - [validate fix]: preserves empty-record warnings" {
 }
 
 // --- Fix and cross-module contracts ---
-
 test "[cli] - [validate fix]: replaces the output with the exact library rewrite" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -825,12 +858,14 @@ test "[cli] - [validate format-only fix]: preserves invalid bytes while normal f
     const fixed_path = try utility.uniqueArtifactPath(allocator, "validate-format-only-out", "fa");
     defer std.Io.Dir.cwd().deleteFile(io, fixed_path) catch {};
 
+    const expected_delivery = try std.fmt.allocPrint(allocator, "error [repair.blocked] validate: \"zig-cache/test-artifacts\" ({d} bytes):2 column=5 offset=9 record=1: Rewrite is blocked by the reported data condition. reason_code=sequence.invalid_symbol byte=0x3f policy=alphabet=protein selection=automatic custom_symbols=unknown sample=symbols=5 rule=nucleotide_above_90_percent interval=unknown request=unknown repair_policy=legacy_safe\nhint: Resolve the reported rewrite blocker before publishing output.\n", .{in_path.len});
+    defer allocator.free(expected_delivery);
     try expectCliResult(
         allocator,
         &.{ ZFASTA_BIN, "validate", "--fix", "-o", rejected_path, in_path },
         1,
         "",
-        "error: validate --fix refuses character-level errors; use --fix-format-only to keep them unchanged\n",
+        expected_delivery,
     );
     try std.testing.expectError(
         error.FileNotFound,
@@ -864,7 +899,7 @@ test "[cli] - [validate fix]: rejects an aliased input path without modifying it
     const spawn_io = threaded.io();
 
     const result = try std.process.run(allocator, spawn_io, .{
-        .argv = &.{ ZFASTA_BIN, "validate", "--fix", "-o", output_alias, in_path },
+        .argv = &.{ ZFASTA_BIN, "validate", "--error-format=json", "--fix", "-o", output_alias, in_path },
         .stdout_limit = .limited(64 * 1024),
         .stderr_limit = .limited(64 * 1024),
     });
@@ -875,13 +910,8 @@ test "[cli] - [validate fix]: rejects an aliased input path without modifying it
         .exited => |code| try std.testing.expectEqual(@as(u8, 1), code),
         else => return error.ChildProcessFailed,
     }
-    const expected_error = try std.fmt.allocPrint(
-        allocator,
-        "error: validate --fix will not overwrite input: {s}\n",
-        .{in_path},
-    );
     try std.testing.expectEqual(@as(usize, 0), result.stdout.len);
-    try std.testing.expectEqualStrings(expected_error, result.stderr);
+    try utility.expectDiagnostic(allocator, result.stderr, .@"repair.output_is_input");
 
     const input_after = try readTestFile(allocator, in_path);
     try std.testing.expectEqualStrings(broken, input_after);
@@ -998,7 +1028,6 @@ test "[integration] - [validator and indexer]: agree on messy record catalog and
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    // Fixture bytes must actually contain each layout feature (not only related warnings).
     try std.testing.expect(std.mem.indexOf(u8, data, "\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, data, "\n\n") != null);
     try std.testing.expect(!std.mem.endsWith(u8, data, "\n"));
@@ -1006,7 +1035,6 @@ test "[integration] - [validator and indexer]: agree on messy record catalog and
     try std.testing.expect(std.mem.indexOf(u8, data, ">empty_rec\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, data, " \n") != null or std.mem.indexOf(u8, data, "\t\n") != null);
 
-    // Validator must expose every layout feature encoded by the fixture.
     var summary = try validator.validateData(allocator, data, .{});
     defer summary.deinit(allocator);
 
@@ -1020,7 +1048,6 @@ test "[integration] - [validator and indexer]: agree on messy record catalog and
     try std.testing.expectEqual(@as(usize, 6), summary.header_count);
     try std.testing.expectEqual(@as(usize, 5), summary.sequence_count);
 
-    // Indexer must retain the same non-empty catalog and mark messy geometry.
     var index = try scanZfi(allocator, data);
     defer index.deinit(allocator);
 
@@ -1036,12 +1063,375 @@ test "[integration] - [validator and indexer]: agree on messy record catalog and
     for (expected_names, 0..) |want, i| {
         try std.testing.expectEqualStrings(want, zfiEmbeddedName(&index, i));
     }
-    // Empty source record is validated but not indexed.
     for (0..index.records.items.len) |i| {
         try std.testing.expect(!std.mem.eql(u8, zfiEmbeddedName(&index, i), "empty_rec"));
     }
-    // Near validate default --max-header-len (1024): still indexable, triggers long_header.
     const long_name = zfiEmbeddedName(&index, 4);
     try std.testing.expect(long_name.len > 1024);
     try std.testing.expectEqual(@as(usize, 1025), long_name.len);
+}
+
+test "[cli] - [validate safety]: refuses preamble loss without changing legacy counts or destination" {
+    const allocator = std.testing.allocator;
+    const data = "junk\n>seq1\nACGT\n";
+    var summary = try validator.validateData(allocator, data, .{});
+    defer summary.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), summary.events.items.len);
+    try std.testing.expectError(error.RepairRefused, validator.fixData(allocator, data, summary.record_widths.items));
+    const input = try writeFastaArtifact(allocator, "validate-preamble-input", data);
+    defer allocator.free(input);
+    defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
+    const output = try writeFastaArtifact(allocator, "validate-preamble-output", "previous destination\n");
+    defer allocator.free(output);
+    defer std.Io.Dir.cwd().deleteFile(io, output) catch {};
+    for ([_]bool{ false, true }) |format_only| {
+        var threaded = std.Io.Threaded.init(allocator, .{});
+        defer threaded.deinit();
+        const argv: []const []const u8 = if (format_only)
+            &.{ ZFASTA_BIN, "validate", "--error-format=json", "--fix", "--fix-format-only", "-o", output, input }
+        else
+            &.{ ZFASTA_BIN, "validate", "--error-format=json", "--fix", "-o", output, input };
+        const result = try std.process.run(allocator, threaded.io(), .{ .argv = argv });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try std.testing.expectEqual(@as(u8, 1), result.term.exited);
+        try std.testing.expectEqualStrings("", result.stdout);
+        try utility.expectDiagnostic(allocator, result.stderr, .@"repair.blocked");
+        const after = try readTestFile(allocator, output);
+        defer allocator.free(after);
+        try std.testing.expectEqualStrings("previous destination\n", after);
+    }
+}
+
+test "[cli] - [validate safety]: rejects a symlink alias and safely replaces a separate hard link" {
+    const allocator = std.testing.allocator;
+    const broken = ">seq1\nACGT";
+    const input = try writeFastaArtifact(allocator, "validate-link-input", broken);
+    defer allocator.free(input);
+    defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
+    const hard = try utility.uniqueArtifactPath(allocator, "validate-hard-output", "fa");
+    defer allocator.free(hard);
+    defer std.Io.Dir.cwd().deleteFile(io, hard) catch {};
+    const sym = try utility.uniqueArtifactPath(allocator, "validate-sym-output", "fa");
+    defer allocator.free(sym);
+    defer std.Io.Dir.cwd().deleteFile(io, sym) catch {};
+    const absolute_input = try std.Io.Dir.cwd().realPathFileAlloc(io, input, allocator);
+    defer allocator.free(absolute_input);
+    try std.Io.Dir.cwd().symLink(io, absolute_input, sym, .{});
+    try std.Io.Dir.cwd().hardLink(input, std.Io.Dir.cwd(), hard, io, .{});
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const rejected = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "validate", "--fix", "-o", sym, input } });
+    defer allocator.free(rejected.stdout);
+    defer allocator.free(rejected.stderr);
+    try std.testing.expectEqual(@as(u8, 1), rejected.term.exited);
+    const accepted = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "validate", "--fix", "-o", hard, input } });
+    defer allocator.free(accepted.stdout);
+    defer allocator.free(accepted.stderr);
+    try std.testing.expectEqual(@as(u8, 0), accepted.term.exited);
+    const input_after = try readTestFile(allocator, input);
+    defer allocator.free(input_after);
+    const output_after = try readTestFile(allocator, hard);
+    defer allocator.free(output_after);
+    try std.testing.expectEqualStrings(broken, input_after);
+    try std.testing.expectEqualStrings(">seq1\nACGT\n", output_after);
+}
+
+test "[failure] - [validate safety]: refuses an output open failure before staging" {
+    const diagnostics = main.index_format.diagnostics;
+    const allocator = std.testing.allocator;
+    const broken = ">seq1\nACGT";
+    const input = try writeFastaArtifact(allocator, "validate-identity-input", broken);
+    defer allocator.free(input);
+    defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
+    const output = try utility.uniqueArtifactPath(allocator, "validate-identity-loop", "fa");
+    defer allocator.free(output);
+    defer std.Io.Dir.cwd().deleteFile(io, output) catch {};
+    const directory = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(directory);
+    const absolute_output = try std.fs.path.join(allocator, &.{ directory, output });
+    defer allocator.free(absolute_output);
+    try std.Io.Dir.cwd().symLink(io, absolute_output, output, .{});
+
+    var failure: diagnostics.Failure = undefined;
+    try std.testing.expectError(error.RepairRefused, validator.runValidate(allocator, io, input, .{ .fix = true, .output_path = output }, &failure));
+    const primary = failure.primary().?;
+    try std.testing.expectEqual(diagnostics.Code.@"repair.output_identity_unknown", primary.code());
+    try std.testing.expectEqual(diagnostics.Stage.check_identity, primary.stage);
+    try std.testing.expectEqual(diagnostics.SourceId.output, primary.at.source.?);
+    try std.testing.expectEqual(error.SymLinkLoop, primary.cause.?.zig);
+    try std.testing.expectEqual(.not_started, failure.outputs.file.state);
+    try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);
+    try std.testing.expect(failure.work_complete);
+    try std.testing.expect(!failure.complete);
+    const after = try readTestFile(allocator, input);
+    defer allocator.free(after);
+    try std.testing.expectEqualStrings(broken, after);
+    try std.testing.expectError(error.SymLinkLoop, std.Io.Dir.cwd().openFile(io, output, .{}));
+}
+
+test "[failure] - [native validator blockers]: owns duplicate facts beyond retained events" {
+    const diagnostics = main.index_format.diagnostics;
+    const allocator = std.testing.allocator;
+    var data: std.ArrayList(u8) = .empty;
+    defer data.deinit(allocator);
+    try data.appendSlice(allocator, ">dup\n");
+    for (0..validator.MAX_VALIDATE_EVENTS) |_| try data.appendSlice(allocator, "A \n");
+    const duplicate_offset = data.items.len;
+    try data.appendSlice(allocator, ">dup\nA\n");
+    var failure: diagnostics.Failure = undefined;
+    var summary = try validator.validateDataChecked(allocator, data.items, .{}, &failure);
+    try std.testing.expect(summary.truncated);
+    try std.testing.expectEqual(@as(usize, 1), summary.error_count);
+    try std.testing.expectError(error.RepairRefused, validator.fixRejectionChecked(&summary, .{ .fix_format_only = true }, &failure));
+    const primary = failure.primary().?;
+    try std.testing.expectEqual(@as(?u64, duplicate_offset), primary.at.location.offset);
+    try std.testing.expectEqual(@as(?u64, validator.MAX_VALIDATE_EVENTS + 2), primary.at.location.line);
+    try std.testing.expectEqual(@as(?u64, 1), primary.at.location.column);
+    try std.testing.expectEqual(@as(?u64, 2), primary.at.record);
+    try std.testing.expectEqual(@as(?u64, 1), primary.related.?.location.line);
+    const preview = primary.details.@"repair.blocked".blocker.duplicate_identifier.identifier.?;
+    summary.deinit(allocator);
+    @memset(data.items, '?');
+    try std.testing.expectEqualStrings("dup", failure.preview(preview));
+}
+
+test "[failure] - [native validator blockers]: distinguishes header and sequence bytes and exact alphabet evidence" {
+    const diagnostics = main.index_format.diagnostics;
+    const cases = [_][]const u8{ ">na\x00me\nACGT\n", ">seq\nA\x00C \n" };
+    for (cases, 0..) |data, i| {
+        var failure: diagnostics.Failure = undefined;
+        var summary = try validator.validateDataChecked(std.testing.allocator, data, .{}, &failure);
+        defer summary.deinit(std.testing.allocator);
+        try std.testing.expectError(error.RepairRefused, validator.fixRejectionChecked(&summary, .{}, &failure));
+        const primary = failure.primary().?;
+        try std.testing.expectEqual(@as(?u64, if (i == 0) 3 else 6), primary.at.location.offset);
+        try std.testing.expectEqual(@as(?u64, if (i == 0) 4 else 2), primary.at.location.column);
+        try std.testing.expectEqual(@as(?u64, 1), primary.at.record);
+        const blocker = primary.details.@"repair.blocked".blocker;
+        try std.testing.expectEqual(if (i == 0) diagnostics.Code.@"fasta.header_control_byte" else diagnostics.Code.@"fasta.sequence_control_byte", blocker.code());
+    }
+    var failure: diagnostics.Failure = undefined;
+    const options = validator.Options{ .custom_alphabet = "ACGT" };
+    var summary = try validator.validateDataChecked(std.testing.allocator, ">seq\n?A#?\n", options, &failure);
+    defer summary.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), summary.kind_counts[@intFromEnum(validator.Kind.invalid_character)]);
+    try std.testing.expectError(error.RepairRefused, validator.fixRejectionChecked(&summary, options, &failure));
+    const primary = failure.primary().?;
+    try std.testing.expectEqual(@as(?u64, 7), primary.at.location.offset);
+    try std.testing.expectEqual(@as(?u64, 3), primary.at.location.column);
+    const detail = primary.details.@"repair.blocked".blocker.invalid_symbol;
+    try std.testing.expectEqual(@as(u8, '#'), detail.byte);
+    try std.testing.expectEqual(diagnostics.Alphabet.custom, detail.policy.alphabet);
+    try std.testing.expect(detail.policy.sample == null);
+    try std.testing.expect(detail.policy.custom_symbols.?['A' / 8] & (@as(u8, 1) << ('A' % 8)) != 0);
+    failure.reset(.validate);
+    try validator.fixRejectionChecked(&summary, .{ .fix_format_only = true, .custom_alphabet = "ACGT" }, &failure);
+    try std.testing.expect(failure.primary() == null);
+}
+
+test "[failure] - [native validator allocations]: releases scanner, rewrite and event storage" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkNativeValidatorAllocations, .{">seq\nACG \nT\n"});
+}
+
+test "[edge] - [native validator BOM]: retains original first-line byte columns" {
+    const cases = [_]struct { data: []const u8, offset: u64, column: u64 }{
+        .{ .data = "\xef\xbb\xbf>na\x00me\nACGT\n", .offset = 6, .column = 7 },
+        .{ .data = "\xef\xbb\xbf \tjunk\n>seq\nACGT\n", .offset = 5, .column = 6 },
+    };
+    for (cases) |case| {
+        var failure: main.index_format.diagnostics.Failure = undefined;
+        var summary = try validator.validateDataChecked(std.testing.allocator, case.data, .{}, &failure);
+        defer summary.deinit(std.testing.allocator);
+        try std.testing.expectError(error.RepairRefused, validator.fixRejectionChecked(&summary, .{}, &failure));
+        try std.testing.expectEqual(@as(?u64, 1), failure.primary().?.at.location.line);
+        try std.testing.expectEqual(@as(?u64, case.offset), failure.primary().?.at.location.offset);
+        try std.testing.expectEqual(@as(?u64, case.column), failure.primary().?.at.location.column);
+        if (summary.preamble != null) {
+            try std.testing.expectError(error.RepairRefused, validator.fixDataChecked(std.testing.allocator, case.data, summary.record_widths.items, &failure));
+            try std.testing.expectEqual(@as(?u64, case.offset), failure.primary().?.at.location.offset);
+            try std.testing.expectEqual(@as(?u64, case.column), failure.primary().?.at.location.column);
+        }
+    }
+}
+
+test "[cli] - [validate text]: escapes unsafe names and keeps v1 JSON escaping" {
+    const allocator = std.testing.allocator;
+    const input = try writeFastaArtifact(allocator, "validate-text-name", ">na\x1b\x7f\xffme\nA\n>na\x1b\x7f\xffme\nC\n");
+    defer allocator.free(input);
+    defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
+    try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", input }, 1, "ERROR: line 3: duplicate name 'na\\x1b\\x7f\\xffme' (first seen line 1)\n", "");
+    const json = try validator.renderJsonEvent(allocator, .{ .level = .error_level, .kind = .duplicate_name, .line = 3, .name = "\xff", .first_line = 1 });
+    defer allocator.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\\u00ff") != null);
+}
+
+test "[failure] - [native validator input]: retains stat and mapping causes before scanning" {
+    const diagnostics = main.index_format.diagnostics;
+    const Fault = struct {
+        fn stat(_: ?*anyopaque, _: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
+            return error.AccessDenied;
+        }
+        fn map(_: ?*anyopaque, _: std.Io.File, _: std.Io.File.MemoryMap.CreateOptions) std.Io.File.MemoryMap.CreateError!std.Io.File.MemoryMap {
+            return error.AccessDenied;
+        }
+    };
+    var vtable = io.vtable.*;
+    const fault_io = std.Io{ .userdata = io.userdata, .vtable = &vtable };
+    var failure: diagnostics.Failure = undefined;
+    vtable.fileStat = Fault.stat;
+    try std.testing.expectError(error.Io, validator.runValidate(std.testing.allocator, fault_io, "tests/data/simple.fasta", .{}, &failure));
+    try std.testing.expectEqual(diagnostics.Code.@"io.stat_failed", failure.primary().?.code());
+    try std.testing.expectEqual(error.AccessDenied, failure.primary().?.cause.?.zig);
+    vtable.fileStat = io.vtable.fileStat;
+    vtable.fileMemoryMapCreate = Fault.map;
+    try std.testing.expectError(error.Io, validator.runValidate(std.testing.allocator, fault_io, "tests/data/simple.fasta", .{}, &failure));
+    try std.testing.expectEqual(diagnostics.Code.@"io.map_failed", failure.primary().?.code());
+    try std.testing.expectEqual(error.AccessDenied, failure.primary().?.cause.?.zig);
+    try std.testing.expect(!failure.work_complete and !failure.complete);
+    try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);
+}
+
+test "[failure] - [native validator repair]: preserves published output after report flush failure" {
+    const diagnostics = main.index_format.diagnostics;
+    const Fault = struct {
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            return switch (operation) {
+                .file_write_streaming => |write| if (write.file.handle == std.Io.File.stdout().handle)
+                    .{ .file_write_streaming = error.BrokenPipe }
+                else
+                    io.vtable.operate(userdata, operation),
+                else => io.vtable.operate(userdata, operation),
+            };
+        }
+    };
+    const allocator = std.testing.allocator;
+    const input = try writeFastaArtifact(allocator, "validate-published-input", ">seq\nACGT");
+    defer allocator.free(input);
+    defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
+    const output = try writeFastaArtifact(allocator, "validate-published-output", "old destination\n");
+    defer allocator.free(output);
+    defer std.Io.Dir.cwd().deleteFile(io, output) catch {};
+    var vtable = io.vtable.*;
+    vtable.operate = Fault.operate;
+    const fault_io = std.Io{ .userdata = io.userdata, .vtable = &vtable };
+    var failure: diagnostics.Failure = undefined;
+    try std.testing.expectError(error.Io, validator.runValidate(allocator, fault_io, input, .{ .fix = true, .output_path = output }, &failure));
+    try std.testing.expectEqual(diagnostics.Code.@"io.flush_failed", failure.primary().?.code());
+    try std.testing.expectEqual(diagnostics.Stage.flush, failure.primary().?.stage);
+    try std.testing.expectEqual(diagnostics.SourceId.stdout, failure.primary().?.at.source);
+    try std.testing.expectEqual(error.BrokenPipe, failure.primary().?.cause.?.zig);
+    try std.testing.expect(failure.work_complete and !failure.complete);
+    try std.testing.expectEqual(.published, failure.outputs.file.state);
+    try std.testing.expectEqual(.succeeded, failure.outputs.file.final_flush);
+    try std.testing.expectEqual(.failed, failure.outputs.stdout.final_flush);
+    const written = try readTestFile(allocator, output);
+    defer allocator.free(written);
+    try std.testing.expectEqualStrings(">seq\nACGT\n", written);
+    const original = try readTestFile(allocator, input);
+    defer allocator.free(original);
+    try std.testing.expectEqualStrings(">seq\nACGT", original);
+}
+
+test "[failure] - [native validator stdout]: retains final flush cause and resets for reuse" {
+    const diagnostics = main.index_format.diagnostics;
+    const Fault = struct {
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            return switch (operation) {
+                .file_write_streaming => .{ .file_write_streaming = error.BrokenPipe },
+                else => io.vtable.operate(userdata, operation),
+            };
+        }
+        fn discard(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            return switch (operation) {
+                .file_write_streaming => |write| blk: {
+                    var size = write.header.len;
+                    for (write.data, 0..) |data, i| size += data.len * (if (i + 1 == write.data.len) write.splat else 1);
+                    break :blk .{ .file_write_streaming = size };
+                },
+                else => io.vtable.operate(userdata, operation),
+            };
+        }
+    };
+    var vtable = io.vtable.*;
+    vtable.operate = Fault.operate;
+    const fault_io = std.Io{ .userdata = io.userdata, .vtable = &vtable };
+    var failure: diagnostics.Failure = undefined;
+    try std.testing.expectError(error.Io, validator.runValidate(std.testing.allocator, fault_io, "tests/data/simple.fasta", .{ .output_mode = .json_summary }, &failure));
+    try std.testing.expectEqual(diagnostics.Code.@"io.flush_failed", failure.primary().?.code());
+    try std.testing.expectEqual(error.BrokenPipe, failure.primary().?.cause.?.zig);
+    try std.testing.expect(failure.work_complete and !failure.complete);
+    try std.testing.expectEqual(.failed, failure.outputs.stdout.final_flush);
+    try std.testing.expect(failure.outputs.stdout.may_be_partial);
+    try std.testing.expectError(error.Io, validator.runValidate(std.testing.allocator, fault_io, "tests/data/validate-file-does-not-exist.fa", .{}, &failure));
+    try std.testing.expectEqual(diagnostics.Code.@"io.file_not_found", failure.primary().?.code());
+    try std.testing.expect(!failure.work_complete and !failure.complete);
+    try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);
+    vtable.operate = Fault.discard;
+    const result = try validator.runValidate(std.testing.allocator, fault_io, "tests/data/simple.fasta", .{ .output_mode = .json_summary }, &failure);
+    try std.testing.expectEqual(@as(u8, 0), result.status);
+    try std.testing.expect(failure.work_complete and failure.complete);
+    try std.testing.expect(failure.primary() == null);
+    try std.testing.expectEqual(.succeeded, failure.outputs.stdout.final_flush);
+}
+
+test "[cli] - [validate cap]: keeps complete counts and explains retained examples" {
+    const allocator = std.testing.allocator;
+    var data: std.ArrayList(u8) = .empty;
+    defer data.deinit(allocator);
+    try data.appendSlice(allocator, ">seq\n");
+    for (0..validator.MAX_VALIDATE_EVENTS + 1) |_| try data.appendSlice(allocator, "A \n");
+    const input = try writeFastaArtifact(allocator, "validate-cap-counts", data.items);
+    defer allocator.free(input);
+    defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
+    const result = try std.process.run(allocator, io, .{ .argv = &.{ ZFASTA_BIN, "validate", "--json", "--summary", input } });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    switch (result.term) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 1), code),
+        else => return error.ChildProcessFailed,
+    }
+    try std.testing.expectEqualStrings("error: validate retained 10000 events; scanning and counting completed; fix reported issues and re-run\n", result.stderr);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, result.stdout, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("truncated").?.bool);
+    try std.testing.expectEqual(@as(i64, validator.MAX_VALIDATE_EVENTS + 1), parsed.value.object.get("counts").?.object.get("trailing_whitespace").?.integer);
+    const machine = try std.process.run(allocator, io, .{ .argv = &.{ ZFASTA_BIN, "validate", "--json", "--summary", "--error-format=json", input } });
+    defer allocator.free(machine.stdout);
+    defer allocator.free(machine.stderr);
+    try std.testing.expectEqual(@as(u8, 1), machine.term.exited);
+    try std.testing.expectEqualStrings(result.stdout, machine.stdout);
+    try std.testing.expectEqualStrings("", machine.stderr);
+
+    const Fault = struct {
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            return switch (operation) {
+                .file_write_streaming => .{ .file_write_streaming = error.BrokenPipe },
+                else => io.vtable.operate(userdata, operation),
+            };
+        }
+    };
+    var vtable = io.vtable.*;
+    vtable.operate = Fault.operate;
+    var failure: main.index_format.diagnostics.Failure = undefined;
+    try std.testing.expectError(error.Io, validator.runValidate(allocator, .{ .userdata = io.userdata, .vtable = &vtable }, input, .{}, &failure));
+    try std.testing.expectEqual(main.index_format.diagnostics.Code.@"io.write_failed", failure.primary().?.code());
+    try std.testing.expectEqual(error.BrokenPipe, failure.primary().?.cause.?.zig);
+    try std.testing.expect(failure.work_complete and !failure.complete);
+    try std.testing.expectEqual(.not_attempted, failure.outputs.stdout.final_flush);
+}
+
+test "[edge] - [validate fix widths]: equal frequencies select the first seen width" {
+    const cases = [_]struct { input: []const u8, width: u32, fixed: []const u8 }{
+        .{ .input = ">seq\nAAA\nCC\nGGGG\n", .width = 3, .fixed = ">seq\nAAA\nCCG\nGGG\n" },
+        .{ .input = ">seq\nCC\nAAA\nGGGG\n", .width = 2, .fixed = ">seq\nCC\nAA\nAG\nGG\nG\n" },
+    };
+    for (cases) |case| {
+        var summary = try validator.validateData(std.testing.allocator, case.input, .{});
+        defer summary.deinit(std.testing.allocator);
+        try std.testing.expectEqual(case.width, summary.record_widths.items[0]);
+        const fixed = try validator.fixData(std.testing.allocator, case.input, summary.record_widths.items);
+        defer std.testing.allocator.free(fixed);
+        try std.testing.expectEqualStrings(case.fixed, fixed);
+    }
 }

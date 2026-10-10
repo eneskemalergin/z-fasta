@@ -309,7 +309,7 @@ def load_section(results_dir: Path, manifest: dict | None, key: str, ir) -> pd.D
         return None
     section_dir = results_dir / rel
     if not section_dir.is_dir():
-        return None
+        raise ValueError(f"missing declared {key} section: {section_dir}")
 
     metadata = ir.load_metadata(results_dir, manifest)
     frames = []
@@ -324,18 +324,17 @@ def load_section(results_dir: Path, manifest: dict | None, key: str, ir) -> pd.D
 
 def load_zebrac_json(path: Path, metadata_df: pd.DataFrame | None, ir) -> pd.DataFrame:
     data = json.loads(path.read_text())
+    results = ir.zebrac_results(data, path)
     meta_rows = ir.meta_rows_for_json(metadata_df, path)
-    meta_by_command = {row.get("command"): row for row in meta_rows}
 
     rows = []
-    for idx, result in enumerate(data.get("results", [])):
+    for result in results:
+        ir.validate_zebrac_samples(result, path)
         command = result.get("command", "")
-        meta = meta_by_command.get(command, {})
-        if not meta and idx < len(meta_rows):
-            meta = meta_rows[idx]
+        meta = ir.match_zebrac_metadata(result, meta_rows, path)
         wall = result.get("wall_time", {})
         peak = result.get("peak_rss", {})
-        mean_s = wall.get("mean", 0) / 1_000_000_000.0
+        mean_s = ir.required_zebrac_mean(result, "wall_time", path) / 1_000_000_000.0
         std_s = wall.get("std_dev", 0) / 1_000_000_000.0
         out_bases = meta.get("output_bases")
         throughput_mbp_s = None
@@ -352,6 +351,7 @@ def load_zebrac_json(path: Path, metadata_df: pd.DataFrame | None, ir) -> pd.Dat
                 dataset, region = parts
         rows.append(
             {
+                "z_fasta_build": meta.get("z_fasta_build"),
                 "tool": meta.get("tool", ""),
                 "section": meta.get("section", ""),
                 "workload": workload,
@@ -359,13 +359,13 @@ def load_zebrac_json(path: Path, metadata_df: pd.DataFrame | None, ir) -> pd.Dat
                 "region": region,
                 "mean": mean_s,
                 "stddev": std_s,
-                "peak_rss_mb": peak.get("mean", 0) / (1024 * 1024),
+                "peak_rss_mb": ir.required_zebrac_mean(result, "peak_rss", path) / (1024 * 1024),
                 "peak_rss_stddev_mb": peak.get("std_dev", 0) / (1024 * 1024),
                 "minor_faults": result.get("minor_faults", {}).get("mean", 0),
                 "minor_faults_stddev": result.get("minor_faults", {}).get("std_dev", 0),
                 "major_faults": result.get("major_faults", {}).get("mean", 0),
                 "output_bases": out_bases,
-                "throughput_mibs": throughput_mbp_s,
+                "throughput_mbp_s": throughput_mbp_s,
                 "input_bytes": meta.get("input_bytes"),
             }
         )
@@ -2200,6 +2200,9 @@ def md_run_provenance(manifest: dict | None, ir) -> str:
         f"- **Runner:** {zebrac}",
     ]
 
+    if identity := ir.md_build_identity(manifest):
+        lines += ["", identity]
+
     artifacts: list[str] = []
     for key, label in [
         ("perf_pos", "positional extraction"),
@@ -2373,10 +2376,10 @@ def md_pos_section(
         table_work,
         table_tools,
         ir,
-        value_col="throughput_mibs",
+        value_col="throughput_mbp_s",
         formatter=lambda row: (
-            fmt_mbp_s(float(row["throughput_mibs"]))
-            if pd.notna(row.get("throughput_mibs"))
+            fmt_mbp_s(float(row["throughput_mbp_s"]))
+            if pd.notna(row.get("throughput_mbp_s"))
             else None
         ),
     )
@@ -2748,10 +2751,10 @@ def md_multi_section(
         table_work,
         table_tools,
         ir,
-        value_col="throughput_mibs",
+        value_col="throughput_mbp_s",
         formatter=lambda row: (
-            fmt_mbp_s(float(row["throughput_mibs"]))
-            if pd.notna(row.get("throughput_mibs"))
+            fmt_mbp_s(float(row["throughput_mbp_s"]))
+            if pd.notna(row.get("throughput_mbp_s"))
             else None
         ),
     )
@@ -3062,8 +3065,8 @@ def md_bed_section(
         chart_tools,
         ir,
         formatter=lambda row: (
-            fmt_mbp_s(float(row["throughput_mibs"]))
-            if pd.notna(row.get("throughput_mibs"))
+            fmt_mbp_s(float(row["throughput_mbp_s"]))
+            if pd.notna(row.get("throughput_mbp_s"))
             else None
         ),
     )
@@ -3406,10 +3409,10 @@ def md_rc_section(
         work,
         tools,
         ir,
-        value_col="throughput_mibs",
+        value_col="throughput_mbp_s",
         formatter=lambda row: (
-            fmt_mbp_s(float(row["throughput_mibs"]))
-            if pd.notna(row.get("throughput_mibs"))
+            fmt_mbp_s(float(row["throughput_mbp_s"]))
+            if pd.notna(row.get("throughput_mbp_s"))
             else None
         ),
     )

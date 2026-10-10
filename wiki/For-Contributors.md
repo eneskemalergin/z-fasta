@@ -16,9 +16,25 @@ zig build -Doptimize=ReleaseFast
 
 The version command must print `0.16.0`. A compiler installed on your `PATH` is fine when it is that exact version. The repository does not provide a public Zig wrapper or compiler download.
 
+Tests select the executable compiled for their build mode and run with copied fixtures and generated indexes in the build cache. They do not install into `zig-out` or write sidecars beside source fixtures. Run `zig build -Doptimize=ReleaseFast` before installed smoke checks, the shell consumer, or local verification scripts.
+
+For a focused edit, select the owning suite and optionally filter test names:
+
+```bash
+zig build test-index
+zig build test-get
+zig build test-stats
+zig build test-validate
+zig build test-cli -Dtest-filter=dispatch
+```
+
+The filter applies to Zig tests. Separate native callers still run when selected through `test-diagnostics` or `test`. Finish code topics with both full test modes.
+
 ## Source map
 
-- `src/main.zig`: CLI parsing, help, dispatch, and diagnostics.
+- `src/main.zig`: CLI parsing, help, dispatch, diagnostics and checked final status.
+- `src/diagnostics.zig`: native codes, observed facts and caller-owned failure storage.
+- `src/reporting.zig`: text and JSON encoding without allocation or flushing.
 - `src/indexer.zig`: bounded FASTA scanner and index output.
 - `src/index_format.zig`: `.zfi` or `.fai` loading, validation, lookup, and ownership.
 - `src/getter.zig`: requests, coordinates, transforms, and bounded output.
@@ -30,12 +46,24 @@ The version command must print `0.16.0`. A compiler installed on your `PATH` is 
 
 The Wiki owns public behavior and workflow documentation. Source files and their tests own implementation details that are not part of the public contract.
 
+## Native diagnostic checks
+
+```bash
+zig build test-diagnostics
+zig build test-reporting
+bash tests/check_diagnostics.sh
+```
+
+The separate caller in `tests/diagnostics_commands_caller.zig` handles failures from the actual command functions and then calls them again successfully. It uses existing exports without running the CLI dispatcher. Preserve finite error unions, allocator cleanup, original causes and the primary failure when cleanup or reporting also fails. Reset `Failure` once at the owning operation entry; nested helpers retain facts before returning and must not reset them.
+
+Borrowed source labels live through handling or reset. Retained preview views belong to their `Failure`. Validator event names borrow the input while `Summary` owns its arrays. Keep those input bytes alive until handling is finished. Failure capture allocates no new message; preview exhaustion marks truncation and must not hide the original failure. See [Error diagnostics](Error-Diagnostics) for units, encoding and output states.
+
 ## Local correctness gates
 
 ```bash
 bash bench/index/run.sh --skip-benchmarks --skip-messy --skip-report
-bash bench/get/run.sh --skip-benchmarks --skip-report
-bash bench/stats/run.sh --skip-benchmarks --skip-report
+bash bench/get/run.sh --skip-benchmarks --skip-messy --skip-report
+bash bench/stats/run.sh --skip-benchmarks --skip-messy --skip-report
 ```
 
 Run every affected gate after code changes. Synthetic unit fixtures do not replace real-data and peer verification.

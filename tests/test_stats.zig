@@ -186,19 +186,19 @@ test "[cli] - [stats]: rejects invalid FASTA path counts" {
         allocator,
         &.{ ZFASTA_BIN, "stats" },
         1,
-        "error: usage: z-fasta stats <file.fasta>\n",
+        "error [usage.missing_argument] stats: A required argument is missing. argument=fasta_path\nhint: Correct the command arguments; use --help for accepted options.\n",
     );
     try expectCliFailure(
         allocator,
         &.{ ZFASTA_BIN, "stats", "tests/data/simple.fasta", "tests/data/single.fasta" },
         1,
-        "error: stats accepts exactly one FASTA path\n",
+        "error [usage.extra_argument] stats: Too many arguments. argument=fasta_path allowed_count=1\nhint: Correct the command arguments; use --help for accepted options.\n",
     );
     try expectCliFailure(
         allocator,
         &.{ ZFASTA_BIN, "stats", "tests/data/definitely-missing-cli-failure.fasta" },
         1,
-        "error: file not found: tests/data/definitely-missing-cli-failure.fasta\n",
+        "error [io.file_not_found] stats: \"tests/data/definitely-mi\" (47 bytes): Required file was not found.; cause=\"FileNotFound\"\nhint: Check the named input/output and retained I/O cause.\n",
     );
 }
 
@@ -212,12 +212,7 @@ test "[cli] - [stats]: reports missing and corrupt indexes" {
     const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta});
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
 
-    const missing = try std.fmt.allocPrint(
-        allocator,
-        "error: no index found for {s}. Run 'z-fasta index {s}' first.\n",
-        .{ fasta, fasta },
-    );
-    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "stats", fasta }, 1, missing);
+    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "stats", fasta }, .@"index.not_found");
 
     {
         const zfi_file = try std.Io.Dir.cwd().createFile(io, zfi_path, .{});
@@ -225,8 +220,7 @@ test "[cli] - [stats]: reports missing and corrupt indexes" {
         try std.Io.File.writeStreamingAll(zfi_file, io, "not a zfi index");
     }
 
-    const corrupt = try std.fmt.allocPrint(allocator, "error: corrupt index file for: {s}\n", .{fasta});
-    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "stats", fasta }, 1, corrupt);
+    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "stats", fasta }, .@"index.truncated");
 }
 
 test "[cli] - [stats report]: renders the exact nucleotide report" {
@@ -300,7 +294,7 @@ test "[integration] - [stats report]: ZFI and FAI render identical mixed nucleot
         const fasta_file = try std.Io.Dir.cwd().openFile(io, fasta_path, .{});
         defer fasta_file.close(io);
         const fasta_stat = try fasta_file.stat(io);
-        var index = try main.indexer.scanZfiData(fasta_data, true, allocator);
+        var index = try main.indexer.scanZfiData(allocator, fasta_data, true);
         defer index.deinit(allocator);
         try main.indexer.writeZfiIndexFile(
             io,
@@ -543,4 +537,68 @@ test "[cli] - [stats report]: counts the complete protein alphabet and exception
     const output = try runStatsAndCapture(allocator, paths.fasta_path);
     defer allocator.free(output);
     try expectComposition(expected, output);
+}
+
+test "[failure] - [stats stdout]: retains final flush cause and resets operation facts" {
+    const diagnostics = main.index_format.diagnostics;
+    const Fault = struct {
+        fn discard(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            return switch (operation) {
+                .file_write_streaming => |write| blk: {
+                    var size = write.header.len;
+                    for (write.data, 0..) |data, i| size += data.len * (if (i + 1 == write.data.len) write.splat else 1);
+                    break :blk .{ .file_write_streaming = size };
+                },
+                else => std.testing.io.vtable.operate(userdata, operation),
+            };
+        }
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            return switch (operation) {
+                .file_write_streaming => .{ .file_write_streaming = error.BrokenPipe },
+                else => std.testing.io.vtable.operate(userdata, operation),
+            };
+        }
+    };
+    var vtable = io.vtable.*;
+    vtable.operate = Fault.operate;
+    const fault_io = std.Io{ .userdata = io.userdata, .vtable = &vtable };
+    var failure: diagnostics.Failure = undefined;
+    try std.testing.expectError(error.Io, stats.runStats(std.testing.allocator, fault_io, "tests/data/simple.fasta", &failure));
+    try std.testing.expectEqual(diagnostics.Code.@"io.flush_failed", failure.primary().?.code());
+    try std.testing.expectEqual(error.BrokenPipe, failure.primary().?.cause.?.zig);
+    try std.testing.expect(failure.work_complete and !failure.complete);
+    try std.testing.expectEqual(.failed, failure.outputs.stdout.final_flush);
+    try std.testing.expect(failure.outputs.stdout.may_be_partial);
+    try std.testing.expectError(error.Io, stats.runStats(std.testing.allocator, fault_io, "tests/data/stats-file-does-not-exist.fa", &failure));
+    try std.testing.expectEqual(diagnostics.Code.@"io.file_not_found", failure.primary().?.code());
+    try std.testing.expect(!failure.work_complete and !failure.complete);
+    try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);
+    try std.testing.expectEqual(.not_attempted, failure.outputs.stdout.final_flush);
+    vtable.operate = Fault.discard;
+    try stats.runStats(std.testing.allocator, fault_io, "tests/data/simple.fasta", &failure);
+    try std.testing.expect(failure.work_complete and failure.complete);
+    try std.testing.expect(failure.primary() == null);
+    try std.testing.expectEqual(.succeeded, failure.outputs.stdout.final_flush);
+}
+
+test "[failure] - [stats diagnostics]: classifies an overlong FASTA path" {
+    const diagnostics = main.index_format.diagnostics;
+    const path: [256]u8 = @splat('x');
+    var failure: diagnostics.Failure = undefined;
+    try std.testing.expectError(error.Io, stats.runStats(std.testing.allocator, io, &path, &failure));
+    const primary = failure.primary().?;
+    try std.testing.expectEqual(diagnostics.Code.@"io.invalid_path", primary.code());
+    try std.testing.expectEqual(diagnostics.Stage.open, primary.stage);
+    try std.testing.expectEqual(diagnostics.SourceId.fasta, primary.at.source);
+    try std.testing.expectEqual(error.NameTooLong, primary.cause.?.zig);
+    const details = primary.details.@"io.invalid_path";
+    try std.testing.expectEqual(diagnostics.PathReason.too_long, details.reason);
+    try std.testing.expect(details.limit_bytes == null);
+    try std.testing.expectEqual(diagnostics.Operation.stats, failure.operation);
+    try std.testing.expectEqualStrings(&path, failure.sourceLabel(.fasta).?);
+    try std.testing.expectEqual(diagnostics.SourceKind.path, failure.sources.get(.fasta).?.kind);
+    try std.testing.expect(!failure.work_complete and !failure.complete);
+    try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);
+    try std.testing.expectEqual(.not_attempted, failure.outputs.stdout.final_flush);
+    try std.testing.expectEqual(@as(usize, 0), failure.secondaryItems().len);
 }

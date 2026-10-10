@@ -28,6 +28,13 @@ zebrac_json_escape() {
     value="${value//$'\n'/\\n}"
     value="${value//$'\r'/\\r}"
     value="${value//$'\t'/\\t}"
+    local byte control escape
+    for ((byte = 1; byte < 32; byte++)); do
+        printf -v escape '\\x%02x' "$byte"
+        printf -v control '%b' "$escape"
+        printf -v escape '\\u%04x' "$byte"
+        value="${value//"$control"/$escape}"
+    done
     printf '%s' "$value"
 }
 
@@ -44,9 +51,14 @@ zebrac_json_number_or_null() {
     fi
 }
 
+bench_build_identity() {
+    python3 "$BENCH_SHARED_DIR/build_identity.py" "$PROJECT_ROOT" "$ZFASTA"
+}
+
 zebrac_clear_commands() {
     ZEBRAC_BENCH_COMMANDS=()
     ZEBRAC_BENCH_METADATA=()
+    unset ZEBRAC_BUILD_IDENTITY
 }
 
 zebrac_add_command() {
@@ -65,6 +77,10 @@ zebrac_add_command() {
     local raw_json="$8"
     local command="$9"
 
+    if [[ "$tool_family" == z-fasta && -z "${ZEBRAC_BUILD_IDENTITY:-}" ]]; then
+        ZEBRAC_BUILD_IDENTITY="$(bench_build_identity)" || return 1
+    fi
+
     ZEBRAC_BENCH_COMMANDS+=("$command")
     ZEBRAC_BENCH_METADATA+=("$(
         printf '{'
@@ -75,6 +91,7 @@ zebrac_add_command() {
         printf '"workload":%s,' "$(zebrac_json_string "$workload")"
         printf '"tool":%s,' "$(zebrac_json_string "$tool")"
         printf '"tool_family":%s,' "$(zebrac_json_string "$tool_family")"
+        printf '"z_fasta_build":%s,' "${ZEBRAC_BUILD_IDENTITY:-null}"
         printf '"command":%s,' "$(zebrac_json_string "$command")"
         printf '"input_bytes":%s,' "$(zebrac_json_number_or_null "$input_bytes")"
         printf '"output_bases":%s' "$(zebrac_json_number_or_null "$output_bases")"
