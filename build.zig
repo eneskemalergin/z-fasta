@@ -113,7 +113,60 @@ pub fn build(b: *std.Build) void {
     }));
     run_test_validate.step.dependOn(b.getInstallStep());
 
+    const diagnostics_module = b.createModule(.{
+        .root_source_file = b.path("src/diagnostics.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const reporting_module = b.createModule(.{
+        .root_source_file = b.path("src/reporting.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "diagnostics", .module = diagnostics_module }},
+    });
+    const run_test_reporting = b.addRunArtifact(b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/test_reporting.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "diagnostics", .module = diagnostics_module },
+                .{ .name = "reporting", .module = reporting_module },
+            },
+        }),
+    }));
+    const reporting_step = b.step("test-reporting", "Run diagnostic renderer tests");
+    reporting_step.dependOn(&run_test_reporting.step);
+    const run_test_diagnostics = b.addRunArtifact(b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/test_diagnostics.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "diagnostics", .module = diagnostics_module },
+                .{ .name = "reporting", .module = reporting_module },
+            },
+        }),
+    }));
+    const run_diagnostics_caller = b.addRunArtifact(b.addExecutable(.{
+        .name = "diagnostics-caller",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/diagnostics_caller.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "diagnostics", .module = diagnostics_module },
+                .{ .name = "reporting", .module = reporting_module },
+            },
+        }),
+    }));
+    const diagnostics_step = b.step("test-diagnostics", "Run diagnostics tests and a separate caller");
+    diagnostics_step.dependOn(reporting_step);
+    diagnostics_step.dependOn(&run_test_diagnostics.step);
+    diagnostics_step.dependOn(&run_diagnostics_caller.step);
+
     const test_step = b.step("test", "Run tests");
+    test_step.dependOn(diagnostics_step);
     test_step.dependOn(&run_test_index.step);
     test_step.dependOn(&run_test_get.step);
     test_step.dependOn(&run_test_main_unit.step);
