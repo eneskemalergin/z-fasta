@@ -2480,6 +2480,86 @@ test "[failure] - [ZFI loader]: rejects a same-size source replacement" {
     try std.testing.expectError(error.StaleIndex, loadIndexChecked(std.testing.allocator, io, fasta_path));
 }
 
+test "[integration] - [ZFI loader]: distinguishes legacy name suffixes from source identity" {
+    const allocator = std.testing.allocator;
+    const name = "nZFIDabcdefgh";
+    for ([_]usize{ 0, 1800 }) |prefix_count| {
+        for ([_][]const u8{ ">nZFIDabcdefgh\nACGT\n", ">nZFIDabcdefgh\nACG\nTACGT\nAC\n" }) |sample| {
+            var input: std.ArrayList(u8) = .empty;
+            defer input.deinit(allocator);
+            for (0..prefix_count) |i| {
+                var header: [64]u8 = undefined;
+                try input.appendSlice(allocator, try std.fmt.bufPrint(&header, ">prefix{d}\nACGT\n", .{i}));
+            }
+            try input.appendSlice(allocator, sample);
+            const fasta = input.items;
+            var catalog = try main.indexer.scanZfiData(allocator, fasta, true);
+            defer catalog.deinit(allocator);
+            const bytes = try main.indexer.zfiIndexToBytes(allocator, &catalog, fasta.len, 0);
+            defer allocator.free(bytes);
+            const footer_start = bytes.len - main.index_format.ZFI_NAME_FOOTER_BYTES;
+            const identity_start = footer_start - main.index_format.ZFI_SOURCE_ID_BYTES;
+            for ([_]bool{ false, true }) |legacy_footer| {
+                var legacy: std.ArrayList(u8) = .empty;
+                defer legacy.deinit(allocator);
+                try legacy.appendSlice(allocator, bytes[0..identity_start]);
+                if (legacy_footer) {
+                    var footer: [16]u8 = @splat(0);
+                    @memcpy(footer[0..4], &main.index_format.ZFI_NAME_FOOTER_MAGIC);
+                    @memcpy(footer[8..16], bytes[bytes.len - 8 ..]);
+                    try legacy.appendSlice(allocator, &footer);
+                } else try legacy.appendSlice(allocator, bytes[footer_start..]);
+                const path = try writeFastaArtifact(allocator, "zfi-name-identity-collision", fasta);
+                defer allocator.free(path);
+                defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+                const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{path});
+                defer allocator.free(zfi_path);
+                defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+                {
+                    const file = try std.Io.Dir.cwd().createFile(io, zfi_path, .{});
+                    defer file.close(io);
+                    try std.Io.File.writeStreamingAll(file, io, legacy.items);
+                }
+                const modes = [_]main.index_format.LoadMode{ .lookup_full_map, .{ .positional = &.{name} }, .{ .matched = &.{name} }, .stats_scan };
+                for (modes) |mode| {
+                    var failure: diagnostics.Failure = undefined;
+                    failure.reset(.get);
+                    var loaded = try main.index_format.loadIndexCheckedWithMode(allocator, io, path, mode, &failure);
+                    defer loaded.deinit();
+                    try std.testing.expectEqualStrings(name, loaded.recordName(loaded.records.len - 1).?);
+                    try std.testing.expectEqual(catalog.records.items[catalog.records.items.len - 1].seq_len, loaded.records[loaded.records.len - 1].seq_len);
+                    var output = std.Io.Writer.Allocating.init(allocator);
+                    defer output.deinit();
+                    try main.getter.extractRegion(&loaded, name, &output.writer, &failure);
+                    const expected = if (loaded.records[loaded.records.len - 1].seq_len == 4) ">nZFIDabcdefgh\nACGT\n" else ">nZFIDabcdefgh\nACGTACGTAC\n";
+                    try std.testing.expectEqualStrings(expected, output.written());
+                }
+            }
+        }
+    }
+}
+
+test "[failure] - [ZFI loader]: inflated blob length cannot hide source identity" {
+    const allocator = std.testing.allocator;
+    const fasta = ">nZFIDabcdefgh\nACGT\n";
+    var catalog = try main.indexer.scanZfiData(allocator, fasta, true);
+    defer catalog.deinit(allocator);
+    const bytes = try main.indexer.zfiIndexToBytes(allocator, &catalog, fasta.len, 0);
+    defer allocator.free(bytes);
+    std.mem.writeInt(u64, bytes[bytes.len - 8 ..][0..8], catalog.name_blob.items.len + main.index_format.ZFI_SOURCE_ID_BYTES, .little);
+    const paths = try writeFastaAndRawZfi(allocator, "zfi-inflated-identity-blob", fasta, bytes);
+    defer allocator.free(paths.fasta_path);
+    defer allocator.free(paths.zfi_path);
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, paths.zfi_path) catch {};
+    for ([_]main.index_format.LoadMode{ .lookup_full_map, .{ .matched = &.{"nZFIDabcdefgh"} } }) |mode| {
+        var failure: diagnostics.Failure = undefined;
+        failure.reset(.get);
+        try std.testing.expectError(error.InvalidIndex, main.index_format.loadIndexCheckedWithMode(allocator, io, paths.fasta_path, mode, &failure));
+        try std.testing.expectEqual(diagnostics.Code.@"index.name_blob_out_of_bounds", failure.primary().?.code());
+    }
+}
+
 test "[integration] - [ZFI loader]: accepts a legacy index without source identity" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
