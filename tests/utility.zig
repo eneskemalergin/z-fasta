@@ -98,7 +98,7 @@ pub fn captureExtractRegion(
     fasta_path: []const u8,
     region: []const u8,
 ) ![]u8 {
-    var index = try main.index_format.loadIndexChecked(allocator, std.testing.io, fasta_path);
+    var index = try main.index_format.loadIndexCheckedLegacy(allocator, std.testing.io, fasta_path);
     defer index.deinit();
 
     var output = std.Io.Writer.Allocating.init(allocator);
