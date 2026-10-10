@@ -544,3 +544,45 @@ test "[cli] - [stats report]: counts the complete protein alphabet and exception
     defer allocator.free(output);
     try expectComposition(expected, output);
 }
+
+test "[failure] - [stats stdout]: retains final flush cause and resets operation facts" {
+    const diagnostics = main.index_format.diagnostics;
+    const Fault = struct {
+        fn discard(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            return switch (operation) {
+                .file_write_streaming => |write| blk: {
+                    var size = write.header.len;
+                    for (write.data, 0..) |data, i| size += data.len * (if (i + 1 == write.data.len) write.splat else 1);
+                    break :blk .{ .file_write_streaming = size };
+                },
+                else => std.testing.io.vtable.operate(userdata, operation),
+            };
+        }
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            return switch (operation) {
+                .file_write_streaming => .{ .file_write_streaming = error.BrokenPipe },
+                else => std.testing.io.vtable.operate(userdata, operation),
+            };
+        }
+    };
+    var vtable = io.vtable.*;
+    vtable.operate = Fault.operate;
+    const fault_io = std.Io{ .userdata = io.userdata, .vtable = &vtable };
+    var failure: diagnostics.Failure = undefined;
+    try std.testing.expectError(error.Io, stats.runStats(std.testing.allocator, fault_io, "tests/data/simple.fasta", &failure));
+    try std.testing.expectEqual(diagnostics.Code.@"io.flush_failed", failure.primary().?.code());
+    try std.testing.expectEqual(error.BrokenPipe, failure.primary().?.cause.?.zig);
+    try std.testing.expect(failure.work_complete and !failure.complete);
+    try std.testing.expectEqual(.failed, failure.outputs.stdout.final_flush);
+    try std.testing.expect(failure.outputs.stdout.may_be_partial);
+    try std.testing.expectError(error.Io, stats.runStats(std.testing.allocator, fault_io, "tests/data/stats-file-does-not-exist.fa", &failure));
+    try std.testing.expectEqual(diagnostics.Code.@"io.file_not_found", failure.primary().?.code());
+    try std.testing.expect(!failure.work_complete and !failure.complete);
+    try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);
+    try std.testing.expectEqual(.not_attempted, failure.outputs.stdout.final_flush);
+    vtable.operate = Fault.discard;
+    try stats.runStats(std.testing.allocator, fault_io, "tests/data/simple.fasta", &failure);
+    try std.testing.expect(failure.work_complete and failure.complete);
+    try std.testing.expect(failure.primary() == null);
+    try std.testing.expectEqual(.succeeded, failure.outputs.stdout.final_flush);
+}

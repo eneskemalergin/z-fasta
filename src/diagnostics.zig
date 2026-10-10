@@ -192,7 +192,8 @@ pub const OutputState = struct {
     may_be_partial: bool = false,
 };
 
-/// stdout, requested file, and stderr can reach different states in one call.
+/// stdout, a requested destination, and stderr can reach different states.
+/// `file` also tracks caller-supplied writers whose path/kind is unobserved.
 pub const Outputs = struct {
     stdout: OutputState = .{},
     file: OutputState = .{},
@@ -402,6 +403,8 @@ pub const Component = enum { cli, indexer, index_loader, getter, bed_parser, sta
 pub const Check = enum {
     missing_side_table,
     retained_name,
+    retained_shortest_name,
+    retained_longest_name,
     record_reservation,
     record_ordinal,
     composition_accounting,
@@ -476,7 +479,7 @@ pub const BedInteger = struct { field: BedCoordinate, coordinate_system: Coordin
 pub const BedIntegerRange = struct { field: BedCoordinate, max_value: u64, coordinate_system: CoordinateSystem, value: ?Preview = null };
 pub const BedInterval = struct { start: u64, end: u64, coordinate_system: CoordinateSystem };
 pub const BedStrand = struct { strand: ?Preview = null, accepted: enum { plus_minus_dot_or_absent } = .plus_minus_dot_or_absent };
-pub const ProteinTransform = struct { transform: Transform, classification: Alphabet, sample: Sample };
+pub const ProteinTransform = struct { transform: Transform, classification: Alphabet, sample: Sample, identifier: ?Preview = null };
 pub const OutputAlias = struct { input: SourceId, output: SourceId, comparison: IdentityComparison };
 pub const UnknownIdentity = struct { input: SourceId, output: SourceId };
 

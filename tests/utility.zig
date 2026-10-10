@@ -103,7 +103,8 @@ pub fn captureExtractRegion(
 
     var output = std.Io.Writer.Allocating.init(allocator);
     errdefer output.deinit();
-    main.getter.extractRegion(&index, region, &output.writer);
+    var failure: main.index_format.diagnostics.Failure = undefined;
+    try main.getter.extractRegion(&index, region, &output.writer, &failure);
     return output.toOwnedSlice();
 }
 

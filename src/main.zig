@@ -6,6 +6,7 @@ const builtin = @import("builtin");
 pub const index_format = @import("index_format.zig");
 pub const indexer = @import("indexer.zig");
 pub const getter = @import("getter.zig");
+pub const bed_parser = @import("bed_parser.zig");
 pub const stats = @import("stats.zig");
 pub const validator = @import("validator.zig");
 
@@ -397,13 +398,128 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     else
         .{ .positional = region_buf[0..region_count] };
 
-    getter.runGetWithOptions(std.heap.page_allocator, io, path, .{
+    const options = getter.GetOptions{
         .source = source,
         .honor_strand = honor_strand,
-        .summary = summary,
+        .measure_elapsed = summary,
         .orientation = transform.orientation,
         .annotate_transform = transform.annotate_transform,
-    });
+    };
+    var failure: index_format.diagnostics.Failure = undefined;
+    const result = getter.runGetWithOptions(std.heap.page_allocator, io, path, options, &failure) catch {
+        printGetFailure(path, options, &failure);
+    };
+    if (summary) {
+        failure.sources.set(.stderr, .{ .label = .{ .borrowed = "stderr" }, .kind = .stream });
+        var buffer: [512]u8 = undefined;
+        var writer = std.Io.File.Writer.initStreaming(.stderr(), io, &buffer);
+        failure.outputs.stderr.state = .streaming;
+        failure.outputs.stderr.may_be_partial = true;
+        writeGetSummary(&writer.interface, result) catch |err| {
+            const captured = failure.fail(.{ .details = .{ .@"io.write_failed" = {} }, .stage = .write, .at = .{ .source = .stderr }, .cause = .{ .zig = writer.err orelse err } });
+            switch (captured) {
+                else => {},
+            }
+            printGetFailure(path, options, &failure);
+        };
+        writer.flush() catch |err| {
+            failure.outputs.stderr.final_flush = .failed;
+            const captured = failure.fail(.{ .details = .{ .@"io.flush_failed" = {} }, .stage = .flush, .at = .{ .source = .stderr }, .cause = .{ .zig = writer.err orelse err } });
+            switch (captured) {
+                else => {},
+            }
+            printGetFailure(path, options, &failure);
+        };
+        failure.outputs.stderr.final_flush = .succeeded;
+    }
+}
+
+fn writeGetSummary(writer: *std.Io.Writer, result: getter.GetResult) std.Io.Writer.Error!void {
+    const seconds = if (result.elapsed_ns == 0) 0.0 else @as(f64, @floatFromInt(result.elapsed_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s));
+    const regions_per_second = if (seconds == 0.0) 0.0 else @as(f64, @floatFromInt(result.region_count)) / seconds;
+    try writer.print("summary: regions={d} total_bases={d} elapsed_s={d:.6} regions_per_s={d:.1}\n", .{ result.region_count, result.total_bases, seconds, regions_per_second });
+}
+
+fn getFailureIdentifier(options: getter.GetOptions, primary: *const index_format.diagnostics.Diagnostic, failure: *const index_format.diagnostics.Failure, preview: ?index_format.diagnostics.Preview) struct { bytes: []const u8, original_bytes: u64, truncated: bool } {
+    if (options.source == .positional) {
+        const requests = options.source.positional;
+        if (primary.at.request) |ordinal| {
+            if (ordinal > 0 and ordinal <= requests.len) {
+                const name = getter.parseRegion(requests[@intCast(ordinal - 1)]).name;
+                return .{ .bytes = name, .original_bytes = name.len, .truncated = false };
+            }
+        }
+    }
+    if (preview) |reference| return .{ .bytes = failure.preview(reference), .original_bytes = reference.original_bytes, .truncated = reference.truncated };
+    return .{ .bytes = "", .original_bytes = 0, .truncated = false };
+}
+
+// Temporary legacy messages until the shared CLI renderer conversion.
+fn printGetFailure(path: []const u8, options: getter.GetOptions, failure: *const index_format.diagnostics.Failure) noreturn {
+    const primary = failure.primary() orelse printErrorAndExit("error: processing failed\n", .{});
+    const source = primary.at.source;
+    const label = if (source) |id| failure.sourceLabel(id) orelse path else path;
+    const line = primary.at.location.line orelse 0;
+    switch (primary.details) {
+        .@"request.sequence_not_found" => |detail| {
+            const identifier = getFailureIdentifier(options, primary, failure, detail.identifier);
+            if (identifier.truncated) printErrorAndExit("error: sequence not found: {s} (identifier truncated; {d} bytes)\n", .{ identifier.bytes, identifier.original_bytes });
+            printErrorAndExit("error: sequence not found: {s}\n", .{identifier.bytes});
+        },
+        .@"request.start_before_one" => printErrorAndExit("error: start position must be >= 1\n", .{}),
+        .@"request.start_after_sequence" => |detail| printErrorAndExit("error: start position {d} exceeds sequence length {d}\n", .{ detail.start, detail.sequence_length }),
+        .@"request.end_before_start" => printErrorAndExit("error: end position must be >= start position\n", .{}),
+        .@"request.no_regions" => printErrorAndExit("error: no regions provided\n", .{}),
+        .@"request.identifier_too_long" => |detail| if (options.source == .bed)
+            printErrorAndExit("error: invalid BED line {d}: chrom exceeds {d} bytes\n", .{ line, detail.limit_bytes })
+        else
+            printErrorAndExit("error: name at line {d} exceeds {d} bytes\n", .{ line, detail.limit_bytes }),
+        .@"request.bed.field_missing" => |detail| printErrorAndExit("error: invalid BED line {d}: missing {s}\n", .{ line, @tagName(detail.field) }),
+        .@"request.bed.invalid_coordinate" => |detail| printErrorAndExit("error: invalid BED line {d}: invalid {s}\n", .{ line, @tagName(detail.field) }),
+        .@"request.bed.coordinate_out_of_range" => |detail| printErrorAndExit("error: invalid BED line {d}: invalid {s}\n", .{ line, @tagName(detail.field) }),
+        .@"request.bed.invalid_interval" => printErrorAndExit("error: invalid BED line {d}: end must be greater than start\n", .{line}),
+        .@"request.bed.invalid_strand" => printErrorAndExit("error: invalid BED line {d}: invalid strand\n", .{line}),
+        .@"transform.complement_on_protein" => |detail| {
+            const identifier = getFailureIdentifier(options, primary, failure, detail.identifier);
+            if (identifier.truncated) printErrorAndExit("error: reverse complement is not defined for protein sequences: {s} (identifier truncated; {d} bytes) (classified from up to {d} bases)\n", .{ identifier.bytes, identifier.original_bytes, stats.GET_TYPE_SAMPLE_BASES });
+            printErrorAndExit("error: reverse complement is not defined for protein sequences: {s} (classified from up to {d} bases)\n", .{ identifier.bytes, stats.GET_TYPE_SAMPLE_BASES });
+        },
+        .@"resource.line_buffer_exceeded" => |detail| if (options.source == .bed)
+            printErrorAndExit("error: BED line {d} exceeds {d}-byte reader buffer (no newline within limit)\n", .{ line, detail.buffer_bytes })
+        else
+            printErrorAndExit("error: name at line {d} exceeds {d} bytes\n", .{ line, std.math.maxInt(u16) }),
+        .@"resource.out_of_memory" => if (source == .fasta or source == .zfi or source == .fai)
+            printErrorAndExit("error: out of memory loading index\n", .{})
+        else
+            printErrorAndExit("error: out of memory\n", .{}),
+        .@"io.file_not_found" => printErrorAndExit("error: file not found: {s}\n", .{label}),
+        .@"io.access_denied" => printErrorAndExit("error: access denied: {s}\n", .{label}),
+        .@"io.invalid_path" => printErrorAndExit("error: path too long\n", .{}),
+        .@"io.open_failed" => if (source == .fasta or source == .names or source == .bed)
+            printErrorAndExit("error: failed to open file: {s}\n", .{label})
+        else
+            printErrorAndExit("error: failed to load index for: {s}\n", .{path}),
+        .@"io.map_failed" => printErrorAndExit("error: failed to mmap file: {s}\n", .{path}),
+        .@"fasta.no_records" => printErrorAndExit("error: file is empty: {s}\n", .{path}),
+        .@"index.not_found" => printErrorAndExit("error: no index found for {s}. Run 'z-fasta index {s}' first.\n", .{ path, path }),
+        .@"index.older_than_source", .@"index.source_size_mismatch", .@"index.source_mtime_mismatch" => printErrorAndExit("error: index is stale (FASTA size or mtime does not match the index). Re-run 'z-fasta index <path>'.\n", .{}),
+        .@"io.write_failed", .@"io.flush_failed" => printErrorAndExit("error: write failed\n", .{}),
+        .@"io.read_failed" => if (source == .names or source == .bed or source == .stdin)
+            if (options.source == .bed) printErrorAndExit("error: failed to read BED input\n", .{}) else printErrorAndExit("error: failed to read names input\n", .{})
+        else if (source == .fasta and primary.stage == .read and primary.related != null)
+            printErrorAndExit("error: failed to read FASTA\n", .{})
+        else
+            printErrorAndExit("error: failed to load index for: {s}\n", .{path}),
+        .@"io.unexpected_eof", .@"pair.region_length_mismatch", .@"index.sequence_span_out_of_bounds" => if (primary.related != null)
+            printErrorAndExit("error: read past end of FASTA\n", .{})
+        else
+            printErrorAndExit("error: corrupt index file for: {s}\n", .{path}),
+        .@"input.changed" => printErrorAndExit("error: request input changed while extracting: {s}\n", .{label}),
+        else => if (index_format.diagnostics.metadata(primary.code()).category == .index_integrity or index_format.diagnostics.metadata(primary.code()).category == .index_compatibility)
+            printErrorAndExit("error: corrupt index file for: {s}\n", .{path})
+        else
+            printErrorAndExit("error: processing failed\n", .{}),
+    }
 }
 
 // --- Stats command ---
@@ -427,7 +543,53 @@ fn runStatsCmd(io: std.Io, args: *std.process.Args.Iterator) void {
         printErrorAndExit("error: usage: z-fasta stats <file.fasta>\n", .{});
     };
 
-    stats.runStats(std.heap.page_allocator, io, path);
+    var failure: index_format.diagnostics.Failure = undefined;
+    stats.runStats(std.heap.page_allocator, io, path, &failure) catch printStatsFailure(path, &failure);
+}
+
+// Temporary legacy messages; common rendering and status move in commit 10.
+fn printStatsFailure(path: []const u8, failure: *const index_format.diagnostics.Failure) noreturn {
+    const primary = failure.primary().?;
+    switch (primary.code()) {
+        .@"io.file_not_found" => printErrorAndExit("error: file not found: {s}\n", .{path}),
+        .@"io.access_denied" => printErrorAndExit("error: access denied: {s}\n", .{path}),
+        .@"io.invalid_path" => printErrorAndExit("error: path too long\n", .{}),
+        .@"fasta.no_records" => printErrorAndExit("error: file is empty: {s}\n", .{path}),
+        .@"io.map_failed" => printErrorAndExit("error: failed to mmap file: {s}\n", .{path}),
+        .@"index.older_than_source", .@"index.source_size_mismatch", .@"index.source_mtime_mismatch" => printErrorAndExit("error: index is stale (FASTA size or mtime does not match the index). Re-run 'z-fasta index <path>'.\n", .{}),
+        .@"index.not_found" => printErrorAndExit("error: no index found for {s}. Run 'z-fasta index {s}' first.\n", .{ path, path }),
+        .@"resource.out_of_memory" => if (primary.stage == .allocate and (primary.details.@"resource.out_of_memory".allocation_role == .lengths or primary.details.@"resource.out_of_memory".allocation_role == .traversal_order))
+            printErrorAndExit("error: out of memory\n", .{})
+        else
+            printErrorAndExit("error: out of memory loading index\n", .{}),
+        .@"resource.count_overflow" => printErrorAndExit("error: sequence length overflow\n", .{}),
+        .@"io.write_failed", .@"io.flush_failed" => printErrorAndExit("error: write failed\n", .{}),
+        .@"pair.total_length_mismatch" => printErrorAndExit("error: index sequence lengths do not match FASTA data\n", .{}),
+        .@"io.read_failed" => if (primary.stage == .read and primary.at.source == .fasta)
+            printErrorAndExit("error: failed to read FASTA\n", .{})
+        else
+            printErrorAndExit("error: failed to load index for: {s}\n", .{path}),
+        .@"io.unexpected_eof" => if (primary.at.source == .fasta)
+            printErrorAndExit("error: index sequence lengths do not match FASTA data\n", .{})
+        else
+            printErrorAndExit("error: corrupt index file for: {s}\n", .{path}),
+        .@"internal.consistency_failed" => switch (primary.details.@"internal.consistency_failed".check) {
+            .retained_shortest_name => printErrorAndExit("error: index does not retain the shortest record name\n", .{}),
+            .retained_longest_name => printErrorAndExit("error: index does not retain the longest record name\n", .{}),
+            .composition_accounting => printErrorAndExit("error: composition does not match indexed symbols\n", .{}),
+            else => printErrorAndExit("error: index sequence lengths do not match FASTA data\n", .{}),
+        },
+        .@"io.open_failed", .@"io.stat_failed" => printErrorAndExit("error: failed to load index for: {s}\n", .{path}),
+        .@"resource.capacity_limit_exceeded" => if (primary.details.@"resource.capacity_limit_exceeded".capacity_role == .map_bytes)
+            printErrorAndExit("error: failed to mmap file: {s}\n", .{path})
+        else
+            printErrorAndExit("error: out of memory loading index\n", .{}),
+        .@"index.no_records" => if (primary.stage == .scan)
+            printErrorAndExit("error: no sequences in index\n", .{})
+        else
+            printErrorAndExit("error: corrupt index file for: {s}\n", .{path}),
+        else => printErrorAndExit("error: corrupt index file for: {s}\n", .{path}),
+    }
 }
 
 // --- Validate command ---
@@ -585,4 +747,10 @@ test "[cli] - [dispatch]: writes help and rejects missing or unknown commands" {
         try std.testing.expectEqual(@as(usize, 0), result.stdout.len);
         try std.testing.expectEqualStrings(help.stdout, result.stderr);
     }
+}
+
+test "[failure] - [get summary]: propagates a full destination" {
+    var buffer: [1]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try std.testing.expectError(error.WriteFailed, writeGetSummary(&writer, .{ .region_count = 1, .total_bases = 1, .elapsed_ns = 1 }));
 }

@@ -6,7 +6,10 @@ const std = @import("std");
 const main = @import("main");
 const utility = @import("utility.zig");
 const parseRegion = main.getter.parseRegion;
-const resolveRegion = main.getter.resolveRegion;
+fn resolveRegion(idx: *const main.index_format.LoadedIndex, input: []const u8) !main.getter.ResolvedRegion {
+    var failure: main.index_format.diagnostics.Failure = undefined;
+    return main.getter.resolveRegion(idx, input, &failure);
+}
 const io = std.testing.io;
 
 const ZFASTA_BIN = utility.ZFASTA_BIN;
@@ -96,7 +99,7 @@ test "[integration] - [region resolution]: preserves indexed coordinate geometry
     };
 
     for (cases) |case| {
-        const resolved = resolveRegion(&idx, case.request);
+        const resolved = try resolveRegion(&idx, case.request);
 
         try std.testing.expectEqualStrings("seq1", resolved.name);
         try std.testing.expectEqual(case.start, resolved.start);
@@ -111,7 +114,7 @@ test "[integration] - [region resolution]: accepts a pipe-delimited protein iden
     var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/proteome.fasta");
     defer idx.deinit();
 
-    const r = resolveRegion(&idx, "sp|P12345|PROT_HUMAN:1-10");
+    const r = try resolveRegion(&idx, "sp|P12345|PROT_HUMAN:1-10");
 
     try std.testing.expectEqualStrings("sp|P12345|PROT_HUMAN", r.name);
     try std.testing.expectEqual(@as(u64, 10), r.num_bases);
@@ -122,7 +125,7 @@ test "[integration] - [region resolution]: accepts a 200-byte identifier" {
     defer idx.deinit();
 
     const long_name = "A" ** 200;
-    const r = resolveRegion(&idx, long_name);
+    const r = try resolveRegion(&idx, long_name);
 
     try std.testing.expectEqualStrings(long_name, r.name);
     try std.testing.expect(r.is_full);
@@ -687,4 +690,354 @@ test "[cli] - [get BED]: annotations describe the composed orientation" {
         &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--bed", bed_path, "--strand-aware", "--rc", "--annotate-rc" },
         ">seq1:1-5 (reverse complement)\nTACGT\n>seq1:1-5\nACGTA\n",
     );
+}
+
+test "[failure] - [BED parser]: retains field locations and distinguishes decimal overflow" {
+    const diagnostics = main.index_format.diagnostics;
+    const cases = [_]struct {
+        row: []const u8,
+        code: diagnostics.Code,
+        column: u64,
+        legacy: main.bed_parser.ParseError,
+        value: ?[]const u8 = null,
+    }{
+        .{ .row = "\t0\t1", .code = .@"request.bed.field_missing", .column = 1, .legacy = error.MissingChrom },
+        .{ .row = "seq", .code = .@"request.bed.field_missing", .column = 4, .legacy = error.MissingStart },
+        .{ .row = "seq\t\t1", .code = .@"request.bed.field_missing", .column = 5, .legacy = error.MissingStart },
+        .{ .row = "seq\t0", .code = .@"request.bed.field_missing", .column = 6, .legacy = error.MissingEnd },
+        .{ .row = "seq\t0\t", .code = .@"request.bed.field_missing", .column = 7, .legacy = error.MissingEnd },
+        .{ .row = "seq\tx\t1", .code = .@"request.bed.invalid_coordinate", .column = 5, .legacy = error.InvalidStart, .value = "x" },
+        .{ .row = "seq\t0\t-1", .code = .@"request.bed.invalid_coordinate", .column = 7, .legacy = error.InvalidEnd, .value = "-1" },
+        .{ .row = "seq\t18446744073709551616\t1", .code = .@"request.bed.coordinate_out_of_range", .column = 5, .legacy = error.InvalidStart, .value = "18446744073709551616" },
+        .{ .row = "seq\t0\t18446744073709551616", .code = .@"request.bed.coordinate_out_of_range", .column = 7, .legacy = error.InvalidEnd, .value = "18446744073709551616" },
+        .{ .row = "seq\t18446744073709551616000x\t1", .code = .@"request.bed.invalid_coordinate", .column = 5, .legacy = error.InvalidStart, .value = "18446744073709551616000x" },
+        .{ .row = "seq\t2\t2", .code = .@"request.bed.invalid_interval", .column = 5, .legacy = error.EmptyInterval },
+        .{ .row = "seq\t2\t1", .code = .@"request.bed.invalid_interval", .column = 5, .legacy = error.EmptyInterval },
+        // Preserve the existing missing-field check before coordinate parsing.
+        .{ .row = "seq\tx", .code = .@"request.bed.field_missing", .column = 6, .legacy = error.MissingEnd },
+    };
+    for (cases) |case| {
+        var failure: diagnostics.Failure = undefined;
+        failure.reset(.get);
+        try std.testing.expectError(error.InvalidRequest, main.bed_parser.parseBedLineChecked(case.row, false, .{
+            .source = .bed,
+            .location = .{ .offset = 100, .line = 12 },
+            .request = 8,
+        }, &failure));
+        const primary = failure.primary().?;
+        try std.testing.expectEqual(case.code, primary.code());
+        try std.testing.expectEqual(@as(?u64, case.column), primary.at.location.column);
+        try std.testing.expectEqual(@as(?u64, 100 + case.column - 1), primary.at.location.offset);
+        try std.testing.expectEqual(@as(?u64, 12), primary.at.location.line);
+        try std.testing.expectEqual(@as(?u64, 8), primary.at.request);
+        try std.testing.expectEqual(@as(?diagnostics.SourceId, .bed), primary.at.source);
+        try std.testing.expectEqual(diagnostics.Stage.parse, primary.stage);
+        try std.testing.expect(primary.cause == null);
+        switch (primary.details) {
+            .@"request.bed.field_missing" => |detail| {
+                const expected: diagnostics.BedField = switch (case.legacy) {
+                    error.MissingChrom => .chrom,
+                    error.MissingStart => .start,
+                    else => .end,
+                };
+                try std.testing.expectEqual(expected, detail.field);
+                try std.testing.expectEqual(@as(u8, switch (expected) {
+                    .chrom => 1,
+                    .start => 2,
+                    .end => 3,
+                }), detail.column_number);
+            },
+            .@"request.bed.invalid_coordinate" => |detail| {
+                try std.testing.expectEqual(diagnostics.CoordinateSystem.zero_based_half_open, detail.coordinate_system);
+                try std.testing.expectEqual(if (case.legacy == error.InvalidStart) diagnostics.BedCoordinate.start else .end, detail.field);
+                try std.testing.expectEqualStrings(case.value.?, failure.preview(detail.value.?));
+            },
+            .@"request.bed.coordinate_out_of_range" => |detail| {
+                try std.testing.expectEqual(std.math.maxInt(u64), detail.max_value);
+                try std.testing.expectEqual(diagnostics.CoordinateSystem.zero_based_half_open, detail.coordinate_system);
+                try std.testing.expectEqual(if (case.legacy == error.InvalidStart) diagnostics.BedCoordinate.start else .end, detail.field);
+                try std.testing.expectEqualStrings(case.value.?, failure.preview(detail.value.?));
+            },
+            .@"request.bed.invalid_interval" => |detail| {
+                try std.testing.expectEqual(@as(u64, 2), detail.start);
+                try std.testing.expectEqual(diagnostics.CoordinateSystem.zero_based_half_open, detail.coordinate_system);
+                try std.testing.expectEqual(@as(u64, if (std.mem.endsWith(u8, case.row, "2")) 2 else 1), detail.end);
+            },
+            else => return error.UnexpectedDiagnostic,
+        }
+        try std.testing.expectError(case.legacy, main.bed_parser.parseBedLine(case.row));
+    }
+}
+
+test "[edge] - [BED parser]: preserves skips, leading zeros, maximum coordinates and optional strand" {
+    const diagnostics = main.index_format.diagnostics;
+    for ([_][]const u8{ "", "\r", "# comment", "track", "track name=x", "browser", "browser position chr1" }) |row| {
+        var failure: diagnostics.Failure = undefined;
+        failure.reset(.get);
+        const parsed = try main.bed_parser.parseBedLineChecked(row, true, .{}, &failure);
+        try std.testing.expect(parsed == .skip);
+        try std.testing.expect(failure.primary() == null);
+    }
+    const rows = [_][]const u8{
+        "seq\t0000\t0001\tname\t0\t-\r",
+        "seq\t18446744073709551614\t18446744073709551615",
+        "seq\t0\t1\tname\t0\t?",
+        "seq\t0\t1\tname\t0\t",
+    };
+    for (rows, 0..) |row, i| {
+        var failure: diagnostics.Failure = undefined;
+        failure.reset(.get);
+        const parsed = try main.bed_parser.parseBedLineChecked(row, false, .{}, &failure);
+        const legacy = try main.bed_parser.parseBedLine(row);
+        try std.testing.expectEqualDeep(legacy, parsed);
+        try std.testing.expect(failure.primary() == null);
+        try std.testing.expectEqual(@as(u64, if (i == 1) std.math.maxInt(u64) else 1), parsed.region.end_1based);
+    }
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.get);
+    try std.testing.expectError(error.InvalidRequest, main.bed_parser.parseBedLineChecked(rows[2], true, .{
+        .source = .bed,
+        .location = .{ .line = 9, .offset = 40 },
+    }, &failure));
+    const primary = failure.primary().?;
+    try std.testing.expectEqual(diagnostics.Code.@"request.bed.invalid_strand", primary.code());
+    try std.testing.expectEqualStrings("?", failure.preview(primary.details.@"request.bed.invalid_strand".strand.?));
+    try std.testing.expectEqual(@as(?u64, 16), primary.at.location.column);
+    try std.testing.expectEqual(@as(?u64, 55), primary.at.location.offset);
+    try std.testing.expectEqual(@as(?u64, 9), primary.at.location.line);
+}
+
+test "[failure] - [BED parser]: owns bounded previews after the input is reused" {
+    const diagnostics = main.index_format.diagnostics;
+    var row = [_]u8{'9'} ** 128;
+    @memcpy(row[0..6], "seq\t0\t");
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.get);
+    try std.testing.expectError(error.InvalidRequest, main.bed_parser.parseBedLineChecked(&row, false, .{ .source = .bed }, &failure));
+    @memset(&row, 0);
+    const primary = failure.primary().?;
+    const preview = primary.details.@"request.bed.coordinate_out_of_range".value.?;
+    try std.testing.expectEqual(@as(u64, 122), preview.original_bytes);
+    try std.testing.expect(preview.truncated);
+    try std.testing.expectEqualStrings("99999999999999999999999999999999", failure.preview(preview));
+    try std.testing.expect(primary.at.location.offset == null);
+    try std.testing.expectEqual(@as(?u64, 7), primary.at.location.column);
+}
+
+test "[failure] - [GET diagnostics]: returns exact request facts without exiting" {
+    const diagnostics = main.index_format.diagnostics;
+    var idx = try main.index_format.loadIndexCheckedLegacy(std.testing.allocator, io, "tests/data/simple.fasta");
+    defer idx.deinit();
+    const cases = [_]struct { request: []const u8, code: diagnostics.Code }{
+        .{ .request = "missing", .code = .@"request.sequence_not_found" },
+        .{ .request = "seq1:0-1", .code = .@"request.start_before_one" },
+        .{ .request = "seq1:25-25", .code = .@"request.start_after_sequence" },
+        .{ .request = "seq1:10-9", .code = .@"request.end_before_start" },
+    };
+    var failure: diagnostics.Failure = undefined;
+    for (cases) |case| {
+        try std.testing.expectError(error.InvalidRequest, main.getter.resolveRegion(&idx, case.request, &failure));
+        const primary = failure.primary().?;
+        try std.testing.expectEqual(case.code, primary.code());
+        try std.testing.expectEqual(@as(?u64, 1), primary.at.request);
+        try std.testing.expect(primary.cause == null);
+        if (case.code == .@"request.sequence_not_found") {
+            const detail = primary.details.@"request.sequence_not_found";
+            try std.testing.expectEqualStrings("missing", failure.preview(detail.identifier.?));
+            try std.testing.expectEqual(diagnostics.LookupScope.retained_matches, detail.lookup_scope);
+        }
+    }
+    const good = try main.getter.resolveRegion(&idx, "seq1:1-999", &failure);
+    try std.testing.expectEqual(@as(u64, 24), good.num_bases);
+    try std.testing.expect(failure.primary() == null);
+    try std.testing.expect(failure.complete);
+}
+
+test "[failure] - [GET diagnostics]: retains FASTA read causes and exact short reads" {
+    const diagnostics = main.index_format.diagnostics;
+    const Fault = struct {
+        fn read(_: ?*anyopaque, _: std.Io.File, _: []const []u8, _: u64) std.Io.File.ReadPositionalError!usize {
+            return error.InputOutput;
+        }
+        fn short(_: ?*anyopaque, _: std.Io.File, _: []const []u8, _: u64) std.Io.File.ReadPositionalError!usize {
+            return 0;
+        }
+    };
+    var idx = try main.index_format.loadIndexCheckedLegacy(std.testing.allocator, io, "tests/data/simple.fasta");
+    defer idx.deinit();
+    for (0..2) |i| {
+        var vtable = io.vtable.*;
+        vtable.fileReadPositional = if (i == 0) Fault.read else Fault.short;
+        idx.io = .{ .userdata = io.userdata, .vtable = &vtable };
+        defer idx.io = io;
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var failure: diagnostics.Failure = undefined;
+        try std.testing.expectError(error.Io, main.getter.extractRegion(&idx, "seq1:1-2", &output.writer, &failure));
+        const primary = failure.primary().?;
+        try std.testing.expectEqual(@as(?u64, idx.records[0].seq_offset), primary.at.location.offset);
+        try std.testing.expectEqual(@as(?diagnostics.SourceId, .fasta), primary.at.source);
+        try std.testing.expectEqual(@as(?u64, 1), primary.related.?.request);
+        if (i == 0) {
+            try std.testing.expectEqual(diagnostics.Code.@"io.read_failed", primary.code());
+            try std.testing.expectEqual(error.InputOutput, primary.cause.?.zig);
+            try std.testing.expectEqual(@as(?u64, 2), primary.details.@"io.read_failed".requested_bytes);
+        } else {
+            const detail = primary.details.@"io.unexpected_eof".exact;
+            try std.testing.expectEqual(@as(u64, 2), detail.requested_bytes);
+            try std.testing.expectEqual(@as(u64, 0), detail.received_bytes);
+            try std.testing.expect(primary.cause == null);
+        }
+        try std.testing.expectEqualStrings(">seq1:1-2\n", output.written());
+        try std.testing.expect(failure.outputs.file.may_be_partial);
+    }
+}
+
+test "[failure] - [GET diagnostics]: returns partial writer failure with no final flush" {
+    const diagnostics = main.index_format.diagnostics;
+    var idx = try main.index_format.loadIndexCheckedLegacy(std.testing.allocator, io, "tests/data/simple.fasta");
+    defer idx.deinit();
+    var buffer: [1]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    var failure: diagnostics.Failure = undefined;
+    try std.testing.expectError(error.Io, main.getter.extractRegion(&idx, "seq1", &writer, &failure));
+    try std.testing.expectEqual(diagnostics.Code.@"io.write_failed", failure.primary().?.code());
+    try std.testing.expectEqual(error.WriteFailed, failure.primary().?.cause.?.zig);
+    try std.testing.expectEqual(@as(?diagnostics.SourceId, .output), failure.primary().?.at.source);
+    try std.testing.expectEqualStrings(">", writer.buffered());
+    try std.testing.expectEqual(.not_attempted, failure.outputs.file.final_flush);
+    try std.testing.expect(failure.outputs.file.may_be_partial);
+    try std.testing.expect(!failure.complete);
+}
+
+test "[failure] - [GET diagnostics]: captures the actual protein sample and source priority" {
+    const diagnostics = main.index_format.diagnostics;
+    var failure: diagnostics.Failure = undefined;
+    try std.testing.expectError(error.UnsupportedTransform, main.getter.runGetWithOptions(std.testing.allocator, io, "tests/data/proteome.fasta", .{
+        .source = .{ .positional = &.{"sp|P12345|PROT_HUMAN:1-10"} },
+        .orientation = main.getter.Orientation.complementOnly(),
+    }, &failure));
+    const detail = failure.primary().?.details.@"transform.complement_on_protein";
+    try std.testing.expectEqual(@as(u32, 10), detail.sample.symbols);
+    try std.testing.expectEqual(@as(?u64, 1), detail.sample.request);
+    try std.testing.expectEqual(diagnostics.Interval{ .start = 1, .end = 10 }, detail.sample.interval.?);
+    try std.testing.expect(detail.transform.complement and !detail.transform.reverse);
+    try std.testing.expectEqualStrings("sp|P12345|PROT_HUMAN", failure.preview(detail.identifier.?));
+    try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);
+    try std.testing.expectError(error.Io, main.getter.runGetWithOptions(std.testing.allocator, io, "tests/data/absent-native-get.fasta", .{
+        .source = .{ .names = "absent-native-requests.txt" },
+    }, &failure));
+    try std.testing.expectEqual(diagnostics.Code.@"io.file_not_found", failure.primary().?.code());
+    try std.testing.expectEqual(@as(?diagnostics.SourceId, .fasta), failure.primary().?.at.source);
+}
+
+test "[cli] - [GET abort]: discards pending stdout after a later malformed BED row" {
+    const allocator = std.testing.allocator;
+    const path = try uniqueArtifactPath(allocator, "get-abort-bed", "bed");
+    defer allocator.free(path);
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    var rows = std.Io.Writer.Allocating.init(allocator);
+    defer rows.deinit();
+    for (0..8192) |_| try rows.writer.writeAll("seq1\t0\t1\n");
+    try rows.writer.writeAll("seq1\n");
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    try std.Io.File.writeStreamingAll(file, io, rows.written());
+    file.close(io);
+    var expected = std.Io.Writer.Allocating.init(allocator);
+    defer expected.deinit();
+    for (0..8192) |_| try expected.writer.writeAll(">seq1:1-1\nA\n");
+    try utility.expectCliResult(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--bed", path, "--summary" }, 1, expected.written()[0..65537], "error: invalid BED line 8193: missing start\n");
+}
+
+fn checkGetOperationAllocations(allocator: std.mem.Allocator, source: main.getter.RequestSource) !void {
+    const diagnostics = main.index_format.diagnostics;
+    var failure: diagnostics.Failure = undefined;
+    _ = main.getter.runGetWithOptions(allocator, io, "tests/data/simple.fasta", .{ .source = source }, &failure) catch |err| {
+        if (err == error.OutOfMemory) {
+            try std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", failure.primary().?.code());
+            return err;
+        }
+        try std.testing.expectEqual(error.InvalidRequest, err);
+        try std.testing.expectEqual(diagnostics.Code.@"request.sequence_not_found", failure.primary().?.code());
+        return;
+    };
+    return error.UnexpectedSuccess;
+}
+
+test "[failure] - [GET operation]: releases allocation failures in positional and cached file modes" {
+    const allocator = std.testing.allocator;
+    const names = try uniqueArtifactPath(allocator, "get-oom-names", "txt");
+    defer allocator.free(names);
+    defer std.Io.Dir.cwd().deleteFile(io, names) catch {};
+    const bed = try uniqueArtifactPath(allocator, "get-oom-bed", "bed");
+    defer allocator.free(bed);
+    defer std.Io.Dir.cwd().deleteFile(io, bed) catch {};
+    for ([_]struct { path: []const u8, bytes: []const u8 }{
+        .{ .path = names, .bytes = "missing\n" }, .{ .path = bed, .bytes = "missing\t0\t1\n" },
+    }) |fixture| {
+        const file = try std.Io.Dir.cwd().createFile(io, fixture.path, .{});
+        defer file.close(io);
+        try std.Io.File.writeStreamingAll(file, io, fixture.bytes);
+    }
+    for ([_]main.getter.RequestSource{ .{ .positional = &.{"missing"} }, .{ .names = names }, .{ .bed = bed } }) |source|
+        try std.testing.checkAllAllocationFailures(allocator, checkGetOperationAllocations, .{source});
+}
+
+test "[failure] - [GET stdout]: distinguishes writes from final flush and retains the backend cause" {
+    const diagnostics = main.index_format.diagnostics;
+    const Fault = struct {
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            return switch (operation) {
+                .file_write_streaming => .{ .file_write_streaming = error.BrokenPipe },
+                else => std.testing.io.vtable.operate(userdata, operation),
+            };
+        }
+    };
+    var vtable = io.vtable.*;
+    vtable.operate = Fault.operate;
+    const fault_io = std.Io{ .userdata = io.userdata, .vtable = &vtable };
+    var failure: diagnostics.Failure = undefined;
+    try std.testing.expectError(error.Io, main.getter.runGetWithOptions(std.testing.allocator, fault_io, "tests/data/simple.fasta", .{
+        .source = .{ .positional = &.{"seq1"} },
+    }, &failure));
+    try std.testing.expectEqual(diagnostics.Code.@"io.flush_failed", failure.primary().?.code());
+    try std.testing.expectEqual(error.BrokenPipe, failure.primary().?.cause.?.zig);
+    try std.testing.expect(failure.work_complete and !failure.complete);
+    try std.testing.expectEqual(.failed, failure.outputs.stdout.final_flush);
+    try std.testing.expectEqual(@as(?u64, 1), failure.outputs.stdout.records);
+
+    const path = try uniqueArtifactPath(std.testing.allocator, "get-write-fault", "txt");
+    defer std.testing.allocator.free(path);
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    var rows = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer rows.deinit();
+    for (0..3000) |_| try rows.writer.writeAll("seq1\n");
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    try std.Io.File.writeStreamingAll(file, io, rows.written());
+    file.close(io);
+    try std.testing.expectError(error.Io, main.getter.runGetWithOptions(std.testing.allocator, fault_io, "tests/data/simple.fasta", .{
+        .source = .{ .names = path },
+    }, &failure));
+    try std.testing.expectEqual(diagnostics.Code.@"io.write_failed", failure.primary().?.code());
+    try std.testing.expectEqual(error.BrokenPipe, failure.primary().?.cause.?.zig);
+    try std.testing.expect(!failure.work_complete and !failure.complete);
+    try std.testing.expectEqual(.not_attempted, failure.outputs.stdout.final_flush);
+    try std.testing.expect(failure.outputs.stdout.records.? > 0);
+}
+
+test "[cli] - [GET missing identifiers]: preserves argv names and labels bounded file previews" {
+    const allocator = std.testing.allocator;
+    const name = "absent" ** 10;
+    const expected = try std.fmt.allocPrint(allocator, "error: sequence not found: {s}\n", .{name});
+    defer allocator.free(expected);
+    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", name }, 1, expected);
+    const path = try uniqueArtifactPath(allocator, "get-long-miss", "txt");
+    defer allocator.free(path);
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    try std.Io.File.writeStreamingAll(file, io, name ++ "\n");
+    file.close(io);
+    const bounded = try std.fmt.allocPrint(allocator, "error: sequence not found: {s} (identifier truncated; 60 bytes)\n", .{name[0..32]});
+    defer allocator.free(bounded);
+    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", path }, 1, bounded);
 }
