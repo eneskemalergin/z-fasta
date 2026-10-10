@@ -580,3 +580,18 @@ test "[failure] - [stats stdout]: retains final flush cause and resets operation
     try std.testing.expect(failure.primary() == null);
     try std.testing.expectEqual(.succeeded, failure.outputs.stdout.final_flush);
 }
+
+test "[failure] - [stats diagnostics]: classifies an overlong FASTA path" {
+    const diagnostics = main.index_format.diagnostics;
+    const path: [256]u8 = @splat('x');
+    var failure: diagnostics.Failure = undefined;
+    try std.testing.expectError(error.Io, stats.runStats(std.testing.allocator, io, &path, &failure));
+    const primary = failure.primary().?;
+    try std.testing.expectEqual(diagnostics.Code.@"io.invalid_path", primary.code());
+    try std.testing.expectEqual(diagnostics.Stage.open, primary.stage);
+    try std.testing.expectEqual(diagnostics.SourceId.fasta, primary.at.source);
+    try std.testing.expectEqual(error.NameTooLong, primary.cause.?.zig);
+    const details = primary.details.@"io.invalid_path";
+    try std.testing.expectEqual(diagnostics.PathReason.too_long, details.reason);
+    try std.testing.expect(details.limit_bytes == null);
+}

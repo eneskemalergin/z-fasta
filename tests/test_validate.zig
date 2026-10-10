@@ -65,8 +65,10 @@ fn renderAndFreeForAllocationCheck(allocator: std.mem.Allocator, name: []const u
 
 fn fuzzValidator(_: void, smith: *std.testing.Smith) !void {
     var storage: [512]u8 = undefined;
-    const data = storage[0..smith.slice(&storage)];
+    try checkValidatorProperties(storage[0..smith.slice(&storage)]);
+}
 
+fn checkValidatorProperties(data: []const u8) !void {
     var summary = try validator.validateData(std.testing.allocator, data, .{});
     defer summary.deinit(std.testing.allocator);
 
@@ -79,21 +81,26 @@ fn fuzzValidator(_: void, smith: *std.testing.Smith) !void {
     try std.testing.expect(summary.format_warning_count <= summary.warning_count);
     for (summary.record_widths.items) |width| try std.testing.expect(width > 0);
 
-    if (validator.fixRejection(&summary, .{}) == null) {
-        const fixed = try validator.fixData(std.testing.allocator, data, summary.record_widths.items);
-        defer std.testing.allocator.free(fixed);
+    var failure: main.index_format.diagnostics.Failure = undefined;
+    failure.reset(.validate);
+    validator.fixRejectionChecked(&summary, .{}, &failure) catch |err| switch (err) {
+        error.RepairRefused => return,
+        else => return err,
+    };
+    const fixed = try validator.fixData(std.testing.allocator, data, summary.record_widths.items);
+    defer std.testing.allocator.free(fixed);
 
-        var fixed_summary = try validator.validateData(std.testing.allocator, fixed, .{});
-        defer fixed_summary.deinit(std.testing.allocator);
-        try std.testing.expect(validator.fixRejection(&fixed_summary, .{}) == null);
-        const fixed_again = try validator.fixData(
-            std.testing.allocator,
-            fixed,
-            fixed_summary.record_widths.items,
-        );
-        defer std.testing.allocator.free(fixed_again);
-        try std.testing.expectEqualStrings(fixed, fixed_again);
-    }
+    var fixed_summary = try validator.validateData(std.testing.allocator, fixed, .{});
+    defer fixed_summary.deinit(std.testing.allocator);
+    failure.reset(.validate);
+    try validator.fixRejectionChecked(&fixed_summary, .{}, &failure);
+    const fixed_again = try validator.fixData(
+        std.testing.allocator,
+        fixed,
+        fixed_summary.record_widths.items,
+    );
+    defer std.testing.allocator.free(fixed_again);
+    try std.testing.expectEqualStrings(fixed, fixed_again);
 }
 
 fn scanZfi(allocator: std.mem.Allocator, data: []const u8) !main.indexer.ZfiIndex {
@@ -385,11 +392,16 @@ test "[failure] - [validate operations]: release partial allocations" {
     );
 }
 
+test "[regression] - [validate scan]: repair properties accept safe preamble refusal" {
+    try checkValidatorProperties("junk\n>seq1\nACGT\n");
+}
+
 test "[fuzz] - [validate scan]: returns bounded summaries and idempotent allowed fixes" {
     try std.testing.fuzz({}, fuzzValidator, .{ .corpus = &.{
         "",
         ">a\nA\n",
         ">a description\r\nAC\r\nGT",
+        "junk\n>seq1\nACGT\n",
         ">a\nAAA \nCC\nGGGG\n",
         ">bad\xffname\nA\x00C\n",
     } });

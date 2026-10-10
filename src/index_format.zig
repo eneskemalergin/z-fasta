@@ -513,6 +513,7 @@ const LoadDiagnostics = struct {
             .open => switch (err) {
                 error.FileNotFound => .{ .@"io.file_not_found" = {} },
                 error.AccessDenied => .{ .@"io.access_denied" = {} },
+                error.NameTooLong => .{ .@"io.invalid_path" = .{ .reason = .too_long } },
                 else => .{ .@"io.open_failed" = {} },
             },
             .stat => .{ .@"io.stat_failed" = {} },
