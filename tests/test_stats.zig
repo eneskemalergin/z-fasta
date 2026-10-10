@@ -594,4 +594,11 @@ test "[failure] - [stats diagnostics]: classifies an overlong FASTA path" {
     const details = primary.details.@"io.invalid_path";
     try std.testing.expectEqual(diagnostics.PathReason.too_long, details.reason);
     try std.testing.expect(details.limit_bytes == null);
+    try std.testing.expectEqual(diagnostics.Operation.stats, failure.operation);
+    try std.testing.expectEqualStrings(&path, failure.sourceLabel(.fasta).?);
+    try std.testing.expectEqual(diagnostics.SourceKind.path, failure.sources.get(.fasta).?.kind);
+    try std.testing.expect(!failure.work_complete and !failure.complete);
+    try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);
+    try std.testing.expectEqual(.not_attempted, failure.outputs.stdout.final_flush);
+    try std.testing.expectEqual(@as(usize, 0), failure.secondaryItems().len);
 }

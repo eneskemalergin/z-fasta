@@ -1121,6 +1121,39 @@ test "[cli] - [validate safety]: rejects a symlink alias and safely replaces a s
     try std.testing.expectEqualStrings(">seq1\nACGT\n", output_after);
 }
 
+test "[failure] - [validate safety]: refuses an output open failure before staging" {
+    const diagnostics = main.index_format.diagnostics;
+    const allocator = std.testing.allocator;
+    const broken = ">seq1\nACGT";
+    const input = try writeFastaArtifact(allocator, "validate-identity-input", broken);
+    defer allocator.free(input);
+    defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
+    const output = try utility.uniqueArtifactPath(allocator, "validate-identity-loop", "fa");
+    defer allocator.free(output);
+    defer std.Io.Dir.cwd().deleteFile(io, output) catch {};
+    const directory = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(directory);
+    const absolute_output = try std.fs.path.join(allocator, &.{ directory, output });
+    defer allocator.free(absolute_output);
+    try std.Io.Dir.cwd().symLink(io, absolute_output, output, .{});
+
+    var failure: diagnostics.Failure = undefined;
+    try std.testing.expectError(error.RepairRefused, validator.runValidate(allocator, io, input, .{ .fix = true, .output_path = output }, &failure));
+    const primary = failure.primary().?;
+    try std.testing.expectEqual(diagnostics.Code.@"repair.output_identity_unknown", primary.code());
+    try std.testing.expectEqual(diagnostics.Stage.check_identity, primary.stage);
+    try std.testing.expectEqual(diagnostics.SourceId.output, primary.at.source.?);
+    try std.testing.expectEqual(error.SymLinkLoop, primary.cause.?.zig);
+    try std.testing.expectEqual(.not_started, failure.outputs.file.state);
+    try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);
+    try std.testing.expect(failure.work_complete);
+    try std.testing.expect(!failure.complete);
+    const after = try readTestFile(allocator, input);
+    defer allocator.free(after);
+    try std.testing.expectEqualStrings(broken, after);
+    try std.testing.expectError(error.SymLinkLoop, std.Io.Dir.cwd().openFile(io, output, .{}));
+}
+
 test "[failure] - [native validator blockers]: owns duplicate facts beyond retained events" {
     const diagnostics = main.index_format.diagnostics;
     const allocator = std.testing.allocator;
@@ -1265,6 +1298,47 @@ test "[failure] - [native validator input]: retains stat and mapping causes befo
     try std.testing.expectEqual(error.AccessDenied, failure.primary().?.cause.?.zig);
     try std.testing.expect(!failure.work_complete and !failure.complete);
     try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);
+}
+
+test "[failure] - [native validator repair]: preserves published output after report flush failure" {
+    const diagnostics = main.index_format.diagnostics;
+    const Fault = struct {
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            return switch (operation) {
+                .file_write_streaming => |write| if (write.file.handle == std.Io.File.stdout().handle)
+                    .{ .file_write_streaming = error.BrokenPipe }
+                else
+                    io.vtable.operate(userdata, operation),
+                else => io.vtable.operate(userdata, operation),
+            };
+        }
+    };
+    const allocator = std.testing.allocator;
+    const input = try writeFastaArtifact(allocator, "validate-published-input", ">seq\nACGT");
+    defer allocator.free(input);
+    defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
+    const output = try writeFastaArtifact(allocator, "validate-published-output", "old destination\n");
+    defer allocator.free(output);
+    defer std.Io.Dir.cwd().deleteFile(io, output) catch {};
+    var vtable = io.vtable.*;
+    vtable.operate = Fault.operate;
+    const fault_io = std.Io{ .userdata = io.userdata, .vtable = &vtable };
+    var failure: diagnostics.Failure = undefined;
+    try std.testing.expectError(error.Io, validator.runValidate(allocator, fault_io, input, .{ .fix = true, .output_path = output }, &failure));
+    try std.testing.expectEqual(diagnostics.Code.@"io.flush_failed", failure.primary().?.code());
+    try std.testing.expectEqual(diagnostics.Stage.flush, failure.primary().?.stage);
+    try std.testing.expectEqual(diagnostics.SourceId.stdout, failure.primary().?.at.source);
+    try std.testing.expectEqual(error.BrokenPipe, failure.primary().?.cause.?.zig);
+    try std.testing.expect(failure.work_complete and !failure.complete);
+    try std.testing.expectEqual(.published, failure.outputs.file.state);
+    try std.testing.expectEqual(.succeeded, failure.outputs.file.final_flush);
+    try std.testing.expectEqual(.failed, failure.outputs.stdout.final_flush);
+    const written = try readTestFile(allocator, output);
+    defer allocator.free(written);
+    try std.testing.expectEqualStrings(">seq\nACGT\n", written);
+    const original = try readTestFile(allocator, input);
+    defer allocator.free(original);
+    try std.testing.expectEqualStrings(">seq\nACGT", original);
 }
 
 test "[failure] - [native validator stdout]: retains final flush cause and resets for reuse" {

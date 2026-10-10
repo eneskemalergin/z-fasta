@@ -833,10 +833,28 @@ test "[failure] - [GET diagnostics]: returns exact request facts without exiting
         try std.testing.expectEqual(case.code, primary.code());
         try std.testing.expectEqual(@as(?u64, 1), primary.at.request);
         try std.testing.expect(primary.cause == null);
-        if (case.code == .@"request.sequence_not_found") {
-            const detail = primary.details.@"request.sequence_not_found";
-            try std.testing.expectEqualStrings("missing", failure.preview(detail.identifier.?));
-            try std.testing.expectEqual(diagnostics.LookupScope.retained_matches, detail.lookup_scope);
+        try std.testing.expectEqual(diagnostics.Stage.resolve, primary.stage);
+        try std.testing.expectEqual(diagnostics.SourceId.request_snapshot, primary.at.source.?);
+        try std.testing.expect(!failure.work_complete and !failure.complete);
+        switch (primary.details) {
+            .@"request.sequence_not_found" => |detail| {
+                try std.testing.expectEqualStrings("missing", failure.preview(detail.identifier.?));
+                try std.testing.expectEqual(diagnostics.LookupScope.retained_matches, detail.lookup_scope);
+                try std.testing.expectEqual(diagnostics.SourceId.zfi, detail.index_source);
+            },
+            .@"request.start_before_one" => |detail| {
+                try std.testing.expectEqual(@as(u64, 0), detail.start);
+                try std.testing.expectEqual(diagnostics.CoordinateSystem.one_based_inclusive, detail.coordinate_system);
+            },
+            .@"request.start_after_sequence" => |detail| {
+                try std.testing.expectEqual(@as(u64, 25), detail.start);
+                try std.testing.expectEqual(@as(u64, 24), detail.sequence_length);
+            },
+            .@"request.end_before_start" => |detail| {
+                try std.testing.expectEqual(@as(u64, 10), detail.start);
+                try std.testing.expectEqual(@as(u64, 9), detail.end);
+            },
+            else => return error.UnexpectedDiagnostic,
         }
     }
     const good = try main.getter.resolveRegion(&idx, "seq1:1-999", &failure);
@@ -1019,17 +1037,38 @@ test "[failure] - [GET stdout]: distinguishes writes from final flush and retain
     try std.testing.expect(failure.outputs.stdout.records.? > 0);
 }
 
-test "[cli] - [GET missing identifiers]: preserves argv names and labels bounded file previews" {
+test "[cli] - [GET missing identifiers]: reports original lengths and bounded prefixes" {
     const allocator = std.testing.allocator;
     const name = "absent" ** 10;
-    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", name }, .@"request.sequence_not_found");
     const path = try uniqueArtifactPath(allocator, "get-long-miss", "txt");
     defer allocator.free(path);
     defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
     const file = try std.Io.Dir.cwd().createFile(io, path, .{});
     try std.Io.File.writeStreamingAll(file, io, name ++ "\n");
     file.close(io);
-    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", path }, .@"request.sequence_not_found");
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    for ([_]struct { argv: []const []const u8, source: []const u8 }{
+        .{ .argv = &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", name, "--error-format=json" }, .source = "request_snapshot" },
+        .{ .argv = &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", path, "--error-format=json" }, .source = "names" },
+    }) |case| {
+        const result = try std.process.run(allocator, threaded.io(), .{ .argv = case.argv });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try std.testing.expectEqual(@as(u8, 1), result.term.exited);
+        try std.testing.expectEqualStrings("", result.stdout);
+        try utility.expectDiagnostic(allocator, result.stderr, .@"request.sequence_not_found");
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, result.stderr, .{});
+        defer parsed.deinit();
+        const primary = parsed.value.object.get("failure").?.object.get("primary").?.object;
+        try std.testing.expectEqualStrings(case.source, primary.get("source").?.string);
+        try std.testing.expectEqualStrings("1", primary.get("request").?.string);
+        const identifier = primary.get("data").?.object.get("identifier").?.object;
+        try std.testing.expectEqualStrings("utf8", identifier.get("encoding").?.string);
+        try std.testing.expectEqualStrings(name[0..32], identifier.get("value").?.string);
+        try std.testing.expectEqualStrings("60", identifier.get("original_bytes").?.string);
+        try std.testing.expect(identifier.get("truncated").?.bool);
+    }
 }
 
 test "[cli] - [get machine summary]: frames metrics without changing FASTA output" {
@@ -1092,4 +1131,11 @@ test "[failure] - [GET diagnostics]: classifies an overlong FASTA path" {
     const details = primary.details.@"io.invalid_path";
     try std.testing.expectEqual(diagnostics.PathReason.too_long, details.reason);
     try std.testing.expect(details.limit_bytes == null);
+    try std.testing.expectEqual(diagnostics.Operation.get, failure.operation);
+    try std.testing.expectEqualStrings(&path, failure.sourceLabel(.fasta).?);
+    try std.testing.expectEqual(diagnostics.SourceKind.path, failure.sources.get(.fasta).?.kind);
+    try std.testing.expect(!failure.work_complete and !failure.complete);
+    try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);
+    try std.testing.expectEqual(.not_attempted, failure.outputs.stdout.final_flush);
+    try std.testing.expectEqual(@as(usize, 0), failure.secondaryItems().len);
 }

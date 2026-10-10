@@ -3525,13 +3525,60 @@ test "[failure] - [index diagnostics]: ZFI header and record facts agree in all 
                 try std.testing.expectEqualDeep(first.at, primary.at);
                 try std.testing.expectEqualDeep(first.details, primary.details);
             }
+            try std.testing.expect(primary.cause == null);
             switch (primary.details) {
-                .@"index.unsupported_version" => |facts| try std.testing.expectEqual(@as(u8, 255), facts.found_version),
-                .@"index.source_size_mismatch" => |facts| try std.testing.expectEqual(@as(u64, 999), facts.stored_bytes),
-                .@"index.name_not_embedded" => try std.testing.expectEqual(@as(u64, 26), primary.at.location.offset.?),
-                .@"index.name_out_of_bounds" => |facts| try std.testing.expectEqual(@as(u64, 1), facts.blob_bytes),
+                .@"index.invalid_magic" => |facts| {
+                    try std.testing.expectEqual(ZFI_MAGIC, facts.expected_magic);
+                    try std.testing.expectEqualStrings("XFI\x01", failure.preview(facts.actual.?));
+                },
+                .@"index.unsupported_version" => |facts| {
+                    try std.testing.expectEqual(@as(u8, 255), facts.found_version);
+                    try std.testing.expectEqual(@as(u8, 1), facts.supported_version);
+                },
+                .@"index.no_records" => |facts| try std.testing.expectEqual(diagnostics.Format.zfi, facts.format),
+                .@"index.truncated" => |facts| {
+                    try std.testing.expectEqual(diagnostics.Section.records, facts.section);
+                    try std.testing.expectEqual(@as(u128, 16) + @as(u128, std.math.maxInt(u32)) * 40, facts.required_end);
+                    try std.testing.expectEqual(bytes.len, facts.available_end);
+                },
+                .@"index.source_size_mismatch" => |facts| {
+                    try std.testing.expectEqual(@as(u64, 999), facts.stored_bytes);
+                    try std.testing.expectEqual(fasta.len, facts.actual_bytes);
+                },
+                .@"index.name_not_embedded" => |facts| {
+                    try std.testing.expectEqual(@as(u64, 26), primary.at.location.offset.?);
+                    try std.testing.expectEqual(@as(u8, 0), facts.flags);
+                    try std.testing.expectEqual(main.index_format.NAME_IN_ZFI_FLAG, facts.required_flag);
+                },
+                .@"index.name_out_of_bounds" => |facts| {
+                    try std.testing.expectEqual(@as(u64, 1), facts.blob_bytes);
+                    try std.testing.expectEqual(if (case.offset == 16) std.math.maxInt(u64) else @as(u64, 0), facts.name_offset);
+                    try std.testing.expectEqual(if (case.offset == 24) @as(u64, 2) else @as(u64, 1), facts.name_bytes);
+                },
                 .@"index.zero_sequence_length" => try std.testing.expectEqual(@as(u64, 1), primary.at.record.?),
-                else => {},
+                .@"index.sequence_offset_out_of_bounds" => |facts| {
+                    try std.testing.expectEqual(fasta.len, facts.sequence_offset);
+                    try std.testing.expectEqual(fasta.len, facts.source_bytes);
+                    try std.testing.expectEqual(diagnostics.BoundSource.actual, facts.bound_source);
+                },
+                .@"index.sequence_span_out_of_bounds" => |facts| {
+                    try std.testing.expectEqual(@as(u128, 23058430092136939521), facts.required_end);
+                    try std.testing.expectEqual(fasta.len, facts.source_bytes);
+                    try std.testing.expectEqual(diagnostics.BoundSource.actual, facts.bound_source);
+                    try std.testing.expect(facts.entry == null);
+                },
+                .@"index.invalid_line_geometry" => |facts| {
+                    try std.testing.expectEqual(if (case.offset == 48) @as(u64, 0) else @as(u64, 4), facts.geometry.line_bases);
+                    try std.testing.expectEqual(if (case.offset == 52) case.value else @as(u64, 5), facts.geometry.line_bytes);
+                    try std.testing.expectEqual(if (case.offset == 48) diagnostics.GeometryConstraint.bases_zero else if (case.value == 0) diagnostics.GeometryConstraint.bytes_zero else diagnostics.GeometryConstraint.bytes_below_bases, facts.constraint);
+                },
+                .@"index.name_footer_missing" => |facts| try std.testing.expect(facts.tight and facts.legacy),
+                .@"index.name_blob_out_of_bounds" => |facts| {
+                    try std.testing.expectEqual(std.math.maxInt(u64), facts.name_blob_bytes);
+                    try std.testing.expectEqual(@as(u64, 57), facts.payload_end);
+                    try std.testing.expectEqual(@as(u64, 56), facts.records_end);
+                },
+                else => return error.UnexpectedDiagnostic,
             }
         }
     }
@@ -3580,9 +3627,54 @@ test "[failure] - [index diagnostics]: side tables retain wire offsets and opera
                 try std.testing.expectEqualDeep(expected.at, primary.at);
                 try std.testing.expectEqualDeep(expected.details, primary.details);
             }
-            if (primary.code() == .@"index.arithmetic_overflow") {
-                try std.testing.expectEqual(case.value, primary.details.@"index.arithmetic_overflow".lhs);
-                try std.testing.expectEqual(std.math.maxInt(usize), primary.details.@"index.arithmetic_overflow".max_value);
+            try std.testing.expectEqual(diagnostics.SourceId.zfi, primary.at.source.?);
+            try std.testing.expectEqual(diagnostics.Stage.parse, primary.stage);
+            try std.testing.expect(primary.cause == null);
+            switch (primary.details) {
+                .@"index.side_table_empty" => try std.testing.expectEqual(side, primary.at.location.offset.?),
+                .@"index.arithmetic_overflow" => |facts| {
+                    try std.testing.expectEqual(case.value, facts.lhs);
+                    try std.testing.expectEqual(if (case.offset == side) @as(u128, 32) else @as(u128, 4), facts.rhs);
+                    try std.testing.expectEqual(if (case.offset == side) diagnostics.IndexField.side_count else diagnostics.IndexField.side_byte_end, facts.field);
+                    try std.testing.expectEqual(if (case.offset == side) diagnostics.Arithmetic.multiply else diagnostics.Arithmetic.add, facts.arithmetic);
+                    try std.testing.expectEqual(std.math.maxInt(usize), facts.max_value);
+                },
+                .@"index.truncated" => |facts| {
+                    try std.testing.expectEqual(diagnostics.Section.side_table_entries, facts.section);
+                    try std.testing.expectEqual(side + 8 + 100 * 32, facts.required_end);
+                    try std.testing.expectEqual(side + 8 + 3 * 32, facts.available_end);
+                },
+                .@"index.side_base_start_mismatch" => |facts| {
+                    try std.testing.expectEqual(@as(u64, 1), facts.entry);
+                    try std.testing.expectEqual(@as(u64, 1), facts.base_start);
+                    try std.testing.expectEqual(@as(u64, 0), facts.expected_base_start);
+                },
+                .@"index.side_line_geometry_invalid" => |facts| {
+                    try std.testing.expectEqual(@as(u64, 1), facts.entry);
+                    try std.testing.expectEqual(if (case.offset == first + 24) case.value else @as(u64, 3), facts.geometry.line_bases);
+                    try std.testing.expectEqual(if (case.offset == first + 16) case.value else @as(u64, 4), facts.geometry.line_bytes);
+                    try std.testing.expectEqual(if (case.offset == first + 24) diagnostics.GeometryConstraint.bases_zero else if (case.value == 0) diagnostics.GeometryConstraint.bytes_zero else diagnostics.GeometryConstraint.bytes_below_bases, facts.constraint);
+                },
+                .@"index.sequence_span_out_of_bounds" => |facts| {
+                    try std.testing.expectEqual(fasta.len + 3, facts.required_end);
+                    try std.testing.expectEqual(fasta.len, facts.source_bytes);
+                    try std.testing.expectEqual(diagnostics.BoundSource.actual, facts.bound_source);
+                    try std.testing.expectEqual(@as(?u64, 1), facts.entry);
+                },
+                .@"index.side_first_offset_mismatch" => |facts| {
+                    try std.testing.expectEqual(@as(u64, 4), facts.first_byte_offset);
+                    try std.testing.expectEqual(@as(u64, 3), facts.sequence_offset);
+                },
+                .@"index.side_line_order_invalid" => |facts| {
+                    try std.testing.expectEqual(@as(u64, 2), facts.entry);
+                    try std.testing.expectEqual(@as(u64, 3), facts.byte_offset);
+                    try std.testing.expectEqual(@as(u64, 7), facts.minimum_offset);
+                },
+                .@"index.side_sequence_length_mismatch" => |facts| {
+                    try std.testing.expectEqual(@as(u64, 10), facts.indexed_length);
+                    try std.testing.expectEqual(@as(u64, 9), facts.side_table_bases);
+                },
+                else => return error.UnexpectedDiagnostic,
             }
         }
     }
