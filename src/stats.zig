@@ -9,7 +9,7 @@ const index_format = @import("index_format.zig");
 const IndexRecord = index_format.IndexRecord;
 const LoadedIndex = index_format.LoadedIndex;
 const SideTableLine = index_format.SideTableLine;
-const diagnostics = @import("diagnostics.zig");
+const diagnostics = @import("diagnostics");
 
 const StatsDiagnostics = struct {
     failure: *diagnostics.Failure,

@@ -27,7 +27,7 @@ pub const Error = error{
     Internal,
 };
 
-pub const Operation = enum { index, get, stats, validate };
+pub const Operation = enum { cli, index, get, stats, validate };
 pub const Kind = enum { finding, failure };
 pub const Severity = enum { @"error", warning };
 pub const Unit = enum { none, file, record, line, byte, field };

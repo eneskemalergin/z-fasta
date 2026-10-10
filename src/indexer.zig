@@ -11,7 +11,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const index_format = @import("index_format.zig");
-const diagnostics = @import("diagnostics.zig");
+const diagnostics = @import("diagnostics");
 
 const IndexRecord = index_format.IndexRecord;
 const ZfiHeader = index_format.ZfiHeader;

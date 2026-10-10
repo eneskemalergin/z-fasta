@@ -1471,7 +1471,7 @@ test "[edge] - [get request workspace]: retains the name crossing its byte targe
 
 test "[unit] - [get names reader]: handles line endings and a final unterminated line" {
     const test_io = std.testing.io;
-    var idx = index_format.loadIndex(std.testing.allocator, test_io, "tests/data/simple.fasta");
+    var idx = try index_format.loadIndexCheckedLegacy(std.testing.allocator, test_io, "tests/data/simple.fasta");
     defer idx.deinit();
     var reader = std.Io.Reader.fixed("# comment\r\n\r\nseq2\r\nseq1\nseq2");
     var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -1506,7 +1506,7 @@ test "[unit] - [get names reader]: handles line endings and a final unterminated
 
 test "[edge] - [get names reader]: resets storage at the request-count boundary" {
     const test_io = std.testing.io;
-    var idx = index_format.loadIndex(std.testing.allocator, test_io, "tests/data/simple.fasta");
+    var idx = try index_format.loadIndexCheckedLegacy(std.testing.allocator, test_io, "tests/data/simple.fasta");
     defer idx.deinit();
     var names = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer names.deinit();
@@ -1545,7 +1545,7 @@ test "[edge] - [get names reader]: resets storage at the request-count boundary"
 
 test "[unit] - [get BED reader]: streams rows in source order" {
     const test_io = std.testing.io;
-    var idx = index_format.loadIndex(std.testing.allocator, test_io, "tests/data/simple.fasta");
+    var idx = try index_format.loadIndexCheckedLegacy(std.testing.allocator, test_io, "tests/data/simple.fasta");
     defer idx.deinit();
 
     const bed_data =
@@ -1587,7 +1587,7 @@ test "[unit] - [get BED reader]: streams rows in source order" {
 
 test "[edge] - [get BED reader]: preserves output across request-batch boundaries" {
     const test_io = std.testing.io;
-    var idx = index_format.loadIndex(std.testing.allocator, test_io, "tests/data/simple.fasta");
+    var idx = try index_format.loadIndexCheckedLegacy(std.testing.allocator, test_io, "tests/data/simple.fasta");
     defer idx.deinit();
 
     const counts = [_]usize{

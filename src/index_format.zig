@@ -7,7 +7,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const platform = @import("platform.zig");
-pub const diagnostics = @import("diagnostics.zig");
+pub const diagnostics = @import("diagnostics");
 
 // --- Types shared by indexer, getter, and stats ---
 
@@ -406,49 +406,7 @@ pub const LoadIndexError = error{
     OutOfMemory,
 };
 
-// --- Shared error helper ---
-
-pub fn printErrorAndExit(comptime fmt: []const u8, args: anytype) noreturn {
-    std.debug.print(fmt, args);
-    std.process.exit(1);
-}
-
 // --- Shared index loader ---
-
-/// Load the index for a FASTA file. A present `.zfi` is authoritative;
-/// `.fai` is considered only when `.zfi` is absent.
-/// The caller must call `deinit()` on the returned LoadedIndex.
-pub fn loadIndex(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8) LoadedIndex {
-    return loadIndexOrExit(allocator, io, fasta_path, .lookup_full_map);
-}
-
-/// Load all stats metadata while keeping the FASTA descriptor-backed.
-pub fn loadIndexForStats(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8) LoadedIndex {
-    return loadIndexOrExit(allocator, io, fasta_path, .stats_scan);
-}
-
-/// Keeps the FASTA open without retaining its contents in memory.
-pub fn loadIndexForGet(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, mode: LoadMode) LoadedIndex {
-    return loadIndexOrExit(allocator, io, fasta_path, mode);
-}
-
-fn loadIndexOrExit(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, mode: LoadMode) LoadedIndex {
-    return loadIndexCheckedWithModeLegacy(allocator, io, fasta_path, mode) catch |err| switch (err) {
-        error.FileNotFound => printErrorAndExit("error: file not found: {s}\n", .{fasta_path}),
-        error.AccessDenied => printErrorAndExit("error: access denied: {s}\n", .{fasta_path}),
-        error.EmptyFile => printErrorAndExit("error: file is empty: {s}\n", .{fasta_path}),
-        error.PathTooLong => printErrorAndExit("error: path too long\n", .{}),
-        error.MmapFailed => printErrorAndExit("error: failed to mmap file: {s}\n", .{fasta_path}),
-        error.CorruptIndex => printErrorAndExit("error: corrupt index file for: {s}\n", .{fasta_path}),
-        error.StaleIndex => printErrorAndExit(
-            "error: index is stale (FASTA size or mtime does not match the index). Re-run 'z-fasta index <path>'.\n",
-            .{},
-        ),
-        error.NoIndexFound => printErrorAndExit("error: no index found for {s}. Run 'z-fasta index {s}' first.\n", .{ fasta_path, fasta_path }),
-        error.OutOfMemory => printErrorAndExit("error: out of memory loading index\n", .{}),
-        error.Io => printErrorAndExit("error: failed to load index for: {s}\n", .{fasta_path}),
-    };
-}
 
 /// Loads a complete catalog. Reset Failure once in the owning operation before
 /// calling. Path labels borrow fasta_path through handling or Failure.reset.

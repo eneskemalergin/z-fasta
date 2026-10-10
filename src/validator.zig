@@ -6,7 +6,7 @@
 const std = @import("std");
 const platform = @import("platform.zig");
 const stats = @import("stats.zig");
-const diagnostics = @import("diagnostics.zig");
+const diagnostics = @import("diagnostics");
 
 const reporting = @import("reporting.zig");
 

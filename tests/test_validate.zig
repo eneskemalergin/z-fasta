@@ -195,14 +195,14 @@ test "[cli] - [validate]: rejects unknown options regardless of position" {
         &.{ ZFASTA_BIN, "validate", "--not-a-flag", fasta },
         1,
         "",
-        "error: unknown option: --not-a-flag\n",
+        "error [usage.unknown_option] validate: Unknown option. option=\"--not-a-flag\"\nhint: Correct the command arguments; use --help for accepted options.\n",
     );
     try expectCliResult(
         allocator,
         &.{ ZFASTA_BIN, "validate", fasta, "--not-a-flag" },
         1,
         "",
-        "error: unknown option: --not-a-flag\n",
+        "error [usage.unknown_option] validate: Unknown option. option=\"--not-a-flag\"\nhint: Correct the command arguments; use --help for accepted options.\n",
     );
 }
 
@@ -214,55 +214,55 @@ test "[cli] - [validate]: rejects invalid arguments with exact diagnostics" {
     const cases = [_]struct { argv: []const []const u8, stderr: []const u8 }{
         .{
             .argv = &.{ ZFASTA_BIN, "validate", "--summary", "tests/data/simple.fasta" },
-            .stderr = "error: validate --summary requires --json\n",
+            .stderr = "error [usage.option_requires] validate: An option prerequisite is missing. option=summary required=json\nhint: Correct the command arguments; use --help for accepted options.\n",
         },
         .{
             .argv = &.{ ZFASTA_BIN, "validate", "--fix-format-only", "tests/data/simple.fasta" },
-            .stderr = "error: validate --fix-format-only requires --fix\n",
+            .stderr = "error [usage.option_requires] validate: An option prerequisite is missing. option=fix_format_only required=fix\nhint: Correct the command arguments; use --help for accepted options.\n",
         },
         .{
             .argv = &.{ ZFASTA_BIN, "validate", "-o", "zig-cache/test-artifacts/unused.fasta", "tests/data/simple.fasta" },
-            .stderr = "error: validate -o requires --fix\n",
+            .stderr = "error [usage.option_requires] validate: An option prerequisite is missing. option=output required=fix\nhint: Correct the command arguments; use --help for accepted options.\n",
         },
         .{
             .argv = &.{ ZFASTA_BIN, "validate" },
-            .stderr = "error: usage: z-fasta validate [options] <file.fasta>\n",
+            .stderr = "error [usage.missing_argument] validate: A required argument is missing. argument=fasta_path\nhint: Correct the command arguments; use --help for accepted options.\n",
         },
         .{
             .argv = &.{ ZFASTA_BIN, "validate", "tests/data/definitely-missing-cli-failure.fasta" },
-            .stderr = "error: file not found: tests/data/definitely-missing-cli-failure.fasta\n",
+            .stderr = "error [io.file_not_found] validate: \"tests/data/definitely-mi\" (47 bytes): Required file was not found.; cause=\"FileNotFound\"\nhint: Check the named input/output and retained I/O cause.\n",
         },
         .{
             .argv = &.{ ZFASTA_BIN, "validate", "tests/data/simple.fasta", "tests/data/single.fasta" },
-            .stderr = "error: validate accepts exactly one FASTA path\n",
+            .stderr = "error [usage.extra_argument] validate: Too many arguments. argument=fasta_path allowed_count=1\nhint: Correct the command arguments; use --help for accepted options.\n",
         },
         .{
             .argv = &.{ ZFASTA_BIN, "validate", "-o" },
-            .stderr = "error: -o requires an output path\n",
+            .stderr = "error [usage.missing_option_value] validate: A required option value is missing. option=output expected=path\nhint: Correct the command arguments; use --help for accepted options.\n",
         },
         .{
             .argv = &.{ ZFASTA_BIN, "validate", "--schema" },
-            .stderr = "error: --schema requires uniprot or refseq\n",
+            .stderr = "error [usage.missing_option_value] validate: A required option value is missing. option=schema expected=schema\nhint: Correct the command arguments; use --help for accepted options.\n",
         },
         .{
             .argv = &.{ ZFASTA_BIN, "validate", "--schema", "ena", "tests/data/simple.fasta" },
-            .stderr = "error: --schema must be uniprot or refseq\n",
+            .stderr = "error [usage.invalid_option_value] validate: Invalid option value. option=schema expected=schema value=\"ena\"\nhint: Correct the command arguments; use --help for accepted options.\n",
         },
         .{
             .argv = &.{ ZFASTA_BIN, "validate", "--custom-alphabet" },
-            .stderr = "error: --custom-alphabet requires characters\n",
+            .stderr = "error [usage.missing_option_value] validate: A required option value is missing. option=custom_alphabet expected=alphabet\nhint: Correct the command arguments; use --help for accepted options.\n",
         },
         .{
             .argv = &.{ ZFASTA_BIN, "validate", "--max-header-len" },
-            .stderr = "error: --max-header-len requires a positive integer\n",
+            .stderr = "error [usage.missing_option_value] validate: A required option value is missing. option=max_header_len expected=positive_usize\nhint: Correct the command arguments; use --help for accepted options.\n",
         },
         .{
             .argv = &.{ ZFASTA_BIN, "validate", "--max-header-len", "0", "tests/data/simple.fasta" },
-            .stderr = "error: --max-header-len requires a positive integer\n",
+            .stderr = "error [usage.invalid_option_value] validate: Invalid option value. option=max_header_len expected=positive_usize value=\"0\"\nhint: Correct the command arguments; use --help for accepted options.\n",
         },
         .{
             .argv = &.{ ZFASTA_BIN, "validate", "--fix", "tests/data/simple.fasta" },
-            .stderr = "error: validate --fix requires -o <output.fa>\n",
+            .stderr = "error [usage.option_requires] validate: \"tests/data/simple.fasta\": An option prerequisite is missing. option=fix required=output\nhint: Correct the command arguments; use --help for accepted options.\n",
         },
     };
     for (cases) |case| {
@@ -825,12 +825,14 @@ test "[cli] - [validate format-only fix]: preserves invalid bytes while normal f
     const fixed_path = try utility.uniqueArtifactPath(allocator, "validate-format-only-out", "fa");
     defer std.Io.Dir.cwd().deleteFile(io, fixed_path) catch {};
 
+    const expected_delivery = try std.fmt.allocPrint(allocator, "error [repair.blocked] validate: \"zig-cache/test-artifacts\" ({d} bytes):2 column=5 offset=9 record=1: Rewrite is blocked by the reported data condition. reason_code=sequence.invalid_symbol byte=0x3f policy=alphabet=protein selection=automatic custom_symbols=unknown sample=symbols=5 rule=nucleotide_above_90_percent interval=unknown request=unknown repair_policy=legacy_safe\nhint: Resolve the reported rewrite blocker before publishing output.\n", .{in_path.len});
+    defer allocator.free(expected_delivery);
     try expectCliResult(
         allocator,
         &.{ ZFASTA_BIN, "validate", "--fix", "-o", rejected_path, in_path },
         1,
         "",
-        "error: validate --fix refuses character-level errors; use --fix-format-only to keep them unchanged\n",
+        expected_delivery,
     );
     try std.testing.expectError(
         error.FileNotFound,
@@ -864,7 +866,7 @@ test "[cli] - [validate fix]: rejects an aliased input path without modifying it
     const spawn_io = threaded.io();
 
     const result = try std.process.run(allocator, spawn_io, .{
-        .argv = &.{ ZFASTA_BIN, "validate", "--fix", "-o", output_alias, in_path },
+        .argv = &.{ ZFASTA_BIN, "validate", "--error-format=json", "--fix", "-o", output_alias, in_path },
         .stdout_limit = .limited(64 * 1024),
         .stderr_limit = .limited(64 * 1024),
     });
@@ -875,13 +877,8 @@ test "[cli] - [validate fix]: rejects an aliased input path without modifying it
         .exited => |code| try std.testing.expectEqual(@as(u8, 1), code),
         else => return error.ChildProcessFailed,
     }
-    const expected_error = try std.fmt.allocPrint(
-        allocator,
-        "error: validate --fix will not overwrite input: {s}\n",
-        .{in_path},
-    );
     try std.testing.expectEqual(@as(usize, 0), result.stdout.len);
-    try std.testing.expectEqualStrings(expected_error, result.stderr);
+    try utility.expectDiagnostic(allocator, result.stderr, .@"repair.output_is_input");
 
     const input_after = try readTestFile(allocator, in_path);
     try std.testing.expectEqualStrings(broken, input_after);
@@ -1063,15 +1060,15 @@ test "[cli] - [validate safety]: refuses preamble loss without changing legacy c
         var threaded = std.Io.Threaded.init(allocator, .{});
         defer threaded.deinit();
         const argv: []const []const u8 = if (format_only)
-            &.{ ZFASTA_BIN, "validate", "--fix", "--fix-format-only", "-o", output, input }
+            &.{ ZFASTA_BIN, "validate", "--error-format=json", "--fix", "--fix-format-only", "-o", output, input }
         else
-            &.{ ZFASTA_BIN, "validate", "--fix", "-o", output, input };
+            &.{ ZFASTA_BIN, "validate", "--error-format=json", "--fix", "-o", output, input };
         const result = try std.process.run(allocator, threaded.io(), .{ .argv = argv });
         defer allocator.free(result.stdout);
         defer allocator.free(result.stderr);
         try std.testing.expectEqual(@as(u8, 1), result.term.exited);
         try std.testing.expectEqualStrings("", result.stdout);
-        try std.testing.expectEqualStrings("error: validate --fix refuses content before the first header at line 1\n", result.stderr);
+        try utility.expectDiagnostic(allocator, result.stderr, .@"repair.blocked");
         const after = try readTestFile(allocator, output);
         defer allocator.free(after);
         try std.testing.expectEqualStrings("previous destination\n", after);
@@ -1321,6 +1318,12 @@ test "[cli] - [validate cap]: keeps complete counts and explains retained exampl
     defer parsed.deinit();
     try std.testing.expect(parsed.value.object.get("truncated").?.bool);
     try std.testing.expectEqual(@as(i64, validator.MAX_VALIDATE_EVENTS + 1), parsed.value.object.get("counts").?.object.get("trailing_whitespace").?.integer);
+    const machine = try std.process.run(allocator, io, .{ .argv = &.{ ZFASTA_BIN, "validate", "--json", "--summary", "--error-format=json", input } });
+    defer allocator.free(machine.stdout);
+    defer allocator.free(machine.stderr);
+    try std.testing.expectEqual(@as(u8, 1), machine.term.exited);
+    try std.testing.expectEqualStrings(result.stdout, machine.stdout);
+    try std.testing.expectEqualStrings("", machine.stderr);
 
     const Fault = struct {
         fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {

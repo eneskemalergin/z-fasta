@@ -1564,10 +1564,14 @@ BED
         && diff_oracle "$TMPDIR/iupac_rc_py.fa" "$TMPDIR/got.tmp" "[parity:seq] IUPAC --rc Python oracle" \
         || fail "[parity:seq] IUPAC --rc Python oracle"
 
-    "$ZFASTA" get "$TEST_DATA_DIR/proteome.fasta" 'sp|P12345|PROT_HUMAN:1-10' --rc > "$TMPDIR/got.tmp" 2> "$TMPDIR/got.err" \
-        && fail "protein RC rejected (should fail)" \
-        || grep -q 'reverse complement is not defined' "$TMPDIR/got.err" \
-        && pass "protein RC rejected" || fail "protein RC rejected (wrong err)"
+    local protein_status=0
+    "$ZFASTA" get "$TEST_DATA_DIR/proteome.fasta" 'sp|P12345|PROT_HUMAN:1-10' --rc > "$TMPDIR/got.tmp" 2> "$TMPDIR/got.err" || protein_status=$?
+    if [[ "$protein_status" == 1 ]] && grep -Fq 'error [transform.complement_on_protein]' "$TMPDIR/got.err"; then
+        pass "protein RC rejected"
+    else
+        fail "protein RC rejected (wrong status or code)"
+        cat "$TMPDIR/got.err"
+    fi
 }
 
 section5() {

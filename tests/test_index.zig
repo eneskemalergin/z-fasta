@@ -409,13 +409,13 @@ test "[cli] - [index]: rejects multiple and nonexistent FASTA paths" {
         allocator,
         &.{ ZFASTA_BIN, "index", "tests/data/simple.fasta", "tests/data/single.fasta" },
         1,
-        "error: index accepts exactly one FASTA path\n",
+        "error [usage.extra_argument] index: Too many arguments. argument=fasta_path allowed_count=1\nhint: Correct the command arguments; use --help for accepted options.\n",
     );
     try expectCliFailure(
         allocator,
         &.{ ZFASTA_BIN, "index", "tests/data/definitely-missing-cli-failure.fasta" },
         1,
-        "error: file not found: tests/data/definitely-missing-cli-failure.fasta\n",
+        "error [io.file_not_found] index: \"tests/data/definitely-mi\" (47 bytes): Required file was not found.; cause=\"FileNotFound\"\nhint: Check the named input/output and retained I/O cause.\n",
     );
 }
 
@@ -532,12 +532,7 @@ test "[cli] - [index]: large catalogs preserve both formats and duplicate policy
                 else
                     &.{ ZFASTA_BIN, "index", "--emit-fai", "--no-dedup", fasta_path };
                 if (non_uniform) {
-                    try expectCliFailure(
-                        allocator,
-                        fai_args,
-                        1,
-                        "error: cannot emit .fai for non-uniform sequence layout; run 'z-fasta index' (default) to write .zfi\n",
-                    );
+                    try utility.expectCliFailureCode(allocator, fai_args, .@"index.nonuniform_fai");
                 } else {
                     const expected = if (enable_dedup) expected_fai.written() else expected_all_fai.written();
                     try expectCliResult(allocator, fai_args, 0, expected, "");
@@ -581,17 +576,11 @@ test "[cli] - [index]: large late failures preserve the prior index and remove t
     try env.put("TMPDIR", spool_dir_path);
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
-    const expected_error = try std.fmt.allocPrint(
-        allocator,
-        "error: sequence name exceeds 65535 bytes: {s}\n",
-        .{fasta_path},
-    );
-    defer allocator.free(expected_error);
     for ([_][]const []const u8{
-        &.{ ZFASTA_BIN, "index", fasta_path },
-        &.{ ZFASTA_BIN, "index", "--no-dedup", fasta_path },
-        &.{ ZFASTA_BIN, "index", "--emit-fai", fasta_path },
-        &.{ ZFASTA_BIN, "index", "--emit-fai", "--no-dedup", fasta_path },
+        &.{ ZFASTA_BIN, "index", "--error-format=json", fasta_path },
+        &.{ ZFASTA_BIN, "index", "--error-format=json", "--no-dedup", fasta_path },
+        &.{ ZFASTA_BIN, "index", "--error-format=json", "--emit-fai", fasta_path },
+        &.{ ZFASTA_BIN, "index", "--error-format=json", "--emit-fai", "--no-dedup", fasta_path },
     }) |argv| {
         const result = try std.process.run(allocator, threaded.io(), .{
             .argv = argv,
@@ -603,7 +592,7 @@ test "[cli] - [index]: large late failures preserve the prior index and remove t
         defer allocator.free(result.stderr);
         try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
         try std.testing.expectEqualStrings("", result.stdout);
-        try std.testing.expectEqualStrings(expected_error, result.stderr);
+        try utility.expectDiagnostic(allocator, result.stderr, .@"index.identifier_too_long");
         const previous = try readTestFile(allocator, zfi_path);
         defer allocator.free(previous);
         try std.testing.expectEqualStrings("previous index", previous);
@@ -2002,7 +1991,7 @@ test "[integration] - [FAI loader]: positional mode retains the FASTA descriptor
 }
 
 test "[integration] - [get index loader]: keeps FASTA readable without mapping it" {
-    var zfi_idx = main.index_format.loadIndexForGet(std.testing.allocator, io, "tests/data/simple.fasta", .lookup_full_map);
+    var zfi_idx = try main.index_format.loadIndexCheckedWithModeLegacy(std.testing.allocator, io, "tests/data/simple.fasta", .lookup_full_map);
     defer zfi_idx.deinit();
 
     try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.zfi, zfi_idx.source);
@@ -2022,7 +2011,7 @@ test "[integration] - [get index loader]: keeps FASTA readable without mapping i
         try std.Io.File.writeStreamingAll(fai_file, io, "seq\t4\t5\t4\t5\n");
     }
 
-    var fai_idx = main.index_format.loadIndexForGet(std.testing.allocator, io, fasta_path, .lookup_full_map);
+    var fai_idx = try main.index_format.loadIndexCheckedWithModeLegacy(std.testing.allocator, io, fasta_path, .lookup_full_map);
     defer fai_idx.deinit();
 
     try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.fai, fai_idx.source);
@@ -2417,7 +2406,7 @@ test "[failure] - [FAI workflow]: leaves output and spool empty" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const result = try std.process.run(allocator, threaded.io(), .{
-        .argv = &.{ ZFASTA_BIN, "index", "--emit-fai", fasta_path },
+        .argv = &.{ ZFASTA_BIN, "index", "--error-format=json", "--emit-fai", fasta_path },
         .environ_map = &env,
         .stdout_limit = .limited(64 * 1024),
         .stderr_limit = .limited(64 * 1024),
@@ -2430,10 +2419,7 @@ test "[failure] - [FAI workflow]: leaves output and spool empty" {
         else => return error.ChildProcessFailed,
     }
     try std.testing.expectEqual(@as(usize, 0), result.stdout.len);
-    try std.testing.expectEqualStrings(
-        "error: cannot emit .fai for non-uniform sequence layout; run 'z-fasta index' (default) to write .zfi\n",
-        result.stderr,
-    );
+    try utility.expectDiagnostic(allocator, result.stderr, .@"index.nonuniform_fai");
     try expectDirectoryEmpty(spool_dir_path);
 }
 
@@ -3233,12 +3219,10 @@ test "[regression] - [FAI loader]: get and stats reject shifted empty columns" {
     const bed = try writeFastaArtifact(allocator, "shifted-fai-bed", "seq1\t0\t4\n");
     defer allocator.free(bed);
     defer std.Io.Dir.cwd().deleteFile(io, bed) catch {};
-    const expected = try std.fmt.allocPrint(allocator, "error: corrupt index file for: {s}\n", .{paths.fasta_path});
-    defer allocator.free(expected);
-    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", paths.fasta_path, "seq1" }, 1, expected);
-    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", paths.fasta_path, "--names", names }, 1, expected);
-    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", paths.fasta_path, "--bed", bed }, 1, expected);
-    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "stats", paths.fasta_path }, 1, expected);
+    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", paths.fasta_path, "seq1" }, .@"index.fai.field_missing");
+    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", paths.fasta_path, "--names", names }, .@"index.fai.field_missing");
+    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", paths.fasta_path, "--bed", bed }, .@"index.fai.field_missing");
+    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "stats", paths.fasta_path }, .@"index.fai.field_missing");
 }
 
 fn expectIndexLoadCode(allocator: std.mem.Allocator, path: []const u8, mode: main.index_format.LoadMode, code: diagnostics.Code, failure: *diagnostics.Failure) !void {

@@ -186,19 +186,19 @@ test "[cli] - [stats]: rejects invalid FASTA path counts" {
         allocator,
         &.{ ZFASTA_BIN, "stats" },
         1,
-        "error: usage: z-fasta stats <file.fasta>\n",
+        "error [usage.missing_argument] stats: A required argument is missing. argument=fasta_path\nhint: Correct the command arguments; use --help for accepted options.\n",
     );
     try expectCliFailure(
         allocator,
         &.{ ZFASTA_BIN, "stats", "tests/data/simple.fasta", "tests/data/single.fasta" },
         1,
-        "error: stats accepts exactly one FASTA path\n",
+        "error [usage.extra_argument] stats: Too many arguments. argument=fasta_path allowed_count=1\nhint: Correct the command arguments; use --help for accepted options.\n",
     );
     try expectCliFailure(
         allocator,
         &.{ ZFASTA_BIN, "stats", "tests/data/definitely-missing-cli-failure.fasta" },
         1,
-        "error: file not found: tests/data/definitely-missing-cli-failure.fasta\n",
+        "error [io.file_not_found] stats: \"tests/data/definitely-mi\" (47 bytes): Required file was not found.; cause=\"FileNotFound\"\nhint: Check the named input/output and retained I/O cause.\n",
     );
 }
 
@@ -212,12 +212,7 @@ test "[cli] - [stats]: reports missing and corrupt indexes" {
     const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta});
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
 
-    const missing = try std.fmt.allocPrint(
-        allocator,
-        "error: no index found for {s}. Run 'z-fasta index {s}' first.\n",
-        .{ fasta, fasta },
-    );
-    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "stats", fasta }, 1, missing);
+    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "stats", fasta }, .@"index.not_found");
 
     {
         const zfi_file = try std.Io.Dir.cwd().createFile(io, zfi_path, .{});
@@ -225,8 +220,7 @@ test "[cli] - [stats]: reports missing and corrupt indexes" {
         try std.Io.File.writeStreamingAll(zfi_file, io, "not a zfi index");
     }
 
-    const corrupt = try std.fmt.allocPrint(allocator, "error: corrupt index file for: {s}\n", .{fasta});
-    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "stats", fasta }, 1, corrupt);
+    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "stats", fasta }, .@"index.truncated");
 }
 
 test "[cli] - [stats report]: renders the exact nucleotide report" {

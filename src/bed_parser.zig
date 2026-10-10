@@ -1,7 +1,7 @@
 //! BED line parser: 0-based half-open intervals to 1-based inclusive requests.
 
 const std = @import("std");
-const diagnostics = @import("diagnostics.zig");
+const diagnostics = @import("diagnostics");
 
 pub const BedStrand = enum {
     forward,

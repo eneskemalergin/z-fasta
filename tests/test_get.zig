@@ -78,7 +78,7 @@ test "[unit] - [get orientation]: composes independent reverse and complement op
 }
 
 test "[integration] - [region resolution]: preserves indexed coordinate geometry" {
-    var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta");
+    var idx = try main.index_format.loadIndexCheckedLegacy(std.testing.allocator, io, "tests/data/simple.fasta");
     defer idx.deinit();
 
     const Case = struct {
@@ -111,7 +111,7 @@ test "[integration] - [region resolution]: preserves indexed coordinate geometry
 }
 
 test "[integration] - [region resolution]: accepts a pipe-delimited protein identifier" {
-    var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/proteome.fasta");
+    var idx = try main.index_format.loadIndexCheckedLegacy(std.testing.allocator, io, "tests/data/proteome.fasta");
     defer idx.deinit();
 
     const r = try resolveRegion(&idx, "sp|P12345|PROT_HUMAN:1-10");
@@ -121,7 +121,7 @@ test "[integration] - [region resolution]: accepts a pipe-delimited protein iden
 }
 
 test "[integration] - [region resolution]: accepts a 200-byte identifier" {
-    var idx = main.index_format.loadIndex(std.testing.allocator, io, "tests/data/edge_cases.fasta");
+    var idx = try main.index_format.loadIndexCheckedLegacy(std.testing.allocator, io, "tests/data/edge_cases.fasta");
     defer idx.deinit();
 
     const long_name = "A" ** 200;
@@ -266,10 +266,7 @@ test "[cli] - [get help]: describes the request source contract" {
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Names and BED input stream.") != null);
 }
 
-const GET_USAGE_STDERR =
-    \\error: usage: z-fasta get <file.fasta> (<region>... | --names file.txt|- | --bed file.bed|-)
-    \\
-;
+const GET_USAGE_STDERR = "error [usage.missing_argument] get: A required argument is missing. argument=request_source\nhint: Correct the command arguments; use --help for accepted options.\n";
 
 test "[cli] - [get]: rejects unknown options regardless of position" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -295,13 +292,13 @@ test "[cli] - [get]: rejects repeated request source flags" {
         allocator,
         &.{ ZFASTA_BIN, "get", fasta, "--bed", "first.bed", "--bed", "second.bed" },
         1,
-        "error: --bed may be specified only once\n",
+        "error [usage.repeated_option] get: This option cannot be repeated. option=bed\nhint: Correct the command arguments; use --help for accepted options.\n",
     );
     try expectCliFailure(
         allocator,
         &.{ ZFASTA_BIN, "get", fasta, "--names", "first.txt", "--names", "second.txt" },
         1,
-        "error: --names may be specified only once\n",
+        "error [usage.repeated_option] get: This option cannot be repeated. option=names\nhint: Correct the command arguments; use --help for accepted options.\n",
     );
 }
 
@@ -310,11 +307,9 @@ test "[cli] - [get]: rejects mixed request source families" {
     defer arena.deinit();
     const allocator = arena.allocator();
     const fasta = "tests/data/simple.fasta";
-    const expected = "error: choose one request source: positional regions, --names, or --bed\n";
-
-    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", fasta, "seq1", "--names", "ids.txt" }, 1, expected);
-    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", fasta, "seq1", "--bed", "regions.bed" }, 1, expected);
-    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", fasta, "--names", "ids.txt", "--bed", "regions.bed" }, 1, expected);
+    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", fasta, "seq1", "--names", "ids.txt" }, .@"usage.conflicting_options");
+    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", fasta, "seq1", "--bed", "regions.bed" }, .@"usage.conflicting_options");
+    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", fasta, "--names", "ids.txt", "--bed", "regions.bed" }, .@"usage.conflicting_options");
 }
 
 test "[cli] - [get]: rejects strand handling outside BED input" {
@@ -322,7 +317,7 @@ test "[cli] - [get]: rejects strand handling outside BED input" {
     defer arena.deinit();
     const allocator = arena.allocator();
     const fasta = "tests/data/simple.fasta";
-    const expected = "error: --strand-aware requires --bed\n";
+    const expected = "error [usage.option_requires] get: An option prerequisite is missing. option=strand_aware required=bed\nhint: Correct the command arguments; use --help for accepted options.\n";
 
     try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", fasta, "seq1", "--strand-aware" }, 1, expected);
     try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", fasta, "--names", "ids.txt", "--honor-strand" }, 1, expected);
@@ -392,11 +387,13 @@ test "[cli] - [get names]: rejects a request name above the index limit" {
         try std.Io.File.writeStreamingAll(names_file, io, name);
     }
 
+    const expected_delivery = try std.fmt.allocPrint(allocator, "error [request.identifier_too_long] get: \"zig-cache/test-artifacts\" ({d} bytes):1 column=1 offset=0 request=1: Request identifier exceeds its byte limit. identifier_bytes=65536 limit_bytes=65535\nhint: Correct the reported request or select the intended index.\n", .{names_path.len});
+    defer allocator.free(expected_delivery);
     try expectCliFailure(
         allocator,
         &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", names_path },
         1,
-        "error: name at line 1 exceeds 65535 bytes\n",
+        expected_delivery,
     );
 }
 
@@ -405,7 +402,7 @@ test "[cli] - [get]: missing FASTA path returns an exact error" {
     defer arena.deinit();
     const allocator = arena.allocator();
     const missing = "tests/data/definitely-missing-cli-failure.fasta";
-    const expected = "error: file not found: tests/data/definitely-missing-cli-failure.fasta\n";
+    const expected = "error [io.file_not_found] get: \"tests/data/definitely-mi\" (47 bytes): Required file was not found.; cause=\"FileNotFound\"\nhint: Check the named input/output and retained I/O cause.\n";
 
     try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", missing, "seq1" }, 1, expected);
 }
@@ -419,13 +416,13 @@ test "[cli] - [get]: validates FASTA and sidecar before request input" {
         allocator,
         &.{ ZFASTA_BIN, "get", "tests/data/definitely-missing-source-order.fasta", "--names", "also-missing.txt" },
         1,
-        "error: file not found: tests/data/definitely-missing-source-order.fasta\n",
+        "error [io.file_not_found] get: \"tests/data/definitely-mi\" (48 bytes): Required file was not found.; cause=\"FileNotFound\"\nhint: Check the named input/output and retained I/O cause.\n",
     );
     try expectCliFailure(
         allocator,
         &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", "tests/data/also-missing.txt" },
         1,
-        "error: file not found: tests/data/also-missing.txt\n",
+        "error [io.file_not_found] get: \"tests/data/also-missing.\" (27 bytes): Required file was not found.; cause=\"FileNotFound\"\nhint: Check the named input/output and retained I/O cause.\n",
     );
 }
 
@@ -452,9 +449,8 @@ test "[cli] - [get index selection]: invalid zfi blocks a valid fai" {
         try std.Io.File.writeStreamingAll(zfi_file, io, "not a zfi index");
     }
 
-    const expected = try std.fmt.allocPrint(allocator, "error: corrupt index file for: {s}\n", .{fasta});
-    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", fasta, "seq" }, 1, expected);
-    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", fasta, "--names", "missing.txt" }, 1, expected);
+    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", fasta, "seq" }, .@"index.truncated");
+    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", fasta, "--names", "missing.txt" }, .@"index.truncated");
 }
 
 test "[cli] - [get names]: failures preserve only valid output prefixes" {
@@ -481,17 +477,12 @@ test "[cli] - [get names]: failures preserve only valid output prefixes" {
         try std.Io.File.writeStreamingAll(file, io, late_names.items);
     }
 
-    try expectCliFailure(
-        allocator,
-        &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", early_path, "--summary" },
-        1,
-        "error: sequence not found: missing\n",
-    );
+    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", early_path, "--summary" }, .@"request.sequence_not_found");
 
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const result = try std.process.run(allocator, threaded.io(), .{
-        .argv = &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", late_path, "--summary" },
+        .argv = &.{ ZFASTA_BIN, "get", "--error-format=json", "tests/data/simple.fasta", "--names", late_path, "--summary" },
         .stdout_limit = .limited(4 * 1024 * 1024),
         .stderr_limit = .limited(64 * 1024),
     });
@@ -503,7 +494,7 @@ test "[cli] - [get names]: failures preserve only valid output prefixes" {
         else => return error.ChildProcessFailed,
     }
     try std.testing.expect(result.stdout.len > 0);
-    try std.testing.expectEqualStrings("error: sequence not found: missing\n", result.stderr);
+    try utility.expectDiagnostic(allocator, result.stderr, .@"request.sequence_not_found");
     const one_output = ">seq1\nACGTACGTACGTACGTACGTACGT\n";
     try std.testing.expect(result.stdout.len <= one_output.len * 65536);
     for (result.stdout, 0..) |byte, i| {
@@ -543,37 +534,37 @@ test "[cli] - [get]: rejects invalid requests, missing names, and transform conf
         allocator,
         &.{ ZFASTA_BIN, "get", fasta, "missing" },
         1,
-        "error: sequence not found: missing\n",
+        "error [request.sequence_not_found] get: \"positional requests\" request=1: Sequence was not found in the selected lookup. lookup_scope=complete_catalog index_source=zfi identifier=\"missing\"\nhint: Correct the reported request or select the intended index.\n",
     );
     try expectCliFailure(
         allocator,
         &.{ ZFASTA_BIN, "get", fasta, "seq1:0-1" },
         1,
-        "error: start position must be >= 1\n",
+        "error [request.start_before_one] get: \"positional requests\" request=1: Inclusive request start must be at least one. start=0 coordinate_system=one_based_inclusive\nhint: Correct the reported request or select the intended index.\n",
     );
     try expectCliFailure(
         allocator,
         &.{ ZFASTA_BIN, "get", fasta, "seq1:25-25" },
         1,
-        "error: start position 25 exceeds sequence length 24\n",
+        "error [request.start_after_sequence] get: \"positional requests\" request=1: Request start exceeds the indexed sequence length. start=25 sequence_length=24\nhint: Correct the reported request or select the intended index.\n",
     );
     try expectCliFailure(
         allocator,
         &.{ ZFASTA_BIN, "get", fasta, "seq1:10-9" },
         1,
-        "error: end position must be >= start position\n",
+        "error [request.end_before_start] get: \"positional requests\" request=1: Request end is before its start. start=10 end=9\nhint: Correct the reported request or select the intended index.\n",
     );
     try expectCliFailure(
         allocator,
         &.{ ZFASTA_BIN, "get", fasta, "seq1", "--annotate-rc" },
         1,
-        "error: --annotate-rc requires a transform or --strand-aware BED input\n",
+        "error [usage.option_requires] get: An option prerequisite is missing. option=annotate_rc required=transform_or_strand\nhint: Correct the command arguments; use --help for accepted options.\n",
     );
     try expectCliFailure(
         allocator,
         &.{ ZFASTA_BIN, "get", fasta, "--rc", "--complement-only", "seq1" },
         1,
-        "error: --rc, --complement-only, and --reverse-only are mutually exclusive\n",
+        "error [usage.conflicting_options] get: Selected options conflict. arguments=rc,complement_only\nhint: Correct the command arguments; use --help for accepted options.\n",
     );
 }
 
@@ -610,24 +601,24 @@ test "[cli] - [get BED]: reports parser boundary errors" {
     defer std.Io.Dir.cwd().deleteFile(io, bed_path) catch {};
     const Case = struct {
         line: []const u8,
-        expected: []const u8,
+        code: main.index_format.diagnostics.Code,
     };
     const cases = [_]Case{
-        .{ .line = "\t0\t1\n", .expected = "error: invalid BED line 1: missing chrom\n" },
-        .{ .line = "seq1\n", .expected = "error: invalid BED line 1: missing start\n" },
-        .{ .line = "seq1\t0\n", .expected = "error: invalid BED line 1: missing end\n" },
-        .{ .line = "seq1\t-0\t10\n", .expected = "error: invalid BED line 1: invalid start\n" },
-        .{ .line = "seq1\t+1\t10\n", .expected = "error: invalid BED line 1: invalid start\n" },
-        .{ .line = "seq1\t1_0\t20\n", .expected = "error: invalid BED line 1: invalid start\n" },
-        .{ .line = "seq1\t18446744073709551616\t20\n", .expected = "error: invalid BED line 1: invalid start\n" },
-        .{ .line = "seq1\t0\t+10\n", .expected = "error: invalid BED line 1: invalid end\n" },
-        .{ .line = "seq1\t0\t1_0\n", .expected = "error: invalid BED line 1: invalid end\n" },
-        .{ .line = "seq1\t0\t18446744073709551616\n", .expected = "error: invalid BED line 1: invalid end\n" },
-        .{ .line = "seq1\t10\t10\n", .expected = "error: invalid BED line 1: end must be greater than start\n" },
-        .{ .line = "seq1\t10\t9\n", .expected = "error: invalid BED line 1: end must be greater than start\n" },
+        .{ .line = "\t0\t1\n", .code = .@"request.bed.field_missing" },
+        .{ .line = "seq1\n", .code = .@"request.bed.field_missing" },
+        .{ .line = "seq1\t0\n", .code = .@"request.bed.field_missing" },
+        .{ .line = "seq1\t-0\t10\n", .code = .@"request.bed.invalid_coordinate" },
+        .{ .line = "seq1\t+1\t10\n", .code = .@"request.bed.invalid_coordinate" },
+        .{ .line = "seq1\t1_0\t20\n", .code = .@"request.bed.invalid_coordinate" },
+        .{ .line = "seq1\t18446744073709551616\t20\n", .code = .@"request.bed.coordinate_out_of_range" },
+        .{ .line = "seq1\t0\t+10\n", .code = .@"request.bed.invalid_coordinate" },
+        .{ .line = "seq1\t0\t1_0\n", .code = .@"request.bed.invalid_coordinate" },
+        .{ .line = "seq1\t0\t18446744073709551616\n", .code = .@"request.bed.coordinate_out_of_range" },
+        .{ .line = "seq1\t10\t10\n", .code = .@"request.bed.invalid_interval" },
+        .{ .line = "seq1\t10\t9\n", .code = .@"request.bed.invalid_interval" },
         .{
             .line = "seq1\t18446744073709551614\t18446744073709551615\n",
-            .expected = "error: start position 18446744073709551615 exceeds sequence length 24\n",
+            .code = .@"request.start_after_sequence",
         },
     };
 
@@ -637,11 +628,10 @@ test "[cli] - [get BED]: reports parser boundary errors" {
             defer bed_file.close(io);
             try std.Io.File.writeStreamingAll(bed_file, io, case.line);
         }
-        try expectCliFailure(
+        try utility.expectCliFailureCode(
             allocator,
             &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--bed", bed_path },
-            1,
-            case.expected,
+            case.code,
         );
     }
 
@@ -655,11 +645,13 @@ test "[cli] - [get BED]: reports parser boundary errors" {
         &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--bed", bed_path },
         ">seq1:1-1\nA\n",
     );
+    const expected_delivery = try std.fmt.allocPrint(allocator, "error [request.bed.invalid_strand] get: \"zig-cache/test-artifacts\" ({d} bytes):1 column=17 offset=16 request=1: Selected BED strand is invalid. strand=\"?\" accepted=plus_minus_dot_or_absent\nhint: Correct the reported request or select the intended index.\n", .{bed_path.len});
+    defer allocator.free(expected_delivery);
     try expectCliFailure(
         allocator,
         &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--bed", bed_path, "--strand-aware" },
         1,
-        "error: invalid BED line 1: invalid strand\n",
+        expected_delivery,
     );
 }
 
@@ -946,7 +938,9 @@ test "[cli] - [GET abort]: discards pending stdout after a later malformed BED r
     var expected = std.Io.Writer.Allocating.init(allocator);
     defer expected.deinit();
     for (0..8192) |_| try expected.writer.writeAll(">seq1:1-1\nA\n");
-    try utility.expectCliResult(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--bed", path, "--summary" }, 1, expected.written()[0..65537], "error: invalid BED line 8193: missing start\n");
+    const expected_delivery = try std.fmt.allocPrint(allocator, "error [request.bed.field_missing] get: \"zig-cache/test-artifacts\" ({d} bytes):8193 column=5 offset=73732 request=8193: A required BED field is missing or empty. field=start column_number=2\nhint: Correct the reported request or select the intended index.\n", .{path.len});
+    defer allocator.free(expected_delivery);
+    try utility.expectCliResult(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--bed", path, "--summary" }, 1, expected.written()[0..65537], expected_delivery);
 }
 
 fn checkGetOperationAllocations(allocator: std.mem.Allocator, source: main.getter.RequestSource) !void {
@@ -1028,16 +1022,59 @@ test "[failure] - [GET stdout]: distinguishes writes from final flush and retain
 test "[cli] - [GET missing identifiers]: preserves argv names and labels bounded file previews" {
     const allocator = std.testing.allocator;
     const name = "absent" ** 10;
-    const expected = try std.fmt.allocPrint(allocator, "error: sequence not found: {s}\n", .{name});
-    defer allocator.free(expected);
-    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", name }, 1, expected);
+    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", name }, .@"request.sequence_not_found");
     const path = try uniqueArtifactPath(allocator, "get-long-miss", "txt");
     defer allocator.free(path);
     defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
     const file = try std.Io.Dir.cwd().createFile(io, path, .{});
     try std.Io.File.writeStreamingAll(file, io, name ++ "\n");
     file.close(io);
-    const bounded = try std.fmt.allocPrint(allocator, "error: sequence not found: {s} (identifier truncated; 60 bytes)\n", .{name[0..32]});
-    defer allocator.free(bounded);
-    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", path }, 1, bounded);
+    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", path }, .@"request.sequence_not_found");
+}
+
+test "[cli] - [get machine summary]: frames metrics without changing FASTA output" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const result = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "get", "--error-format=json", "tests/data/simple.fasta", "seq1:1-4", "--summary" } });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try std.testing.expectEqual(@as(u8, 0), result.term.exited);
+    try std.testing.expectEqualStrings(">seq1:1-4\nACGT\n", result.stdout);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, result.stderr, .{});
+    defer parsed.deinit();
+    const object = parsed.value.object;
+    try std.testing.expectEqualStrings("summary", object.get("kind").?.string);
+    try std.testing.expect(object.get("accepted").?.bool);
+    try std.testing.expect(object.get("operation").?.object.get("complete").?.bool);
+    try std.testing.expect(object.get("failure").? == .null);
+    const metrics = object.get("metrics").?.object;
+    try std.testing.expectEqualStrings("1", metrics.get("region_count").?.string);
+    try std.testing.expectEqualStrings("4", metrics.get("total_bases").?.string);
+    _ = try std.fmt.parseInt(u64, metrics.get("elapsed_ns").?.string, 10);
+}
+
+test "[cli] - [get machine failure]: preserves opaque identifier bytes" {
+    const allocator = std.testing.allocator;
+    const names = try writeFastaArtifact(allocator, "get-machine-opaque", "\xff\n");
+    defer allocator.free(names);
+    defer std.Io.Dir.cwd().deleteFile(io, names) catch {};
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const result = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", names, "--error-format=json" } });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try std.testing.expectEqual(@as(u8, 1), result.term.exited);
+    try std.testing.expectEqualStrings("", result.stdout);
+    try utility.expectDiagnostic(allocator, result.stderr, .@"request.sequence_not_found");
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, result.stderr, .{});
+    defer parsed.deinit();
+    const primary = parsed.value.object.get("failure").?.object.get("primary").?.object;
+    try std.testing.expectEqualStrings("names", primary.get("source").?.string);
+    try std.testing.expectEqualStrings("1", primary.get("location").?.object.get("line").?.string);
+    try std.testing.expectEqualStrings("1", primary.get("request").?.string);
+    const identifier = primary.get("data").?.object.get("identifier").?.object;
+    try std.testing.expectEqualStrings("base64", identifier.get("encoding").?.string);
+    try std.testing.expectEqualStrings("/w==", identifier.get("value").?.string);
+    try std.testing.expect(!identifier.get("truncated").?.bool);
 }

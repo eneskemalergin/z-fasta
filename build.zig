@@ -16,6 +16,12 @@ pub fn build(b: *std.Build) void {
     // ReleaseFast does not enable stripping automatically.
     const strip = b.option(bool, "strip", "Strip debug info") orelse (optimize != .Debug);
 
+    const diagnostics_module = b.createModule(.{
+        .root_source_file = b.path("src/diagnostics.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const exe = b.addExecutable(.{
         .name = "z-fasta",
         .root_module = b.createModule(.{
@@ -26,6 +32,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    exe.root_module.addImport("diagnostics", diagnostics_module);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -42,6 +49,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
+    main_module.addImport("diagnostics", diagnostics_module);
 
     const test_index_module = b.createModule(.{
         .root_source_file = b.path("tests/test_index.zig"),
@@ -73,6 +82,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/indexer.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{.{ .name = "diagnostics", .module = diagnostics_module }},
         }),
     }));
 
@@ -91,6 +101,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/validator.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{.{ .name = "diagnostics", .module = diagnostics_module }},
         }),
     }));
 
@@ -122,11 +133,6 @@ pub fn build(b: *std.Build) void {
     }));
     run_test_validate.step.dependOn(b.getInstallStep());
 
-    const diagnostics_module = b.createModule(.{
-        .root_source_file = b.path("src/diagnostics.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
     const reporting_module = b.createModule(.{
         .root_source_file = b.path("src/reporting.zig"),
         .target = target,
@@ -169,8 +175,19 @@ pub fn build(b: *std.Build) void {
             },
         }),
     }));
+    const run_commands_caller = b.addRunArtifact(b.addExecutable(.{
+        .name = "diagnostics-commands-caller",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/diagnostics_commands_caller.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "main", .module = main_module }},
+        }),
+    }));
+    run_commands_caller.step.dependOn(&gen_simple_index.step);
     const diagnostics_step = b.step("test-diagnostics", "Run diagnostics tests and a separate caller");
     diagnostics_step.dependOn(reporting_step);
+    diagnostics_step.dependOn(&run_commands_caller.step);
     diagnostics_step.dependOn(&run_test_diagnostics.step);
     diagnostics_step.dependOn(&run_diagnostics_caller.step);
 

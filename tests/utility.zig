@@ -40,6 +40,42 @@ pub fn expectCliFailure(
     try expectCliResult(allocator, argv, exit_code, "", expected_stderr);
 }
 
+pub fn expectDiagnostic(allocator: std.mem.Allocator, bytes: []const u8, code: main.index_format.diagnostics.Code) !void {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+    const object = parsed.value.object;
+    try std.testing.expectEqualStrings("v2", object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("failure", object.get("kind").?.string);
+    try std.testing.expect(!object.get("accepted").?.bool);
+    try std.testing.expect(!object.get("operation").?.object.get("complete").?.bool);
+    const primary = object.get("failure").?.object.get("primary").?.object;
+    try std.testing.expectEqualStrings(@tagName(code), primary.get("code").?.string);
+    try std.testing.expectEqualStrings("error", primary.get("severity").?.string);
+    try std.testing.expectEqualStrings(@tagName(main.index_format.diagnostics.metadata(code).category), primary.get("category").?.string);
+}
+
+pub fn expectCliCodeResult(allocator: std.mem.Allocator, argv: []const []const u8, exit_code: u8, stdout: []const u8, code: main.index_format.diagnostics.Code) !void {
+    const args = try allocator.alloc([]const u8, argv.len + 1);
+    defer allocator.free(args);
+    @memcpy(args[0..argv.len], argv);
+    args[argv.len] = "--error-format=json";
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const result = try std.process.run(allocator, threaded.io(), .{ .argv = args, .stdout_limit = .limited(128 * 1024), .stderr_limit = .limited(64 * 1024) });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    switch (result.term) {
+        .exited => |status| try std.testing.expectEqual(exit_code, status),
+        else => return error.ChildProcessFailed,
+    }
+    try std.testing.expectEqualStrings(stdout, result.stdout);
+    try expectDiagnostic(allocator, result.stderr, code);
+}
+
+pub fn expectCliFailureCode(allocator: std.mem.Allocator, argv: []const []const u8, code: main.index_format.diagnostics.Code) !void {
+    try expectCliCodeResult(allocator, argv, 1, "", code);
+}
+
 pub fn expectCliSuccess(
     allocator: std.mem.Allocator,
     argv: []const []const u8,
@@ -53,7 +89,7 @@ pub fn expectUnknownOptionRejected(
     argv: []const []const u8,
     unknown: []const u8,
 ) !void {
-    const expected = try std.fmt.allocPrint(allocator, "error: unknown option: {s}\n", .{unknown});
+    const expected = try std.fmt.allocPrint(allocator, "error [usage.unknown_option] {s}: Unknown option. option=\"{s}\"\nhint: Correct the command arguments; use --help for accepted options.\n", .{ argv[1], unknown });
     defer allocator.free(expected);
     try expectCliFailure(allocator, argv, 1, expected);
 }

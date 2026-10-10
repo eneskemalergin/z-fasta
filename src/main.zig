@@ -10,7 +10,8 @@ pub const bed_parser = @import("bed_parser.zig");
 pub const stats = @import("stats.zig");
 pub const validator = @import("validator.zig");
 
-const printErrorAndExit = index_format.printErrorAndExit;
+const diagnostics = index_format.diagnostics;
+pub const reporting = @import("reporting.zig");
 
 const VERSION = "0.3.4";
 const STRAND_AWARE_FLAG = "--strand-aware";
@@ -32,6 +33,7 @@ const USAGE =
     \\General options:
     \\  --help       Show this help message
     \\  --version    Print version
+    \\  --error-format=text|json  Select stderr diagnostics (default: text)
     \\
     \\Index options:
     \\  --emit-fai   Output FAI to stdout when every record has fixed line geometry;
@@ -63,7 +65,7 @@ const USAGE =
     \\  --schema NAME            Header schema: uniprot or refseq
     \\  --custom-alphabet CHARS  Override nucleotide/protein alphabet checks
     \\  --max-header-len N       Warn on headers longer than N bytes (default: 1024)
-    \\  Event list stops at 10000 issues (error without --fix). --fix still streams to -o.
+    \\  Retain 10000 examples; scan/count all input (error without --fix).
     \\
     \\Examples:
     \\  z-fasta index genome.fa                  Create .zfi binary index
@@ -117,202 +119,220 @@ fn parseTransformFlags(
     };
 }
 
-fn printUsageAndExit() noreturn {
-    std.debug.print("{s}", .{USAGE});
-    std.process.exit(1);
-}
+const ErrorFormat = enum { text, json };
 
-// Positional argv tokens must not start with `-`. Known flags are matched earlier.
-fn rejectUnknownOption(arg: []const u8) void {
-    if (arg.len > 0 and arg[0] == '-') {
-        printErrorAndExit("error: unknown option: {s}\n", .{arg});
-    }
-}
-
-fn printHelpAndExit(io: std.Io) noreturn {
-    std.Io.File.writeStreamingAll(.stdout(), io, USAGE) catch {};
-    std.process.exit(0);
-}
-
-fn printVersionAndExit(io: std.Io) noreturn {
-    std.Io.File.writeStreamingAll(.stdout(), io, "z-fasta " ++ VERSION ++ "\n") catch {};
-    std.process.exit(0);
-}
-
-fn writeStdoutAll(bytes: []const u8) void {
-    if (comptime builtin.os.tag == .linux) {
-        var written: usize = 0;
-        while (written < bytes.len) {
-            const result = std.os.linux.write(1, bytes[written..].ptr, bytes.len - written);
-            if (std.os.linux.errno(result) != .SUCCESS) return;
-            if (result == 0) return;
-            written += result;
+// Renderer selection observes option arity. Values are not renderer options.
+// Valid repetitions use the last value; invalid values use the static fallback.
+fn selectErrorFormat(args: std.process.Args.Iterator, operation: diagnostics.Operation, initial: ErrorFormat) error{InvalidFormat}!ErrorFormat {
+    var probe = args;
+    var format = initial;
+    while (probe.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h") or (operation == .index and (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")))) break;
+        if ((std.mem.eql(u8, arg, "--error-format") or std.mem.startsWith(u8, arg, "--error-format="))) {
+            format = try parseErrorFormat(arg);
+        } else if (takesValue(operation, arg)) {
+            _ = probe.next();
         }
-    } else {
+    }
+    return format;
+}
+
+fn takesValue(operation: diagnostics.Operation, arg: []const u8) bool {
+    return switch (operation) {
+        .get => std.mem.eql(u8, arg, "--bed") or std.mem.eql(u8, arg, "--names"),
+        .validate => std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--schema") or std.mem.eql(u8, arg, "--custom-alphabet") or std.mem.eql(u8, arg, "--max-header-len"),
+        else => false,
+    };
+}
+
+fn parseErrorFormat(arg: []const u8) error{InvalidFormat}!ErrorFormat {
+    if (std.mem.eql(u8, arg, "--error-format=text")) return .text;
+    if (std.mem.eql(u8, arg, "--error-format=json")) return .json;
+    return error.InvalidFormat;
+}
+
+const Cli = struct {
+    io: std.Io,
+    args: *std.process.Args.Iterator,
+    format: ErrorFormat,
+    failure: *diagnostics.Failure,
+
+    fn next(self: *Cli) ?[]const u8 {
+        while (self.args.next()) |arg| {
+            if (std.mem.startsWith(u8, arg, "--error-format=")) continue;
+            return arg;
+        }
+        return null;
+    }
+
+    fn fail(self: *Cli, details: diagnostics.Details) diagnostics.Error {
+        return self.failure.fail(.{ .details = details, .stage = .arguments });
+    }
+
+    fn value(self: *Cli, option: diagnostics.Argument, expected: diagnostics.Expected) diagnostics.Error![]const u8 {
+        return self.args.next() orelse self.fail(.{ .@"usage.missing_option_value" = .{ .option = option, .expected = expected } });
+    }
+
+    fn positional(self: *Cli, arg: []const u8) diagnostics.Error!void {
+        if (arg.len != 0 and arg[0] == '-') return self.fail(.{ .@"usage.unknown_option" = .{ .option = self.failure.retain(arg, 32) } });
+    }
+
+    fn stdout(self: *Cli, bytes: []const u8) diagnostics.Error!u8 {
+        self.failure.sources.set(.stdout, .{ .label = .{ .borrowed = "stdout" }, .kind = .stream });
+        self.failure.outputs.stdout.state = .streaming;
+        self.failure.outputs.stdout.may_be_partial = true;
+        std.Io.File.writeStreamingAll(.stdout(), self.io, bytes) catch |err| return self.failure.fail(.{ .details = .{ .@"io.write_failed" = {} }, .stage = .write, .at = .{ .source = .stdout }, .cause = .{ .zig = err } });
+        self.failure.succeed();
+        return 0;
+    }
+};
+
+// A failed diagnostic sink receives no recursive report or unframed fallback.
+fn reportFailure(io: std.Io, format: ErrorFormat, failure: *diagnostics.Failure) u8 {
+    var buffer: [4096]u8 = undefined;
+    var fw = std.Io.File.Writer.initStreaming(.stderr(), io, &buffer);
+    if (failure.sources.get(.stderr) == null) failure.sources.set(.stderr, .{ .label = .{ .borrowed = "stderr" }, .kind = .stream });
+    failure.outputs.stderr.state = .streaming;
+    failure.outputs.stderr.may_be_partial = true;
+    const rendered = switch (format) {
+        .text => reporting.writeText(&fw.interface, failure),
+        .json => reporting.writeJson(&fw.interface, failure, .{ .version = VERSION }),
+    };
+    rendered catch |err| {
+        fw.interface.end = 0;
+        switch (failure.fail(.{ .details = .{ .@"io.write_failed" = {} }, .stage = .report, .at = .{ .source = .stderr }, .cause = .{ .zig = fw.err orelse err } })) {
+            else => {},
+        }
+        return 1;
+    };
+    fw.flush() catch |err| {
+        fw.interface.end = 0;
+        failure.outputs.stderr.final_flush = .failed;
+        switch (failure.fail(.{ .details = .{ .@"io.flush_failed" = {} }, .stage = .flush, .at = .{ .source = .stderr }, .cause = .{ .zig = fw.err orelse err } })) {
+            else => {},
+        }
+        return 1;
+    };
+    failure.outputs.stderr.final_flush = .succeeded;
+    return 1;
+}
+
+fn bootstrap(reason: reporting.Bootstrap) u8 {
+    var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    defer threaded.deinit();
+    var buffer: [512]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    reporting.writeBootstrap(&writer, reason) catch return 1;
+    // No usable preference/result exists. A failed fallback is never retried.
+    std.Io.File.writeStreamingAll(.stderr(), threaded.io(), writer.buffered()) catch {};
+    return 1;
+}
+
+const FastWriteFailure = struct { cause: ?diagnostics.Cause };
+
+fn writeStdoutFast(bytes: []const u8) ?FastWriteFailure {
+    if (comptime builtin.os.tag != .linux) {
         var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
         defer threaded.deinit();
-        std.Io.File.writeStreamingAll(.stdout(), threaded.io(), bytes) catch {};
+        std.Io.File.writeStreamingAll(.stdout(), threaded.io(), bytes) catch |err| return .{ .cause = .{ .zig = err } };
+        return null;
     }
-}
-
-fn printHelpFastAndExit() noreturn {
-    writeStdoutAll(USAGE);
-    std.process.exit(0);
-}
-
-fn printVersionFastAndExit() noreturn {
-    writeStdoutAll("z-fasta " ++ VERSION ++ "\n");
-    std.process.exit(0);
+    var written: usize = 0;
+    while (written < bytes.len) {
+        const result = std.os.linux.write(1, bytes[written..].ptr, bytes.len - written);
+        const err = std.os.linux.errno(result);
+        switch (err) {
+            .SUCCESS => if (result == 0) return .{ .cause = null },
+            .INTR => continue,
+            else => return .{ .cause = .{ .native = .{ .domain = .posix_errno, .number = @intFromEnum(err) } } },
+        }
+        written += result;
+    }
+    return null;
 }
 
 pub fn main(init: std.process.Init.Minimal) void {
-    var args = std.process.Args.Iterator.initAllocator(init.args, std.heap.page_allocator) catch {
-        std.debug.print("error: out of memory\n", .{});
-        std.process.exit(1);
-    };
+    const status = runCli(init);
+    if (status != 0) std.process.exit(status);
+}
+
+fn runCli(init: std.process.Init.Minimal) u8 {
+    var args = std.process.Args.Iterator.initAllocator(init.args, std.heap.page_allocator) catch return bootstrap(.argv_oom);
     defer args.deinit();
     _ = args.skip();
-
-    const cmd = args.next() orelse {
-        printUsageAndExit();
-    };
-
-    if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) {
-        printHelpFastAndExit();
+    var format: ErrorFormat = .text;
+    var command = args.next();
+    while (command) |arg| {
+        if (!(std.mem.eql(u8, arg, "--error-format") or std.mem.startsWith(u8, arg, "--error-format="))) break;
+        format = parseErrorFormat(arg) catch return bootstrap(.invalid_format);
+        command = args.next();
     }
-    if (std.mem.eql(u8, cmd, "--version") or std.mem.eql(u8, cmd, "-V")) {
-        printVersionFastAndExit();
+    // Preserve the ordinary help/version fast path, but observe write failure.
+    if (command) |cmd| {
+        if (format == .text and (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h") or std.mem.eql(u8, cmd, "--version") or std.mem.eql(u8, cmd, "-V"))) {
+            const bytes = if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) USAGE else "z-fasta " ++ VERSION ++ "\n";
+            const write_failure = writeStdoutFast(bytes) orelse return 0;
+            var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+            defer threaded.deinit();
+            var failure: diagnostics.Failure = undefined;
+            failure.reset(.cli);
+            failure.sources.set(.stdout, .{ .label = .{ .borrowed = "stdout" }, .kind = .stream });
+            failure.outputs.stdout.state = .streaming;
+            failure.outputs.stdout.may_be_partial = true;
+            switch (failure.fail(.{ .details = .{ .@"io.write_failed" = {} }, .stage = .write, .at = .{ .source = .stdout }, .cause = write_failure.cause })) {
+                else => {},
+            }
+            return reportFailure(threaded.io(), .text, &failure);
+        }
     }
-
+    const operation: diagnostics.Operation = if (command) |cmd| std.meta.stringToEnum(diagnostics.Operation, cmd) orelse .cli else .cli;
+    format = selectErrorFormat(args, operation, format) catch return bootstrap(.invalid_format);
     var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-
-    if (std.mem.eql(u8, cmd, "index")) {
-        runIndex(io, init.environ, &args);
-    } else if (std.mem.eql(u8, cmd, "get")) {
-        runGetCmd(io, &args);
-    } else if (std.mem.eql(u8, cmd, "stats")) {
-        runStatsCmd(io, &args);
-    } else if (std.mem.eql(u8, cmd, "validate")) {
-        runValidateCmd(io, &args);
-    } else {
-        printUsageAndExit();
-    }
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(operation);
+    var cli = Cli{ .io = io, .args = &args, .format = format, .failure = &failure };
+    const status = dispatch(&cli, init.environ, command) catch {
+        if (failure.primary().?.at.source == .stderr) return 1;
+        return reportFailure(io, format, &failure);
+    };
+    return status;
 }
 
-// --- Index command ---
+fn dispatch(cli: *Cli, environ: std.process.Environ, command: ?[]const u8) diagnostics.Error!u8 {
+    const cmd = command orelse return cli.fail(.{ .@"usage.command_required" = {} });
+    if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) return cli.stdout(USAGE);
+    if (std.mem.eql(u8, cmd, "--version") or std.mem.eql(u8, cmd, "-V")) return cli.stdout("z-fasta " ++ VERSION ++ "\n");
+    return switch (cli.failure.operation) {
+        .index => runIndex(cli, environ),
+        .get => runGetCmd(cli),
+        .stats => runStatsCmd(cli),
+        .validate => runValidateCmd(cli),
+        .cli => cli.fail(.{ .@"usage.unknown_command" = .{ .command = cli.failure.retain(cmd, 32) } }),
+    };
+}
 
-fn runIndex(io: std.Io, environ: std.process.Environ, args: *std.process.Args.Iterator) void {
+fn runIndex(cli: *Cli, environ: std.process.Environ) diagnostics.Error!u8 {
     var emit_fai = false;
     var enable_dedup = true;
-    var fasta_path: ?[]const u8 = null;
-
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            printHelpAndExit(io);
-        } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")) {
-            printVersionAndExit(io);
-        } else if (std.mem.eql(u8, arg, "--emit-fai")) {
-            emit_fai = true;
-        } else if (std.mem.eql(u8, arg, "--no-dedup")) {
-            enable_dedup = false;
-        } else if (std.mem.eql(u8, arg, "--dedup")) {
-            enable_dedup = true;
-        } else {
-            rejectUnknownOption(arg);
-            if (fasta_path != null) {
-                printErrorAndExit("error: index accepts exactly one FASTA path\n", .{});
-            }
-            fasta_path = arg;
+    var path: ?[]const u8 = null;
+    while (cli.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) return cli.stdout(USAGE);
+        if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")) return cli.stdout("z-fasta " ++ VERSION ++ "\n");
+        if (std.mem.eql(u8, arg, "--emit-fai")) emit_fai = true else if (std.mem.eql(u8, arg, "--no-dedup")) enable_dedup = false else if (std.mem.eql(u8, arg, "--dedup")) enable_dedup = true else {
+            try cli.positional(arg);
+            if (path != null) return cli.fail(.{ .@"usage.extra_argument" = .{ .argument = .fasta_path, .allowed_count = 1 } });
+            path = arg;
         }
     }
-
-    const path = fasta_path orelse {
-        printUsageAndExit();
-    };
-
-    var failure: index_format.diagnostics.Failure = undefined;
-    const result = indexer.runIndex(io, environ, path, .{
-        .emit_fai = emit_fai,
-        .enable_dedup = enable_dedup,
-    }, &failure) catch {
-        printIndexFailure(path, &failure);
-    };
-    if (!emit_fai) std.debug.print("wrote {s}.zfi ({d} sequences)\n", .{ path, result.record_count });
+    const fasta = path orelse return cli.fail(.{ .@"usage.missing_argument" = .{ .argument = .fasta_path } });
+    const result = try indexer.runIndex(cli.io, environ, fasta, .{ .emit_fai = emit_fai, .enable_dedup = enable_dedup }, cli.failure);
+    if (!emit_fai and cli.format == .text) try writeNotice(cli, .{ .index = .{ .path = fasta, .count = result.record_count } });
+    return 0;
 }
 
-fn printIndexFailure(path: []const u8, failure: *const index_format.diagnostics.Failure) noreturn {
-    const primary = failure.primary() orelse printErrorAndExit("error: processing failed\n", .{});
-    switch (primary.code()) {
-        .@"io.file_not_found" => printErrorAndExit("error: file not found: {s}\n", .{path}),
-        .@"io.access_denied" => printErrorAndExit("error: access denied: {s}\n", .{path}),
-        .@"io.open_failed" => if (primary.at.source == .fasta) printErrorAndExit("error: failed to open file: {s}\n", .{path}) else printErrorAndExit("error: write failed\n", .{}),
-        .@"fasta.no_records" => printErrorAndExit("error: file is empty: {s}\n", .{path}),
-        .@"index.initial_header_required" => printErrorAndExit("error: not a FASTA file: {s}\n", .{path}),
-        .@"index.identifier_too_long" => printErrorAndExit(
-            "error: sequence name exceeds {d} bytes: {s}\n",
-            .{ indexer.MAX_INDEX_NAME_LEN, path },
-        ),
-        .@"index.sequence_line_too_long" => printErrorAndExit(
-            "error: sequence line exceeds the index format limit: {s}\n",
-            .{path},
-        ),
-        .@"index.record_count_limit_exceeded" => printErrorAndExit(
-            "error: sequence count exceeds {d}: {s}\n",
-            .{ std.math.maxInt(u32), path },
-        ),
-        .@"index.nonuniform_fai" => printErrorAndExit(
-            "error: cannot emit .fai for non-uniform sequence layout; run 'z-fasta index' (default) to write .zfi\n",
-            .{},
-        ),
-        .@"index.no_indexable_records" => printErrorAndExit(
-            "error: no valid sequences found in: {s}\n",
-            .{path},
-        ),
-        .@"io.temp_unavailable" => if (primary.at.source != .fai_spool) printErrorAndExit("error: write failed\n", .{}) else printErrorAndExit(
-            "error: no usable temporary directory for FAI spool\n",
-            .{},
-        ),
-        .@"input.changed" => printErrorAndExit(
-            "error: source changed while indexing: {s}\n",
-            .{path},
-        ),
-        .@"index.source_timestamp_out_of_range" => printErrorAndExit(
-            "error: source modification time predates the Unix epoch: {s}\n",
-            .{path},
-        ),
-        .@"io.invalid_path" => printErrorAndExit("error: path too long\n", .{}),
-        .@"io.publish_failed" => printErrorAndExit(
-            "error: failed to finalize index: {s}.zfi\n",
-            .{path},
-        ),
-        .@"io.stat_failed" => if (primary.at.source == .fasta)
-            printErrorAndExit("error: failed to stat file: {s}\n", .{path})
-        else
-            printErrorAndExit("error: failed to read temporary FAI spool\n", .{}),
-        .@"io.read_failed", .@"io.unexpected_eof" => if (primary.at.source == .fasta)
-            printErrorAndExit("error: failed to read file: {s}\n", .{path})
-        else if (primary.at.source == .fai_spool)
-            printErrorAndExit("error: failed to read temporary FAI spool\n", .{})
-        else
-            printErrorAndExit("error: write failed\n", .{}),
-        .@"io.write_failed", .@"io.flush_failed" => if (primary.at.source == .fai_spool)
-            printErrorAndExit("error: failed to write temporary FAI spool\n", .{})
-        else if (primary.at.source == .stdout and primary.stage == .flush)
-            printErrorAndExit("error: failed to flush FAI stdout\n", .{})
-        else if (primary.at.source == .stdout)
-            printErrorAndExit("error: failed to replay FAI stdout\n", .{})
-        else
-            printErrorAndExit("error: write failed\n", .{}),
-        .@"io.create_failed" => printErrorAndExit("error: write failed\n", .{}),
-        else => printErrorAndExit("error: processing failed\n", .{}),
-    }
-}
-
-// --- Get command ---
-
-fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
+fn runGetCmd(cli: *Cli) diagnostics.Error!u8 {
     var fasta_path: ?[]const u8 = null;
     var bed_path: ?[]const u8 = null;
     var names_path: ?[]const u8 = null;
@@ -322,115 +342,130 @@ fn runGetCmd(io: std.Io, args: *std.process.Args.Iterator) void {
     var complement_only = false;
     var reverse_only = false;
     var annotate_transform = false;
-    // Static buffer: up to 1024 region strings without heap allocation.
-    var region_buf: [1024][]const u8 = undefined;
-    var region_count: usize = 0;
-
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            printHelpAndExit(io);
-        } else if (std.mem.eql(u8, arg, "--bed")) {
-            if (bed_path != null) {
-                printErrorAndExit("error: --bed may be specified only once\n", .{});
-            }
-            bed_path = args.next() orelse {
-                printErrorAndExit("error: --bed requires a path or '-'\n", .{});
-            };
+    var regions: [1024][]const u8 = undefined;
+    var count: usize = 0;
+    while (cli.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) return cli.stdout(USAGE);
+        if (std.mem.eql(u8, arg, "--bed")) {
+            if (bed_path != null) return cli.fail(.{ .@"usage.repeated_option" = .{ .option = .bed } });
+            bed_path = try cli.value(.bed, .path);
         } else if (std.mem.eql(u8, arg, "--names")) {
-            if (names_path != null) {
-                printErrorAndExit("error: --names may be specified only once\n", .{});
+            if (names_path != null) return cli.fail(.{ .@"usage.repeated_option" = .{ .option = .names } });
+            names_path = try cli.value(.names, .path);
+        } else if (std.mem.eql(u8, arg, STRAND_AWARE_FLAG) or std.mem.eql(u8, arg, STRAND_AWARE_ALIAS)) honor_strand = true else if (std.mem.eql(u8, arg, "--summary")) summary = true else if (std.mem.eql(u8, arg, RC_FLAG)) rc = true else if (std.mem.eql(u8, arg, COMPLEMENT_ONLY_FLAG)) complement_only = true else if (std.mem.eql(u8, arg, REVERSE_ONLY_FLAG)) reverse_only = true else if (std.mem.eql(u8, arg, ANNOTATE_RC_FLAG)) annotate_transform = true else {
+            try cli.positional(arg);
+            if (fasta_path == null) fasta_path = arg else {
+                if (count == regions.len) return cli.fail(.{ .@"resource.capacity_limit_exceeded" = .{ .capacity_role = .positional_requests, .limit = regions.len, .required = .{ .exact = count + 1 } } });
+                regions[count] = arg;
+                count += 1;
             }
-            names_path = args.next() orelse {
-                printErrorAndExit("error: --names requires a path\n", .{});
-            };
-        } else if (std.mem.eql(u8, arg, STRAND_AWARE_FLAG) or std.mem.eql(u8, arg, STRAND_AWARE_ALIAS)) {
-            honor_strand = true;
-        } else if (std.mem.eql(u8, arg, "--summary")) {
-            summary = true;
-        } else if (std.mem.eql(u8, arg, RC_FLAG)) {
-            rc = true;
-        } else if (std.mem.eql(u8, arg, COMPLEMENT_ONLY_FLAG)) {
-            complement_only = true;
-        } else if (std.mem.eql(u8, arg, REVERSE_ONLY_FLAG)) {
-            reverse_only = true;
-        } else if (std.mem.eql(u8, arg, ANNOTATE_RC_FLAG)) {
-            annotate_transform = true;
-        } else if (fasta_path == null) {
-            rejectUnknownOption(arg);
-            fasta_path = arg;
-        } else {
-            rejectUnknownOption(arg);
-            if (region_count >= region_buf.len) {
-                printErrorAndExit("error: too many regions (max 1024)\n", .{});
-            }
-            region_buf[region_count] = arg;
-            region_count += 1;
         }
     }
-
-    const path = fasta_path orelse {
-        printErrorAndExit(GET_USAGE_ERROR, .{});
-    };
-    const source_count = @as(usize, @intFromBool(region_count > 0)) +
-        @as(usize, @intFromBool(bed_path != null)) +
-        @as(usize, @intFromBool(names_path != null));
-    if (source_count == 0) {
-        printErrorAndExit(GET_USAGE_ERROR, .{});
-    }
+    const path = fasta_path orelse return cli.fail(.{ .@"usage.missing_argument" = .{ .argument = .fasta_path } });
+    const source_count = @as(usize, @intFromBool(count != 0)) + @as(usize, @intFromBool(bed_path != null)) + @as(usize, @intFromBool(names_path != null));
+    if (source_count == 0) return cli.fail(.{ .@"usage.missing_argument" = .{ .argument = .request_source } });
     if (source_count > 1) {
-        printErrorAndExit("error: choose one request source: positional regions, --names, or --bed\n", .{});
+        var arguments = diagnostics.Arguments.initEmpty();
+        if (count != 0) arguments.insert(.positional);
+        if (bed_path != null) arguments.insert(.bed);
+        if (names_path != null) arguments.insert(.names);
+        return cli.fail(.{ .@"usage.conflicting_options" = .{ .arguments = arguments } });
     }
-    if (honor_strand and bed_path == null) {
-        printErrorAndExit("error: --strand-aware requires --bed\n", .{});
-    }
-
+    if (honor_strand and bed_path == null) return cli.fail(.{ .@"usage.option_requires" = .{ .option = .strand_aware, .required = .bed } });
     const transform = parseTransformFlags(rc, complement_only, reverse_only, annotate_transform) catch {
-        printErrorAndExit("error: --rc, --complement-only, and --reverse-only are mutually exclusive\n", .{});
+        var arguments = diagnostics.Arguments.initEmpty();
+        if (rc) arguments.insert(.rc);
+        if (complement_only) arguments.insert(.complement_only);
+        if (reverse_only) arguments.insert(.reverse_only);
+        return cli.fail(.{ .@"usage.conflicting_options" = .{ .arguments = arguments } });
     };
-    if (transform.annotate_transform and transform.orientation.isIdentity() and !honor_strand) {
-        printErrorAndExit("error: --annotate-rc requires a transform or --strand-aware BED input\n", .{});
+    if (transform.annotate_transform and transform.orientation.isIdentity() and !honor_strand) return cli.fail(.{ .@"usage.option_requires" = .{ .option = .annotate_rc, .required = .transform_or_strand } });
+    const source: getter.RequestSource = if (bed_path) |bed| .{ .bed = bed } else if (names_path) |names| .{ .names = names } else .{ .positional = regions[0..count] };
+    const result = try getter.runGetWithOptions(std.heap.page_allocator, cli.io, path, .{ .source = source, .honor_strand = honor_strand, .measure_elapsed = summary, .orientation = transform.orientation, .annotate_transform = transform.annotate_transform }, cli.failure);
+    if (summary) try writeNotice(cli, .{ .get = result });
+    return 0;
+}
+
+fn runStatsCmd(cli: *Cli) diagnostics.Error!u8 {
+    var path: ?[]const u8 = null;
+    while (cli.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) return cli.stdout(USAGE);
+        try cli.positional(arg);
+        if (path != null) return cli.fail(.{ .@"usage.extra_argument" = .{ .argument = .fasta_path, .allowed_count = 1 } });
+        path = arg;
     }
+    const fasta = path orelse return cli.fail(.{ .@"usage.missing_argument" = .{ .argument = .fasta_path } });
+    try stats.runStats(std.heap.page_allocator, cli.io, fasta, cli.failure);
+    return 0;
+}
 
-    const source: getter.RequestSource = if (bed_path) |bed|
-        .{ .bed = bed }
-    else if (names_path) |names|
-        .{ .names = names }
-    else
-        .{ .positional = region_buf[0..region_count] };
+fn runValidateCmd(cli: *Cli) diagnostics.Error!u8 {
+    var path: ?[]const u8 = null;
+    var options = validator.Options{};
+    var saw_json = false;
+    var saw_summary = false;
+    while (cli.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) return cli.stdout(USAGE);
+        if (std.mem.eql(u8, arg, "--strict")) options.strict = true else if (std.mem.eql(u8, arg, "--json")) {
+            saw_json = true;
+            options.output_mode = if (saw_summary) .json_summary else .json_lines;
+        } else if (std.mem.eql(u8, arg, "--summary")) {
+            saw_summary = true;
+            options.output_mode = .json_summary;
+        } else if (std.mem.eql(u8, arg, "--fix")) options.fix = true else if (std.mem.eql(u8, arg, "--fix-format-only")) options.fix_format_only = true else if (std.mem.eql(u8, arg, "-o")) options.output_path = try cli.value(.output, .path) else if (std.mem.eql(u8, arg, "--custom-alphabet")) options.custom_alphabet = try cli.value(.custom_alphabet, .alphabet) else if (std.mem.eql(u8, arg, "--schema")) {
+            const raw = try cli.value(.schema, .schema);
+            options.schema = if (std.mem.eql(u8, raw, "uniprot")) .uniprot else if (std.mem.eql(u8, raw, "refseq")) .refseq else return cli.fail(.{ .@"usage.invalid_option_value" = .{ .option = .schema, .expected = .schema, .value = cli.failure.retain(raw, 32) } });
+        } else if (std.mem.eql(u8, arg, "--max-header-len")) {
+            const raw = try cli.value(.max_header_len, .positive_usize);
+            const width = std.fmt.parseInt(usize, raw, 10) catch return invalidWidth(cli, raw);
+            if (width == 0) return invalidWidth(cli, raw);
+            options.max_header_len = width;
+        } else {
+            try cli.positional(arg);
+            if (path != null) return cli.fail(.{ .@"usage.extra_argument" = .{ .argument = .fasta_path, .allowed_count = 1 } });
+            path = arg;
+        }
+    }
+    if (saw_summary and !saw_json) return cli.fail(.{ .@"usage.option_requires" = .{ .option = .summary, .required = .json } });
+    if (options.fix_format_only and !options.fix) return cli.fail(.{ .@"usage.option_requires" = .{ .option = .fix_format_only, .required = .fix } });
+    if (options.output_path != null and !options.fix) return cli.fail(.{ .@"usage.option_requires" = .{ .option = .output, .required = .fix } });
+    const fasta = path orelse return cli.fail(.{ .@"usage.missing_argument" = .{ .argument = .fasta_path } });
+    const result = try validator.runValidate(std.heap.page_allocator, cli.io, fasta, options, cli.failure);
+    if (result.truncated and cli.format == .text) try writeNotice(cli, .{ .cap = result.fix_written });
+    return result.status;
+}
 
-    const options = getter.GetOptions{
-        .source = source,
-        .honor_strand = honor_strand,
-        .measure_elapsed = summary,
-        .orientation = transform.orientation,
-        .annotate_transform = transform.annotate_transform,
+fn invalidWidth(cli: *Cli, raw: []const u8) diagnostics.Error {
+    return cli.fail(.{ .@"usage.invalid_option_value" = .{ .option = .max_header_len, .expected = .positive_usize, .value = cli.failure.retain(raw, 32) } });
+}
+
+const Notice = union(enum) { index: struct { path: []const u8, count: u64 }, get: getter.GetResult, cap: bool };
+
+fn writeNotice(cli: *Cli, notice: Notice) diagnostics.Error!void {
+    const failure = cli.failure;
+    if (failure.sources.get(.stderr) == null) failure.sources.set(.stderr, .{ .label = .{ .borrowed = "stderr" }, .kind = .stream });
+    failure.outputs.stderr.state = .streaming;
+    failure.outputs.stderr.may_be_partial = true;
+    var buffer: [4096]u8 = undefined;
+    var fw = std.Io.File.Writer.initStreaming(.stderr(), cli.io, &buffer);
+    errdefer fw.interface.end = 0;
+    writeNoticeBytes(&fw.interface, cli.format, failure, notice) catch |err| return failure.fail(.{ .details = .{ .@"io.write_failed" = {} }, .stage = .report, .at = .{ .source = .stderr }, .cause = .{ .zig = fw.err orelse err } });
+    fw.flush() catch |err| {
+        failure.outputs.stderr.final_flush = .failed;
+        return failure.fail(.{ .details = .{ .@"io.flush_failed" = {} }, .stage = .flush, .at = .{ .source = .stderr }, .cause = .{ .zig = fw.err orelse err } });
     };
-    var failure: index_format.diagnostics.Failure = undefined;
-    const result = getter.runGetWithOptions(std.heap.page_allocator, io, path, options, &failure) catch {
-        printGetFailure(path, options, &failure);
-    };
-    if (summary) {
-        failure.sources.set(.stderr, .{ .label = .{ .borrowed = "stderr" }, .kind = .stream });
-        var buffer: [512]u8 = undefined;
-        var writer = std.Io.File.Writer.initStreaming(.stderr(), io, &buffer);
-        failure.outputs.stderr.state = .streaming;
-        failure.outputs.stderr.may_be_partial = true;
-        writeGetSummary(&writer.interface, result) catch |err| {
-            const captured = failure.fail(.{ .details = .{ .@"io.write_failed" = {} }, .stage = .write, .at = .{ .source = .stderr }, .cause = .{ .zig = writer.err orelse err } });
-            switch (captured) {
-                else => {},
-            }
-            printGetFailure(path, options, &failure);
-        };
-        writer.flush() catch |err| {
-            failure.outputs.stderr.final_flush = .failed;
-            const captured = failure.fail(.{ .details = .{ .@"io.flush_failed" = {} }, .stage = .flush, .at = .{ .source = .stderr }, .cause = .{ .zig = writer.err orelse err } });
-            switch (captured) {
-                else => {},
-            }
-            printGetFailure(path, options, &failure);
-        };
-        failure.outputs.stderr.final_flush = .succeeded;
+    failure.outputs.stderr.final_flush = .succeeded;
+}
+
+fn writeNoticeBytes(writer: *std.Io.Writer, format: ErrorFormat, failure: *const diagnostics.Failure, notice: Notice) std.Io.Writer.Error!void {
+    switch (notice) {
+        .index => |value| {
+            try writer.writeAll("wrote ");
+            try reporting.writeEscapedBytes(writer, value.path);
+            try writer.print(".zfi ({d} sequences)\n", .{value.count});
+        },
+        .get => |value| if (format == .json) try reporting.writeJson(writer, failure, .{ .version = VERSION, .accepted = true, .metrics = .{ .region_count = value.region_count, .total_bases = value.total_bases, .elapsed_ns = value.elapsed_ns } }) else try writeGetSummary(writer, value),
+        .cap => |fixed| if (fixed) try writer.print("warning: validate event list truncated at {d}; --fix output was still written\n", .{validator.MAX_VALIDATE_EVENTS}) else try writer.print("error: validate retained {d} events; scanning and counting completed; fix reported issues and re-run\n", .{validator.MAX_VALIDATE_EVENTS}),
     }
 }
 
@@ -438,298 +473,6 @@ fn writeGetSummary(writer: *std.Io.Writer, result: getter.GetResult) std.Io.Writ
     const seconds = if (result.elapsed_ns == 0) 0.0 else @as(f64, @floatFromInt(result.elapsed_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s));
     const regions_per_second = if (seconds == 0.0) 0.0 else @as(f64, @floatFromInt(result.region_count)) / seconds;
     try writer.print("summary: regions={d} total_bases={d} elapsed_s={d:.6} regions_per_s={d:.1}\n", .{ result.region_count, result.total_bases, seconds, regions_per_second });
-}
-
-fn getFailureIdentifier(options: getter.GetOptions, primary: *const index_format.diagnostics.Diagnostic, failure: *const index_format.diagnostics.Failure, preview: ?index_format.diagnostics.Preview) struct { bytes: []const u8, original_bytes: u64, truncated: bool } {
-    if (options.source == .positional) {
-        const requests = options.source.positional;
-        if (primary.at.request) |ordinal| {
-            if (ordinal > 0 and ordinal <= requests.len) {
-                const name = getter.parseRegion(requests[@intCast(ordinal - 1)]).name;
-                return .{ .bytes = name, .original_bytes = name.len, .truncated = false };
-            }
-        }
-    }
-    if (preview) |reference| return .{ .bytes = failure.preview(reference), .original_bytes = reference.original_bytes, .truncated = reference.truncated };
-    return .{ .bytes = "", .original_bytes = 0, .truncated = false };
-}
-
-// Temporary legacy messages until the shared CLI renderer conversion.
-fn printGetFailure(path: []const u8, options: getter.GetOptions, failure: *const index_format.diagnostics.Failure) noreturn {
-    const primary = failure.primary() orelse printErrorAndExit("error: processing failed\n", .{});
-    const source = primary.at.source;
-    const label = if (source) |id| failure.sourceLabel(id) orelse path else path;
-    const line = primary.at.location.line orelse 0;
-    switch (primary.details) {
-        .@"request.sequence_not_found" => |detail| {
-            const identifier = getFailureIdentifier(options, primary, failure, detail.identifier);
-            if (identifier.truncated) printErrorAndExit("error: sequence not found: {s} (identifier truncated; {d} bytes)\n", .{ identifier.bytes, identifier.original_bytes });
-            printErrorAndExit("error: sequence not found: {s}\n", .{identifier.bytes});
-        },
-        .@"request.start_before_one" => printErrorAndExit("error: start position must be >= 1\n", .{}),
-        .@"request.start_after_sequence" => |detail| printErrorAndExit("error: start position {d} exceeds sequence length {d}\n", .{ detail.start, detail.sequence_length }),
-        .@"request.end_before_start" => printErrorAndExit("error: end position must be >= start position\n", .{}),
-        .@"request.no_regions" => printErrorAndExit("error: no regions provided\n", .{}),
-        .@"request.identifier_too_long" => |detail| if (options.source == .bed)
-            printErrorAndExit("error: invalid BED line {d}: chrom exceeds {d} bytes\n", .{ line, detail.limit_bytes })
-        else
-            printErrorAndExit("error: name at line {d} exceeds {d} bytes\n", .{ line, detail.limit_bytes }),
-        .@"request.bed.field_missing" => |detail| printErrorAndExit("error: invalid BED line {d}: missing {s}\n", .{ line, @tagName(detail.field) }),
-        .@"request.bed.invalid_coordinate" => |detail| printErrorAndExit("error: invalid BED line {d}: invalid {s}\n", .{ line, @tagName(detail.field) }),
-        .@"request.bed.coordinate_out_of_range" => |detail| printErrorAndExit("error: invalid BED line {d}: invalid {s}\n", .{ line, @tagName(detail.field) }),
-        .@"request.bed.invalid_interval" => printErrorAndExit("error: invalid BED line {d}: end must be greater than start\n", .{line}),
-        .@"request.bed.invalid_strand" => printErrorAndExit("error: invalid BED line {d}: invalid strand\n", .{line}),
-        .@"transform.complement_on_protein" => |detail| {
-            const identifier = getFailureIdentifier(options, primary, failure, detail.identifier);
-            if (identifier.truncated) printErrorAndExit("error: reverse complement is not defined for protein sequences: {s} (identifier truncated; {d} bytes) (classified from up to {d} bases)\n", .{ identifier.bytes, identifier.original_bytes, stats.GET_TYPE_SAMPLE_BASES });
-            printErrorAndExit("error: reverse complement is not defined for protein sequences: {s} (classified from up to {d} bases)\n", .{ identifier.bytes, stats.GET_TYPE_SAMPLE_BASES });
-        },
-        .@"resource.line_buffer_exceeded" => |detail| if (options.source == .bed)
-            printErrorAndExit("error: BED line {d} exceeds {d}-byte reader buffer (no newline within limit)\n", .{ line, detail.buffer_bytes })
-        else
-            printErrorAndExit("error: name at line {d} exceeds {d} bytes\n", .{ line, std.math.maxInt(u16) }),
-        .@"resource.out_of_memory" => if (source == .fasta or source == .zfi or source == .fai)
-            printErrorAndExit("error: out of memory loading index\n", .{})
-        else
-            printErrorAndExit("error: out of memory\n", .{}),
-        .@"io.file_not_found" => printErrorAndExit("error: file not found: {s}\n", .{label}),
-        .@"io.access_denied" => printErrorAndExit("error: access denied: {s}\n", .{label}),
-        .@"io.invalid_path" => printErrorAndExit("error: path too long\n", .{}),
-        .@"io.open_failed" => if (source == .fasta or source == .names or source == .bed)
-            printErrorAndExit("error: failed to open file: {s}\n", .{label})
-        else
-            printErrorAndExit("error: failed to load index for: {s}\n", .{path}),
-        .@"io.map_failed" => printErrorAndExit("error: failed to mmap file: {s}\n", .{path}),
-        .@"fasta.no_records" => printErrorAndExit("error: file is empty: {s}\n", .{path}),
-        .@"index.not_found" => printErrorAndExit("error: no index found for {s}. Run 'z-fasta index {s}' first.\n", .{ path, path }),
-        .@"index.older_than_source", .@"index.source_size_mismatch", .@"index.source_mtime_mismatch" => printErrorAndExit("error: index is stale (FASTA size or mtime does not match the index). Re-run 'z-fasta index <path>'.\n", .{}),
-        .@"io.write_failed", .@"io.flush_failed" => printErrorAndExit("error: write failed\n", .{}),
-        .@"io.read_failed" => if (source == .names or source == .bed or source == .stdin)
-            if (options.source == .bed) printErrorAndExit("error: failed to read BED input\n", .{}) else printErrorAndExit("error: failed to read names input\n", .{})
-        else if (source == .fasta and primary.stage == .read and primary.related != null)
-            printErrorAndExit("error: failed to read FASTA\n", .{})
-        else
-            printErrorAndExit("error: failed to load index for: {s}\n", .{path}),
-        .@"io.unexpected_eof", .@"pair.region_length_mismatch", .@"index.sequence_span_out_of_bounds" => if (primary.related != null)
-            printErrorAndExit("error: read past end of FASTA\n", .{})
-        else
-            printErrorAndExit("error: corrupt index file for: {s}\n", .{path}),
-        .@"input.changed" => printErrorAndExit("error: request input changed while extracting: {s}\n", .{label}),
-        else => if (index_format.diagnostics.metadata(primary.code()).category == .index_integrity or index_format.diagnostics.metadata(primary.code()).category == .index_compatibility)
-            printErrorAndExit("error: corrupt index file for: {s}\n", .{path})
-        else
-            printErrorAndExit("error: processing failed\n", .{}),
-    }
-}
-
-// --- Stats command ---
-
-fn runStatsCmd(io: std.Io, args: *std.process.Args.Iterator) void {
-    var fasta_path: ?[]const u8 = null;
-
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            printHelpAndExit(io);
-        } else {
-            rejectUnknownOption(arg);
-            if (fasta_path != null) {
-                printErrorAndExit("error: stats accepts exactly one FASTA path\n", .{});
-            }
-            fasta_path = arg;
-        }
-    }
-
-    const path = fasta_path orelse {
-        printErrorAndExit("error: usage: z-fasta stats <file.fasta>\n", .{});
-    };
-
-    var failure: index_format.diagnostics.Failure = undefined;
-    stats.runStats(std.heap.page_allocator, io, path, &failure) catch printStatsFailure(path, &failure);
-}
-
-// Temporary legacy messages; common rendering and status move in commit 10.
-fn printStatsFailure(path: []const u8, failure: *const index_format.diagnostics.Failure) noreturn {
-    const primary = failure.primary().?;
-    switch (primary.code()) {
-        .@"io.file_not_found" => printErrorAndExit("error: file not found: {s}\n", .{path}),
-        .@"io.access_denied" => printErrorAndExit("error: access denied: {s}\n", .{path}),
-        .@"io.invalid_path" => printErrorAndExit("error: path too long\n", .{}),
-        .@"fasta.no_records" => printErrorAndExit("error: file is empty: {s}\n", .{path}),
-        .@"io.map_failed" => printErrorAndExit("error: failed to mmap file: {s}\n", .{path}),
-        .@"index.older_than_source", .@"index.source_size_mismatch", .@"index.source_mtime_mismatch" => printErrorAndExit("error: index is stale (FASTA size or mtime does not match the index). Re-run 'z-fasta index <path>'.\n", .{}),
-        .@"index.not_found" => printErrorAndExit("error: no index found for {s}. Run 'z-fasta index {s}' first.\n", .{ path, path }),
-        .@"resource.out_of_memory" => if (primary.stage == .allocate and (primary.details.@"resource.out_of_memory".allocation_role == .lengths or primary.details.@"resource.out_of_memory".allocation_role == .traversal_order))
-            printErrorAndExit("error: out of memory\n", .{})
-        else
-            printErrorAndExit("error: out of memory loading index\n", .{}),
-        .@"resource.count_overflow" => printErrorAndExit("error: sequence length overflow\n", .{}),
-        .@"io.write_failed", .@"io.flush_failed" => printErrorAndExit("error: write failed\n", .{}),
-        .@"pair.total_length_mismatch" => printErrorAndExit("error: index sequence lengths do not match FASTA data\n", .{}),
-        .@"io.read_failed" => if (primary.stage == .read and primary.at.source == .fasta)
-            printErrorAndExit("error: failed to read FASTA\n", .{})
-        else
-            printErrorAndExit("error: failed to load index for: {s}\n", .{path}),
-        .@"io.unexpected_eof" => if (primary.at.source == .fasta)
-            printErrorAndExit("error: index sequence lengths do not match FASTA data\n", .{})
-        else
-            printErrorAndExit("error: corrupt index file for: {s}\n", .{path}),
-        .@"internal.consistency_failed" => switch (primary.details.@"internal.consistency_failed".check) {
-            .retained_shortest_name => printErrorAndExit("error: index does not retain the shortest record name\n", .{}),
-            .retained_longest_name => printErrorAndExit("error: index does not retain the longest record name\n", .{}),
-            .composition_accounting => printErrorAndExit("error: composition does not match indexed symbols\n", .{}),
-            else => printErrorAndExit("error: index sequence lengths do not match FASTA data\n", .{}),
-        },
-        .@"io.open_failed", .@"io.stat_failed" => printErrorAndExit("error: failed to load index for: {s}\n", .{path}),
-        .@"resource.capacity_limit_exceeded" => if (primary.details.@"resource.capacity_limit_exceeded".capacity_role == .map_bytes)
-            printErrorAndExit("error: failed to mmap file: {s}\n", .{path})
-        else
-            printErrorAndExit("error: out of memory loading index\n", .{}),
-        .@"index.no_records" => if (primary.stage == .scan)
-            printErrorAndExit("error: no sequences in index\n", .{})
-        else
-            printErrorAndExit("error: corrupt index file for: {s}\n", .{path}),
-        else => printErrorAndExit("error: corrupt index file for: {s}\n", .{path}),
-    }
-}
-
-// --- Validate command ---
-
-fn runValidateCmd(io: std.Io, args: *std.process.Args.Iterator) void {
-    var fasta_path: ?[]const u8 = null;
-    var options = validator.Options{};
-    var saw_json = false;
-    var saw_summary = false;
-
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            printHelpAndExit(io);
-        } else if (std.mem.eql(u8, arg, "--strict")) {
-            options.strict = true;
-        } else if (std.mem.eql(u8, arg, "--json")) {
-            saw_json = true;
-            options.output_mode = if (saw_summary) .json_summary else .json_lines;
-        } else if (std.mem.eql(u8, arg, "--summary")) {
-            saw_summary = true;
-            options.output_mode = .json_summary;
-        } else if (std.mem.eql(u8, arg, "--fix")) {
-            options.fix = true;
-        } else if (std.mem.eql(u8, arg, "--fix-format-only")) {
-            options.fix_format_only = true;
-        } else if (std.mem.eql(u8, arg, "-o")) {
-            options.output_path = args.next() orelse {
-                printErrorAndExit("error: -o requires an output path\n", .{});
-            };
-        } else if (std.mem.eql(u8, arg, "--schema")) {
-            const raw = args.next() orelse {
-                printErrorAndExit("error: --schema requires uniprot or refseq\n", .{});
-            };
-            options.schema = parseValidateSchema(raw);
-        } else if (std.mem.eql(u8, arg, "--custom-alphabet")) {
-            options.custom_alphabet = args.next() orelse {
-                printErrorAndExit("error: --custom-alphabet requires characters\n", .{});
-            };
-        } else if (std.mem.eql(u8, arg, "--max-header-len")) {
-            const raw = args.next() orelse {
-                printErrorAndExit("error: --max-header-len requires a positive integer\n", .{});
-            };
-            options.max_header_len = parsePositiveUsize(raw, "--max-header-len");
-        } else if (fasta_path == null) {
-            rejectUnknownOption(arg);
-            fasta_path = arg;
-        } else {
-            rejectUnknownOption(arg);
-            printErrorAndExit("error: validate accepts exactly one FASTA path\n", .{});
-        }
-    }
-
-    if (saw_summary and !saw_json) {
-        printErrorAndExit("error: validate --summary requires --json\n", .{});
-    }
-    if (options.fix_format_only and !options.fix) {
-        printErrorAndExit("error: validate --fix-format-only requires --fix\n", .{});
-    }
-    if (options.output_path != null and !options.fix) {
-        printErrorAndExit("error: validate -o requires --fix\n", .{});
-    }
-
-    const path = fasta_path orelse {
-        printErrorAndExit("error: usage: z-fasta validate [options] <file.fasta>\n", .{});
-    };
-
-    var failure: index_format.diagnostics.Failure = undefined;
-    const result = validator.runValidate(std.heap.page_allocator, io, path, options, &failure) catch printValidateFailure(path, options, &failure);
-    if (result.truncated) {
-        var buffer: [512]u8 = undefined;
-        var stderr_fw = std.Io.File.Writer.initStreaming(.stderr(), io, &buffer);
-        failure.sources.set(.stderr, .{ .label = .{ .borrowed = "stderr" }, .kind = .stream });
-        failure.outputs.stderr.state = .streaming;
-        failure.outputs.stderr.may_be_partial = true;
-        writeValidateCapNotice(&stderr_fw.interface, result.fix_written) catch |err| {
-            switch (failure.fail(.{ .details = .{ .@"io.write_failed" = {} }, .stage = .report, .at = .{ .source = .stderr }, .cause = .{ .zig = stderr_fw.err orelse err } })) {
-                else => {},
-            }
-            printValidateFailure(path, options, &failure);
-        };
-        stderr_fw.flush() catch |err| {
-            failure.outputs.stderr.final_flush = .failed;
-            switch (failure.fail(.{ .details = .{ .@"io.flush_failed" = {} }, .stage = .flush, .at = .{ .source = .stderr }, .cause = .{ .zig = stderr_fw.err orelse err } })) {
-                else => {},
-            }
-            printValidateFailure(path, options, &failure);
-        };
-        failure.outputs.stderr.final_flush = .succeeded;
-    }
-    std.process.exit(result.status);
-}
-
-fn writeValidateCapNotice(writer: *std.Io.Writer, fixed: bool) std.Io.Writer.Error!void {
-    if (fixed) try writer.print("warning: validate event list truncated at {d}; --fix output was still written\n", .{validator.MAX_VALIDATE_EVENTS}) else try writer.print("error: validate retained {d} events; scanning and counting completed; fix reported issues and re-run\n", .{validator.MAX_VALIDATE_EVENTS});
-}
-
-// Temporary legacy messages; C10 selects common rendering/status after cleanup.
-fn printValidateFailure(path: []const u8, options: validator.Options, failure: *const index_format.diagnostics.Failure) noreturn {
-    const primary = failure.primary().?;
-    switch (primary.code()) {
-        .@"io.file_not_found" => printErrorAndExit("error: file not found: {s}\n", .{path}),
-        .@"io.access_denied" => printErrorAndExit("error: access denied: {s}\n", .{path}),
-        .@"io.open_failed", .@"io.invalid_path" => printErrorAndExit("error: failed to open file: {s}\n", .{path}),
-        .@"io.stat_failed" => printErrorAndExit("error: failed to stat file: {s}\n", .{path}),
-        .@"io.map_failed", .@"resource.capacity_limit_exceeded" => printErrorAndExit("error: failed to mmap file: {s}\n", .{path}),
-        .@"resource.out_of_memory" => printErrorAndExit("error: out of memory\n", .{}),
-        .@"index.sequence_line_too_long" => printErrorAndExit("error: sequence line exceeds the index format limit: {s}\n", .{path}),
-        .@"repair.output_is_input" => printErrorAndExit("error: validate --fix will not overwrite input: {s}\n", .{path}),
-        .@"repair.output_identity_unknown" => printErrorAndExit("error: validate --fix cannot establish output identity: {s}\n", .{options.output_path orelse ""}),
-        .@"repair.blocked" => switch (primary.details.@"repair.blocked".blocker) {
-            .content_before_header => printErrorAndExit("error: validate --fix refuses content before the first header at line {d}\n", .{primary.at.location.line orelse 1}),
-            .invalid_symbol => printErrorAndExit("error: validate --fix refuses character-level errors; use --fix-format-only to keep them unchanged\n", .{}),
-            .duplicate_identifier => printErrorAndExit("error: validate --fix cannot repair duplicate_name\n", .{}),
-            .no_records => printErrorAndExit("error: validate --fix cannot repair no_sequences\n", .{}),
-            .header_control_byte, .sequence_control_byte => printErrorAndExit("error: validate --fix cannot repair null_byte\n", .{}),
-        },
-        .@"usage.option_requires" => printErrorAndExit("error: validate --fix requires -o <output.fa>\n", .{}),
-        .@"io.create_failed", .@"io.publish_failed", .@"input.changed" => printErrorAndExit("error: failed to write fixed FASTA: {s}\n", .{options.output_path orelse ""}),
-        .@"io.write_failed", .@"io.flush_failed" => if (primary.at.source == .output)
-            printErrorAndExit("error: failed to write fixed FASTA: {s}\n", .{options.output_path orelse ""})
-        else
-            printErrorAndExit("error: write failed\n", .{}),
-        else => printErrorAndExit("error: validation failed: {s}\n", .{path}),
-    }
-}
-
-fn parseValidateSchema(raw: []const u8) validator.Schema {
-    if (std.mem.eql(u8, raw, "uniprot")) return .uniprot;
-    if (std.mem.eql(u8, raw, "refseq")) return .refseq;
-    printErrorAndExit("error: --schema must be uniprot or refseq\n", .{});
-}
-
-fn parsePositiveUsize(raw: []const u8, comptime flag: []const u8) usize {
-    const parsed = std.fmt.parseInt(usize, raw, 10) catch {
-        printErrorAndExit("error: {s} requires a positive integer\n", .{flag});
-    };
-    if (parsed == 0) {
-        printErrorAndExit("error: {s} requires a positive integer\n", .{flag});
-    }
-    return parsed;
 }
 
 test "[unit] - [get transform flags]: selects the requested orientation" {
@@ -788,7 +531,12 @@ test "[cli] - [dispatch]: writes help and rejects missing or unknown commands" {
         &.{ zfasta_bin, "index" },
         &.{ zfasta_bin, "not-a-command" },
     };
-    for (cases) |argv| {
+    const errors = [_][]const u8{
+        "error [usage.command_required] cli: A command is required.\nhint: Correct the command arguments; use --help for accepted options.\n",
+        "error [usage.missing_argument] index: A required argument is missing. argument=fasta_path\nhint: Correct the command arguments; use --help for accepted options.\n",
+        "error [usage.unknown_command] cli: Unknown command. command=\"not-a-command\"\nhint: Correct the command arguments; use --help for accepted options.\n",
+    };
+    for (cases, errors) |argv, expected| {
         const result = try std.process.run(allocator, io, .{
             .argv = argv,
             .stdout_limit = .limited(64 * 1024),
@@ -802,7 +550,7 @@ test "[cli] - [dispatch]: writes help and rejects missing or unknown commands" {
             else => return error.ChildProcessFailed,
         }
         try std.testing.expectEqual(@as(usize, 0), result.stdout.len);
-        try std.testing.expectEqualStrings(help.stdout, result.stderr);
+        try std.testing.expectEqualStrings(expected, result.stderr);
     }
 }
 
@@ -810,4 +558,112 @@ test "[failure] - [get summary]: propagates a full destination" {
     var buffer: [1]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try std.testing.expectError(error.WriteFailed, writeGetSummary(&writer, .{ .region_count = 1, .total_bases = 1, .elapsed_ns = 1 }));
+}
+
+test "[cli] - [diagnostic format]: respects placement, values, repetition and help priority" {
+    const binary = if (builtin.os.tag == .windows) "zig-out\\bin\\z-fasta.exe" else "zig-out/bin/z-fasta";
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const Case = struct { argv: []const []const u8, code: diagnostics.Code, json: bool = true };
+    const cases = [_]Case{
+        .{ .argv = &.{ binary, "--error-format=json" }, .code = .@"usage.command_required" },
+        .{ .argv = &.{ binary, "--error-format=json", "unknown" }, .code = .@"usage.unknown_command" },
+        .{ .argv = &.{ binary, "stats", "--bad", "--error-format=json" }, .code = .@"usage.unknown_option" },
+        .{ .argv = &.{ binary, "get", "--error-format=text", "--error-format=json" }, .code = .@"usage.missing_argument" },
+        .{ .argv = &.{ binary, "get", "--error-format=json", "--error-format=text" }, .code = .@"usage.missing_argument", .json = false },
+        .{ .argv = &.{ binary, "validate", "--custom-alphabet", "--error-format=json", "--schema", "bad" }, .code = .@"usage.invalid_option_value", .json = false },
+        .{ .argv = &.{ binary, "get", "tests/data/simple.fasta", "--names", "--error-format=json" }, .code = .@"io.file_not_found", .json = false },
+        .{ .argv = &.{ binary, "stats", "--error-format=json", "--error-format=bad" }, .code = .@"usage.invalid_option_value", .json = false },
+        .{ .argv = &.{ binary, "stats", "--error-format=json", "--error-formatting" }, .code = .@"usage.unknown_option" },
+    };
+    for (cases) |case| {
+        const result = try std.process.run(std.testing.allocator, threaded.io(), .{ .argv = case.argv });
+        defer std.testing.allocator.free(result.stdout);
+        defer std.testing.allocator.free(result.stderr);
+        try std.testing.expectEqual(@as(u8, 1), result.term.exited);
+        try std.testing.expectEqualStrings("", result.stdout);
+        if (case.json) {
+            const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.stderr, .{});
+            defer parsed.deinit();
+            try std.testing.expectEqualStrings(@tagName(case.code), parsed.value.object.get("failure").?.object.get("primary").?.object.get("code").?.string);
+            try std.testing.expect(!parsed.value.object.get("accepted").?.bool);
+        } else {
+            var prefix: [128]u8 = undefined;
+            try std.testing.expect(std.mem.startsWith(u8, result.stderr, try std.fmt.bufPrint(&prefix, "error [{s}]", .{@tagName(case.code)})));
+        }
+    }
+    const help = try std.process.run(std.testing.allocator, threaded.io(), .{ .argv = &.{ binary, "get", "--error-format=json", "--help", "--error-format=bad" } });
+    defer std.testing.allocator.free(help.stdout);
+    defer std.testing.allocator.free(help.stderr);
+    try std.testing.expectEqual(@as(u8, 0), help.term.exited);
+    try std.testing.expectEqualStrings(USAGE, help.stdout);
+    try std.testing.expectEqualStrings("", help.stderr);
+}
+
+test "[failure] - [CLI delivery]: retains primary after failed stderr and observes stdout failures" {
+    const Fault = struct {
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            return switch (operation) {
+                .file_write_streaming => .{ .file_write_streaming = error.BrokenPipe },
+                else => std.testing.io.vtable.operate(userdata, operation),
+            };
+        }
+    };
+    var vtable = std.testing.io.vtable.*;
+    vtable.operate = Fault.operate;
+    const fault_io = std.Io{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.cli);
+    switch (failure.fail(.{ .details = .{ .@"usage.command_required" = {} }, .stage = .arguments })) {
+        else => {},
+    }
+    try std.testing.expectEqual(@as(u8, 1), reportFailure(fault_io, .json, &failure));
+    try std.testing.expectEqual(diagnostics.Code.@"usage.command_required", failure.primary().?.code());
+    try std.testing.expectEqual(@as(u8, 1), failure.secondary_len);
+    try std.testing.expectEqual(diagnostics.Code.@"io.flush_failed", failure.secondary[0].code());
+    try std.testing.expectEqual(error.BrokenPipe, failure.secondary[0].cause.?.zig);
+    try std.testing.expectEqual(.failed, failure.outputs.stderr.final_flush);
+    failure.reset(.cli);
+    var cli = Cli{ .io = fault_io, .args = undefined, .format = .json, .failure = &failure };
+    try std.testing.expectError(error.Io, cli.stdout("help\n"));
+    try std.testing.expectEqual(diagnostics.Code.@"io.write_failed", failure.primary().?.code());
+    try std.testing.expectEqual(error.BrokenPipe, failure.primary().?.cause.?.zig);
+    failure.reset(.index);
+    failure.succeed();
+    try std.testing.expectError(error.Io, writeNotice(&cli, .{ .index = .{ .path = "input.fa", .count = 1 } }));
+    try std.testing.expectEqual(diagnostics.Code.@"io.flush_failed", failure.primary().?.code());
+    try std.testing.expect(failure.work_complete and !failure.complete);
+}
+
+test "[cli] - [Linux delivery]: help, version and required stderr failures return failure" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    const binary = "zig-out/bin/z-fasta";
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    for ([_][]const u8{ "--help", "--version" }) |option| {
+        for ([_]bool{ false, true }) |json| {
+            const script = if (json) "exec \"$1\" --error-format=json \"$2\" >/dev/full" else "exec \"$1\" \"$2\" >/dev/full";
+            const result = try std.process.run(std.testing.allocator, threaded.io(), .{ .argv = &.{ "/bin/sh", "-c", script, "sh", binary, option } });
+            defer std.testing.allocator.free(result.stdout);
+            defer std.testing.allocator.free(result.stderr);
+            try std.testing.expectEqual(@as(u8, 1), result.term.exited);
+            try std.testing.expectEqualStrings("", result.stdout);
+            if (json) {
+                const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.stderr, .{});
+                defer parsed.deinit();
+                const primary = parsed.value.object.get("failure").?.object.get("primary").?.object;
+                try std.testing.expectEqualStrings("io.write_failed", primary.get("code").?.string);
+                try std.testing.expectEqualStrings("stdout", primary.get("source").?.string);
+            } else {
+                try std.testing.expect(std.mem.startsWith(u8, result.stderr, "error [io.write_failed]"));
+                try std.testing.expect(std.mem.indexOf(u8, result.stderr, "cause=posix_errno:28") != null);
+            }
+        }
+    }
+    const result = try std.process.run(std.testing.allocator, threaded.io(), .{ .argv = &.{ "/bin/sh", "-c", "exec \"$1\" get tests/data/simple.fasta seq1:1-4 --summary 2>/dev/full", "sh", binary } });
+    defer std.testing.allocator.free(result.stdout);
+    defer std.testing.allocator.free(result.stderr);
+    try std.testing.expectEqual(@as(u8, 1), result.term.exited);
+    try std.testing.expectEqualStrings(">seq1:1-4\nACGT\n", result.stdout);
+    try std.testing.expectEqualStrings("", result.stderr);
 }

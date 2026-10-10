@@ -408,19 +408,21 @@ expect_fail() {
     fi
 }
 
-expect_fail_msg() {
-    local label="$1" needle="$2"; shift 2
+expect_fail_code() {
+    local label="$1" code="$2"; shift 2
     local err="$TMPDIR/edge_${label//[^a-zA-Z0-9_]/_}.err"
     local out="$TMPDIR/edge_${label//[^a-zA-Z0-9_]/_}.out"
-    if "$@" >"$out" 2>"$err"; then
-        echo "expected non-zero exit" >"$err"
+    local status=0
+    "$@" >"$out" 2>"$err" || status=$?
+    if [[ "$status" != 1 ]]; then
+        echo "expected exit 1, got $status" >>"$err"
         fail "$label" "$err"
         return
     fi
-    if grep -q "$needle" "$err"; then
+    if grep -Fq "error [$code]" "$err"; then
         pass "$label"
     else
-        echo "stderr missing: $needle" >>"$err"
+        echo "stderr missing code: $code" >>"$err"
         fail "$label" "$err"
     fi
 }
@@ -734,20 +736,20 @@ verify_edge_paths() {
     local empty="$TMPDIR/edge_empty.fasta"
     local junk="$TMPDIR/edge_not_fasta.txt"
 
-    expect_fail_msg "[extended:edge] usage (no file)" "usage:" \
+    expect_fail_code "[extended:edge] usage (no file)" "usage.missing_argument" \
         "$ZFASTA" stats
 
-    expect_fail_msg "[extended:edge] missing file" "file not found" \
+    expect_fail_code "[extended:edge] missing file" "io.file_not_found" \
         "$ZFASTA" stats "$TMPDIR/does_not_exist.fasta"
 
     cp "$TEST_DATA/simple.fasta" "$bare"
     rm -f "${bare}.zfi" "${bare}.fai"
-    expect_fail_msg "[extended:edge] no index" "no index found" \
+    expect_fail_code "[extended:edge] no index" "index.not_found" \
         "$ZFASTA" stats "$bare"
 
     cp "$TEST_DATA/empty.fasta" "$empty"
     rm -f "${empty}.zfi" "${empty}.fai"
-    expect_fail_msg "[extended:edge] empty fasta" "file is empty" \
+    expect_fail_code "[extended:edge] empty fasta" "fasta.no_records" \
         "$ZFASTA" stats "$empty"
 
     printf 'this is not fasta\n' >"$junk"
