@@ -428,21 +428,23 @@ fn validatedStrideBlock(
     line_bytes: usize,
 ) usize {
     const sep_len = line_bytes - line_bases;
-    const block_end = start + line_count * line_bytes;
     var line_index: usize = 0;
     while (line_index < line_count) : (line_index += 1) {
         const line_start = start + line_index * line_bytes;
-        if (data[line_start] == '>') return line_index;
+        if (data[line_start] == '>') break;
         if (!hasLineSeparatorAt(data, line_start + line_bases, @intCast(sep_len))) {
-            return line_index;
+            break;
         }
     }
-    if (countWhitespace(vector_len, data[start..block_end]) == line_count * sep_len) {
-        return line_count;
+    const candidate_lines = line_index;
+    if (candidate_lines == 0) return 0;
+    const block_end = start + candidate_lines * line_bytes;
+    if (countWhitespace(vector_len, data[start..block_end]) == candidate_lines * sep_len) {
+        return candidate_lines;
     }
 
     line_index = 0;
-    while (line_index < line_count) : (line_index += 1) {
+    while (line_index < candidate_lines) : (line_index += 1) {
         const line_start = start + line_index * line_bytes;
         if (countWhitespace(vector_len, data[line_start .. line_start + line_bases]) != 0) {
             return line_index;
@@ -540,6 +542,10 @@ const LineMetricsBuilder = struct {
         }
         self.metrics.seq_len += bases;
         self.metrics.line_count += 1;
+        if (bases != content_len) {
+            if (self.metrics.is_uniform_width) self.nonuniform_reason = .sequence_whitespace;
+            self.metrics.is_uniform_width = false;
+        }
 
         if (self.metrics.line_count == 1) {
             self.first_actual_bytes = actual_bytes;
@@ -2968,7 +2974,17 @@ test "[property] - [stride scanner]: matches scalar structural boundaries" {
                     line_bases,
                     line_bytes,
                 );
-                const scalar = validatedStrideRun(1, block, 0, line_bases, line_bytes);
+                const scalar = reference: {
+                    for (0..line_count) |line_index| {
+                        const row = block[line_index * line.len ..][0..line.len];
+                        if (row[0] == '>') break :reference line_index;
+                        for (row[0..line_bases]) |byte| {
+                            if (byte <= ' ') break :reference line_index;
+                        }
+                        if (!std.mem.eql(u8, row[line_bases..], line[line_bases..])) break :reference line_index;
+                    }
+                    break :reference line_count;
+                };
 
                 try std.testing.expectEqual(scalar, native);
                 const at_next_line = line_offset == line.len;
@@ -2983,6 +2999,20 @@ test "[property] - [stride scanner]: matches scalar structural boundaries" {
             }
             block[mutation_offset] = original;
         }
+    }
+}
+
+test "[regression] - [stride scanner]: checks whitespace before a later structural stop" {
+    const cases = [_][]const u8{
+        "AAAA\nAA A\n>b x\n",
+        "AAAA\nAA A\nAAAAx",
+        "AAAA\r\nAA A\r\n>b x\r\n",
+        "AAAA\r\nAA A\r\nAAAAx\n",
+    };
+    for (cases) |data| {
+        const line_bytes: u32 = if (data[4] == '\r') 6 else 5;
+        try std.testing.expectEqual(@as(usize, 1), validatedStrideRun(1, data, 0, 4, line_bytes));
+        try std.testing.expectEqual(@as(usize, 1), validatedStrideRun(STRIDE_VECTOR_LEN, data, 0, 4, line_bytes));
     }
 }
 

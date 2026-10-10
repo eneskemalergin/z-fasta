@@ -1182,6 +1182,39 @@ test "[failure] - [FAI scanner]: rejects a trailing tab as non-uniform" {
     );
 }
 
+test "[integration] - [index scanners]: preserves whitespace before the next header" {
+    const allocator = std.testing.allocator;
+    const cases = [_][]const u8{
+        ">a\nAAAA\nAAAA\nAA A\n>b x\nTTTT\n",
+        ">a\r\nAAAA\r\nAAAA\r\nAA A\r\n>b x\r\nTTTT\r\n",
+        ">a\nAAAA\nAAAA\nAAA \n>b x\nTTTT\n",
+    };
+    for (cases) |data| {
+        var index = try main.indexer.scanZfiData(allocator, data, true);
+        defer index.deinit(allocator);
+        try std.testing.expectEqual(@as(u64, 11), index.records.items[0].seq_len);
+        try std.testing.expect(!index.records.items[0].isUniformWidth());
+        const bytes = try main.indexer.zfiIndexToBytes(allocator, &index, data.len, 0);
+        defer allocator.free(bytes);
+        const paths = try writeFastaAndRawZfi(allocator, "stride-whitespace", data, bytes);
+        defer allocator.free(paths.fasta_path);
+        defer allocator.free(paths.zfi_path);
+        defer std.Io.Dir.cwd().deleteFile(io, paths.fasta_path) catch {};
+        defer std.Io.Dir.cwd().deleteFile(io, paths.zfi_path) catch {};
+        var loaded = try loadIndexChecked(allocator, io, paths.fasta_path);
+        defer loaded.deinit();
+        var failure: diagnostics.Failure = undefined;
+        failure.reset(.get);
+        var output: [128]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&output);
+        try main.getter.extractRegion(&loaded, "a:9-11", &writer, &failure);
+        try std.testing.expectEqualStrings(">a:9-11\nAAA\n", writer.buffered());
+        var fai = std.Io.Writer.fixed(&output);
+        try std.testing.expectError(error.NonUniformFai, scanFaiData(allocator, data, &fai, true));
+        try std.testing.expectEqual(@as(usize, 0), fai.buffered().len);
+    }
+}
+
 test "[edge] - [index scanners]: accept final CRLF after a uniform LF body" {
     // Final CRLF is a terminator, not a wider wrap.
     const data = ">seq\nAAAA\nAAAA\r\n";
