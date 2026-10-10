@@ -183,7 +183,7 @@ pub const Stage = enum {
     check_identity,
 };
 pub const OutputState = struct {
-    state: enum { not_started, staged, published, streaming, unknown } = .not_started,
+    state: enum { not_started, staged, published, streaming, unknown, aborted } = .not_started,
     /// Records completed by the writer, not a promise about the visible prefix.
     records: ?u64 = null,
     /// Bytes accepted by the writer; buffering does not prove delivery.

@@ -3642,3 +3642,236 @@ test "[failure] - [index diagnostics]: truncation and source identity precede re
         try std.testing.expectEqual(@as(i128, try statMtimeNs(paths.fasta_path)), primary.details.@"index.source_mtime_mismatch".actual_mtime_ns);
     }
 }
+
+fn failIndexCreate(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir.CreateFileAtomicOptions) std.Io.Dir.CreateFileAtomicError!std.Io.File.Atomic {
+    return error.AccessDenied;
+}
+
+fn failIndexWrite(_: ?*anyopaque, _: std.Io.File, _: []const u8, _: []const []const u8, _: usize, _: u64) std.Io.File.WritePositionalError!usize {
+    return error.NoSpaceLeft;
+}
+
+fn failIndexPublish(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir, _: []const u8) std.Io.Dir.RenameError!void {
+    return error.AccessDenied;
+}
+
+fn disappearIndexSource(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
+    return error.FileNotFound;
+}
+
+fn failIndexSpoolCreate(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir.CreateFileOptions) std.Io.File.OpenError!std.Io.File {
+    return error.AccessDenied;
+}
+
+fn failIndexCleanup(_: ?*anyopaque, _: std.Io.Dir, _: []const u8) std.Io.Dir.DeleteFileError!void {
+    return error.AccessDenied;
+}
+
+fn discardIndexStdout(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+    switch (operation) {
+        .file_write_streaming => |write| {
+            var bytes = write.header.len;
+            for (write.data, 0..) |part, i| bytes += part.len * (if (i + 1 == write.data.len) write.splat else 1);
+            return .{ .file_write_streaming = bytes };
+        },
+        else => return std.testing.io.vtable.operate(userdata, operation),
+    }
+}
+
+fn failIndexStdout(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+    switch (operation) {
+        .file_write_streaming => return .{ .file_write_streaming = error.BrokenPipe },
+        else => return std.testing.io.vtable.operate(userdata, operation),
+    }
+}
+
+fn expectIndexRunCode(faulty_io: std.Io, path: []const u8, emit_fai: bool, code: diagnostics.Code, failure: *diagnostics.Failure) !void {
+    try std.testing.expectError(diagnostics.metadata(code).returned_error, main.indexer.runIndex(faulty_io, .empty, path, .{ .emit_fai = emit_fai }, failure));
+    try std.testing.expectEqual(code, failure.primary().?.code());
+    try std.testing.expect(!failure.complete);
+}
+
+test "[failure] - [index diagnostics]: retains source, write, publish and comparison causes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const path = try writeFastaArtifact(allocator, "index-diagnostics", ">seq\nACGT\n");
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{path});
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+    const Case = struct { code: diagnostics.Code, stage: diagnostics.Stage, cause: anyerror };
+    const cases = [_]Case{
+        .{ .code = .@"io.stat_failed", .stage = .stat, .cause = error.AccessDenied },
+        .{ .code = .@"io.read_failed", .stage = .read, .cause = error.InputOutput },
+        .{ .code = .@"io.create_failed", .stage = .create, .cause = error.AccessDenied },
+        .{ .code = .@"io.flush_failed", .stage = .flush, .cause = error.NoSpaceLeft },
+        .{ .code = .@"io.publish_failed", .stage = .publish, .cause = error.AccessDenied },
+        .{ .code = .@"input.changed", .stage = .compare_source, .cause = error.FileNotFound },
+    };
+    for ([_]bool{ false, true }) |large| {
+        if (large) {
+            const source = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write });
+            defer source.close(io);
+            const wraps = "ACGT\n" ** 2048;
+            var offset: u64 = 10;
+            while (offset <= 32 * 1024 * 1024) : (offset += wraps.len) try source.writePositionalAll(io, wraps, offset);
+        }
+        const source_bytes = (try std.Io.Dir.cwd().statFile(io, path, .{})).size;
+        for (cases, 0..) |case, i| {
+            try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = zfi_path, .data = "previous index" });
+            var vtable = io.vtable.*;
+            switch (i) {
+                0 => vtable.fileStat = failIndexStat,
+                1 => vtable.fileReadPositional = failIndexRead,
+                2 => vtable.dirCreateFileAtomic = failIndexCreate,
+                3 => vtable.fileWritePositional = failIndexWrite,
+                4 => vtable.dirRename = failIndexPublish,
+                5 => vtable.dirStatFile = disappearIndexSource,
+                else => unreachable,
+            }
+            var failure: diagnostics.Failure = undefined;
+            try expectIndexRunCode(.{ .userdata = io.userdata, .vtable = &vtable }, path, false, if (large and i == 3) .@"io.write_failed" else case.code, &failure);
+            const primary = failure.primary().?;
+            try std.testing.expectEqual(if (large and i == 3) diagnostics.Stage.write else case.stage, primary.stage);
+            try std.testing.expectEqual(case.cause, primary.cause.?.zig);
+            try std.testing.expectEqualStrings("previous index", try readTestFile(allocator, zfi_path));
+            try std.testing.expectEqualStrings(path, failure.sourceLabel(.zfi).?);
+            if (i == 3 or i == 5) try std.testing.expectEqual(.aborted, failure.outputs.file.state);
+            if (i == 4) try std.testing.expectEqual(.unknown, failure.outputs.file.state);
+            if (i == 5) {
+                const changed = primary.details.@"input.changed";
+                try std.testing.expect(changed.disappeared);
+                try std.testing.expectEqual(@as(?u64, source_bytes), changed.before.bytes);
+                try std.testing.expectEqual(@as(?diagnostics.FileSnapshot, null), changed.after);
+            }
+        }
+    }
+}
+
+test "[failure] - [FAI diagnostics]: stages complete output and retains cleanup secondaries" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const path = try writeFastaArtifact(allocator, "fai-diagnostics", ">seq\nACGT\n");
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    for (0..5) |i| {
+        var vtable = io.vtable.*;
+        vtable.operate = discardIndexStdout;
+        switch (i) {
+            0 => vtable.dirCreateFile = failIndexSpoolCreate,
+            1 => vtable.fileWritePositional = failIndexWrite,
+            2 => vtable.operate = failIndexStdout,
+            3 => vtable.dirDeleteFile = failIndexCleanup,
+            4 => {
+                vtable.fileWritePositional = failIndexWrite;
+                vtable.dirDeleteFile = failIndexCleanup;
+            },
+            else => unreachable,
+        }
+        const code: diagnostics.Code = switch (i) {
+            0 => .@"io.temp_unavailable",
+            3 => .@"io.cleanup_failed",
+            else => .@"io.flush_failed",
+        };
+        var failure: diagnostics.Failure = undefined;
+        try expectIndexRunCode(.{ .userdata = io.userdata, .vtable = &vtable }, path, true, code, &failure);
+        const primary = failure.primary().?;
+        if (i == 0) {
+            try std.testing.expectEqual(diagnostics.TemporaryPurpose.fai, primary.details.@"io.temp_unavailable".purpose);
+            try std.testing.expect(primary.details.@"io.temp_unavailable".attempts.len > 0);
+        } else if (i == 2) {
+            try std.testing.expectEqual(diagnostics.SourceId.stdout, primary.at.source.?);
+            try std.testing.expectEqual(error.BrokenPipe, primary.cause.?.zig);
+            try std.testing.expect(failure.outputs.stdout.may_be_partial);
+            try std.testing.expectEqual(.failed, failure.outputs.stdout.final_flush);
+        } else {
+            try std.testing.expectEqual(diagnostics.SourceId.fai_spool, primary.at.source.?);
+            if (i == 3) {
+                try std.testing.expect(failure.work_complete);
+                try std.testing.expectEqual(.succeeded, failure.outputs.stdout.final_flush);
+                try std.testing.expectEqual(@as(?u64, 1), failure.outputs.stdout.records);
+            } else {
+                try std.testing.expectEqual(error.NoSpaceLeft, primary.cause.?.zig);
+                try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);
+            }
+            if (i == 3 or i == 4) {
+                defer std.Io.Dir.cwd().deleteFile(io, failure.sourceLabel(.fai_spool).?) catch {};
+                if (i == 4) {
+                    try std.testing.expectEqual(@as(usize, 1), failure.secondaryItems().len);
+                    try std.testing.expectEqual(diagnostics.Code.@"io.cleanup_failed", failure.secondaryItems()[0].code());
+                    try std.testing.expectEqual(error.AccessDenied, failure.secondaryItems()[0].cause.?.zig);
+                }
+            }
+        }
+    }
+}
+
+test "[failure] - [index serialization]: allocation writer failure is typed OOM" {
+    var index = try main.indexer.scanZfiData(">seq\nACGT\n", true, std.testing.allocator);
+    defer index.deinit(std.testing.allocator);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.index);
+    try std.testing.expectError(error.OutOfMemory, main.indexer.zfiIndexToBytesChecked(&index, 10, 0, failing.allocator(), &failure));
+    try std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", failure.primary().?.code());
+    try std.testing.expectEqual(diagnostics.AllocationRole.serialized_index, failure.primary().?.details.@"resource.out_of_memory".allocation_role);
+}
+
+test "[failure] - [index diagnostics]: retains original record for nonuniform FAI rejection" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const path = try writeFastaArtifact(allocator, "nonuniform-diagnostic", ">empty\n>ragged\nACGT\nAC\nTT\n");
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    var failure: diagnostics.Failure = undefined;
+    try expectIndexRunCode(io, path, true, .@"index.nonuniform_fai", &failure);
+    const primary = failure.primary().?;
+    try std.testing.expectEqual(@as(?u64, 2), primary.at.record);
+    try std.testing.expectEqual(@as(?u64, 7), primary.at.location.offset);
+    try std.testing.expectEqual(diagnostics.NonuniformReason.interior_short_line, primary.details.@"index.nonuniform_fai".reason);
+    try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);
+}
+
+test "[integration] - [index diagnostics]: completes ZFI publication before returning success" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const path = try writeFastaArtifact(allocator, "index-result", ">empty\n>seq\nACGT\n>seq\nTT\n");
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{path});
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+    var failure: diagnostics.Failure = undefined;
+    const result = try main.indexer.runIndex(io, .empty, path, .{}, &failure);
+    try std.testing.expectEqual(@as(u32, 1), result.record_count);
+    try std.testing.expectEqual(@as(?*const diagnostics.Diagnostic, null), failure.primary());
+    try std.testing.expect(failure.complete and failure.work_complete);
+    try std.testing.expectEqual(.published, failure.outputs.file.state);
+    try std.testing.expectEqual(.succeeded, failure.outputs.file.final_flush);
+    failure.reset(.get);
+    var loaded = try main.index_format.loadIndexChecked(allocator, io, path, &failure);
+    defer loaded.deinit();
+    try std.testing.expectEqual(@as(usize, 1), loaded.records.len);
+    try std.testing.expectEqualStrings("seq", loaded.recordName(0).?);
+}
+
+test "[regression] - [index scanner]: empty buffers reject before reading or allocating" {
+    const Context = struct {
+        fn emit(_: *@This(), _: main.indexer.FastaRecordEmit) !void {
+            return error.UnexpectedEmit;
+        }
+    };
+    var context = Context{};
+    var buffer: [0]u8 = .{};
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.index);
+    var reader = std.Io.Reader.fixed(">name\nACGT\n");
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+
+    try std.testing.expectError(error.InvalidArgument, main.indexer.scanFastaReader(&reader, &buffer, .{ .enable_dedup = true, .failure = &failure }, failing.allocator(), null, &context, Context.emit));
+    try std.testing.expectEqual(diagnostics.Code.@"usage.invalid_option_value", failure.primary().?.code());
+    try std.testing.expectEqual(diagnostics.Argument.read_buffer, failure.primary().?.details.@"usage.invalid_option_value".option);
+    try std.testing.expectEqual(diagnostics.Expected.nonempty_buffer, failure.primary().?.details.@"usage.invalid_option_value".expected);
+    try std.testing.expectEqual(@as(usize, 0), reader.seek);
+    try std.testing.expectEqual(@as(usize, 0), failing.allocations);
+    try std.testing.expectError(error.InvalidArgument, main.indexer.scanZfiReader(&reader, &buffer, true, failing.allocator()));
+}

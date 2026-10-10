@@ -231,69 +231,82 @@ fn runIndex(io: std.Io, environ: std.process.Environ, args: *std.process.Args.It
         printUsageAndExit();
     };
 
-    indexer.runIndex(io, environ, path, .{
+    var failure: index_format.diagnostics.Failure = undefined;
+    const result = indexer.runIndex(io, environ, path, .{
         .emit_fai = emit_fai,
         .enable_dedup = enable_dedup,
-    }) catch |err| switch (err) {
-        error.FileNotFound => printErrorAndExit("error: file not found: {s}\n", .{path}),
-        error.AccessDenied => printErrorAndExit("error: access denied: {s}\n", .{path}),
-        error.SourceOpenFailed => printErrorAndExit("error: failed to open file: {s}\n", .{path}),
-        error.SourceStatFailed => printErrorAndExit("error: failed to stat file: {s}\n", .{path}),
-        error.EmptyFile => printErrorAndExit("error: file is empty: {s}\n", .{path}),
-        error.NotFasta => printErrorAndExit("error: not a FASTA file: {s}\n", .{path}),
-        error.HeaderTooLong => printErrorAndExit(
+    }, &failure) catch {
+        printIndexFailure(path, &failure);
+    };
+    if (!emit_fai) std.debug.print("wrote {s}.zfi ({d} sequences)\n", .{ path, result.record_count });
+}
+
+fn printIndexFailure(path: []const u8, failure: *const index_format.diagnostics.Failure) noreturn {
+    const primary = failure.primary() orelse printErrorAndExit("error: processing failed\n", .{});
+    switch (primary.code()) {
+        .@"io.file_not_found" => printErrorAndExit("error: file not found: {s}\n", .{path}),
+        .@"io.access_denied" => printErrorAndExit("error: access denied: {s}\n", .{path}),
+        .@"io.open_failed" => if (primary.at.source == .fasta) printErrorAndExit("error: failed to open file: {s}\n", .{path}) else printErrorAndExit("error: write failed\n", .{}),
+        .@"fasta.no_records" => printErrorAndExit("error: file is empty: {s}\n", .{path}),
+        .@"index.initial_header_required" => printErrorAndExit("error: not a FASTA file: {s}\n", .{path}),
+        .@"index.identifier_too_long" => printErrorAndExit(
             "error: sequence name exceeds {d} bytes: {s}\n",
             .{ indexer.MAX_INDEX_NAME_LEN, path },
         ),
-        error.SequenceLineTooLong => printErrorAndExit(
+        .@"index.sequence_line_too_long" => printErrorAndExit(
             "error: sequence line exceeds the index format limit: {s}\n",
             .{path},
         ),
-        error.TooManySequences => printErrorAndExit(
+        .@"index.record_count_limit_exceeded" => printErrorAndExit(
             "error: sequence count exceeds {d}: {s}\n",
             .{ std.math.maxInt(u32), path },
         ),
-        error.NonUniformFai => printErrorAndExit(
+        .@"index.nonuniform_fai" => printErrorAndExit(
             "error: cannot emit .fai for non-uniform sequence layout; run 'z-fasta index' (default) to write .zfi\n",
             .{},
         ),
-        error.NoValidSequences => printErrorAndExit(
+        .@"index.no_indexable_records" => printErrorAndExit(
             "error: no valid sequences found in: {s}\n",
             .{path},
         ),
-        error.SourceReadFailed => printErrorAndExit("error: failed to read file: {s}\n", .{path}),
-        error.NoUsableFaiSpool => printErrorAndExit(
+        .@"io.temp_unavailable" => if (primary.at.source != .fai_spool) printErrorAndExit("error: write failed\n", .{}) else printErrorAndExit(
             "error: no usable temporary directory for FAI spool\n",
             .{},
         ),
-        error.FaiSpoolWriteFailed => printErrorAndExit(
-            "error: failed to write temporary FAI spool\n",
-            .{},
-        ),
-        error.FaiSpoolReadFailed => printErrorAndExit(
-            "error: failed to read temporary FAI spool\n",
-            .{},
-        ),
-        error.StdoutReplayFailed => printErrorAndExit("error: failed to replay FAI stdout\n", .{}),
-        error.StdoutFlushFailed => printErrorAndExit("error: failed to flush FAI stdout\n", .{}),
-        error.SourceChanged => printErrorAndExit(
+        .@"input.changed" => printErrorAndExit(
             "error: source changed while indexing: {s}\n",
             .{path},
         ),
-        error.UnsupportedTimestamp => printErrorAndExit(
+        .@"index.source_timestamp_out_of_range" => printErrorAndExit(
             "error: source modification time predates the Unix epoch: {s}\n",
             .{path},
         ),
-        error.OutputPathTooLong => printErrorAndExit("error: path too long\n", .{}),
-        error.ZfiWriteFailed => printErrorAndExit("error: write failed\n", .{}),
-        error.ZfiFinalizeFailed => printErrorAndExit(
+        .@"io.invalid_path" => printErrorAndExit("error: path too long\n", .{}),
+        .@"io.publish_failed" => printErrorAndExit(
             "error: failed to finalize index: {s}.zfi\n",
             .{path},
         ),
-        error.ProcessingFailed => printErrorAndExit("error: processing failed\n", .{}),
-        error.OutOfMemory => printErrorAndExit("error: processing failed\n", .{}),
+        .@"io.stat_failed" => if (primary.at.source == .fasta)
+            printErrorAndExit("error: failed to stat file: {s}\n", .{path})
+        else
+            printErrorAndExit("error: failed to read temporary FAI spool\n", .{}),
+        .@"io.read_failed", .@"io.unexpected_eof" => if (primary.at.source == .fasta)
+            printErrorAndExit("error: failed to read file: {s}\n", .{path})
+        else if (primary.at.source == .fai_spool)
+            printErrorAndExit("error: failed to read temporary FAI spool\n", .{})
+        else
+            printErrorAndExit("error: write failed\n", .{}),
+        .@"io.write_failed", .@"io.flush_failed" => if (primary.at.source == .fai_spool)
+            printErrorAndExit("error: failed to write temporary FAI spool\n", .{})
+        else if (primary.at.source == .stdout and primary.stage == .flush)
+            printErrorAndExit("error: failed to flush FAI stdout\n", .{})
+        else if (primary.at.source == .stdout)
+            printErrorAndExit("error: failed to replay FAI stdout\n", .{})
+        else
+            printErrorAndExit("error: write failed\n", .{}),
+        .@"io.create_failed" => printErrorAndExit("error: write failed\n", .{}),
         else => printErrorAndExit("error: processing failed\n", .{}),
-    };
+    }
 }
 
 // --- Get command ---

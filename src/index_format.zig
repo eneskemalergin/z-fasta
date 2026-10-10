@@ -18,7 +18,7 @@ const NON_UNIFORM_WIDTH_FLAG: u8 = 1;
 /// Record flag indicating that its name is embedded in the `.zfi` name blob.
 pub const NAME_IN_ZFI_FLAG: u8 = 2;
 const SIDE_TABLE_OFFSET_BYTES = 5;
-const MAX_SIDE_TABLE_OFFSET = (1 << (SIDE_TABLE_OFFSET_BYTES * 8)) - 1;
+pub const MAX_SIDE_TABLE_OFFSET = (1 << (SIDE_TABLE_OFFSET_BYTES * 8)) - 1;
 // Holds the maximum u16 name, four tabs, four maximum-width numeric fields,
 // and the line delimiter.
 const FAI_READER_BUFFER_BYTES: usize = 65_600;

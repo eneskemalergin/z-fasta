@@ -9,6 +9,21 @@ fn object(value: std.json.Value, name: []const u8) std.json.Value {
     return value.object.get(name).?;
 }
 
+test "[unit] - [reporting]: file output states distinguish abort from staging and publication" {
+    inline for (.{ .not_started, .staged, .aborted, .published, .streaming, .unknown }, [_][]const u8{ "not_started", "staged", "aborted", "published", "streaming", "unknown" }) |state, expected| {
+        var failure: diagnostics.Failure = undefined;
+        failure.reset(.index);
+        try testing.expectEqual(error.Io, failure.fail(.{ .details = .{ .@"io.write_failed" = {} }, .stage = .write }));
+        failure.outputs.file.state = state;
+        var buffer: [reporting.JSON_BYTES_LIMIT]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try reporting.writeJson(&writer, &failure, .{});
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, writer.buffered(), .{});
+        defer parsed.deinit();
+        try testing.expectEqualStrings(expected, object(object(parsed.value, "outputs").array.items[1], "state").string);
+    }
+}
+
 test "[unit] - [reporting]: machine facts preserve wide values and publication state" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.get);
