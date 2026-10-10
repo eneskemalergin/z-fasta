@@ -107,6 +107,10 @@ jobs:
         shell: bash
         run: zig build test -Doptimize=ReleaseFast --summary all
 
+      - name: Check diagnostic consumer
+        shell: bash
+        run: bash tests/check_diagnostics.sh "${{ matrix.binary }}"
+
       - name: Smoke test
         shell: bash
         run: |

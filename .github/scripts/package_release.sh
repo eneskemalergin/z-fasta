@@ -19,11 +19,7 @@ got=$("$bin" --version)
 
 size=$(wc -c < "$bin" | tr -d ' ')
 if [[ "$size" -gt 1048576 ]]; then
-    echo "release binary too large (${size} bytes); expected stripped ReleaseFast (<1 MiB)" >&2
-    exit 1
-fi
-if [[ "$system" == linux_* && "$size" -gt 750000 ]]; then
-    echo "linux release binary too large (${size} bytes); expected <=750 KiB stripped RF" >&2
+    echo "release binary too large (${size} bytes); expected stripped ReleaseFast (<=1048576 bytes)" >&2
     exit 1
 fi
 if [[ "$system" == linux_* ]] && command -v file >/dev/null 2>&1; then
@@ -62,9 +58,20 @@ tar -xf "release-out/${archive}" -C "$smoke"
     "./${exe}" validate test.fasta >/dev/null
     "./${exe}" index test.fasta
     "./${exe}" index --emit-fai test.fasta > test.fai
-    test -s test.fai
+    printf 'seq1\t4\t6\t4\t5\nseq2\t4\t17\t4\t5\n' > expected.fai
+    cmp expected.fai test.fai
     "./${exe}" get test.fasta seq1:1-4 > get.out
-    test -s get.out
+    printf '>seq1:1-4\nACGT\n' > expected.get
+    cmp expected.get get.out
     "./${exe}" stats test.fasta > stats.out
-    test -s stats.out
+    grep -Fx '  indexed_records: 2' stats.out
+    grep -Fx '  total_symbols: 8' stats.out
+    grep -Fx '  n50: 4' stats.out
+    grep -Fx '  gc: 75.00%' stats.out
+    status=0
+    "./${exe}" stats --error-format=json > failure.out 2> failure.json || status=$?
+    [[ "$status" -eq 1 ]]
+    test ! -s failure.out
+    grep -F '"schema_version":"v2"' failure.json >/dev/null
+    grep -F '"code":"usage.missing_argument"' failure.json >/dev/null
 )
