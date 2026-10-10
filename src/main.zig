@@ -264,9 +264,10 @@ fn runCli(init: std.process.Init.Minimal) u8 {
         format = parseErrorFormat(arg) catch return bootstrap(.invalid_format);
         command = args.next();
     }
+    const terminal_command = if (command) |cmd| std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h") or std.mem.eql(u8, cmd, "--version") or std.mem.eql(u8, cmd, "-V") else false;
     // Preserve the ordinary help/version fast path, but observe write failure.
     if (command) |cmd| {
-        if (format == .text and (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h") or std.mem.eql(u8, cmd, "--version") or std.mem.eql(u8, cmd, "-V"))) {
+        if (format == .text and terminal_command) {
             const bytes = if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) USAGE else "z-fasta " ++ VERSION ++ "\n";
             const write_failure = writeStdoutFast(bytes) orelse return 0;
             var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
@@ -283,7 +284,7 @@ fn runCli(init: std.process.Init.Minimal) u8 {
         }
     }
     const operation: diagnostics.Operation = if (command) |cmd| std.meta.stringToEnum(diagnostics.Operation, cmd) orelse .cli else .cli;
-    format = selectErrorFormat(args, operation, format) catch return bootstrap(.invalid_format);
+    if (!terminal_command) format = selectErrorFormat(args, operation, format) catch return bootstrap(.invalid_format);
     var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -595,6 +596,19 @@ test "[cli] - [diagnostic format]: respects placement, values, repetition and he
     try std.testing.expectEqual(@as(u8, 0), help.term.exited);
     try std.testing.expectEqualStrings(USAGE, help.stdout);
     try std.testing.expectEqualStrings("", help.stderr);
+    for ([_][]const u8{ "--error-format=text", "--error-format=json" }) |format| {
+        for ([_][]const u8{ "--help", "-h", "--version", "-V" }) |option| {
+            const result = try std.process.run(std.testing.allocator, threaded.io(), .{
+                .argv = &.{ binary, format, option, "--error-format=bad" },
+            });
+            defer std.testing.allocator.free(result.stdout);
+            defer std.testing.allocator.free(result.stderr);
+            try std.testing.expectEqual(@as(u8, 0), result.term.exited);
+            const expected = if (std.mem.eql(u8, option, "--help") or std.mem.eql(u8, option, "-h")) USAGE else "z-fasta " ++ VERSION ++ "\n";
+            try std.testing.expectEqualStrings(expected, result.stdout);
+            try std.testing.expectEqualStrings("", result.stderr);
+        }
+    }
 }
 
 test "[failure] - [CLI delivery]: retains primary after failed stderr and observes stdout failures" {
@@ -639,7 +653,7 @@ test "[cli] - [Linux delivery]: help, version and required stderr failures retur
     defer threaded.deinit();
     for ([_][]const u8{ "--help", "--version" }) |option| {
         for ([_]bool{ false, true }) |json| {
-            const script = if (json) "exec \"$1\" --error-format=json \"$2\" >/dev/full" else "exec \"$1\" \"$2\" >/dev/full";
+            const script = if (json) "exec \"$1\" --error-format=json \"$2\" --error-format=bad >/dev/full" else "exec \"$1\" \"$2\" --error-format=bad >/dev/full";
             const result = try std.process.run(std.testing.allocator, threaded.io(), .{ .argv = &.{ "/bin/sh", "-c", script, "sh", binary, option } });
             defer std.testing.allocator.free(result.stdout);
             defer std.testing.allocator.free(result.stderr);
