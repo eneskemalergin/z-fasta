@@ -72,13 +72,13 @@ z-fasta validate genome.fa
 
 ## Coordinate error
 
-Common causes:
+The code names the rejected rule:
 
-- Using BED coordinates as positional coordinates.
-- Start is zero.
-- Start exceeds sequence length.
-- End is less than start.
-- BED end equals start.
+- `request.start_before_one`: positional start is zero. Positional regions are one-based; BED coordinates used as positional coordinates often cause this.
+- `request.start_after_sequence`: start exceeds the indexed sequence length.
+- `request.end_before_start`: end is less than start.
+- `request.bed.invalid_interval`: BED end is not greater than start.
+- `request.bed.field_missing`, `request.bed.invalid_coordinate`, `request.bed.coordinate_out_of_range`, `request.bed.invalid_strand`: a malformed BED row; the report gives its line and column.
 
 Review [Coordinates and sequence names](Coordinates-and-Sequence-Names).
 
@@ -92,7 +92,7 @@ For unusual nucleotide alphabets, validate with an explicit alphabet and inspect
 
 ## No regions provided
 
-The names or BED source contained only blank, comment, or directive lines. Confirm the input stream:
+The code is `request.no_regions`. The names or BED source contained only blank, comment, or directive lines. Confirm the input stream:
 
 ```bash
 sed -n '1,20p' ids.txt
@@ -106,6 +106,32 @@ Names lines beginning with `#` are skipped. BED also skips `track` and `browser`
 Names and BED stream in batches. Earlier valid records may reach stdout before a later request fails. The summary is suppressed on failure.
 
 Use the temporary-output recipe in [Recipes](Recipes) when a partial file must never be published.
+
+## Output closed early
+
+The code is `io.write_failed` with `cause="BrokenPipe"`, and the exit status is 1. The reader closed stdout before z-fasta finished, for example `z-fasta get genome.fa chr1 | head`.
+
+The data that reached the reader is correct; z-fasta reports that it could not deliver the rest. For a quick preview, request a smaller region instead of truncating the stream:
+
+```bash
+z-fasta get genome.fa chr1:1-1000
+```
+
+In a pipeline with `set -o pipefail`, an early-closing reader makes the pipeline fail.
+
+## Missing or unreadable file
+
+- `io.file_not_found`: the named FASTA, sidecar, names, or BED file does not exist.
+- `io.access_denied`: the file exists but cannot be opened with the current permissions.
+- `io.invalid_path`: the path is too long or otherwise rejected before opening; `reason` and `limit_bytes` say which.
+
+The report's source label says which input failed, and `cause` keeps the operating-system reason.
+
+## Input changed during work
+
+The code is `input.changed`. Index, validate repair, and GET names or BED files compare the file's size and modification time during the work. A difference, or a file that disappeared, stops the command; index and repair do not publish their output.
+
+Wait until the writer finishes, then rerun. The check compares size and time only; it does not prove identical bytes.
 
 ## Validate returned exit 2
 
@@ -143,7 +169,11 @@ A separate hard-link destination can be atomically replaced without modifying th
 
 ## File is empty or not FASTA
 
-Index requires a non-empty input whose first byte is `>`. A UTF-8 BOM before the first header makes the first byte something else. Validate can report the BOM and write a clean copy:
+- `fasta.no_records`: the input is empty.
+- `index.initial_header_required`: the first byte is not `>`. The report's `byte` shows it; `0xef` is the start of a UTF-8 BOM.
+- `index.no_indexable_records`: every record is empty. The report counts seen, empty, and duplicate records.
+
+Index requires a non-empty input whose first byte is `>`. Validate can report a BOM and write a clean copy:
 
 ```bash
 z-fasta validate --fix -o clean.fa input.fa
@@ -152,7 +182,7 @@ z-fasta index clean.fa
 
 ## Unknown option
 
-Flags are command-specific and unknown options are rejected anywhere. Confirm command placement with:
+The code is `usage.unknown_option`; other `usage.*` codes report missing, repeated, or conflicting arguments. Flags are command-specific and unknown options are rejected anywhere. Confirm command placement with:
 
 ```bash
 z-fasta --help
