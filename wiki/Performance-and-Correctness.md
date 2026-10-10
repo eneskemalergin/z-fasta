@@ -45,23 +45,23 @@ I care about correct output before timing. The benchmark harness keeps correctne
 
 ## Representative published results
 
-The selected v0.3.4 reports use an AMD Ryzen 9 3950X with warm cache, measured on 2026-10-07. These tables are snapshots from those reports; times and memory use depend on the machine and dataset.
+The selected v0.3.5 reports use an AMD Ryzen 9 3950X with warm cache, measured on 2026-10-10. These tables are snapshots from those reports; times and memory use depend on the machine and dataset.
 
 Index `.fai` examples:
 
 | Dataset | Size | z-fasta | samtools |
 | --- | ---: | ---: | ---: |
-| Human genome | ~2.9 GiB | 0.3212 s | 8.1131 s |
-| Transcriptome | ~459 MiB | 0.1380 s | 1.6801 s |
-| Proteome | ~13 MiB | 0.0108 s | 0.0653 s |
+| Human genome | ~2.9 GiB | 0.3824 s | 8.1614 s |
+| Transcriptome | ~459 MiB | 0.1546 s | 1.7112 s |
+| Proteome | ~13 MiB | 0.0113 s | 0.0650 s |
 
 GET 1 kbp examples through `.zfi`:
 
 | Dataset | z-fasta | samtools |
 | --- | ---: | ---: |
-| Human genome | 2.4 ms | 8.1 ms |
-| Transcriptome | 6.3 ms | 289.8 ms |
-| Proteome | 2.7 ms | 17.3 ms |
+| Human genome | 2.3 ms | 8.2 ms |
+| Transcriptome | 8.2 ms | 301.8 ms |
+| Proteome | 2.7 ms | 17.9 ms |
 
 <details>
 <summary>View the full positional GET chart</summary>
@@ -76,9 +76,9 @@ Complete stats examples through `.zfi`:
 
 | Dataset | z-fasta | SeqKit `stats -a` |
 | --- | ---: | ---: |
-| Human genome | 2.685 s | 17.576 s |
-| Transcriptome | 0.379 s | 2.406 s |
-| Proteome | 12.9 ms | 64.6 ms |
+| Human genome | 2.840 s | 17.726 s |
+| Transcriptome | 0.396 s | 2.420 s |
+| Proteome | 13.2 ms | 60.3 ms |
 
 <details>
 <summary>View the full stats chart</summary>
@@ -98,7 +98,7 @@ Below roughly 10 kbp on the benchmark host, end-to-end GET is dominated by proce
 
 For many requests, one invocation normally beats one process per region because it loads the index once and can share reads across neighboring spans.
 
-In the v0.3.4 refresh, transcriptome `.zfi` positional GET is slower than in the August reports. A same-host check of the seven distinct commands behind the historical timing flags records a largest increase of 0.146 ms (2.46%) against rebuilt `main`. The [GET report](https://github.com/eneskemalergin/z-fasta/blob/main/bench/get/REPORT.md) retains both sets of timings. The batch memory savings apply to seekable BED and names files; positional GET and stdin/FIFO requests still use full index loading.
+Compared with v0.3.4, indexing is 10 to 40 percent slower and transcriptome `.zfi` positional GET takes about 1.5 ms longer; both sessions ran on the same host, where peer commands also moved by a few percent. Transcriptome `.fai` stats uses less memory (20.2 MiB, down from 23.7 MiB). The [benchmark framework page](https://github.com/eneskemalergin/z-fasta/blob/main/bench/README.md#v035-measurements) lists every flagged change. The batch memory savings apply to seekable BED and names files; positional GET and stdin/FIFO requests still use full index loading.
 
 ## Reports and methodology
 

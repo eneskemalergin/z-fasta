@@ -76,7 +76,7 @@ The Wiki holds the details that would otherwise bury this page:
 
 ## Performance
 
-Selected warm-cache results for v0.3.4, measured on 2026-10-07 with an AMD Ryzen 9 3950X, are shown below. Lower is better. The generated summaries keep elapsed time beside process memory; the linked reports contain the complete methods, field coverage, scaling, correctness checks, and peer definitions.
+Selected warm-cache results for v0.3.5, measured on 2026-10-10 with an AMD Ryzen 9 3950X, are shown below. Lower is better. The generated summaries keep elapsed time beside process memory; the linked reports contain the complete methods, field coverage, scaling, correctness checks, and peer definitions.
 
 ### Index
 
@@ -84,9 +84,9 @@ Selected warm-cache results for v0.3.4, measured on 2026-10-07 with an AMD Ryzen
 
 | Dataset       |     Size |      z-fasta |  noodles | rust-bio | samtools |
 | ------------- | -------: | -----------: | -------: | -------: | -------: |
-| Human genome  | ~2.9 GiB | **0.3212 s** | 1.3365 s | 3.4361 s | 8.1131 s |
-| Transcriptome | ~459 MiB | **0.1380 s** | 0.3885 s | 0.6877 s | 1.6801 s |
-| Proteome      |  ~13 MiB | **0.0108 s** | 0.0183 s | 0.0256 s | 0.0653 s |
+| Human genome  | ~2.9 GiB | **0.3824 s** | 1.3640 s | 3.4821 s | 8.1614 s |
+| Transcriptome | ~459 MiB | **0.1546 s** | 0.4111 s | 0.6943 s | 1.7112 s |
+| Proteome      |  ~13 MiB | **0.0113 s** | 0.0176 s | 0.0254 s | 0.0650 s |
 
 [Index benchmark report](bench/index/REPORT.md)
 
@@ -96,9 +96,9 @@ One 1 kbp positional region through each indexed implementation:
 
 | Dataset       | z-fasta `.zfi` | z-fasta `.fai` | noodles | rust-bio | samtools |
 | ------------- | -------------: | -------------: | ------: | -------: | -------: |
-| Human genome  |     **2.4 ms** |         2.6 ms |  2.8 ms |   3.1 ms |   8.1 ms |
-| Transcriptome |     **6.3 ms** |        29.3 ms | 89.0 ms | 530.0 ms | 289.8 ms |
-| Proteome      |     **2.7 ms** |         4.2 ms |  7.2 ms |  20.0 ms |  17.3 ms |
+| Human genome  |     **2.3 ms** |         2.3 ms |  2.6 ms |   2.8 ms |   8.2 ms |
+| Transcriptome |     **8.2 ms** |        28.3 ms | 97.4 ms | 546.2 ms | 301.8 ms |
+| Proteome      |     **2.7 ms** |         3.9 ms |  6.8 ms |  20.1 ms |  17.9 ms |
 
 [GET benchmark report](bench/get/REPORT.md)
 
@@ -108,9 +108,9 @@ Complete z-fasta and noodles reports, with SeqKit `stats -a` as a partial ecosys
 
 | Dataset       | z-fasta `.zfi` | z-fasta `.fai` | noodles | SeqKit `stats -a` |
 | ------------- | -------------: | -------------: | ------: | ----------------: |
-| Human genome  |    **2.685 s** |        2.687 s | 10.012 s |          17.576 s |
-| Transcriptome |    **0.379 s** |        0.415 s |  1.135 s |           2.406 s |
-| Proteome      |    **12.9 ms** |        15.5 ms |  36.2 ms |           64.6 ms |
+| Human genome  |        2.840 s |    **2.838 s** | 10.173 s |          17.726 s |
+| Transcriptome |    **0.396 s** |        0.431 s |  1.172 s |           2.420 s |
+| Proteome      |    **13.2 ms** |        15.1 ms |  36.8 ms |           60.3 ms |
 
 [Stats benchmark report](bench/stats/REPORT.md) | [Benchmark framework](bench/README.md)
 

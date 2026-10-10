@@ -6,17 +6,17 @@ If you just want to use z-fasta, download a release archive. You get one static 
 
 Open the [z-fasta Releases page](https://github.com/eneskemalergin/z-fasta/releases) and choose the archive that matches your operating system and CPU:
 
-- `z-fasta_0.3.4_linux_x86_64.tar.gz`
-- `z-fasta_0.3.4_linux_arm64.tar.gz`
-- `z-fasta_0.3.4_macos_x86_64.tar.gz`
-- `z-fasta_0.3.4_macos_arm64.tar.gz`
+- `z-fasta_0.3.5_linux_x86_64.tar.gz`
+- `z-fasta_0.3.5_linux_arm64.tar.gz`
+- `z-fasta_0.3.5_macos_x86_64.tar.gz`
+- `z-fasta_0.3.5_macos_arm64.tar.gz`
 
 Extract the archive and place `z-fasta` in a directory on your `PATH`.
 
 ### Linux and macOS
 
 ```bash
-tar -xzf z-fasta_0.3.4_linux_x86_64.tar.gz
+tar -xzf z-fasta_0.3.5_linux_x86_64.tar.gz
 chmod +x z-fasta
 ./z-fasta --version
 ```
@@ -69,12 +69,12 @@ z-fasta --help
 z-fasta --version
 ```
 
-The archive examples above use the published 0.3.4 release. Expected output for that archive:
+Expected output for the 0.3.5 archive:
 
 ```text
-z-fasta 0.3.4
+z-fasta 0.3.5
 ```
 
-The 0.3.5 source candidate prints `z-fasta 0.3.5`. Match the printed version to the archive or checkout you selected.
+Match the printed version to the archive or checkout you selected.
 
 Next: [Getting started](Getting-Started).
