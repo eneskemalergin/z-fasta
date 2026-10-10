@@ -28,14 +28,17 @@ for command in ("index", "get", "stats", "validate"):
         else:
             raise AssertionError("Incomplete JSON was accepted")
 
-result = subprocess.run([binary, "get", "tests/data/simple.fasta", "seq1:0-1", "--error-format=json"], capture_output=True, check=False)
-assert result.returncode == 1 and result.stdout == b""
-report = json.loads(result.stderr)
-assert report["failure"]["primary"]["code"] == "request.start_before_one"
-assert report["failure"]["primary"]["data"]["start"] == "0"
-
 # Warning acceptance is explicit. Validator data remains a separate v1 report.
 with tempfile.TemporaryDirectory(prefix="zfasta-diagnostic-consumer-") as directory:
+    reference = Path(directory) / "reference.fa"
+    reference.write_bytes(b">seq1\nACGT\n")
+    Path(str(reference) + ".fai").write_bytes(b"seq1\t4\t6\t4\t5\n")
+    result = subprocess.run([binary, "get", str(reference), "seq1:0-1", "--error-format=json"], capture_output=True, check=False)
+    assert result.returncode == 1 and result.stdout == b""
+    report = json.loads(result.stderr)
+    assert report["failure"]["primary"]["code"] == "request.start_before_one"
+    assert report["failure"]["primary"]["data"]["start"] == "0"
+
     warning = Path(directory) / "warning.fa"
     warning.write_bytes(b">empty\n")
     result = subprocess.run([binary, "validate", str(warning), "--json", "--summary", "--error-format=json"], capture_output=True, check=False)

@@ -4,7 +4,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const main = @import("main");
 
-pub const ZFASTA_BIN = if (builtin.os.tag == .windows) "zig-out\\bin\\z-fasta.exe" else "zig-out/bin/z-fasta";
+const test_options = @import("test_options");
+pub const ZFASTA_BIN = if (std.fs.path.isAbsolute(test_options.binary_path)) test_options.binary_path else test_options.build_root ++ std.fs.path.sep_str ++ test_options.binary_path;
 
 pub fn expectCliResult(
     allocator: std.mem.Allocator,

@@ -16,6 +16,20 @@ zig build -Doptimize=ReleaseFast
 
 The version command must print `0.16.0`. A compiler installed on your `PATH` is fine when it is that exact version. The repository does not provide a public Zig wrapper or compiler download.
 
+Tests select the executable compiled for their build mode and run with copied fixtures and generated indexes in the build cache. They do not install into `zig-out` or write sidecars beside source fixtures. Run `zig build -Doptimize=ReleaseFast` before installed smoke checks, the shell consumer, or local verification scripts.
+
+For a focused edit, select the owning suite and optionally filter test names:
+
+```bash
+zig build test-index
+zig build test-get
+zig build test-stats
+zig build test-validate
+zig build test-cli -Dtest-filter=dispatch
+```
+
+The filter applies to Zig tests. Separate native callers still run when selected through `test-diagnostics` or `test`. Finish code topics with both full test modes.
+
 ## Source map
 
 - `src/main.zig`: CLI parsing, help, dispatch, diagnostics and checked final status.

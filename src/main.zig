@@ -18,6 +18,11 @@ pub fn main(init: std.process.Init.Minimal) void {
     if (status != 0) std.process.exit(status);
 }
 
+const TEST_BINARY_PATH = if (builtin.is_test) blk: {
+    const options = @import("test_options");
+    break :blk if (std.fs.path.isAbsolute(options.binary_path)) options.binary_path else options.build_root ++ std.fs.path.sep_str ++ options.binary_path;
+} else "";
+
 const VERSION = "0.3.5";
 const STRAND_AWARE_FLAG = "--strand-aware";
 const STRAND_AWARE_ALIAS = "--honor-strand";
@@ -504,7 +509,7 @@ test "[failure] - [get transform flags]: rejects conflicting modes" {
 }
 
 test "[cli] - [dispatch]: writes help and rejects missing or unknown commands" {
-    const zfasta_bin = if (builtin.os.tag == .windows) "zig-out\\bin\\z-fasta.exe" else "zig-out/bin/z-fasta";
+    const zfasta_bin = TEST_BINARY_PATH;
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -559,7 +564,7 @@ test "[failure] - [get summary]: propagates a full destination" {
 }
 
 test "[cli] - [diagnostic format]: respects placement, values, repetition and help priority" {
-    const binary = if (builtin.os.tag == .windows) "zig-out\\bin\\z-fasta.exe" else "zig-out/bin/z-fasta";
+    const binary = TEST_BINARY_PATH;
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
     const Case = struct { argv: []const []const u8, code: diagnostics.Code, json: bool = true };
@@ -648,7 +653,7 @@ test "[failure] - [CLI delivery]: retains primary after failed stderr and observ
 
 test "[cli] - [Linux delivery]: help, version and required stderr failures return failure" {
     if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
-    const binary = "zig-out/bin/z-fasta";
+    const binary = TEST_BINARY_PATH;
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
     for ([_][]const u8{ "--help", "--version" }) |option| {
