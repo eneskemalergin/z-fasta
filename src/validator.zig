@@ -1308,6 +1308,7 @@ test "[failure] - [rewrite safety]: keeps original preamble location and identit
     try std.testing.expectEqual(@as(?u64, 3), primary.at.location.column);
     try std.testing.expectEqual(@as(?u64, std.mem.indexOf(u8, data, "junk").?), primary.at.location.offset);
     try std.testing.expectEqual(diagnostics.RepairPolicy.legacy_format_only, primary.details.@"repair.blocked".repair_policy);
+    try std.testing.expectEqual(diagnostics.Code.@"fasta.content_before_header", primary.details.@"repair.blocked".blocker.code());
     failure.reset(.validate);
     try checkPreamble(UTF8_BOM ++ " \t\r\n>seq1\nACGT\n", .{}, &failure);
     try std.testing.expect(failure.primary() == null);

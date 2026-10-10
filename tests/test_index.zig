@@ -489,6 +489,26 @@ test "[cli] - [index]: rejects multiple and nonexistent FASTA paths" {
     );
 }
 
+test "[cli] - [index]: rejects inputs without indexable records" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const empty_records = try writeFastaArtifact(allocator, "index-empty-records", ">a\n>b\n");
+    defer std.Io.Dir.cwd().deleteFile(io, empty_records) catch {};
+    const Case = struct { path: []const u8, code: diagnostics.Code };
+    for ([_]Case{
+        .{ .path = "tests/data/empty.fasta", .code = .@"fasta.no_records" },
+        .{ .path = "tests/data/not_fasta.txt", .code = .@"index.initial_header_required" },
+        .{ .path = empty_records, .code = .@"index.no_indexable_records" },
+    }) |case| {
+        for ([_]bool{ false, true }) |fai| {
+            const argv: []const []const u8 = if (fai) &.{ ZFASTA_BIN, "index", "--emit-fai", case.path } else &.{ ZFASTA_BIN, "index", case.path };
+            try utility.expectCliFailureCode(allocator, argv, case.code);
+        }
+    }
+}
+
 test "[cli] - [index]: atomically replaces ZFI and applies duplicate-name policy" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1857,6 +1877,7 @@ test "[integration] - [index loader]: gives a present ZFI authority over FAI" {
     try markFileStaleOneHourAgo(zfi_file);
 
     try std.testing.expectError(error.StaleIndex, loadIndexChecked(std.testing.allocator, io, fasta_path));
+    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", fasta_path, "seq1" }, .@"index.older_than_source");
 }
 
 test "[failure] - [index loader]: rejects an invalid present ZFI despite valid FAI" {
@@ -1926,6 +1947,7 @@ test "[failure] - [index loader]: reports an inaccessible selected sidecar" {
         try zfi_file.setPermissions(io, no_permissions);
         defer zfi_file.setPermissions(io, permissions) catch {};
         try std.testing.expectError(error.AccessDenied, loadIndexChecked(std.testing.allocator, io, fasta_path));
+        try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", fasta_path, "seq" }, .@"io.access_denied");
     }
 
     try std.Io.Dir.cwd().deleteFile(io, zfi_path);

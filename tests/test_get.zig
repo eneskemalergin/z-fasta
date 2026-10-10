@@ -581,6 +581,9 @@ test "[cli] - [get]: rejects invalid requests, missing names, and transform conf
         1,
         "error [usage.conflicting_options] get: Selected options conflict. arguments=rc,complement_only\nhint: Correct the command arguments; use --help for accepted options.\n",
     );
+    const empty_names = try writeFastaArtifact(allocator, "get-empty-names", "");
+    defer std.Io.Dir.cwd().deleteFile(io, empty_names) catch {};
+    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", fasta, "--names", empty_names }, .@"request.no_regions");
 }
 
 test "[cli] - [get BED]: converts coordinates and skips metadata lines" {
