@@ -40,12 +40,15 @@ test "[unit] - [reporting]: machine facts preserve wide values and publication s
     failure.addSecondary(.{ .details = .{ .@"io.flush_failed" = {} }, .stage = .flush, .at = .{ .source = .stderr }, .cause = .{ .native = .{ .domain = .posix_errno, .number = 32 } } });
     var buffer: [reporting.JSON_BYTES_LIMIT]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    try reporting.writeJson(&writer, &failure, .{ .version = "0.3.4", .accepted = true });
+    try reporting.writeJson(&writer, &failure, .{ .version = "0.3.5", .accepted = true });
 
     try testing.expectEqual(@as(u8, '\n'), writer.buffered()[writer.end - 1]);
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, writer.buffered(), .{});
     defer parsed.deinit();
     const envelope = parsed.value;
+    try testing.expectEqualStrings("v2", object(envelope, "schema_version").string);
+    try testing.expectEqualStrings("0.3.5-1", object(envelope, "catalog_revision").string);
+    try testing.expectEqualStrings("0.3.5", object(object(envelope, "producer"), "version").string);
     try testing.expect(!object(envelope, "accepted").bool);
     try testing.expect(object(object(envelope, "operation"), "work_complete").bool);
     try testing.expect(!object(object(envelope, "operation"), "complete").bool);

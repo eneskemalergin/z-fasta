@@ -1,12 +1,10 @@
 # Troubleshooting
 
-My first rule is to start with the exact stderr message. Do not delete sidecars or rewrite the FASTA yet: most failures identify one specific input or index contract, and the original files are useful evidence.
+Start with the exact stderr code and observed facts. See [Error diagnostics](Error-Diagnostics) for text and JSON reports. Do not delete sidecars or rewrite the FASTA yet: most failures identify one specific input or index contract, and the original files are useful evidence.
 
 ## No index found
 
-```text
-error: no index found for genome.fa. Run 'z-fasta index genome.fa' first.
-```
+The code is `index.not_found`. GET and stats tried the named sidecars without finding an index.
 
 Create the default index:
 
@@ -18,9 +16,7 @@ GET and stats do not create indexes automatically.
 
 ## Index is stale
 
-```text
-error: index is stale (FASTA size or mtime does not match the index). Re-run 'z-fasta index <path>'.
-```
+The code is `index.older_than_source`, `index.source_size_mismatch` or `index.source_mtime_mismatch`. The facts name the observed timestamps or sizes.
 
 The FASTA changed after indexing or source identity no longer matches. Rebuild:
 
@@ -32,9 +28,7 @@ If you intentionally use `.fai`, remove or relocate the stale `.zfi` before retr
 
 ## Corrupt index despite a valid `.fai`
 
-```text
-error: corrupt index file for: genome.fa
-```
+Read the specific `index.*` code, such as `index.truncated`, `index.invalid_magic` or `index.name_out_of_bounds`, and its original source location.
 
 Check whether `genome.fa.zfi` exists. A present invalid `.zfi` blocks `.fai` fallback. Preserve it if you need forensic evidence, then regenerate or remove it deliberately.
 
@@ -43,9 +37,7 @@ Check whether `genome.fa.zfi` exists. A present invalid `.zfi` blocks `.fai` fal
 
 ## `.fai` emission rejects the FASTA
 
-```text
-error: cannot emit .fai for non-uniform sequence layout; run 'z-fasta index' (default) to write .zfi
-```
+The code is `index.nonuniform_fai`. The observed layout cannot be represented by a uniform FAI row.
 
 Choose one:
 
@@ -61,9 +53,7 @@ z-fasta index --emit-fai genome.clean.fa > genome.clean.fa.fai
 
 ## Sequence not found
 
-```text
-error: sequence not found: chr1
-```
+The code is `request.sequence_not_found`. Its identifier preview and original request position identify the rejected request.
 
 Work through these checks in order:
 
@@ -94,9 +84,7 @@ Review [Coordinates and sequence names](Coordinates-and-Sequence-Names).
 
 ## Protein reverse-complement error
 
-```text
-error: reverse complement is not defined for protein sequences: NAME (classified from up to 256 bases)
-```
+The code is `transform.complement_on_protein`. The report retains the selected transform and the shared classifier's observed sample facts.
 
 Use `--reverse-only` only when simple byte reversal is the intended operation. Otherwise remove the complement-based flag or correct the source classification problem.
 
@@ -129,15 +117,15 @@ Use `--strict` when warnings must fail automation:
 z-fasta validate --strict genome.fa
 ```
 
-## Validate stopped after 10000 events
+## Validate retained 10000 examples
 
-The report is incomplete, though scanning and counts continued. Fix the visible problem class and rerun. JSON summary includes `truncated: true`.
+Scanning and legacy kind counts continued, but additional event examples were omitted. JSON includes `truncated: true`. Without fix, the existing cap policy returns exit 1. With fix, a permitted rewrite can finish and the remaining findings select the status.
 
-With `--fix`, a complete rewrite can still finish, but stderr warns that retained examples were capped.
+Text mode says the retained examples were capped. Machine error mode omits that prose notice; inspect the v1 report's truncation field and the actual status. This is not a new coded biological failure.
 
 ## Fix refuses the file
 
-Fix cannot repair no-sequence, duplicate-name, or null-byte errors. Resolve those in the source.
+Fix cannot repair no-sequence, duplicate-name, or null-byte errors. It also refuses non-null content before the first header instead of discarding it. Resolve those in the source.
 
 Invalid alphabet bytes require either source correction, a correct `--custom-alphabet`, or an explicit format-only decision:
 
@@ -149,7 +137,9 @@ The invalid bytes remain and still affect exit status.
 
 ## Fix refuses the output path
 
-z-fasta does not overwrite the input, including an alternate path spelling or symlink that resolves to the same existing file. Choose a distinct destination.
+`repair.output_is_input` rejects the same existing file, including alternate path spellings and symlinks. `repair.output_identity_unknown` refuses publication when the required comparison cannot be completed. Choose a destination whose identity can be checked.
+
+A separate hard-link destination can be atomically replaced without modifying the input inode. Refused repair preserves an existing destination. Observed source size or mtime changes before publication produce `input.changed`; this check does not prove byte-for-byte identity.
 
 ## File is empty or not FASTA
 

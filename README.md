@@ -72,6 +72,8 @@ The Wiki holds the details that would otherwise bury this page:
 
 [Index formats](https://github.com/eneskemalergin/z-fasta/wiki/Index-Formats) | [Coordinates and names](https://github.com/eneskemalergin/z-fasta/wiki/Coordinates-and-Sequence-Names) | [Limits](https://github.com/eneskemalergin/z-fasta/wiki/Limits-and-Supported-Formats) | [Recipes](https://github.com/eneskemalergin/z-fasta/wiki/Recipes) | [Troubleshooting](https://github.com/eneskemalergin/z-fasta/wiki/Troubleshooting)
 
+[Error diagnostics](wiki/Error-Diagnostics.md) describes coded text, JSON stderr reports, exit policies and native callers.
+
 ## Performance
 
 Selected warm-cache results for v0.3.4, measured on 2026-10-07 with an AMD Ryzen 9 3950X, are shown below. Lower is better. The generated summaries keep elapsed time beside process memory; the linked reports contain the complete methods, field coverage, scaling, correctness checks, and peer definitions.

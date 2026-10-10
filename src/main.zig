@@ -13,7 +13,7 @@ pub const validator = @import("validator.zig");
 const diagnostics = index_format.diagnostics;
 pub const reporting = @import("reporting.zig");
 
-const VERSION = "0.3.4";
+const VERSION = "0.3.5";
 const STRAND_AWARE_FLAG = "--strand-aware";
 const STRAND_AWARE_ALIAS = "--honor-strand";
 const RC_FLAG = "--rc";

@@ -12,6 +12,8 @@ Zebrac is Linux-only. It is similar to `hyperfine`, but it also records process 
 - [GET benchmark report](get/REPORT.md)
 - [Stats benchmark report](stats/REPORT.md)
 
+The published reports and figures currently describe the measured 0.3.4 runs. They are not measurements of the 0.3.5 source candidate.
+
 Each report describes its own methods, field coverage, correctness checks, measurements, and figures. The suites do not all compare the same operation: stats has complete wrapper lanes and partial SeqKit/Seqtk reference lanes, while GET and index have their own compatibility limits.
 
 ## How to run
@@ -31,8 +33,8 @@ bash bench/stats/run.sh
 
 # Correctness only
 bash bench/index/run.sh --skip-benchmarks --skip-messy --skip-report
-bash bench/get/run.sh --skip-benchmarks --skip-report
-bash bench/stats/run.sh --skip-benchmarks --skip-report
+bash bench/get/run.sh --skip-benchmarks --skip-messy --skip-report
+bash bench/stats/run.sh --skip-benchmarks --skip-messy --skip-report
 ```
 
 Each suite has one entrypoint: `bash bench/<index|get|stats>/run.sh`. It runs correctness first, then optional zebrac measurements, then writes `REPORT.md`. The suites have different default sample counts and warmups, so check `--help` or the generated report when those details matter.
@@ -42,6 +44,31 @@ The benchmark scripts resolve commands from `tools/bin/` by default. Set `SAMTOO
 The v0.3.4 refresh uses Zig 0.16.0 and zebrac 0.6.2 from `PATH`, with `ZEBRAC="$(command -v zebrac)"` passed to each suite. Index, GET, and stats run in that order without overlapping measurements. Each main section uses five measured samples, three warmups, and a 5,000 ms budget per command. Messy sections retain their separately documented sampling settings.
 
 The common skips are `--skip-tests` (`--skip-verify`), `--skip-benchmarks` (`--skip-perf`), `--skip-report`, and `--skip-messy`. The last one skips messy performance work only. It does not skip messy correctness cases.
+
+## Refresh reports for a new version
+
+Finish executable changes and run the correctness checks before collecting the release measurements. Build the selected source and check the actual executable version:
+
+```bash
+git rev-parse HEAD
+zig version
+zig build -Doptimize=ReleaseFast -Dstrip=true
+zig-out/bin/z-fasta --version
+```
+
+Record the committed source, whether it has local changes, binary identity, compiler, build mode, host, input identities and runner settings with the results. The suite manifests record tool versions and sampling settings; they do not alone identify the source commit or prove that the executable matches it. For a comparison, build the earlier source separately and use the same host, inputs and modes. Preserve slower or larger results as well as favorable ones.
+
+Run the full suites sequentially, with the verified zebrac executable:
+
+```bash
+ZEBRAC=$(command -v zebrac) bash bench/index/run.sh
+ZEBRAC=$(command -v zebrac) bash bench/get/run.sh
+ZEBRAC=$(command -v zebrac) bash bench/stats/run.sh
+```
+
+Check each command's exit status before starting the next suite. Review its manifest, output checks, complete workload set and report before updating README or Wiki summaries. Keep units and measured populations consistent between tables and figures. Do not relabel an older report as the new version. If executable code or the measurement method changes afterward, repeat the affected checks and measurements before regenerating its report.
+
+The correctness-only commands above disable both ordinary and messy measurements and report generation. They cannot supply timing, RSS, allocation, stack or binary-size evidence for a report refresh. For the 0.3.5 candidate, those measurements remain uncollected here; the existing 0.3.4 reports remain the measured results.
 
 ## How the tools are built
 

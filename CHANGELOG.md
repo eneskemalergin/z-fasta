@@ -4,9 +4,28 @@
 
 All notable changes to z-fasta will be documented in this file.
 
-## Unreleased
+## [0.3.5]
 
-Planned to improve `validate` module, possibly work on scan based alternatives for get, stats, and other options (bypass indexing or using indexed files etc.)
+The `.zfi` file format and valid `.fai` rows are unchanged. **Re-index not required.** Existing successful FASTA, FAI, statistics and validator JSON v1 output keeps its format.
+
+### Added
+
+- Stable symbolic error codes and typed observed facts for CLI usage, input/output, index loading, indexing, GET/BED, statistics and validation operations. Reusable command functions return finite errors with caller-owned diagnostic storage instead of printing or terminating the caller.
+- `--error-format=text` and `--error-format=json`, before the command or among its arguments. Machine failures use one newline-terminated v2 JSON stderr object with catalog revision `0.3.5-1`, primary and bounded secondary failures, source roles, original locations, native causes and separate output states.
+- Reversible UTF-8/base64 encoding for operational diagnostic byte previews, explicit truncation and decimal-string wide integers. Requested GET machine summaries use the same envelope; validation findings retain JSON v1.
+- Error-diagnostics documentation and separate native-caller, machine-consumer and delivery-failure checks.
+
+### Changed
+
+- Default stderr errors use coded text with escaped, bounded paths/identifiers and hints. Required success notices, help/version writes, final flushes, publication and observable cleanup affect the final status when they fail.
+- Loader and request failures retain their original input positions and specific observed reasons across full and matched loading, streamed batches and deferred indexing work. Primary failures survive later cleanup or reporting failures.
+- Validator text escapes opaque names and describes the 10000-example retention cap without claiming scanning stopped. Machine error mode omits the prose cap notice; existing v1 counts, truncation and warning/strict/cap statuses remain unchanged.
+
+### Fixed
+
+- FAI parsing rejects a missing required column instead of shifting later fields into it, including long rows. Valid leading-zero decimals and ignored trailing columns remain accepted.
+- Repair refuses non-null content before the first header instead of silently dropping it. Required unresolved output identity and observed source size/mtime changes prevent publication, preserving an existing destination. Separate hard-link destinations remain safe to replace; input aliases remain refused.
+- Failed required stdout or stderr delivery returns failure, including help/version and post-work notices. Broken report sinks receive no recursive report attempt.
 
 ## [0.3.4] - 2026-10-07
 

@@ -14,7 +14,7 @@ Clean input prints:
 OK: no issues found
 ```
 
-Reports go to stdout. Fatal command, mapping, write, or truncation diagnostics go to stderr.
+Findings go to stdout. Operational command, mapping and write failures go to stderr. `--error-format=json` selects coded operational reports; it leaves v1 findings and warning statuses unchanged. See [Error diagnostics](Error-Diagnostics).
 
 ## What validate checks
 
@@ -73,7 +73,7 @@ The default header warning threshold is 1024 bytes after `>`, including descript
 z-fasta validate --json genome.fa
 ```
 
-Each retained event becomes one `schema_version: v1` JSON object. Invalid UTF-8 header bytes are escaped so the output remains valid UTF-8 JSON.
+Each retained event becomes one `schema_version: v1` JSON object. Invalid UTF-8 header bytes are escaped so the output remains valid UTF-8 JSON. This legacy escaping is not a reversible encoding of arbitrary original bytes; use v2 opaque-byte objects for operational diagnostic previews.
 
 ## One JSON summary
 
@@ -119,7 +119,7 @@ Fix normalizes:
 Each record uses its modal observed non-empty line width. A frequency tie chooses the width seen first. Empty records default to width 60 but remain empty.
 
 > [!WARNING]
-> Fix never overwrites the input, including an alternate path that resolves to the same existing file. It writes a separate destination through atomic replacement.
+> Fix never overwrites the input, including an alternate path that resolves to the same existing file. It writes a separate destination through atomic replacement. Publication is refused if required output identity is unknown or an observed source size or mtime changes. Those observations do not prove byte-for-byte source identity. A refusal preserves the previous destination; replacing a separate hard-link path leaves the input inode intact.
 
 ## What fix refuses
 
@@ -127,7 +127,8 @@ Fix always refuses:
 
 - no sequences;
 - duplicate identifiers;
-- null bytes.
+- null bytes;
+- non-null content before the first header, because the rewrite cannot preserve it.
 
 Invalid alphabet bytes also block fix unless you choose format-only repair:
 
@@ -147,7 +148,9 @@ After a successful fix, the exit code ignores only the five warnings the rewrite
 
 At most 10000 event objects are retained. Scanning, kind counts, late fix blockers, and rewrite-width collection continue after that cap.
 
-Without `--fix`, a truncated report ends with a fatal diagnostic asking you to fix the visible issues and rerun. With `--fix`, the complete rewrite is written and stderr warns that the event list was truncated.
+Without `--fix`, truncation returns exit 1 under the existing cap policy. With `--fix`, a permitted complete rewrite can finish, and remaining findings select its status. Text mode reports capped examples without claiming scanning stopped. Machine error mode omits that prose notice; v1 JSON retains `truncated: true`.
+
+Counts keep their legacy units: invalid-symbol events count distinct invalid byte values across the input, not every occurrence; null-byte events count at most once per affected line. Empty input reports the legacy no-sequences error and missing-terminal-newline warning. These reports do not claim full header-schema validation or a fixed total memory bound.
 
 ## Safe normalization workflow
 

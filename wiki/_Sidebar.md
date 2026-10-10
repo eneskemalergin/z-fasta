@@ -27,6 +27,7 @@
 **Solve a problem**
 
 - [Recipes](Recipes)
+- [Error diagnostics](Error-Diagnostics)
 - [Troubleshooting](Troubleshooting)
 - [FAQ](FAQ)
 

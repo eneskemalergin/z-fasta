@@ -69,10 +69,12 @@ z-fasta --help
 z-fasta --version
 ```
 
-Expected version output:
+The archive examples above use the published 0.3.4 release. Expected output for that archive:
 
 ```text
 z-fasta 0.3.4
 ```
+
+The 0.3.5 source candidate prints `z-fasta 0.3.5`. Match the printed version to the archive or checkout you selected.
 
 Next: [Getting started](Getting-Started).
