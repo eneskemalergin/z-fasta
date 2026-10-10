@@ -30,17 +30,6 @@ pub const ParseResult = union(enum) {
     region: Region,
 };
 
-fn parseStrand(field: []const u8) Strand {
-    if (field.len == 0) return .forward;
-    if (field.len != 1) return .invalid;
-
-    return switch (field[0]) {
-        '+', '.' => .forward,
-        '-' => .reverse,
-        else => .invalid,
-    };
-}
-
 /// Parses a BED row and records precise field failures in caller-owned storage.
 /// `at` identifies the original row; offsets and columns are byte locations.
 /// The caller initializes `failure` once for the operation. This helper does
@@ -73,6 +62,25 @@ pub fn parseBedLineChecked(
 /// from `line`. Invalid strands are retained for the caller to accept or reject.
 pub fn parseBedLine(line: []const u8) ParseError!ParseResult {
     return parseLine(line, .{});
+}
+
+/// Borrows a chromosome for lookup collection. Output callers still parse the complete row.
+pub fn requestChrom(line: []const u8) ?[]const u8 {
+    const trimmed = requestLine(line) orelse return null;
+    const end = std.mem.findScalar(u8, trimmed, '\t') orelse trimmed.len;
+    if (end == 0) return null;
+    return trimmed[0..end];
+}
+
+fn parseStrand(field: []const u8) Strand {
+    if (field.len == 0) return .forward;
+    if (field.len != 1) return .invalid;
+
+    return switch (field[0]) {
+        '+', '.' => .forward,
+        '-' => .reverse,
+        else => .invalid,
+    };
 }
 
 const BedDiagnostics = struct {
@@ -186,14 +194,6 @@ fn parseLine(line: []const u8, diag: BedDiagnostics) ParseError!ParseResult {
         .end_1based = end_0based,
         .strand = strand,
     } };
-}
-
-/// Borrows a chromosome for lookup collection. Output callers still parse the complete row.
-pub fn requestChrom(line: []const u8) ?[]const u8 {
-    const trimmed = requestLine(line) orelse return null;
-    const end = std.mem.findScalar(u8, trimmed, '\t') orelse trimmed.len;
-    if (end == 0) return null;
-    return trimmed[0..end];
 }
 
 fn requestLine(line: []const u8) ?[]const u8 {

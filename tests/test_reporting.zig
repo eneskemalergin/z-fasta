@@ -1,13 +1,65 @@
 //! Renderer output, byte identity, limits, and failure delivery checks.
 
 const std = @import("std");
-const testing = std.testing;
+
 const diagnostics = @import("diagnostics");
 const reporting = @import("reporting");
+
+const testing = std.testing;
 
 fn object(value: std.json.Value, name: []const u8) std.json.Value {
     return value.object.get(name).?;
 }
+
+const LONG_CAUSE = error.@"\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01long_error_name";
+
+fn largest(comptime T: type, preview: diagnostics.Preview) T {
+    if (T == diagnostics.Preview) return preview;
+    if (T == diagnostics.Cause) return .{ .zig = LONG_CAUSE };
+    if (T == diagnostics.Arguments) return .initFull();
+    if (T == diagnostics.Measurement) return .{ .at_least = std.math.maxInt(u128) };
+    if (T == diagnostics.TempAttempts) {
+        var attempts: T = .{};
+        for (0..diagnostics.TEMP_ATTEMPT_LIMIT) |_| attempts.append(largest(diagnostics.TempAttempt, preview));
+        attempts.truncated = true;
+        return attempts;
+    }
+    if (T == diagnostics.Eof) return .{ .delimiter = .{ .delimiter = 255, .observed_bytes = .{ .at_least = std.math.maxInt(u128) } } };
+    if (T == diagnostics.Blocker) return .{ .invalid_symbol = largest(diagnostics.InvalidSymbol, preview) };
+    return switch (@typeInfo(T)) {
+        .void => {},
+        .bool => true,
+        .int => |integer| if (integer.signedness == .signed) std.math.minInt(T) else std.math.maxInt(T),
+        .optional => |optional| largest(optional.child, preview),
+        .array => @splat(1),
+        .@"enum" => |enumeration| blk: {
+            comptime var longest = enumeration.fields[0];
+            inline for (enumeration.fields) |member| {
+                if (member.name.len > longest.name.len) longest = member;
+            }
+            break :blk @enumFromInt(longest.value);
+        },
+        .@"struct" => blk: {
+            var value: T = undefined;
+            inline for (std.meta.fields(T)) |member| @field(value, member.name) = largest(member.type, preview);
+            break :blk value;
+        },
+        else => @compileError("add a bounded renderer fixture for " ++ @typeName(T)),
+    };
+}
+
+const BrokenWriter = struct {
+    writer: std.Io.Writer,
+    calls: usize = 0,
+
+    fn drain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        _ = data;
+        _ = splat;
+        const self: *BrokenWriter = @fieldParentPtr("writer", writer);
+        self.calls += 1;
+        return error.WriteFailed;
+    }
+};
 
 test "[unit] - [reporting]: file output states distinguish abort from staging and publication" {
     inline for (.{ .not_started, .staged, .aborted, .published, .streaming, .unknown }, [_][]const u8{ "not_started", "staged", "aborted", "published", "streaming", "unknown" }) |state, expected| {
@@ -119,43 +171,6 @@ test "[unit] - [reporting]: requested metrics stay strings and acceptance is sup
     try testing.expect(!object(rejected.value, "accepted").bool);
 }
 
-const LONG_CAUSE = error.@"\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01long_error_name";
-
-fn largest(comptime T: type, preview: diagnostics.Preview) T {
-    if (T == diagnostics.Preview) return preview;
-    if (T == diagnostics.Cause) return .{ .zig = LONG_CAUSE };
-    if (T == diagnostics.Arguments) return .initFull();
-    if (T == diagnostics.Measurement) return .{ .at_least = std.math.maxInt(u128) };
-    if (T == diagnostics.TempAttempts) {
-        var attempts: T = .{};
-        for (0..diagnostics.TEMP_ATTEMPT_LIMIT) |_| attempts.append(largest(diagnostics.TempAttempt, preview));
-        attempts.truncated = true;
-        return attempts;
-    }
-    if (T == diagnostics.Eof) return .{ .delimiter = .{ .delimiter = 255, .observed_bytes = .{ .at_least = std.math.maxInt(u128) } } };
-    if (T == diagnostics.Blocker) return .{ .invalid_symbol = largest(diagnostics.InvalidSymbol, preview) };
-    return switch (@typeInfo(T)) {
-        .void => {},
-        .bool => true,
-        .int => |integer| if (integer.signedness == .signed) std.math.minInt(T) else std.math.maxInt(T),
-        .optional => |optional| largest(optional.child, preview),
-        .array => @splat(1),
-        .@"enum" => |enumeration| blk: {
-            comptime var longest = enumeration.fields[0];
-            inline for (enumeration.fields) |member| {
-                if (member.name.len > longest.name.len) longest = member;
-            }
-            break :blk @enumFromInt(longest.value);
-        },
-        .@"struct" => blk: {
-            var value: T = undefined;
-            inline for (std.meta.fields(T)) |member| @field(value, member.name) = largest(member.type, preview);
-            break :blk value;
-        },
-        else => @compileError("add a bounded renderer fixture for " ++ @typeName(T)),
-    };
-}
-
 test "[property] - [reporting]: every code fits both budgets with full sources and secondaries" {
     @setEvalBranchQuota(100000);
     var failure: diagnostics.Failure = undefined;
@@ -221,19 +236,6 @@ test "[edge] - [reporting]: typed exceptional encodings retain read kind and blo
     const policy = object(object(repair, "blocker"), "policy");
     try testing.expectEqualStrings("256", object(object(policy, "sample"), "symbols").string);
 }
-
-const BrokenWriter = struct {
-    writer: std.Io.Writer,
-    calls: usize = 0,
-
-    fn drain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-        _ = data;
-        _ = splat;
-        const self: *BrokenWriter = @fieldParentPtr("writer", writer);
-        self.calls += 1;
-        return error.WriteFailed;
-    }
-};
 
 test "[failure] - [reporting]: writes and late flush fail once without changing the original result" {
     var failure: diagnostics.Failure = undefined;

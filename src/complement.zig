@@ -2,6 +2,26 @@
 
 const std = @import("std");
 
+/// Returns the IUPAC complement for one byte.
+/// Unknown bytes pass through unchanged.
+pub fn complement(byte: u8) u8 {
+    return IUPAC_COMPLEMENT_TABLE[byte];
+}
+
+/// Write the IUPAC complement of `src` into `dst`; asserts equal lengths.
+pub fn complementInto(dst: []u8, src: []const u8) void {
+    std.debug.assert(dst.len == src.len);
+    var i: usize = 0;
+    while (src.len - i >= 32) : (i += 32) {
+        inline for (0..32) |j| {
+            dst[i + j] = IUPAC_COMPLEMENT_TABLE[src[i + j]];
+        }
+    }
+    while (i < src.len) : (i += 1) {
+        dst[i] = IUPAC_COMPLEMENT_TABLE[src[i]];
+    }
+}
+
 fn setPair(table: *[256]u8, left: u8, right: u8) void {
     table[left] = right;
     table[right] = left;
@@ -33,26 +53,6 @@ fn buildComplementTable() [256]u8 {
 }
 
 const IUPAC_COMPLEMENT_TABLE: [256]u8 = buildComplementTable();
-
-/// Returns the IUPAC complement for one byte.
-/// Unknown bytes pass through unchanged.
-pub fn complement(byte: u8) u8 {
-    return IUPAC_COMPLEMENT_TABLE[byte];
-}
-
-/// Write the IUPAC complement of `src` into `dst`; asserts equal lengths.
-pub fn complementInto(dst: []u8, src: []const u8) void {
-    std.debug.assert(dst.len == src.len);
-    var i: usize = 0;
-    while (src.len - i >= 32) : (i += 32) {
-        inline for (0..32) |j| {
-            dst[i + j] = IUPAC_COMPLEMENT_TABLE[src[i + j]];
-        }
-    }
-    while (i < src.len) : (i += 1) {
-        dst[i] = IUPAC_COMPLEMENT_TABLE[src[i]];
-    }
-}
 
 test "[unit] - [complement]: maps IUPAC symbols and preserves other bytes" {
     const pairs = [_][2]u8{

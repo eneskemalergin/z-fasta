@@ -13,6 +13,45 @@ fn retainTemporaryLabel(failure: *diagnostics.Failure) void {
     @memset(&local_path, 'x');
 }
 
+fn writeFailure(stage: diagnostics.Stage, cause: anyerror) diagnostics.Diagnostic {
+    return .{
+        .details = .{ .@"io.write_failed" = {} },
+        .stage = stage,
+        .at = .{ .source = .stdout },
+        .cause = .{ .zig = cause },
+    };
+}
+
+fn allocationCheck(allocator: std.mem.Allocator) !void {
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.stats);
+    const first = allocator.alloc(u8, 8) catch |err| {
+        try testing.expect(failure.fail(.{
+            .details = .{ .@"resource.out_of_memory" = .{ .allocation_role = .names, .requested_bytes = 8 } },
+            .stage = .allocate,
+            .cause = .{ .zig = err },
+        }) == error.OutOfMemory);
+        try testing.expect(failure.primary().?.cause.?.zig == error.OutOfMemory);
+        return err;
+    };
+    defer allocator.free(first);
+    const second = allocator.alloc(u8, 16) catch |err| {
+        try testing.expect(failure.fail(.{
+            .details = .{ .@"resource.out_of_memory" = .{ .allocation_role = .records, .requested_bytes = 16 } },
+            .stage = .allocate,
+            .cause = .{ .zig = err },
+        }) == error.OutOfMemory);
+        try testing.expect(failure.primary().?.details.@"resource.out_of_memory".requested_bytes.? == 16);
+        const count = std.math.maxInt(u64);
+        try testing.expectError(error.OutOfMemory, diagnostics.oneBased(&failure, count, .{}));
+        try testing.expect(failure.secondaryItems()[0].code() == .@"resource.count_overflow");
+        return err;
+    };
+    defer allocator.free(second);
+    failure.succeed();
+    try testing.expect(failure.primary() == null and failure.complete);
+}
+
 test "[unit] - [diagnostics]: copied source labels survive cleanup and failure moves" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.index);
@@ -86,14 +125,6 @@ test "[failure] - [diagnostics]: deferred failure survives success and yields to
     try testing.expect(failure.primary().?.code() == .@"resource.count_overflow");
     try testing.expect(failure.secondaryItems()[0].cause.?.zig == error.NoSpaceLeft);
     try testing.expect(failure.secondaryItems()[1].stage == .flush);
-}
-fn writeFailure(stage: diagnostics.Stage, cause: anyerror) diagnostics.Diagnostic {
-    return .{
-        .details = .{ .@"io.write_failed" = {} },
-        .stage = stage,
-        .at = .{ .source = .stdout },
-        .cause = .{ .zig = cause },
-    };
 }
 
 test "[unit] - [diagnostics]: findings and unfinished work retain separate meanings" {
@@ -366,36 +397,6 @@ test "[edge] - [diagnostics]: temporary attempts and native causes are bounded" 
     try testing.expect(attempts.truncated);
     try testing.expectEqual(@as(u32, 13), attempts.items()[0].cause.?.native.number);
     try testing.expectEqual(@as(u32, 16), attempts.items()[3].cause.?.native.number);
-}
-
-fn allocationCheck(allocator: std.mem.Allocator) !void {
-    var failure: diagnostics.Failure = undefined;
-    failure.reset(.stats);
-    const first = allocator.alloc(u8, 8) catch |err| {
-        try testing.expect(failure.fail(.{
-            .details = .{ .@"resource.out_of_memory" = .{ .allocation_role = .names, .requested_bytes = 8 } },
-            .stage = .allocate,
-            .cause = .{ .zig = err },
-        }) == error.OutOfMemory);
-        try testing.expect(failure.primary().?.cause.?.zig == error.OutOfMemory);
-        return err;
-    };
-    defer allocator.free(first);
-    const second = allocator.alloc(u8, 16) catch |err| {
-        try testing.expect(failure.fail(.{
-            .details = .{ .@"resource.out_of_memory" = .{ .allocation_role = .records, .requested_bytes = 16 } },
-            .stage = .allocate,
-            .cause = .{ .zig = err },
-        }) == error.OutOfMemory);
-        try testing.expect(failure.primary().?.details.@"resource.out_of_memory".requested_bytes.? == 16);
-        const count = std.math.maxInt(u64);
-        try testing.expectError(error.OutOfMemory, diagnostics.oneBased(&failure, count, .{}));
-        try testing.expect(failure.secondaryItems()[0].code() == .@"resource.count_overflow");
-        return err;
-    };
-    defer allocator.free(second);
-    failure.succeed();
-    try testing.expect(failure.primary() == null and failure.complete);
 }
 
 test "[failure] - [diagnostics]: every partial allocation cleans up without diagnostic allocation" {

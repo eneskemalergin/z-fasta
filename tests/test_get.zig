@@ -5,6 +5,7 @@
 const std = @import("std");
 const main = @import("main");
 const utility = @import("utility.zig");
+
 const parseRegion = main.getter.parseRegion;
 fn resolveRegion(idx: *const main.index_format.LoadedIndex, input: []const u8) !main.getter.ResolvedRegion {
     var failure: main.index_format.diagnostics.Failure = undefined;
@@ -20,6 +21,23 @@ const uniqueArtifactPath = utility.uniqueArtifactPath;
 const writeFastaArtifact = utility.writeFastaArtifact;
 const writeZfi = utility.writeZfi;
 const captureExtractRegion = utility.captureExtractRegion;
+
+const GET_USAGE_STDERR = "error [usage.missing_argument] get: A required argument is missing. argument=request_source\nhint: Correct the command arguments; use --help for accepted options.\n";
+
+fn checkGetOperationAllocations(allocator: std.mem.Allocator, source: main.getter.RequestSource) !void {
+    const diagnostics = main.index_format.diagnostics;
+    var failure: diagnostics.Failure = undefined;
+    _ = main.getter.runGetWithOptions(allocator, io, "tests/data/simple.fasta", .{ .source = source }, &failure) catch |err| {
+        if (err == error.OutOfMemory) {
+            try std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", failure.primary().?.code());
+            return err;
+        }
+        try std.testing.expectEqual(error.InvalidRequest, err);
+        try std.testing.expectEqual(diagnostics.Code.@"request.sequence_not_found", failure.primary().?.code());
+        return;
+    };
+    return error.UnexpectedSuccess;
+}
 
 test "[unit] - [region parser]: distinguishes literal names and rightmost coordinate suffixes" {
     const Case = struct {
@@ -133,7 +151,6 @@ test "[integration] - [region resolution]: accepts a 200-byte identifier" {
 }
 
 // --- Index-backed get fixtures ---
-
 test "[property] - [get extraction]: zfi and fai match across uniform FASTA lines" {
     const data = @embedFile("data/simple.fasta");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -265,8 +282,6 @@ test "[cli] - [get help]: describes the request source contract" {
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Choose exactly one request source") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Names and BED input stream.") != null);
 }
-
-const GET_USAGE_STDERR = "error [usage.missing_argument] get: A required argument is missing. argument=request_source\nhint: Correct the command arguments; use --help for accepted options.\n";
 
 test "[cli] - [get]: rejects unknown options regardless of position" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -958,21 +973,6 @@ test "[cli] - [GET abort]: discards pending stdout after a later malformed BED r
     const expected_delivery = try std.fmt.allocPrint(allocator, "error [request.bed.field_missing] get: \"zig-cache/test-artifacts\" ({d} bytes):8193 column=5 offset=73732 request=8193: A required BED field is missing or empty. field=start column_number=2\nhint: Correct the reported request or select the intended index.\n", .{path.len});
     defer allocator.free(expected_delivery);
     try utility.expectCliResult(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--bed", path, "--summary" }, 1, expected.written()[0..65537], expected_delivery);
-}
-
-fn checkGetOperationAllocations(allocator: std.mem.Allocator, source: main.getter.RequestSource) !void {
-    const diagnostics = main.index_format.diagnostics;
-    var failure: diagnostics.Failure = undefined;
-    _ = main.getter.runGetWithOptions(allocator, io, "tests/data/simple.fasta", .{ .source = source }, &failure) catch |err| {
-        if (err == error.OutOfMemory) {
-            try std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", failure.primary().?.code());
-            return err;
-        }
-        try std.testing.expectEqual(error.InvalidRequest, err);
-        try std.testing.expectEqual(diagnostics.Code.@"request.sequence_not_found", failure.primary().?.code());
-        return;
-    };
-    return error.UnexpectedSuccess;
 }
 
 test "[failure] - [GET operation]: releases allocation failures in positional and cached file modes" {

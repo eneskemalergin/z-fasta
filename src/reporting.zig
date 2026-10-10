@@ -7,8 +7,6 @@ const diagnostics = @import("diagnostics");
 
 pub const TEXT_BYTES_LIMIT = 4096;
 pub const JSON_BYTES_LIMIT = 16384;
-const SOURCE_PREFIX_BYTES = 48;
-const CAUSE_PREFIX_BYTES = 32;
 
 pub const GetMetrics = struct { region_count: u64, total_bases: u64, elapsed_ns: u64 };
 
@@ -126,6 +124,22 @@ pub fn writeText(writer: *std.Io.Writer, failure: *const diagnostics.Failure) st
     if (failure.secondary_truncated) try writer.writeAll("Further secondary failures were omitted.\n");
     try writer.print("hint: {s}\n", .{actionText(diagnostics.metadata(primary.code()).action)});
 }
+
+/// Writes printable ASCII verbatim and escapes controls, opaque bytes, quotes
+/// and backslashes without adding enclosing quotes. Does not allocate.
+pub fn writeEscapedBytes(writer: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Error!void {
+    for (bytes) |byte| switch (byte) {
+        '"', '\\' => {
+            try writer.writeByte('\\');
+            try writer.writeByte(byte);
+        },
+        0x20...0x21, 0x23...0x5b, 0x5d...0x7e => try writer.writeByte(byte),
+        else => try writer.print("\\x{x:0>2}", .{byte}),
+    };
+}
+
+const SOURCE_PREFIX_BYTES = 48;
+const CAUSE_PREFIX_BYTES = 32;
 
 fn field(json: *std.json.Stringify, name: []const u8, value: anytype) std.Io.Writer.Error!void {
     try json.objectField(name);
@@ -363,19 +377,6 @@ fn actionSource(diagnostic: *const diagnostics.Diagnostic) ?diagnostics.SourceId
     return switch (diagnostics.metadata(diagnostic.code()).action) {
         .rebuild_index => .fasta,
         else => diagnostic.at.source,
-    };
-}
-
-/// Writes printable ASCII verbatim and escapes controls, opaque bytes, quotes
-/// and backslashes without adding enclosing quotes. Does not allocate.
-pub fn writeEscapedBytes(writer: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Error!void {
-    for (bytes) |byte| switch (byte) {
-        '"', '\\' => {
-            try writer.writeByte('\\');
-            try writer.writeByte(byte);
-        },
-        0x20...0x21, 0x23...0x5b, 0x5d...0x7e => try writer.writeByte(byte),
-        else => try writer.print("\\x{x:0>2}", .{byte}),
     };
 }
 

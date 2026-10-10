@@ -6,8 +6,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const main = @import("main");
-const diagnostics = main.index_format.diagnostics;
+
 const utility = @import("utility.zig");
+
+const diagnostics = main.index_format.diagnostics;
+
 const ZFASTA_BIN = utility.ZFASTA_BIN;
 const expectCliFailure = utility.expectCliFailure;
 const expectCliResult = utility.expectCliResult;
@@ -381,8 +384,80 @@ fn expectCorruptFaiFixture(allocator: std.mem.Allocator, stem: []const u8) !void
     try std.testing.expectError(error.CorruptIndex, loadIndexChecked(std.testing.allocator, io, paths.fasta_path));
 }
 
-// --- FASTA reader tests ---
+fn expectIndexLoadCode(allocator: std.mem.Allocator, path: []const u8, mode: main.index_format.LoadMode, code: diagnostics.Code, failure: *diagnostics.Failure) !void {
+    failure.reset(.get);
+    if (main.index_format.loadIndexCheckedWithMode(allocator, io, path, mode, failure)) |loaded| {
+        var unexpected = loaded;
+        unexpected.deinit();
+        return error.ExpectedIndexFailure;
+    } else |err| {
+        try std.testing.expectEqual(diagnostics.metadata(code).returned_error, err);
+        try std.testing.expectEqual(code, failure.primary().?.code());
+        try std.testing.expect(!failure.complete);
+    }
+}
 
+fn failIndexRead(_: ?*anyopaque, _: std.Io.File, _: []const []u8, _: u64) std.Io.File.ReadPositionalError!usize {
+    return error.InputOutput;
+}
+
+fn shortIndexRead(_: ?*anyopaque, _: std.Io.File, _: []const []u8, _: u64) std.Io.File.ReadPositionalError!usize {
+    return 0;
+}
+
+fn failIndexStat(_: ?*anyopaque, _: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
+    return error.AccessDenied;
+}
+
+fn failIndexCreate(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir.CreateFileAtomicOptions) std.Io.Dir.CreateFileAtomicError!std.Io.File.Atomic {
+    return error.AccessDenied;
+}
+
+fn failIndexWrite(_: ?*anyopaque, _: std.Io.File, _: []const u8, _: []const []const u8, _: usize, _: u64) std.Io.File.WritePositionalError!usize {
+    return error.NoSpaceLeft;
+}
+
+fn failIndexPublish(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir, _: []const u8) std.Io.Dir.RenameError!void {
+    return error.AccessDenied;
+}
+
+fn disappearIndexSource(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
+    return error.FileNotFound;
+}
+
+fn failIndexSpoolCreate(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir.CreateFileOptions) std.Io.File.OpenError!std.Io.File {
+    return error.AccessDenied;
+}
+
+fn failIndexCleanup(_: ?*anyopaque, _: std.Io.Dir, _: []const u8) std.Io.Dir.DeleteFileError!void {
+    return error.AccessDenied;
+}
+
+fn discardIndexStdout(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+    switch (operation) {
+        .file_write_streaming => |write| {
+            var bytes = write.header.len;
+            for (write.data, 0..) |part, i| bytes += part.len * (if (i + 1 == write.data.len) write.splat else 1);
+            return .{ .file_write_streaming = bytes };
+        },
+        else => return std.testing.io.vtable.operate(userdata, operation),
+    }
+}
+
+fn failIndexStdout(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+    switch (operation) {
+        .file_write_streaming => return .{ .file_write_streaming = error.BrokenPipe },
+        else => return std.testing.io.vtable.operate(userdata, operation),
+    }
+}
+
+fn expectIndexRunCode(faulty_io: std.Io, path: []const u8, emit_fai: bool, code: diagnostics.Code, failure: *diagnostics.Failure) !void {
+    try std.testing.expectError(diagnostics.metadata(code).returned_error, main.indexer.runIndex(faulty_io, .empty, path, .{ .emit_fai = emit_fai }, failure));
+    try std.testing.expectEqual(code, failure.primary().?.code());
+    try std.testing.expect(!failure.complete);
+}
+
+// --- FASTA reader tests ---
 test "[cli] - [index]: rejects unknown options regardless of position" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -728,7 +803,6 @@ test "[fuzz] - [FASTA scanner]: returns bounded records for arbitrary bytes" {
 }
 
 // --- ZFI wire format ---
-
 test "[integration] - [ZFI writer]: creates the production layout" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -3004,7 +3078,6 @@ test "[regression] - [ZFI scanner]: preserves a header spanning the prior stride
 }
 
 // --- Stable gates fixtures ---
-
 test "[integration] - [index gates]: duplicate names keep the first occurrence" {
     try requireFixturePath("tests/data/gates/duplicates.fasta");
     const data = try readTestFile(std.testing.allocator, "tests/data/gates/duplicates.fasta");
@@ -3315,19 +3388,6 @@ test "[regression] - [FAI loader]: get and stats reject shifted empty columns" {
     try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", paths.fasta_path, "--names", names }, .@"index.fai.field_missing");
     try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", paths.fasta_path, "--bed", bed }, .@"index.fai.field_missing");
     try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "stats", paths.fasta_path }, .@"index.fai.field_missing");
-}
-
-fn expectIndexLoadCode(allocator: std.mem.Allocator, path: []const u8, mode: main.index_format.LoadMode, code: diagnostics.Code, failure: *diagnostics.Failure) !void {
-    failure.reset(.get);
-    if (main.index_format.loadIndexCheckedWithMode(allocator, io, path, mode, failure)) |loaded| {
-        var unexpected = loaded;
-        unexpected.deinit();
-        return error.ExpectedIndexFailure;
-    } else |err| {
-        try std.testing.expectEqual(diagnostics.metadata(code).returned_error, err);
-        try std.testing.expectEqual(code, failure.primary().?.code());
-        try std.testing.expect(!failure.complete);
-    }
 }
 
 test "[failure] - [index diagnostics]: FAI fields retain original rows and byte columns" {
@@ -3725,18 +3785,6 @@ test "[regression] - [index diagnostics]: name flags precede footer identity and
     }
 }
 
-fn failIndexRead(_: ?*anyopaque, _: std.Io.File, _: []const []u8, _: u64) std.Io.File.ReadPositionalError!usize {
-    return error.InputOutput;
-}
-
-fn shortIndexRead(_: ?*anyopaque, _: std.Io.File, _: []const []u8, _: u64) std.Io.File.ReadPositionalError!usize {
-    return 0;
-}
-
-fn failIndexStat(_: ?*anyopaque, _: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
-    return error.AccessDenied;
-}
-
 test "[failure] - [index diagnostics]: required reads and stats retain causes" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -3851,54 +3899,6 @@ test "[failure] - [index diagnostics]: truncation and source identity precede re
         try std.testing.expectEqual(bytes.len - 20, primary.at.location.offset.?);
         try std.testing.expectEqual(@as(i128, try statMtimeNs(paths.fasta_path)), primary.details.@"index.source_mtime_mismatch".actual_mtime_ns);
     }
-}
-
-fn failIndexCreate(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir.CreateFileAtomicOptions) std.Io.Dir.CreateFileAtomicError!std.Io.File.Atomic {
-    return error.AccessDenied;
-}
-
-fn failIndexWrite(_: ?*anyopaque, _: std.Io.File, _: []const u8, _: []const []const u8, _: usize, _: u64) std.Io.File.WritePositionalError!usize {
-    return error.NoSpaceLeft;
-}
-
-fn failIndexPublish(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir, _: []const u8) std.Io.Dir.RenameError!void {
-    return error.AccessDenied;
-}
-
-fn disappearIndexSource(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
-    return error.FileNotFound;
-}
-
-fn failIndexSpoolCreate(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir.CreateFileOptions) std.Io.File.OpenError!std.Io.File {
-    return error.AccessDenied;
-}
-
-fn failIndexCleanup(_: ?*anyopaque, _: std.Io.Dir, _: []const u8) std.Io.Dir.DeleteFileError!void {
-    return error.AccessDenied;
-}
-
-fn discardIndexStdout(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
-    switch (operation) {
-        .file_write_streaming => |write| {
-            var bytes = write.header.len;
-            for (write.data, 0..) |part, i| bytes += part.len * (if (i + 1 == write.data.len) write.splat else 1);
-            return .{ .file_write_streaming = bytes };
-        },
-        else => return std.testing.io.vtable.operate(userdata, operation),
-    }
-}
-
-fn failIndexStdout(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
-    switch (operation) {
-        .file_write_streaming => return .{ .file_write_streaming = error.BrokenPipe },
-        else => return std.testing.io.vtable.operate(userdata, operation),
-    }
-}
-
-fn expectIndexRunCode(faulty_io: std.Io, path: []const u8, emit_fai: bool, code: diagnostics.Code, failure: *diagnostics.Failure) !void {
-    try std.testing.expectError(diagnostics.metadata(code).returned_error, main.indexer.runIndex(faulty_io, .empty, path, .{ .emit_fai = emit_fai }, failure));
-    try std.testing.expectEqual(code, failure.primary().?.code());
-    try std.testing.expect(!failure.complete);
 }
 
 test "[failure] - [index diagnostics]: retains source, write, publish and comparison causes" {

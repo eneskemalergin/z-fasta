@@ -6,6 +6,65 @@ const std = @import("std");
 const diagnostics = @import("diagnostics");
 const reporting = @import("reporting");
 
+/// Used by the standalone executable and subsystem tests. All labels are owned
+/// by this caller until the failure is handled; helpers retain no stack paths.
+pub fn exercise(allocator: std.mem.Allocator) !void {
+    var failure: diagnostics.Failure = undefined;
+    const caller_path = [_]u8{ 's', 'a', 'm', 'p', 'l', 'e', '.', 'f', 'a' };
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 1 });
+    if (acquire(failing.allocator(), &failure, &caller_path, false)) |owned| {
+        owned.deinit(failing.allocator());
+        return error.ExpectedAllocationFailure;
+    } else |err| {
+        try require(err == error.OutOfMemory);
+        try require(failure.primary().?.code() == .@"resource.out_of_memory");
+        const facts = failure.primary().?.details.@"resource.out_of_memory";
+        try require(facts.allocation_role == .records and facts.requested_bytes.? == 128);
+    }
+    try require(failing.allocations == 1 and failing.deallocations == 1);
+    try require(failing.allocated_bytes == failing.freed_bytes);
+    const source = failure.sources.get(.zfi).?;
+    try require(source.label.borrowed.ptr == &caller_path and source.suffix == .zfi);
+
+    if (acquire(allocator, &failure, &caller_path, true)) |owned| {
+        owned.deinit(allocator);
+        return error.ExpectedParseFailure;
+    } else |err| {
+        try require(err == error.InvalidIndex);
+        try require(failure.primary().?.code() == .@"index.fai.invalid_integer");
+        const retained = failure.primary().?.details.@"index.fai.invalid_integer".value.?;
+        try require(std.mem.eql(u8, failure.preview(retained), "bad\xff!"));
+        try require(failure.secondaryItems().len == 1);
+        try require(failure.secondaryItems()[0].cause.?.zig == error.WriteFailed);
+        try require(failure.outputs.file.state == .staged);
+    }
+    try require(failure.sources.get(.fasta).?.label.borrowed.ptr == &caller_path);
+
+    var report_buffer: [reporting.JSON_BYTES_LIMIT]u8 = undefined;
+    var report_writer = std.Io.Writer.fixed(&report_buffer);
+    try reporting.writeJson(&report_writer, &failure, .{});
+    try require(std.mem.indexOf(u8, report_writer.buffered(), "YmFk/yE=") != null);
+    report_writer.end = 0;
+    try reporting.writeText(&report_writer, &failure);
+    try require(std.mem.indexOf(u8, report_writer.buffered(), "bad\\xff!") != null);
+
+    const owned = try acquire(allocator, &failure, &caller_path, false);
+    defer owned.deinit(allocator);
+    try require(failure.primary() == null and failure.secondary_len == 0);
+    try require(failure.preview_len == 0 and !failure.secondary_truncated);
+    try require(failure.complete and failure.work_complete);
+    try require(failure.outputs.file.state == .not_started);
+    try require(owned.name.len == 64 and owned.records.len == 128);
+}
+
+pub fn main() !void {
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    const result = exercise(debug_allocator.allocator());
+    const cleanup = debug_allocator.deinit();
+    if (cleanup == .leak) return error.CallerMemoryLeak;
+    try result;
+}
+
 const Owned = struct {
     name: []u8,
     records: []u8,
@@ -71,63 +130,4 @@ fn acquire(
 
 fn require(condition: bool) error{CallerCheckFailed}!void {
     if (!condition) return error.CallerCheckFailed;
-}
-
-/// Used by the standalone executable and subsystem tests. All labels are owned
-/// by this caller until the failure is handled; helpers retain no stack paths.
-pub fn exercise(allocator: std.mem.Allocator) !void {
-    var failure: diagnostics.Failure = undefined;
-    const caller_path = [_]u8{ 's', 'a', 'm', 'p', 'l', 'e', '.', 'f', 'a' };
-    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 1 });
-    if (acquire(failing.allocator(), &failure, &caller_path, false)) |owned| {
-        owned.deinit(failing.allocator());
-        return error.ExpectedAllocationFailure;
-    } else |err| {
-        try require(err == error.OutOfMemory);
-        try require(failure.primary().?.code() == .@"resource.out_of_memory");
-        const facts = failure.primary().?.details.@"resource.out_of_memory";
-        try require(facts.allocation_role == .records and facts.requested_bytes.? == 128);
-    }
-    try require(failing.allocations == 1 and failing.deallocations == 1);
-    try require(failing.allocated_bytes == failing.freed_bytes);
-    const source = failure.sources.get(.zfi).?;
-    try require(source.label.borrowed.ptr == &caller_path and source.suffix == .zfi);
-
-    if (acquire(allocator, &failure, &caller_path, true)) |owned| {
-        owned.deinit(allocator);
-        return error.ExpectedParseFailure;
-    } else |err| {
-        try require(err == error.InvalidIndex);
-        try require(failure.primary().?.code() == .@"index.fai.invalid_integer");
-        const retained = failure.primary().?.details.@"index.fai.invalid_integer".value.?;
-        try require(std.mem.eql(u8, failure.preview(retained), "bad\xff!"));
-        try require(failure.secondaryItems().len == 1);
-        try require(failure.secondaryItems()[0].cause.?.zig == error.WriteFailed);
-        try require(failure.outputs.file.state == .staged);
-    }
-    try require(failure.sources.get(.fasta).?.label.borrowed.ptr == &caller_path);
-
-    var report_buffer: [reporting.JSON_BYTES_LIMIT]u8 = undefined;
-    var report_writer = std.Io.Writer.fixed(&report_buffer);
-    try reporting.writeJson(&report_writer, &failure, .{});
-    try require(std.mem.indexOf(u8, report_writer.buffered(), "YmFk/yE=") != null);
-    report_writer.end = 0;
-    try reporting.writeText(&report_writer, &failure);
-    try require(std.mem.indexOf(u8, report_writer.buffered(), "bad\\xff!") != null);
-
-    const owned = try acquire(allocator, &failure, &caller_path, false);
-    defer owned.deinit(allocator);
-    try require(failure.primary() == null and failure.secondary_len == 0);
-    try require(failure.preview_len == 0 and !failure.secondary_truncated);
-    try require(failure.complete and failure.work_complete);
-    try require(failure.outputs.file.state == .not_started);
-    try require(owned.name.len == 64 and owned.records.len == 128);
-}
-
-pub fn main() !void {
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-    const result = exercise(debug_allocator.allocator());
-    const cleanup = debug_allocator.deinit();
-    if (cleanup == .leak) return error.CallerMemoryLeak;
-    try result;
 }

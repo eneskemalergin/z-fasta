@@ -189,8 +189,31 @@ fn zfiEmbeddedName(index: *const main.indexer.ZfiIndex, rec_idx: usize) []const 
     return index.name_blob.items[rec.name_offset..][0..rec.name_len];
 }
 
-// --- Validation and report contracts ---
+fn checkNativeValidatorAllocations(allocator: std.mem.Allocator, data: []const u8) !void {
+    const diagnostics = main.index_format.diagnostics;
+    var failure: diagnostics.Failure = undefined;
+    var summary = validator.validateDataChecked(allocator, data, .{}, &failure) catch |err| {
+        try std.testing.expectEqual(error.OutOfMemory, err);
+        try std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", failure.primary().?.code());
+        try std.testing.expectEqual(error.OutOfMemory, failure.primary().?.cause.?.zig);
+        return error.OutOfMemory;
+    };
+    defer summary.deinit(allocator);
+    const fixed = validator.fixDataChecked(allocator, data, summary.record_widths.items, &failure) catch |err| {
+        try std.testing.expectEqual(error.OutOfMemory, err);
+        try std.testing.expectEqual(diagnostics.AllocationRole.rewrite_bytes, failure.primary().?.details.@"resource.out_of_memory".allocation_role);
+        return error.OutOfMemory;
+    };
+    defer allocator.free(fixed);
+    const json = validator.renderJsonEventChecked(allocator, .{ .level = .warning, .kind = .empty_sequence, .line = 1, .name = "seq" }, &failure) catch |err| {
+        try std.testing.expectEqual(error.OutOfMemory, err);
+        try std.testing.expectEqual(diagnostics.AllocationRole.serialized_event, failure.primary().?.details.@"resource.out_of_memory".allocation_role);
+        return error.OutOfMemory;
+    };
+    defer allocator.free(json);
+}
 
+// --- Validation and report contracts ---
 test "[cli] - [validate]: rejects unknown options regardless of position" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -776,7 +799,6 @@ test "[property] - [validate fix]: preserves empty-record warnings" {
 }
 
 // --- Fix and cross-module contracts ---
-
 test "[cli] - [validate fix]: replaces the output with the exact library rewrite" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1206,30 +1228,6 @@ test "[failure] - [native validator blockers]: distinguishes header and sequence
     failure.reset(.validate);
     try validator.fixRejectionChecked(&summary, .{ .fix_format_only = true, .custom_alphabet = "ACGT" }, &failure);
     try std.testing.expect(failure.primary() == null);
-}
-
-fn checkNativeValidatorAllocations(allocator: std.mem.Allocator, data: []const u8) !void {
-    const diagnostics = main.index_format.diagnostics;
-    var failure: diagnostics.Failure = undefined;
-    var summary = validator.validateDataChecked(allocator, data, .{}, &failure) catch |err| {
-        try std.testing.expectEqual(error.OutOfMemory, err);
-        try std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", failure.primary().?.code());
-        try std.testing.expectEqual(error.OutOfMemory, failure.primary().?.cause.?.zig);
-        return error.OutOfMemory;
-    };
-    defer summary.deinit(allocator);
-    const fixed = validator.fixDataChecked(allocator, data, summary.record_widths.items, &failure) catch |err| {
-        try std.testing.expectEqual(error.OutOfMemory, err);
-        try std.testing.expectEqual(diagnostics.AllocationRole.rewrite_bytes, failure.primary().?.details.@"resource.out_of_memory".allocation_role);
-        return error.OutOfMemory;
-    };
-    defer allocator.free(fixed);
-    const json = validator.renderJsonEventChecked(allocator, .{ .level = .warning, .kind = .empty_sequence, .line = 1, .name = "seq" }, &failure) catch |err| {
-        try std.testing.expectEqual(error.OutOfMemory, err);
-        try std.testing.expectEqual(diagnostics.AllocationRole.serialized_event, failure.primary().?.details.@"resource.out_of_memory".allocation_role);
-        return error.OutOfMemory;
-    };
-    defer allocator.free(json);
 }
 
 test "[failure] - [native validator allocations]: releases scanner, rewrite and event storage" {

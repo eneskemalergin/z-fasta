@@ -10,8 +10,6 @@ const index_format = @import("index_format.zig");
 const stats = @import("stats.zig");
 const diagnostics = @import("diagnostics");
 
-const LoadedIndex = index_format.LoadedIndex;
-
 /// A borrowed sequence name with an optional 1-based inclusive interval.
 /// `is_full` preserves the distinct header form of a bare name.
 pub const Region = struct {
@@ -71,6 +69,110 @@ pub const RequestSource = union(enum) {
 /// Completed GET data output. The CLI writes a requested summary afterward.
 /// `elapsed_ns` is zero when timing was not requested through `measure_elapsed`.
 pub const Result = struct { region_count: usize, total_bases: u64, elapsed_ns: u64 };
+
+/// Parses a borrowed name or rightmost `:START-END`/`:START-` suffix.
+/// Invalid or overflowing suffixes remain part of the literal name.
+pub fn parseRegion(input: []const u8) Region {
+    if (std.mem.findScalarLast(u8, input, ':')) |cp| {
+        const suffix = input[cp + 1 ..];
+
+        if (parseRangeSuffix(suffix)) |range| {
+            return Region{
+                .name = input[0..cp],
+                .start = range.start,
+                .end = range.end,
+                .is_full = false,
+            };
+        }
+    }
+
+    return Region{
+        .name = input,
+        .start = 1,
+        .end = null,
+        .is_full = true,
+    };
+}
+
+/// A validated extraction request borrowing its name and non-uniform line table.
+/// Coordinates are 1-based inclusive; `display_end` preserves an unclamped request end.
+pub const ResolvedRegion = struct {
+    name: []const u8,
+    start: u64,
+    display_end: u64,
+    is_full: bool,
+    seq_offset: u64,
+    num_bases: u64,
+    line_bases: u32,
+    line_bytes: u32,
+    side_table: []const index_format.SideTableLine,
+    record_index: usize,
+    orientation: Orientation,
+    annotate_transform: bool,
+};
+
+/// Resolves one request, borrowing its name and side table from input/index.
+/// Resets caller-owned failure storage once; returns without printing or exiting.
+/// Failure input labels borrow `region_str` through handling or the next reset.
+/// A supplied index does not carry complete-selection evidence, so misses report
+/// `retained_matches` rather than claiming absence from the complete catalog.
+pub fn resolveRegion(idx: *const LoadedIndex, region_str: []const u8, failure: *diagnostics.Failure) diagnostics.Error!ResolvedRegion {
+    failure.reset(.get);
+    failure.sources.set(.request_snapshot, .{ .label = .{ .borrowed = region_str }, .kind = .memory });
+    var context = Diagnostics{ .failure = failure, .lookup_scope = .retained_matches, .index_source = if (idx.source == .zfi) .zfi else .fai, .at = .{ .source = .request_snapshot, .request = 1 } };
+    const result = try resolveRegionInternal(idx, region_str, &context);
+    failure.succeed();
+    return result;
+}
+
+/// Writes one resolved request with 60-base wrapping. Failure storage resets
+/// once; a failed writer may have accepted a prefix, including a partial header.
+/// The caller owns the writer and its final flush. Its state is `outputs.file`
+/// with source role `output`; failure input labels borrow `region_str`.
+pub fn extractRegion(idx: *const LoadedIndex, region_str: []const u8, writer: anytype, failure: *diagnostics.Failure) diagnostics.Error!void {
+    failure.reset(.get);
+    failure.sources.set(.output, .{ .label = .{ .borrowed = "caller writer" }, .kind = .stream });
+    failure.sources.set(.request_snapshot, .{ .label = .{ .borrowed = region_str }, .kind = .memory });
+    var context = Diagnostics{ .failure = failure, .output_source = .output, .lookup_scope = .retained_matches, .index_source = if (idx.source == .zfi) .zfi else .fai, .at = .{ .source = .request_snapshot, .request = 1 } };
+    const diag = &context;
+    const resolved = try resolveRegionInternal(idx, region_str, diag);
+    var input_buffer: [FASTA_INPUT_BUFFER_BYTES]u8 = undefined;
+    var output_buffer: [REGION_OUTPUT_BUFFER_BYTES]u8 = undefined;
+    try emitRegion(resolved, fastaSource(idx), &input_buffer, &output_buffer, writer, diag);
+    failure.succeed();
+}
+
+/// Runs one GET source and finishes stdout. Caller-owned diagnostics reset once.
+/// Returns after discarding pending output on failure and releasing temporary
+/// storage. A successful result does not deliver the CLI's requested summary.
+pub fn runGetWithOptions(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, options: Options, failure: *diagnostics.Failure) diagnostics.Error!Result {
+    failure.reset(.get);
+    failure.sources.set(.stdout, .{ .label = .{ .borrowed = "stdout" }, .kind = .stream });
+    var context = Diagnostics{ .failure = failure };
+    var storage: GetBuffers = undefined;
+    const buffers = &storage;
+    const start_ns = if (options.measure_elapsed) monotonicNs(io) else 0;
+    switch (options.source) {
+        .positional => {
+            context.at.source = .request_snapshot;
+            failure.sources.set(.request_snapshot, .{ .label = .{ .borrowed = "positional requests" }, .kind = .memory });
+        },
+        .names, .bed => |path| {
+            const stdin = std.mem.eql(u8, path, "-");
+            context.at.source = if (stdin) .stdin else if (options.source == .bed) .bed else .names;
+            failure.sources.set(context.at.source.?, .{ .label = .{ .borrowed = if (stdin) "stdin" else path }, .kind = if (stdin) .stream else .path });
+        },
+    }
+    const totals = switch (options.source) {
+        .positional => |regions| try runPositionalGet(backing_allocator, io, fasta_path, options, regions, &context, buffers),
+        .names => |path| try runFileGet(backing_allocator, io, fasta_path, path, .{ .names = options.orientation }, options, &context, buffers),
+        .bed => |path| try runFileGet(backing_allocator, io, fasta_path, path, .{ .bed = .{ .honor_strand = options.honor_strand, .global_orientation = options.orientation } }, options, &context, buffers),
+    };
+    failure.succeed();
+    return .{ .region_count = totals.region_count, .total_bases = totals.total_bases, .elapsed_ns = if (options.measure_elapsed) monotonicNs(io) - start_ns else 0 };
+}
+
+const LoadedIndex = index_format.LoadedIndex;
 
 const Diagnostics = struct {
     failure: *diagnostics.Failure,
@@ -242,30 +344,6 @@ const BatchStats = struct {
     total_bases: u64 = 0,
 };
 
-/// Parses a borrowed name or rightmost `:START-END`/`:START-` suffix.
-/// Invalid or overflowing suffixes remain part of the literal name.
-pub fn parseRegion(input: []const u8) Region {
-    if (std.mem.findScalarLast(u8, input, ':')) |cp| {
-        const suffix = input[cp + 1 ..];
-
-        if (parseRangeSuffix(suffix)) |range| {
-            return Region{
-                .name = input[0..cp],
-                .start = range.start,
-                .end = range.end,
-                .is_full = false,
-            };
-        }
-    }
-
-    return Region{
-        .name = input,
-        .start = 1,
-        .end = null,
-        .is_full = true,
-    };
-}
-
 const ParsedRange = struct {
     start: u64,
     end: ?u64,
@@ -284,37 +362,6 @@ fn parseRangeSuffix(suffix: []const u8) ?ParsedRange {
 
     const end = std.fmt.parseInt(u64, end_str, 10) catch return null;
     return .{ .start = start, .end = end };
-}
-
-/// A validated extraction request borrowing its name and non-uniform line table.
-/// Coordinates are 1-based inclusive; `display_end` preserves an unclamped request end.
-pub const ResolvedRegion = struct {
-    name: []const u8,
-    start: u64,
-    display_end: u64,
-    is_full: bool,
-    seq_offset: u64,
-    num_bases: u64,
-    line_bases: u32,
-    line_bytes: u32,
-    side_table: []const index_format.SideTableLine,
-    record_index: usize,
-    orientation: Orientation,
-    annotate_transform: bool,
-};
-
-/// Resolves one request, borrowing its name and side table from input/index.
-/// Resets caller-owned failure storage once; returns without printing or exiting.
-/// Failure input labels borrow `region_str` through handling or the next reset.
-/// A supplied index does not carry complete-selection evidence, so misses report
-/// `retained_matches` rather than claiming absence from the complete catalog.
-pub fn resolveRegion(idx: *const LoadedIndex, region_str: []const u8, failure: *diagnostics.Failure) diagnostics.Error!ResolvedRegion {
-    failure.reset(.get);
-    failure.sources.set(.request_snapshot, .{ .label = .{ .borrowed = region_str }, .kind = .memory });
-    var context = Diagnostics{ .failure = failure, .lookup_scope = .retained_matches, .index_source = if (idx.source == .zfi) .zfi else .fai, .at = .{ .source = .request_snapshot, .request = 1 } };
-    const result = try resolveRegionInternal(idx, region_str, &context);
-    failure.succeed();
-    return result;
 }
 
 fn resolveRegionInternal(idx: *const LoadedIndex, region_str: []const u8, diag: *Diagnostics) diagnostics.Error!ResolvedRegion {
@@ -418,23 +465,6 @@ const FastaSource = struct {
 
 fn fastaSource(idx: *const LoadedIndex) FastaSource {
     return .{ .io = idx.io, .file = idx.fasta_file, .size = idx.fasta_size };
-}
-
-/// Writes one resolved request with 60-base wrapping. Failure storage resets
-/// once; a failed writer may have accepted a prefix, including a partial header.
-/// The caller owns the writer and its final flush. Its state is `outputs.file`
-/// with source role `output`; failure input labels borrow `region_str`.
-pub fn extractRegion(idx: *const LoadedIndex, region_str: []const u8, writer: anytype, failure: *diagnostics.Failure) diagnostics.Error!void {
-    failure.reset(.get);
-    failure.sources.set(.output, .{ .label = .{ .borrowed = "caller writer" }, .kind = .stream });
-    failure.sources.set(.request_snapshot, .{ .label = .{ .borrowed = region_str }, .kind = .memory });
-    var context = Diagnostics{ .failure = failure, .output_source = .output, .lookup_scope = .retained_matches, .index_source = if (idx.source == .zfi) .zfi else .fai, .at = .{ .source = .request_snapshot, .request = 1 } };
-    const diag = &context;
-    const resolved = try resolveRegionInternal(idx, region_str, diag);
-    var input_buffer: [FASTA_INPUT_BUFFER_BYTES]u8 = undefined;
-    var output_buffer: [REGION_OUTPUT_BUFFER_BYTES]u8 = undefined;
-    try emitRegion(resolved, fastaSource(idx), &input_buffer, &output_buffer, writer, diag);
-    failure.succeed();
 }
 
 const FASTA_INPUT_BUFFER_BYTES: usize = 256 * 1024;
@@ -1262,36 +1292,6 @@ fn processRequestPath(
     return processRequestReader(allocator, idx, prepared_reader orelse &reader.interface, source, name_reservation, annotate_transform, writer, fasta_source, diag, if (prepared_reader != null and prepared_file_reader == null) null else opened_file, buffers);
 }
 
-/// Runs one GET source and finishes stdout. Caller-owned diagnostics reset once.
-/// Returns after discarding pending output on failure and releasing temporary
-/// storage. A successful result does not deliver the CLI's requested summary.
-pub fn runGetWithOptions(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, options: Options, failure: *diagnostics.Failure) diagnostics.Error!Result {
-    failure.reset(.get);
-    failure.sources.set(.stdout, .{ .label = .{ .borrowed = "stdout" }, .kind = .stream });
-    var context = Diagnostics{ .failure = failure };
-    var storage: GetBuffers = undefined;
-    const buffers = &storage;
-    const start_ns = if (options.measure_elapsed) monotonicNs(io) else 0;
-    switch (options.source) {
-        .positional => {
-            context.at.source = .request_snapshot;
-            failure.sources.set(.request_snapshot, .{ .label = .{ .borrowed = "positional requests" }, .kind = .memory });
-        },
-        .names, .bed => |path| {
-            const stdin = std.mem.eql(u8, path, "-");
-            context.at.source = if (stdin) .stdin else if (options.source == .bed) .bed else .names;
-            failure.sources.set(context.at.source.?, .{ .label = .{ .borrowed = if (stdin) "stdin" else path }, .kind = if (stdin) .stream else .path });
-        },
-    }
-    const totals = switch (options.source) {
-        .positional => |regions| try runPositionalGet(backing_allocator, io, fasta_path, options, regions, &context, buffers),
-        .names => |path| try runFileGet(backing_allocator, io, fasta_path, path, .{ .names = options.orientation }, options, &context, buffers),
-        .bed => |path| try runFileGet(backing_allocator, io, fasta_path, path, .{ .bed = .{ .honor_strand = options.honor_strand, .global_orientation = options.orientation } }, options, &context, buffers),
-    };
-    failure.succeed();
-    return .{ .region_count = totals.region_count, .total_bases = totals.total_bases, .elapsed_ns = if (options.measure_elapsed) monotonicNs(io) - start_ns else 0 };
-}
-
 fn runPositionalGet(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, options: Options, regions: []const []const u8, diag: *Diagnostics, buffers: *GetBuffers) diagnostics.Error!BatchStats {
     var input_arena = std.heap.ArenaAllocator.init(backing_allocator);
     defer input_arena.deinit();
@@ -1392,6 +1392,25 @@ fn collectNamesForAllocationCheck(allocator: std.mem.Allocator, stable_input: bo
     try std.testing.expect(try requested.collect(&reader, .{ .names = .{} }, stable_input));
     try std.testing.expectEqual(@as(usize, 303), requested.names.items.len);
     try std.testing.expectEqualStrings("name299", requested.names.items[302]);
+}
+
+fn checkGetRequestAllocations(allocator: std.mem.Allocator) !void {
+    var idx = try index_format.loadIndexCheckedLegacy(std.testing.allocator, std.testing.io, "tests/data/simple.fasta");
+    defer idx.deinit();
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var reader = std.Io.Reader.fixed("# skip\nseq1\t0\t2\nseq2\t0\t2\n");
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.get);
+    var context = Diagnostics{ .failure = &failure, .at = .{ .source = .bed } };
+    var storage: GetBuffers = undefined;
+    const buffers = &storage;
+    const result = processRequestReader(allocator, &idx, &reader, .{ .bed = .{ .honor_strand = false, .global_orientation = .{} } }, 0, false, &output.writer, fastaSource(&idx), &context, null, buffers) catch |err| {
+        try std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", failure.primary().?.code());
+        try std.testing.expectEqual(error.OutOfMemory, failure.primary().?.cause.?.zig);
+        return err;
+    };
+    try std.testing.expectEqual(@as(u64, 4), result.total_bases);
 }
 
 test "[failure] - [get requested names]: releases partial collection" {
@@ -1668,25 +1687,6 @@ test "[failure] - [GET totals]: rejects repeated-request overflow before writing
     const detail = failure.primary().?.details.@"resource.count_overflow";
     try std.testing.expectEqual(diagnostics.Counter.total_symbols, detail.counter);
     try std.testing.expectEqual(@as(?u128, 2), detail.increment);
-}
-
-fn checkGetRequestAllocations(allocator: std.mem.Allocator) !void {
-    var idx = try index_format.loadIndexCheckedLegacy(std.testing.allocator, std.testing.io, "tests/data/simple.fasta");
-    defer idx.deinit();
-    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer output.deinit();
-    var reader = std.Io.Reader.fixed("# skip\nseq1\t0\t2\nseq2\t0\t2\n");
-    var failure: diagnostics.Failure = undefined;
-    failure.reset(.get);
-    var context = Diagnostics{ .failure = &failure, .at = .{ .source = .bed } };
-    var storage: GetBuffers = undefined;
-    const buffers = &storage;
-    const result = processRequestReader(allocator, &idx, &reader, .{ .bed = .{ .honor_strand = false, .global_orientation = .{} } }, 0, false, &output.writer, fastaSource(&idx), &context, null, buffers) catch |err| {
-        try std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", failure.primary().?.code());
-        try std.testing.expectEqual(error.OutOfMemory, failure.primary().?.cause.?.zig);
-        return err;
-    };
-    try std.testing.expectEqual(@as(u64, 4), result.total_bases);
 }
 
 test "[failure] - [GET requests]: releases partial batches on allocation failure" {

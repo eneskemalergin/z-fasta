@@ -12,12 +12,10 @@ pub const diagnostics = @import("diagnostics");
 /// Four-byte magic and version for the supported `.zfi` wire format.
 pub const ZFI_MAGIC: [4]u8 = .{ 'Z', 'F', 'I', 0x01 };
 
-const NON_UNIFORM_WIDTH_FLAG: u8 = 1;
 /// Record flag indicating that its name is embedded in the `.zfi` name blob.
 pub const NAME_IN_ZFI_FLAG: u8 = 2;
-const SIDE_TABLE_OFFSET_BYTES = 5;
+
 pub const MAX_SIDE_TABLE_OFFSET = (1 << (SIDE_TABLE_OFFSET_BYTES * 8)) - 1;
-const FAI_READER_BUFFER_BYTES: usize = 65_600;
 
 pub const ZFI_NAME_FOOTER_MAGIC: [4]u8 = .{ 'Z', 'F', 'N', 'M' };
 
@@ -51,74 +49,9 @@ pub fn encodeZfiSourceId(source_mtime_ns: u64) [ZFI_SOURCE_ID_BYTES]u8 {
     return out;
 }
 
-fn decodeZfiNameFooterBytes(footer_bytes: []const u8) ?u64 {
-    if (footer_bytes.len < ZFI_NAME_FOOTER_BYTES) return null;
-    if (!std.mem.eql(u8, footer_bytes[0..4], &ZFI_NAME_FOOTER_MAGIC)) return null;
-    return std.mem.readInt(u64, footer_bytes[4..12], .little);
-}
-
-fn decodeZfiSourceIdBytes(id_bytes: []const u8) ?u64 {
-    if (id_bytes.len < ZFI_SOURCE_ID_BYTES) return null;
-    if (!std.mem.eql(u8, id_bytes[0..4], &ZFI_SOURCE_ID_MAGIC)) return null;
-    return std.mem.readInt(u64, id_bytes[4..12], .little);
-}
-
-const ZFI_NAME_FOOTER_LEGACY_BYTES: usize = 16;
-
 /// Converts a non-negative timestamp to the unsigned `.zfi` representation.
 pub fn timestampToNs(ts: std.Io.Timestamp) error{TimestampOutOfRange}!u64 {
     return std.math.cast(u64, ts.nanoseconds) orelse error.TimestampOutOfRange;
-}
-
-const ZfiTrailingMeta = struct {
-    payload_end: usize,
-    name_blob_len: u64,
-    source_mtime_ns: ?u64,
-    source_mtime_offset: ?usize,
-};
-
-fn parseZfiTrailingMeta(zfi_data: []const u8) ?ZfiTrailingMeta {
-    const footer = parseZfiNameFooterAtEnd(zfi_data) orelse return null;
-    const footer_start = zfi_data.len - footer.footer_bytes;
-
-    var source_mtime_ns: ?u64 = null;
-    var source_mtime_offset: ?usize = null;
-    var payload_end = footer_start;
-    if (footer_start >= ZFI_SOURCE_ID_BYTES) {
-        if (decodeZfiSourceIdBytes(zfi_data[footer_start - ZFI_SOURCE_ID_BYTES .. footer_start])) |mtime_ns| {
-            source_mtime_ns = mtime_ns;
-            source_mtime_offset = footer_start - ZFI_SOURCE_ID_BYTES + 4;
-            payload_end = footer_start - ZFI_SOURCE_ID_BYTES;
-        }
-    }
-
-    return .{
-        .payload_end = payload_end,
-        .name_blob_len = footer.name_blob_len,
-        .source_mtime_ns = source_mtime_ns,
-        .source_mtime_offset = source_mtime_offset,
-    };
-}
-
-fn parseZfiNameFooterAtEnd(zfi_data: []const u8) ?struct {
-    name_blob_len: u64,
-    footer_bytes: usize,
-} {
-    if (zfi_data.len >= ZFI_NAME_FOOTER_BYTES) {
-        if (decodeZfiNameFooterBytes(zfi_data[zfi_data.len - ZFI_NAME_FOOTER_BYTES ..])) |name_blob_len| {
-            return .{ .name_blob_len = name_blob_len, .footer_bytes = ZFI_NAME_FOOTER_BYTES };
-        }
-    }
-
-    if (zfi_data.len >= ZFI_NAME_FOOTER_LEGACY_BYTES) {
-        const tail = zfi_data[zfi_data.len - ZFI_NAME_FOOTER_LEGACY_BYTES ..];
-        if (std.mem.eql(u8, tail[0..4], &ZFI_NAME_FOOTER_MAGIC)) {
-            const name_blob_len = std.mem.readInt(u64, tail[8..16], .little);
-            return .{ .name_blob_len = name_blob_len, .footer_bytes = ZFI_NAME_FOOTER_LEGACY_BYTES };
-        }
-    }
-
-    return null;
 }
 
 /// Frozen 16-byte `.zfi` header.
@@ -190,29 +123,6 @@ pub const IndexRecord = extern struct {
         }
     }
 };
-
-comptime {
-    if (builtin.cpu.arch.endian() != .little) {
-        @compileError(".zfi wire format requires little-endian (see plan/docs/zfi-format.md); big-endian codec not implemented");
-    }
-    if (@sizeOf(ZfiHeader) != ZFI_HEADER_BYTES) @compileError("ZfiHeader size drifted from wire contract");
-    if (@sizeOf(IndexRecord) != ZFI_INDEX_RECORD_BYTES) @compileError("IndexRecord size drifted from wire contract");
-    if (@sizeOf(SideTableLine) != ZFI_SIDE_TABLE_LINE_BYTES) @compileError("SideTableLine size drifted from wire contract");
-    if (@offsetOf(ZfiHeader, "magic") != 0) @compileError("ZfiHeader.magic offset");
-    if (@offsetOf(ZfiHeader, "record_count") != 4) @compileError("ZfiHeader.record_count offset");
-    if (@offsetOf(ZfiHeader, "source_size") != 8) @compileError("ZfiHeader.source_size offset");
-    if (@offsetOf(IndexRecord, "name_offset") != 0) @compileError("IndexRecord.name_offset offset");
-    if (@offsetOf(IndexRecord, "name_len") != 8) @compileError("IndexRecord.name_len offset");
-    if (@offsetOf(IndexRecord, "flags_and_offset") != 10) @compileError("IndexRecord.flags_and_offset offset");
-    if (@offsetOf(IndexRecord, "seq_offset") != 16) @compileError("IndexRecord.seq_offset offset");
-    if (@offsetOf(IndexRecord, "seq_len") != 24) @compileError("IndexRecord.seq_len offset");
-    if (@offsetOf(IndexRecord, "line_bases") != 32) @compileError("IndexRecord.line_bases offset");
-    if (@offsetOf(IndexRecord, "line_bytes") != 36) @compileError("IndexRecord.line_bytes offset");
-    if (@offsetOf(SideTableLine, "base_start") != 0) @compileError("SideTableLine.base_start offset");
-    if (@offsetOf(SideTableLine, "byte_offset") != 8) @compileError("SideTableLine.byte_offset offset");
-    if (@offsetOf(SideTableLine, "line_bytes") != 16) @compileError("SideTableLine.line_bytes offset");
-    if (@offsetOf(SideTableLine, "line_bases") != 24) @compileError("SideTableLine.line_bases offset");
-}
 
 /// Explicit little-endian header bytes (must match `asBytes` on little-endian hosts).
 pub fn encodeZfiHeader(header: ZfiHeader) [ZFI_HEADER_BYTES]u8 {
@@ -463,6 +373,100 @@ pub fn loadIndexCheckedWithModeLegacy(allocator: std.mem.Allocator, io: std.Io, 
             },
         };
     };
+}
+
+const NON_UNIFORM_WIDTH_FLAG: u8 = 1;
+
+const SIDE_TABLE_OFFSET_BYTES = 5;
+
+const FAI_READER_BUFFER_BYTES: usize = 65_600;
+
+fn decodeZfiNameFooterBytes(footer_bytes: []const u8) ?u64 {
+    if (footer_bytes.len < ZFI_NAME_FOOTER_BYTES) return null;
+    if (!std.mem.eql(u8, footer_bytes[0..4], &ZFI_NAME_FOOTER_MAGIC)) return null;
+    return std.mem.readInt(u64, footer_bytes[4..12], .little);
+}
+
+fn decodeZfiSourceIdBytes(id_bytes: []const u8) ?u64 {
+    if (id_bytes.len < ZFI_SOURCE_ID_BYTES) return null;
+    if (!std.mem.eql(u8, id_bytes[0..4], &ZFI_SOURCE_ID_MAGIC)) return null;
+    return std.mem.readInt(u64, id_bytes[4..12], .little);
+}
+
+const ZFI_NAME_FOOTER_LEGACY_BYTES: usize = 16;
+
+const ZfiTrailingMeta = struct {
+    payload_end: usize,
+    name_blob_len: u64,
+    source_mtime_ns: ?u64,
+    source_mtime_offset: ?usize,
+};
+
+fn parseZfiTrailingMeta(zfi_data: []const u8) ?ZfiTrailingMeta {
+    const footer = parseZfiNameFooterAtEnd(zfi_data) orelse return null;
+    const footer_start = zfi_data.len - footer.footer_bytes;
+
+    var source_mtime_ns: ?u64 = null;
+    var source_mtime_offset: ?usize = null;
+    var payload_end = footer_start;
+    if (footer_start >= ZFI_SOURCE_ID_BYTES) {
+        if (decodeZfiSourceIdBytes(zfi_data[footer_start - ZFI_SOURCE_ID_BYTES .. footer_start])) |mtime_ns| {
+            source_mtime_ns = mtime_ns;
+            source_mtime_offset = footer_start - ZFI_SOURCE_ID_BYTES + 4;
+            payload_end = footer_start - ZFI_SOURCE_ID_BYTES;
+        }
+    }
+
+    return .{
+        .payload_end = payload_end,
+        .name_blob_len = footer.name_blob_len,
+        .source_mtime_ns = source_mtime_ns,
+        .source_mtime_offset = source_mtime_offset,
+    };
+}
+
+fn parseZfiNameFooterAtEnd(zfi_data: []const u8) ?struct {
+    name_blob_len: u64,
+    footer_bytes: usize,
+} {
+    if (zfi_data.len >= ZFI_NAME_FOOTER_BYTES) {
+        if (decodeZfiNameFooterBytes(zfi_data[zfi_data.len - ZFI_NAME_FOOTER_BYTES ..])) |name_blob_len| {
+            return .{ .name_blob_len = name_blob_len, .footer_bytes = ZFI_NAME_FOOTER_BYTES };
+        }
+    }
+
+    if (zfi_data.len >= ZFI_NAME_FOOTER_LEGACY_BYTES) {
+        const tail = zfi_data[zfi_data.len - ZFI_NAME_FOOTER_LEGACY_BYTES ..];
+        if (std.mem.eql(u8, tail[0..4], &ZFI_NAME_FOOTER_MAGIC)) {
+            const name_blob_len = std.mem.readInt(u64, tail[8..16], .little);
+            return .{ .name_blob_len = name_blob_len, .footer_bytes = ZFI_NAME_FOOTER_LEGACY_BYTES };
+        }
+    }
+
+    return null;
+}
+
+comptime {
+    if (builtin.cpu.arch.endian() != .little) {
+        @compileError(".zfi wire format requires little-endian (see plan/docs/zfi-format.md); big-endian codec not implemented");
+    }
+    if (@sizeOf(ZfiHeader) != ZFI_HEADER_BYTES) @compileError("ZfiHeader size drifted from wire contract");
+    if (@sizeOf(IndexRecord) != ZFI_INDEX_RECORD_BYTES) @compileError("IndexRecord size drifted from wire contract");
+    if (@sizeOf(SideTableLine) != ZFI_SIDE_TABLE_LINE_BYTES) @compileError("SideTableLine size drifted from wire contract");
+    if (@offsetOf(ZfiHeader, "magic") != 0) @compileError("ZfiHeader.magic offset");
+    if (@offsetOf(ZfiHeader, "record_count") != 4) @compileError("ZfiHeader.record_count offset");
+    if (@offsetOf(ZfiHeader, "source_size") != 8) @compileError("ZfiHeader.source_size offset");
+    if (@offsetOf(IndexRecord, "name_offset") != 0) @compileError("IndexRecord.name_offset offset");
+    if (@offsetOf(IndexRecord, "name_len") != 8) @compileError("IndexRecord.name_len offset");
+    if (@offsetOf(IndexRecord, "flags_and_offset") != 10) @compileError("IndexRecord.flags_and_offset offset");
+    if (@offsetOf(IndexRecord, "seq_offset") != 16) @compileError("IndexRecord.seq_offset offset");
+    if (@offsetOf(IndexRecord, "seq_len") != 24) @compileError("IndexRecord.seq_len offset");
+    if (@offsetOf(IndexRecord, "line_bases") != 32) @compileError("IndexRecord.line_bases offset");
+    if (@offsetOf(IndexRecord, "line_bytes") != 36) @compileError("IndexRecord.line_bytes offset");
+    if (@offsetOf(SideTableLine, "base_start") != 0) @compileError("SideTableLine.base_start offset");
+    if (@offsetOf(SideTableLine, "byte_offset") != 8) @compileError("SideTableLine.byte_offset offset");
+    if (@offsetOf(SideTableLine, "line_bytes") != 16) @compileError("SideTableLine.line_bytes offset");
+    if (@offsetOf(SideTableLine, "line_bases") != 24) @compileError("SideTableLine.line_bases offset");
 }
 
 const Diagnostics = struct {

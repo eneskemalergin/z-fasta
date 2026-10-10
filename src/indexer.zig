@@ -13,26 +13,9 @@ const builtin = @import("builtin");
 const index_format = @import("index_format.zig");
 const diagnostics = @import("diagnostics");
 
-const IndexRecord = index_format.IndexRecord;
-const ZfiHeader = index_format.ZfiHeader;
-const ZFI_MAGIC = index_format.ZFI_MAGIC;
-
-const SIMD_CHUNK_SIZE = 32;
-const SimdVec = @Vector(SIMD_CHUNK_SIZE, u8);
-const STRIDE_VECTOR_LEN = std.simd.suggestVectorLength(u8) orelse 1;
-const STRIDE_VALIDATION_BLOCK_LINES = 256;
 /// Size in bytes of the scanner's sequence read buffer.
 pub const INDEX_READ_BUFFER_SIZE = 256 * 1024;
-const FILE_IO_BUF_SIZE = 8 * 1024;
-const INDEX_OUTPUT_BUFFER_SIZE = 64 * 1024;
-const INDEX_PATH_BUFFER_SIZE = std.Io.Dir.max_path_bytes;
-const SMALL_INDEX_MAX_BYTES = 32 * 1024 * 1024;
-const ZFI_INITIAL_RECORD_CAPACITY = 4096;
-const DEDUP_INITIAL_CAPACITY: u32 = 16384;
-const FAI_SPOOL_NAME_BUFFER_SIZE = 64;
-const FAI_U64_DECIMAL_DIGITS = 20;
-const FAI_SUFFIX_BUFFER_SIZE = 4 * (1 + FAI_U64_DECIMAL_DIGITS) + 1;
-const FAI_SPOOL_CREATE_ATTEMPTS = 16;
+
 /// Maximum identifier length in bytes for both index formats.
 pub const MAX_INDEX_NAME_LEN = std.math.maxInt(u16);
 
@@ -54,6 +37,192 @@ pub const Options = struct {
 
 /// Number of retained nonempty records after publication and required cleanup.
 pub const Result = struct { record_count: u32 };
+
+/// First-wins name set whose decisions use full-string equality despite hash collisions.
+/// FAI owns stable keys in a child arena; `.zfi` shares names with its output blob.
+pub const NameDedup = NameDedupWith(std.hash_map.StringContext);
+
+/// One parsed FASTA record passed to reader emit callbacks.
+/// Name and side-table slices are borrowed only for the callback's duration.
+pub const FastaRecordEmit = struct {
+    record: IndexRecord,
+    name: []const u8,
+    /// Original FASTA position; borrowed only for the callback duration.
+    source_reference: ?*const diagnostics.Reference = null,
+    nonuniform_reason: diagnostics.NonuniformReason = .nonuniform_layout,
+    uses_uniform_formula: bool,
+    /// Incremental side-table bytes for `.zfi` (line count plus `SideTableLine` rows).
+    side_table: []const u8 = &.{},
+    /// When true, `record` already has blob-relative `name_offset`/`name_len` and `NAME_IN_ZFI_FLAG`
+    /// (`.zfi` blob-backed `NameDedup`); skip `embedZfiName`.
+    name_embedded: bool = false,
+};
+
+/// Owned records, side tables, and names; release with `deinit` using the scan allocator.
+pub const ZfiIndex = struct {
+    records: std.ArrayList(IndexRecord),
+    side_tables: std.ArrayList(u8),
+    name_blob: std.ArrayList(u8),
+
+    /// Releases all catalog storage with the allocator used to create it.
+    pub fn deinit(self: *ZfiIndex, allocator: std.mem.Allocator) void {
+        self.records.deinit(allocator);
+        self.side_tables.deinit(allocator);
+        self.name_blob.deinit(allocator);
+    }
+};
+
+/// Collects an owned `.zfi` catalog; `read_buf` must be nonempty and remains caller-owned.
+pub fn scanZfiReader(
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    read_buf: []u8,
+    enable_dedup: bool,
+) !ZfiIndex {
+    return scanZfiReaderWithOptions(
+        allocator,
+        reader,
+        read_buf,
+        .{ .enable_dedup = enable_dedup },
+    );
+}
+
+/// Collects an owned `.zfi` catalog from borrowed FASTA bytes.
+pub fn scanZfiData(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    enable_dedup: bool,
+) !ZfiIndex {
+    var r = std.Io.Reader.fixed(data);
+    var read_buf: [INDEX_READ_BUFFER_SIZE]u8 = undefined;
+    return scanZfiReader(allocator, &r, &read_buf, enable_dedup);
+}
+
+/// Writes a collected catalog directly to `path`; the CLI owns atomic publication.
+pub fn writeZfiIndexFile(
+    io: std.Io,
+    path: []const u8,
+    index: *const ZfiIndex,
+    source_size: u64,
+    source_mtime_ns: u64,
+) !void {
+    _ = try checkedZfiRecordCount(index.records.items.len, .{});
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
+
+    var file_buf: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
+    var file_fw = file.writer(io, &file_buf);
+    try writeZfiIndex(&file_fw.interface, index, source_size, source_mtime_ns);
+    try file_fw.flush();
+}
+
+/// Caller owns the returned production-layout bytes.
+pub fn zfiIndexToBytes(
+    allocator: std.mem.Allocator,
+    index: *const ZfiIndex,
+    source_size: u64,
+    source_mtime_ns: u64,
+) ![]u8 {
+    return serializeZfiIndex(allocator, index, source_size, source_mtime_ns, .{});
+}
+
+/// Serializes an owned index without resetting the caller's diagnostic destination.
+/// The returned bytes belong to `allocator`; rejects counts above the ZFI u32 limit.
+/// Allocation failures retain OOM facts without allocating diagnostic storage.
+pub fn zfiIndexToBytesChecked(allocator: std.mem.Allocator, index: *const ZfiIndex, source_size: u64, source_mtime_ns: u64, failure: *diagnostics.Failure) diagnostics.Error![]u8 {
+    return serializeZfiIndex(allocator, index, source_size, source_mtime_ns, .{ .failure = failure }) catch return diagnostics.metadata(failure.primary().?.code()).returned_error;
+}
+
+/// Scans records through a nonempty caller-owned buffer and returns the retained count.
+/// Callback slices expire on return; an external name set is borrowed and may be updated.
+/// Returns `TooManySequences` before emitting more than 4294967295 retained records.
+/// Rejects empty buffers and buffers larger than 4294967295 bytes before reading.
+pub fn scanFastaReader(
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    read_buf: []u8,
+    options: ScanOptions,
+    external_dedup: ?*NameDedup,
+    ctx: anytype,
+    comptime emitRecord: fn (@TypeOf(ctx), FastaRecordEmit) anyerror!void,
+) !u32 {
+    try checkReadBufferSize(read_buf.len, options.failure);
+    return scanFastaReaderWithDedup(allocator, reader, read_buf, options, external_dedup, ctx, emitRecord);
+}
+
+/// Writes `.fai` rows to `writer`; errors may leave a prefix in this low-level API.
+pub fn scanFaiData(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    writer: anytype,
+    enable_dedup: bool,
+) !u32 {
+    var r = std.Io.Reader.fixed(data);
+    var read_buf: [INDEX_READ_BUFFER_SIZE]u8 = undefined;
+    return scanFaiReader(allocator, &r, &read_buf, writer, .{ .enable_dedup = enable_dedup });
+}
+
+/// Indexes a file and returns after publication and required temporary-file removal.
+/// The caller owns `failure` and `path` through diagnostic handling. This entry resets
+/// `failure` once. ZFI replaces its sidecar atomically; FAI stdout starts after a valid scan.
+pub fn runIndex(
+    io: std.Io,
+    environ: std.process.Environ,
+    path: []const u8,
+    options: Options,
+    failure: *diagnostics.Failure,
+) diagnostics.Error!Result {
+    failure.reset(.index);
+    failure.sources.set(.fasta, .{ .label = .{ .borrowed = path }, .kind = .path });
+    failure.sources.set(.zfi, .{ .label = .{ .borrowed = path }, .kind = .path, .suffix = .zfi });
+    failure.sources.set(.stdout, .{ .label = .{ .borrowed = "stdout" }, .kind = .stream });
+    const diag = Diagnostics{ .failure = failure, .format = if (options.emit_fai) .fai else .zfi };
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| return failure.fail(.{
+        .details = switch (err) {
+            error.FileNotFound => .{ .@"io.file_not_found" = {} },
+            error.AccessDenied => .{ .@"io.access_denied" = {} },
+            error.NameTooLong => .{ .@"io.invalid_path" = .{ .reason = .too_long } },
+            else => .{ .@"io.open_failed" = {} },
+        },
+        .stage = .open,
+        .at = .{ .source = .fasta },
+        .cause = .{ .zig = err },
+    });
+    defer file.close(io);
+    const stat = file.stat(io) catch |err| return failure.fail(.{ .details = .{ .@"io.stat_failed" = {} }, .stage = .stat, .at = .{ .source = .fasta }, .cause = .{ .zig = err } });
+    if (stat.size == 0) return failure.fail(.{ .details = .{ .@"fasta.no_records" = {} }, .stage = .stat, .at = .{ .source = .fasta } });
+    const count = (if (stat.size <= SMALL_INDEX_MAX_BYTES)
+        runIndexSmall(io, environ, path, options, file, stat, diag)
+    else
+        runIndexLarge(io, environ, path, options, file, stat, diag)) catch |err| {
+        if (failure.primary()) |primary| return diagnostics.metadata(primary.code()).returned_error;
+        return failure.fail(.{ .details = .{ .@"internal.consistency_failed" = .{ .component = .indexer, .check = .codec_state } }, .stage = .scan, .at = .{ .source = .fasta }, .cause = .{ .zig = err } });
+    };
+    failure.work_complete = true;
+    try failure.finishDeferred();
+    failure.succeed();
+    return .{ .record_count = count };
+}
+
+const IndexRecord = index_format.IndexRecord;
+const ZfiHeader = index_format.ZfiHeader;
+const ZFI_MAGIC = index_format.ZFI_MAGIC;
+
+const SIMD_CHUNK_SIZE = 32;
+const SimdVec = @Vector(SIMD_CHUNK_SIZE, u8);
+const STRIDE_VECTOR_LEN = std.simd.suggestVectorLength(u8) orelse 1;
+const STRIDE_VALIDATION_BLOCK_LINES = 256;
+
+const FILE_IO_BUF_SIZE = 8 * 1024;
+const INDEX_OUTPUT_BUFFER_SIZE = 64 * 1024;
+const INDEX_PATH_BUFFER_SIZE = std.Io.Dir.max_path_bytes;
+const SMALL_INDEX_MAX_BYTES = 32 * 1024 * 1024;
+const ZFI_INITIAL_RECORD_CAPACITY = 4096;
+const DEDUP_INITIAL_CAPACITY: u32 = 16384;
+const FAI_SPOOL_NAME_BUFFER_SIZE = 64;
+const FAI_U64_DECIMAL_DIGITS = 20;
+const FAI_SUFFIX_BUFFER_SIZE = 4 * (1 + FAI_U64_DECIMAL_DIGITS) + 1;
+const FAI_SPOOL_CREATE_ATTEMPTS = 16;
 
 const IndexReference = struct {
     source: ?diagnostics.SourceId = null,
@@ -261,40 +430,6 @@ fn NameDedupWith(comptime Context: type) type {
         }
     };
 }
-
-/// First-wins name set whose decisions use full-string equality despite hash collisions.
-/// FAI owns stable keys in a child arena; `.zfi` shares names with its output blob.
-pub const NameDedup = NameDedupWith(std.hash_map.StringContext);
-
-/// One parsed FASTA record passed to reader emit callbacks.
-/// Name and side-table slices are borrowed only for the callback's duration.
-pub const FastaRecordEmit = struct {
-    record: IndexRecord,
-    name: []const u8,
-    /// Original FASTA position; borrowed only for the callback duration.
-    source_reference: ?*const diagnostics.Reference = null,
-    nonuniform_reason: diagnostics.NonuniformReason = .nonuniform_layout,
-    uses_uniform_formula: bool,
-    /// Incremental side-table bytes for `.zfi` (line count plus `SideTableLine` rows).
-    side_table: []const u8 = &.{},
-    /// When true, `record` already has blob-relative `name_offset`/`name_len` and `NAME_IN_ZFI_FLAG`
-    /// (`.zfi` blob-backed `NameDedup`); skip `embedZfiName`.
-    name_embedded: bool = false,
-};
-
-/// Owned records, side tables, and names; release with `deinit` using the scan allocator.
-pub const ZfiIndex = struct {
-    records: std.ArrayList(IndexRecord),
-    side_tables: std.ArrayList(u8),
-    name_blob: std.ArrayList(u8),
-
-    /// Releases all catalog storage with the allocator used to create it.
-    pub fn deinit(self: *ZfiIndex, allocator: std.mem.Allocator) void {
-        self.records.deinit(allocator);
-        self.side_tables.deinit(allocator);
-        self.name_blob.deinit(allocator);
-    }
-};
 
 const LineMetrics = struct {
     seq_len: u64 = 0,
@@ -598,21 +733,6 @@ fn embedZfiName(
     rec.flags_and_offset[0] |= index_format.NAME_IN_ZFI_FLAG;
 }
 
-/// Collects an owned `.zfi` catalog; `read_buf` must be nonempty and remains caller-owned.
-pub fn scanZfiReader(
-    allocator: std.mem.Allocator,
-    reader: *std.Io.Reader,
-    read_buf: []u8,
-    enable_dedup: bool,
-) !ZfiIndex {
-    return scanZfiReaderWithOptions(
-        allocator,
-        reader,
-        read_buf,
-        .{ .enable_dedup = enable_dedup },
-    );
-}
-
 fn scanZfiReaderWithOptions(
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
@@ -675,17 +795,6 @@ fn scanZfiReaderWithOptions(
     return index;
 }
 
-/// Collects an owned `.zfi` catalog from borrowed FASTA bytes.
-pub fn scanZfiData(
-    allocator: std.mem.Allocator,
-    data: []const u8,
-    enable_dedup: bool,
-) !ZfiIndex {
-    var r = std.Io.Reader.fixed(data);
-    var read_buf: [INDEX_READ_BUFFER_SIZE]u8 = undefined;
-    return scanZfiReader(allocator, &r, &read_buf, enable_dedup);
-}
-
 fn writeZfiIndex(
     writer: *std.Io.Writer,
     index: *const ZfiIndex,
@@ -703,41 +812,6 @@ fn writeZfiIndex(
     try writer.writeAll(index.name_blob.items);
     try writer.writeAll(&index_format.encodeZfiSourceId(source_mtime_ns));
     try writer.writeAll(&index_format.encodeZfiNameFooter(index.name_blob.items.len));
-}
-
-/// Writes a collected catalog directly to `path`; the CLI owns atomic publication.
-pub fn writeZfiIndexFile(
-    io: std.Io,
-    path: []const u8,
-    index: *const ZfiIndex,
-    source_size: u64,
-    source_mtime_ns: u64,
-) !void {
-    _ = try checkedZfiRecordCount(index.records.items.len, .{});
-    const file = try std.Io.Dir.cwd().createFile(io, path, .{});
-    defer file.close(io);
-
-    var file_buf: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
-    var file_fw = file.writer(io, &file_buf);
-    try writeZfiIndex(&file_fw.interface, index, source_size, source_mtime_ns);
-    try file_fw.flush();
-}
-
-/// Caller owns the returned production-layout bytes.
-pub fn zfiIndexToBytes(
-    allocator: std.mem.Allocator,
-    index: *const ZfiIndex,
-    source_size: u64,
-    source_mtime_ns: u64,
-) ![]u8 {
-    return serializeZfiIndex(allocator, index, source_size, source_mtime_ns, .{});
-}
-
-/// Serializes an owned index without resetting the caller's diagnostic destination.
-/// The returned bytes belong to `allocator`; rejects counts above the ZFI u32 limit.
-/// Allocation failures retain OOM facts without allocating diagnostic storage.
-pub fn zfiIndexToBytesChecked(allocator: std.mem.Allocator, index: *const ZfiIndex, source_size: u64, source_mtime_ns: u64, failure: *diagnostics.Failure) diagnostics.Error![]u8 {
-    return serializeZfiIndex(allocator, index, source_size, source_mtime_ns, .{ .failure = failure }) catch return diagnostics.metadata(failure.primary().?.code()).returned_error;
 }
 
 fn serializeZfiIndex(allocator: std.mem.Allocator, index: *const ZfiIndex, source_size: u64, source_mtime_ns: u64, diag: Diagnostics) ![]u8 {
@@ -1259,23 +1333,6 @@ fn processChunkBytes(
     }
 }
 
-/// Scans records through a nonempty caller-owned buffer and returns the retained count.
-/// Callback slices expire on return; an external name set is borrowed and may be updated.
-/// Returns `TooManySequences` before emitting more than 4294967295 retained records.
-/// Rejects empty buffers and buffers larger than 4294967295 bytes before reading.
-pub fn scanFastaReader(
-    allocator: std.mem.Allocator,
-    reader: *std.Io.Reader,
-    read_buf: []u8,
-    options: ScanOptions,
-    external_dedup: ?*NameDedup,
-    ctx: anytype,
-    comptime emitRecord: fn (@TypeOf(ctx), FastaRecordEmit) anyerror!void,
-) !u32 {
-    try checkReadBufferSize(read_buf.len, options.failure);
-    return scanFastaReaderWithDedup(allocator, reader, read_buf, options, external_dedup, ctx, emitRecord);
-}
-
 fn scanFastaReaderWithDedup(
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
@@ -1615,60 +1672,6 @@ fn scanFaiReaderWithDedup(
     const count = try scanFastaReaderWithDedup(allocator, reader, read_buf, options, dedup, &ctx, Ctx.emit);
     try fai_buf.flush();
     return count;
-}
-
-/// Writes `.fai` rows to `writer`; errors may leave a prefix in this low-level API.
-pub fn scanFaiData(
-    allocator: std.mem.Allocator,
-    data: []const u8,
-    writer: anytype,
-    enable_dedup: bool,
-) !u32 {
-    var r = std.Io.Reader.fixed(data);
-    var read_buf: [INDEX_READ_BUFFER_SIZE]u8 = undefined;
-    return scanFaiReader(allocator, &r, &read_buf, writer, .{ .enable_dedup = enable_dedup });
-}
-
-/// Indexes a file and returns after publication and required temporary-file removal.
-/// The caller owns `failure` and `path` through diagnostic handling. This entry resets
-/// `failure` once. ZFI replaces its sidecar atomically; FAI stdout starts after a valid scan.
-pub fn runIndex(
-    io: std.Io,
-    environ: std.process.Environ,
-    path: []const u8,
-    options: Options,
-    failure: *diagnostics.Failure,
-) diagnostics.Error!Result {
-    failure.reset(.index);
-    failure.sources.set(.fasta, .{ .label = .{ .borrowed = path }, .kind = .path });
-    failure.sources.set(.zfi, .{ .label = .{ .borrowed = path }, .kind = .path, .suffix = .zfi });
-    failure.sources.set(.stdout, .{ .label = .{ .borrowed = "stdout" }, .kind = .stream });
-    const diag = Diagnostics{ .failure = failure, .format = if (options.emit_fai) .fai else .zfi };
-    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| return failure.fail(.{
-        .details = switch (err) {
-            error.FileNotFound => .{ .@"io.file_not_found" = {} },
-            error.AccessDenied => .{ .@"io.access_denied" = {} },
-            error.NameTooLong => .{ .@"io.invalid_path" = .{ .reason = .too_long } },
-            else => .{ .@"io.open_failed" = {} },
-        },
-        .stage = .open,
-        .at = .{ .source = .fasta },
-        .cause = .{ .zig = err },
-    });
-    defer file.close(io);
-    const stat = file.stat(io) catch |err| return failure.fail(.{ .details = .{ .@"io.stat_failed" = {} }, .stage = .stat, .at = .{ .source = .fasta }, .cause = .{ .zig = err } });
-    if (stat.size == 0) return failure.fail(.{ .details = .{ .@"fasta.no_records" = {} }, .stage = .stat, .at = .{ .source = .fasta } });
-    const count = (if (stat.size <= SMALL_INDEX_MAX_BYTES)
-        runIndexSmall(io, environ, path, options, file, stat, diag)
-    else
-        runIndexLarge(io, environ, path, options, file, stat, diag)) catch |err| {
-        if (failure.primary()) |primary| return diagnostics.metadata(primary.code()).returned_error;
-        return failure.fail(.{ .details = .{ .@"internal.consistency_failed" = .{ .component = .indexer, .check = .codec_state } }, .stage = .scan, .at = .{ .source = .fasta }, .cause = .{ .zig = err } });
-    };
-    failure.work_complete = true;
-    try failure.finishDeferred();
-    failure.succeed();
-    return .{ .record_count = count };
 }
 
 fn sourceTimestamp(stat: std.Io.File.Stat, diag: Diagnostics) !u64 {
@@ -2862,6 +2865,26 @@ fn checkStagedNameReplay(allocator: std.mem.Allocator, data: []const u8, compres
     }
 }
 
+fn checkCollectedIndexAllocations(allocator: std.mem.Allocator) !void {
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.index);
+    errdefer |err| {
+        if (err == error.OutOfMemory) {
+            std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", failure.primary().?.code()) catch @panic("missing collected-index allocation diagnostic");
+            std.testing.expectEqual(error.OutOfMemory, failure.primary().?.cause.?.zig) catch @panic("wrong allocation cause");
+        }
+    }
+    const data = ">one\nACGT\nAC\nTTTT\n>two\nA C\n>one\nTT\n";
+    var reader = std.Io.Reader.fixed(data);
+    var buffer: [7]u8 = undefined;
+    var index = try scanZfiReaderWithOptions(allocator, &reader, &buffer, .{ .enable_dedup = true, .failure = &failure });
+    defer index.deinit(allocator);
+    const bytes = try zfiIndexToBytesChecked(allocator, &index, data.len, 0, &failure);
+    defer allocator.free(bytes);
+    try std.testing.expectEqual(@as(usize, 2), index.records.items.len);
+    try std.testing.expect(failure.primary() == null);
+}
+
 test "[property] - [stride scanner]: matches scalar structural boundaries" {
     const line_bases: u32 = 4;
     const line_count = 520;
@@ -3660,26 +3683,6 @@ test "[regression] - [FAI replay diagnostics]: missing delimiters retain EOF wit
         try std.testing.expectEqual(delimiter, details.delimiter);
         try std.testing.expectEqual(@as(?diagnostics.Measurement, null), details.observed_bytes);
     }
-}
-
-fn checkCollectedIndexAllocations(allocator: std.mem.Allocator) !void {
-    var failure: diagnostics.Failure = undefined;
-    failure.reset(.index);
-    errdefer |err| {
-        if (err == error.OutOfMemory) {
-            std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", failure.primary().?.code()) catch @panic("missing collected-index allocation diagnostic");
-            std.testing.expectEqual(error.OutOfMemory, failure.primary().?.cause.?.zig) catch @panic("wrong allocation cause");
-        }
-    }
-    const data = ">one\nACGT\nAC\nTTTT\n>two\nA C\n>one\nTT\n";
-    var reader = std.Io.Reader.fixed(data);
-    var buffer: [7]u8 = undefined;
-    var index = try scanZfiReaderWithOptions(allocator, &reader, &buffer, .{ .enable_dedup = true, .failure = &failure });
-    defer index.deinit(allocator);
-    const bytes = try zfiIndexToBytesChecked(allocator, &index, data.len, 0, &failure);
-    defer allocator.free(bytes);
-    try std.testing.expectEqual(@as(usize, 2), index.records.items.len);
-    try std.testing.expect(failure.primary() == null);
 }
 
 test "[failure] - [index diagnostics]: collected catalog and serialization clean every OOM" {

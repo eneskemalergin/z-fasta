@@ -615,106 +615,6 @@ pub const Metadata = struct {
     returned_error: Error,
 };
 
-fn describe(code: Code, category: Category, kind: Kind, unit: Unit, action: Action, returned_error: Error) Metadata {
-    return .{ .code = code, .name = @tagName(code), .category = category, .kind = kind, .severity = .@"error", .unit = unit, .action = action, .returned_error = returned_error };
-}
-
-fn describeCode(code: Code) Metadata {
-    return switch (code) {
-        .@"usage.command_required" => describe(code, .usage, .failure, .none, .correct_arguments, error.InvalidArgument),
-        .@"usage.unknown_command" => describe(code, .usage, .failure, .none, .correct_arguments, error.InvalidArgument),
-        .@"usage.unknown_option" => describe(code, .usage, .failure, .none, .correct_arguments, error.InvalidArgument),
-        .@"usage.missing_argument" => describe(code, .usage, .failure, .none, .correct_arguments, error.InvalidArgument),
-        .@"usage.extra_argument" => describe(code, .usage, .failure, .none, .correct_arguments, error.InvalidArgument),
-        .@"usage.missing_option_value" => describe(code, .usage, .failure, .none, .correct_arguments, error.InvalidArgument),
-        .@"usage.repeated_option" => describe(code, .usage, .failure, .none, .correct_arguments, error.InvalidArgument),
-        .@"usage.conflicting_options" => describe(code, .usage, .failure, .none, .correct_arguments, error.InvalidArgument),
-        .@"usage.option_requires" => describe(code, .usage, .failure, .none, .correct_arguments, error.InvalidArgument),
-        .@"usage.invalid_option_value" => describe(code, .usage, .failure, .none, .correct_arguments, error.InvalidArgument),
-        .@"io.file_not_found" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
-        .@"io.access_denied" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
-        .@"io.invalid_path" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
-        .@"io.open_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
-        .@"io.stat_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
-        .@"io.seek_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
-        .@"io.read_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
-        .@"io.unexpected_eof" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
-        .@"io.map_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
-        .@"io.create_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
-        .@"io.write_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
-        .@"io.flush_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
-        .@"io.publish_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
-        .@"io.temp_unavailable" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
-        .@"io.cleanup_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
-        .@"resource.out_of_memory" => describe(code, .resources, .failure, .none, .check_memory, error.OutOfMemory),
-        .@"resource.capacity_limit_exceeded" => describe(code, .resources, .failure, .none, .check_capacity, error.CapacityExceeded),
-        .@"resource.count_overflow" => describe(code, .resources, .failure, .none, .check_counts, error.CountOverflow),
-        .@"resource.line_buffer_exceeded" => describe(code, .resources, .failure, .none, .check_capacity, error.CapacityExceeded),
-        .@"input.changed" => describe(code, .source_stability, .failure, .none, .check_source, error.InputChanged),
-        .@"fasta.no_records" => describe(code, .structure, .finding, .file, .correct_data, error.InvalidFasta),
-        .@"fasta.content_before_header" => describe(code, .structure, .finding, .line, .correct_data, error.InvalidFasta),
-        .@"fasta.header_control_byte" => describe(code, .structure, .finding, .byte, .correct_data, error.InvalidFasta),
-        .@"fasta.sequence_control_byte" => describe(code, .structure, .finding, .byte, .correct_data, error.InvalidFasta),
-        .@"fasta.duplicate_identifier" => describe(code, .identifiers, .finding, .record, .correct_data, error.InvalidFasta),
-        .@"sequence.invalid_symbol" => describe(code, .alphabet, .finding, .byte, .correct_data, error.InvalidFasta),
-        .@"index.initial_header_required" => describe(code, .index_compatibility, .finding, .file, .correct_data, error.InvalidIndex),
-        .@"index.no_indexable_records" => describe(code, .index_compatibility, .finding, .file, .correct_data, error.InvalidIndex),
-        .@"index.identifier_too_long" => describe(code, .index_compatibility, .finding, .record, .correct_data, error.InvalidIndex),
-        .@"index.sequence_line_too_long" => describe(code, .index_compatibility, .finding, .line, .correct_data, error.InvalidIndex),
-        .@"index.record_count_limit_exceeded" => describe(code, .index_compatibility, .finding, .file, .correct_data, error.InvalidIndex),
-        .@"index.side_table_offset_limit_exceeded" => describe(code, .index_compatibility, .finding, .record, .correct_data, error.InvalidIndex),
-        .@"index.source_timestamp_out_of_range" => describe(code, .index_compatibility, .finding, .file, .check_source, error.InvalidIndex),
-        .@"index.nonuniform_fai" => describe(code, .index_compatibility, .finding, .record, .select_index_format, error.InvalidIndex),
-        .@"index.not_found" => describe(code, .index_integrity, .failure, .none, .rebuild_index, error.InvalidIndex),
-        .@"index.no_records" => describe(code, .index_integrity, .finding, .file, .rebuild_index, error.InvalidIndex),
-        .@"index.invalid_magic" => describe(code, .index_integrity, .finding, .file, .rebuild_index, error.InvalidIndex),
-        .@"index.unsupported_version" => describe(code, .index_integrity, .finding, .file, .rebuild_index, error.InvalidIndex),
-        .@"index.truncated" => describe(code, .index_integrity, .finding, .file, .rebuild_index, error.InvalidIndex),
-        .@"index.name_not_embedded" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
-        .@"index.name_footer_missing" => describe(code, .index_integrity, .finding, .file, .rebuild_index, error.InvalidIndex),
-        .@"index.name_blob_out_of_bounds" => describe(code, .index_integrity, .finding, .file, .rebuild_index, error.InvalidIndex),
-        .@"index.name_out_of_bounds" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
-        .@"index.zero_sequence_length" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
-        .@"index.invalid_line_geometry" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
-        .@"index.sequence_offset_out_of_bounds" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
-        .@"index.sequence_span_out_of_bounds" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
-        .@"index.arithmetic_overflow" => describe(code, .index_integrity, .finding, .field, .rebuild_index, error.InvalidIndex),
-        .@"index.fai.field_missing" => describe(code, .index_integrity, .finding, .field, .rebuild_index, error.InvalidIndex),
-        .@"index.fai.invalid_integer" => describe(code, .index_integrity, .finding, .field, .rebuild_index, error.InvalidIndex),
-        .@"index.fai.integer_out_of_range" => describe(code, .index_integrity, .finding, .field, .rebuild_index, error.InvalidIndex),
-        .@"index.side_table_offset_out_of_bounds" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
-        .@"index.side_table_misaligned" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
-        .@"index.side_table_empty" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
-        .@"index.side_table_order_invalid" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
-        .@"index.side_base_start_mismatch" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
-        .@"index.side_line_geometry_invalid" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
-        .@"index.side_first_offset_mismatch" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
-        .@"index.side_line_order_invalid" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
-        .@"index.side_sequence_length_mismatch" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
-        .@"index.older_than_source" => describe(code, .index_match, .finding, .file, .rebuild_index, error.InvalidIndex),
-        .@"index.source_size_mismatch" => describe(code, .index_match, .finding, .file, .rebuild_index, error.InvalidIndex),
-        .@"index.source_mtime_mismatch" => describe(code, .index_match, .finding, .file, .rebuild_index, error.InvalidIndex),
-        .@"pair.region_length_mismatch" => describe(code, .index_match, .finding, .record, .rebuild_index, error.InvalidIndex),
-        .@"pair.total_length_mismatch" => describe(code, .index_match, .finding, .file, .rebuild_index, error.InvalidIndex),
-        .@"request.no_regions" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
-        .@"request.sequence_not_found" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
-        .@"request.start_before_one" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
-        .@"request.start_after_sequence" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
-        .@"request.end_before_start" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
-        .@"request.identifier_too_long" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
-        .@"request.bed.field_missing" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
-        .@"request.bed.invalid_coordinate" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
-        .@"request.bed.coordinate_out_of_range" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
-        .@"request.bed.invalid_interval" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
-        .@"request.bed.invalid_strand" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
-        .@"transform.complement_on_protein" => describe(code, .transforms, .failure, .none, .select_transform, error.UnsupportedTransform),
-        .@"repair.output_is_input" => describe(code, .repair, .failure, .none, .select_output, error.RepairRefused),
-        .@"repair.output_identity_unknown" => describe(code, .repair, .failure, .none, .select_output, error.RepairRefused),
-        .@"repair.blocked" => describe(code, .repair, .failure, .none, .resolve_blocker, error.RepairRefused),
-        .@"internal.consistency_failed" => describe(code, .internal, .failure, .none, .report_defect, error.Internal),
-    };
-}
-
 /// One compiled registry. Tag names supply the stable strings; the exhaustive
 /// switch requires metadata for every payload. Neither formatters nor callers
 /// maintain a second list of code strings.
@@ -724,18 +624,6 @@ pub const REGISTRY = blk: {
     for (codes, 0..) |code, index| entries[index] = describeCode(code);
     break :blk entries;
 };
-
-comptime {
-    @setEvalBranchQuota(30000);
-    for (REGISTRY, 0..) |entry, index| {
-        if (@intFromEnum(entry.code) != index) @compileError("diagnostic registry tag order differs");
-        for (REGISTRY[0..index]) |previous| {
-            if (std.mem.eql(u8, entry.name, previous.name)) @compileError("duplicate diagnostic code");
-        }
-    }
-    if (std.enums.values(SourceId).len != SOURCE_LIMIT) @compileError("diagnostic source role limit differs");
-    if (@sizeOf(Failure) > FAILURE_BYTES_LIMIT) @compileError("diagnostic failure storage exceeds 2048 bytes");
-}
 
 /// Static metadata; no formatting or allocation occurs at lookup.
 pub fn metadata(code: Code) *const Metadata {
@@ -951,4 +839,116 @@ pub fn oneBased(failure: *Failure, zero_based: u64, at: Reference) Error!u64 {
             .at = at,
         });
     };
+}
+
+fn describe(code: Code, category: Category, kind: Kind, unit: Unit, action: Action, returned_error: Error) Metadata {
+    return .{ .code = code, .name = @tagName(code), .category = category, .kind = kind, .severity = .@"error", .unit = unit, .action = action, .returned_error = returned_error };
+}
+
+fn describeCode(code: Code) Metadata {
+    return switch (code) {
+        .@"usage.command_required" => describe(code, .usage, .failure, .none, .correct_arguments, error.InvalidArgument),
+        .@"usage.unknown_command" => describe(code, .usage, .failure, .none, .correct_arguments, error.InvalidArgument),
+        .@"usage.unknown_option" => describe(code, .usage, .failure, .none, .correct_arguments, error.InvalidArgument),
+        .@"usage.missing_argument" => describe(code, .usage, .failure, .none, .correct_arguments, error.InvalidArgument),
+        .@"usage.extra_argument" => describe(code, .usage, .failure, .none, .correct_arguments, error.InvalidArgument),
+        .@"usage.missing_option_value" => describe(code, .usage, .failure, .none, .correct_arguments, error.InvalidArgument),
+        .@"usage.repeated_option" => describe(code, .usage, .failure, .none, .correct_arguments, error.InvalidArgument),
+        .@"usage.conflicting_options" => describe(code, .usage, .failure, .none, .correct_arguments, error.InvalidArgument),
+        .@"usage.option_requires" => describe(code, .usage, .failure, .none, .correct_arguments, error.InvalidArgument),
+        .@"usage.invalid_option_value" => describe(code, .usage, .failure, .none, .correct_arguments, error.InvalidArgument),
+        .@"io.file_not_found" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
+        .@"io.access_denied" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
+        .@"io.invalid_path" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
+        .@"io.open_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
+        .@"io.stat_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
+        .@"io.seek_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
+        .@"io.read_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
+        .@"io.unexpected_eof" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
+        .@"io.map_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
+        .@"io.create_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
+        .@"io.write_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
+        .@"io.flush_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
+        .@"io.publish_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
+        .@"io.temp_unavailable" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
+        .@"io.cleanup_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
+        .@"resource.out_of_memory" => describe(code, .resources, .failure, .none, .check_memory, error.OutOfMemory),
+        .@"resource.capacity_limit_exceeded" => describe(code, .resources, .failure, .none, .check_capacity, error.CapacityExceeded),
+        .@"resource.count_overflow" => describe(code, .resources, .failure, .none, .check_counts, error.CountOverflow),
+        .@"resource.line_buffer_exceeded" => describe(code, .resources, .failure, .none, .check_capacity, error.CapacityExceeded),
+        .@"input.changed" => describe(code, .source_stability, .failure, .none, .check_source, error.InputChanged),
+        .@"fasta.no_records" => describe(code, .structure, .finding, .file, .correct_data, error.InvalidFasta),
+        .@"fasta.content_before_header" => describe(code, .structure, .finding, .line, .correct_data, error.InvalidFasta),
+        .@"fasta.header_control_byte" => describe(code, .structure, .finding, .byte, .correct_data, error.InvalidFasta),
+        .@"fasta.sequence_control_byte" => describe(code, .structure, .finding, .byte, .correct_data, error.InvalidFasta),
+        .@"fasta.duplicate_identifier" => describe(code, .identifiers, .finding, .record, .correct_data, error.InvalidFasta),
+        .@"sequence.invalid_symbol" => describe(code, .alphabet, .finding, .byte, .correct_data, error.InvalidFasta),
+        .@"index.initial_header_required" => describe(code, .index_compatibility, .finding, .file, .correct_data, error.InvalidIndex),
+        .@"index.no_indexable_records" => describe(code, .index_compatibility, .finding, .file, .correct_data, error.InvalidIndex),
+        .@"index.identifier_too_long" => describe(code, .index_compatibility, .finding, .record, .correct_data, error.InvalidIndex),
+        .@"index.sequence_line_too_long" => describe(code, .index_compatibility, .finding, .line, .correct_data, error.InvalidIndex),
+        .@"index.record_count_limit_exceeded" => describe(code, .index_compatibility, .finding, .file, .correct_data, error.InvalidIndex),
+        .@"index.side_table_offset_limit_exceeded" => describe(code, .index_compatibility, .finding, .record, .correct_data, error.InvalidIndex),
+        .@"index.source_timestamp_out_of_range" => describe(code, .index_compatibility, .finding, .file, .check_source, error.InvalidIndex),
+        .@"index.nonuniform_fai" => describe(code, .index_compatibility, .finding, .record, .select_index_format, error.InvalidIndex),
+        .@"index.not_found" => describe(code, .index_integrity, .failure, .none, .rebuild_index, error.InvalidIndex),
+        .@"index.no_records" => describe(code, .index_integrity, .finding, .file, .rebuild_index, error.InvalidIndex),
+        .@"index.invalid_magic" => describe(code, .index_integrity, .finding, .file, .rebuild_index, error.InvalidIndex),
+        .@"index.unsupported_version" => describe(code, .index_integrity, .finding, .file, .rebuild_index, error.InvalidIndex),
+        .@"index.truncated" => describe(code, .index_integrity, .finding, .file, .rebuild_index, error.InvalidIndex),
+        .@"index.name_not_embedded" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
+        .@"index.name_footer_missing" => describe(code, .index_integrity, .finding, .file, .rebuild_index, error.InvalidIndex),
+        .@"index.name_blob_out_of_bounds" => describe(code, .index_integrity, .finding, .file, .rebuild_index, error.InvalidIndex),
+        .@"index.name_out_of_bounds" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
+        .@"index.zero_sequence_length" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
+        .@"index.invalid_line_geometry" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
+        .@"index.sequence_offset_out_of_bounds" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
+        .@"index.sequence_span_out_of_bounds" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
+        .@"index.arithmetic_overflow" => describe(code, .index_integrity, .finding, .field, .rebuild_index, error.InvalidIndex),
+        .@"index.fai.field_missing" => describe(code, .index_integrity, .finding, .field, .rebuild_index, error.InvalidIndex),
+        .@"index.fai.invalid_integer" => describe(code, .index_integrity, .finding, .field, .rebuild_index, error.InvalidIndex),
+        .@"index.fai.integer_out_of_range" => describe(code, .index_integrity, .finding, .field, .rebuild_index, error.InvalidIndex),
+        .@"index.side_table_offset_out_of_bounds" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
+        .@"index.side_table_misaligned" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
+        .@"index.side_table_empty" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
+        .@"index.side_table_order_invalid" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
+        .@"index.side_base_start_mismatch" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
+        .@"index.side_line_geometry_invalid" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
+        .@"index.side_first_offset_mismatch" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
+        .@"index.side_line_order_invalid" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
+        .@"index.side_sequence_length_mismatch" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
+        .@"index.older_than_source" => describe(code, .index_match, .finding, .file, .rebuild_index, error.InvalidIndex),
+        .@"index.source_size_mismatch" => describe(code, .index_match, .finding, .file, .rebuild_index, error.InvalidIndex),
+        .@"index.source_mtime_mismatch" => describe(code, .index_match, .finding, .file, .rebuild_index, error.InvalidIndex),
+        .@"pair.region_length_mismatch" => describe(code, .index_match, .finding, .record, .rebuild_index, error.InvalidIndex),
+        .@"pair.total_length_mismatch" => describe(code, .index_match, .finding, .file, .rebuild_index, error.InvalidIndex),
+        .@"request.no_regions" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
+        .@"request.sequence_not_found" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
+        .@"request.start_before_one" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
+        .@"request.start_after_sequence" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
+        .@"request.end_before_start" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
+        .@"request.identifier_too_long" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
+        .@"request.bed.field_missing" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
+        .@"request.bed.invalid_coordinate" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
+        .@"request.bed.coordinate_out_of_range" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
+        .@"request.bed.invalid_interval" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
+        .@"request.bed.invalid_strand" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
+        .@"transform.complement_on_protein" => describe(code, .transforms, .failure, .none, .select_transform, error.UnsupportedTransform),
+        .@"repair.output_is_input" => describe(code, .repair, .failure, .none, .select_output, error.RepairRefused),
+        .@"repair.output_identity_unknown" => describe(code, .repair, .failure, .none, .select_output, error.RepairRefused),
+        .@"repair.blocked" => describe(code, .repair, .failure, .none, .resolve_blocker, error.RepairRefused),
+        .@"internal.consistency_failed" => describe(code, .internal, .failure, .none, .report_defect, error.Internal),
+    };
+}
+
+comptime {
+    @setEvalBranchQuota(30000);
+    for (REGISTRY, 0..) |entry, index| {
+        if (@intFromEnum(entry.code) != index) @compileError("diagnostic registry tag order differs");
+        for (REGISTRY[0..index]) |previous| {
+            if (std.mem.eql(u8, entry.name, previous.name)) @compileError("duplicate diagnostic code");
+        }
+    }
+    if (std.enums.values(SourceId).len != SOURCE_LIMIT) @compileError("diagnostic source role limit differs");
+    if (@sizeOf(Failure) > FAILURE_BYTES_LIMIT) @compileError("diagnostic failure storage exceeds 2048 bytes");
 }
