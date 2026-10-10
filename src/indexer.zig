@@ -1714,7 +1714,7 @@ pub fn runIndex(
         .details = switch (err) {
             error.FileNotFound => .{ .@"io.file_not_found" = {} },
             error.AccessDenied => .{ .@"io.access_denied" = {} },
-            error.NameTooLong => .{ .@"io.invalid_path" = .{ .reason = .too_long, .limit_bytes = INDEX_PATH_BUFFER_SIZE } },
+            error.NameTooLong => .{ .@"io.invalid_path" = .{ .reason = .too_long } },
             else => .{ .@"io.open_failed" = {} },
         },
         .stage = .open,
@@ -3863,4 +3863,19 @@ test "[edge] - [index preflight]: buffer width and ZFI count reject before narro
         try std.testing.expectEqual(@as(?diagnostics.Cause, null), primary.cause);
         try std.testing.expectError(error.TooManySequences, checkedZfiRecordCount(count, .{}));
     }
+}
+
+test "[failure] - [index diagnostics]: reports the known ZFI path buffer limit" {
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.index);
+    var buffer: [8]u8 = undefined;
+    try std.testing.expectError(error.Io, zfiOutputPath(&buffer, "input", .{ .failure = &failure }));
+    const primary = failure.primary().?;
+    try std.testing.expectEqual(diagnostics.Code.@"io.invalid_path", primary.code());
+    try std.testing.expectEqual(diagnostics.Stage.create, primary.stage);
+    try std.testing.expectEqual(diagnostics.SourceId.zfi, primary.at.source);
+    try std.testing.expect(primary.cause == null);
+    const details = primary.details.@"io.invalid_path";
+    try std.testing.expectEqual(diagnostics.PathReason.too_long, details.reason);
+    try std.testing.expectEqual(@as(?u64, buffer.len), details.limit_bytes);
 }

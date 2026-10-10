@@ -4024,3 +4024,25 @@ test "[regression] - [index scanner]: empty buffers reject before reading or all
     try std.testing.expectEqual(@as(usize, 0), failing.allocations);
     try std.testing.expectError(error.InvalidArgument, main.indexer.scanZfiReader(failing.allocator(), &reader, &buffer, true));
 }
+
+test "[regression] - [index diagnostics]: leaves OS path limits unknown before output starts" {
+    const path: [std.Io.Dir.max_path_bytes + 1]u8 = @splat('x');
+    for ([_]bool{ false, true }) |emit_fai| {
+        var failure: diagnostics.Failure = undefined;
+        try std.testing.expectError(error.Io, main.indexer.runIndex(io, .empty, &path, .{ .emit_fai = emit_fai }, &failure));
+        const primary = failure.primary().?;
+        try std.testing.expectEqual(diagnostics.Code.@"io.invalid_path", primary.code());
+        try std.testing.expectEqual(diagnostics.Stage.open, primary.stage);
+        try std.testing.expectEqual(diagnostics.SourceId.fasta, primary.at.source);
+        try std.testing.expectEqual(error.NameTooLong, primary.cause.?.zig);
+        const details = primary.details.@"io.invalid_path";
+        try std.testing.expectEqual(diagnostics.PathReason.too_long, details.reason);
+        try std.testing.expect(details.limit_bytes == null);
+        try std.testing.expectEqual(diagnostics.Operation.index, failure.operation);
+        try std.testing.expectEqualStrings(&path, failure.sourceLabel(.fasta).?);
+        try std.testing.expect(!failure.work_complete and !failure.complete);
+        try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);
+        try std.testing.expectEqual(.not_attempted, failure.outputs.stdout.final_flush);
+        try std.testing.expectEqual(@as(usize, 0), failure.secondaryItems().len);
+    }
+}
