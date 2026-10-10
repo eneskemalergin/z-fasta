@@ -983,7 +983,10 @@ fn writeFixed(io: std.Io, data: []const u8, record_widths: []const u32, output_p
     };
     failure.outputs.file.final_flush = .succeeded;
     try checkRewriteSource(io, input, before, failure);
-    atomic_file.replace(io) catch |err| return diag.fail(.{ .@"io.publish_failed" = {} }, .publish, .output, err);
+    atomic_file.replace(io) catch |err| {
+        failure.outputs.file.state = .unknown;
+        return diag.fail(.{ .@"io.publish_failed" = {} }, .publish, .output, err);
+    };
     failure.outputs.file.state = .published;
 }
 
@@ -1396,41 +1399,54 @@ test "[failure] - [validator counters]: captures limits before arithmetic and al
     }
 }
 
-test "[failure] - [validator output]: preserves publication primary and records failed staged cleanup" {
+test "[failure] - [validator output]: keeps failed publication unknown after staged cleanup" {
     const Fault = struct {
-        fn rename(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir, _: []const u8) std.Io.Dir.RenameError!void {
+        var scenario: enum { published, refused, cleanup_failed } = .published;
+
+        fn rename(userdata: ?*anyopaque, old_dir: std.Io.Dir, old_path: []const u8, new_dir: std.Io.Dir, new_path: []const u8) std.Io.Dir.RenameError!void {
+            if (scenario == .published) try std.testing.io.vtable.dirRename(userdata, old_dir, old_path, new_dir, new_path);
             return error.AccessDenied;
         }
         fn remove(_: ?*anyopaque, _: std.Io.Dir, _: []const u8) std.Io.Dir.DeleteFileError!void {
             return error.AccessDenied;
         }
     };
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const input = try tmp.dir.createFile(std.testing.io, "in.fa", .{ .read = true });
-    defer input.close(std.testing.io);
+    const input = try tmp.dir.createFile(io, "in.fa", .{ .read = true });
+    defer input.close(io);
     const data = ">seq\nACGT\n";
-    try std.Io.File.writeStreamingAll(input, std.testing.io, data);
-    const before = try input.stat(std.testing.io);
-    const output = try tmp.dir.createFile(std.testing.io, "out.fa", .{});
-    try std.Io.File.writeStreamingAll(output, std.testing.io, "old output\n");
-    output.close(std.testing.io);
-    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "out.fa", std.testing.allocator);
+    try std.Io.File.writeStreamingAll(input, io, data);
+    const before = try input.stat(io);
+    try tmp.dir.writeFile(io, .{ .sub_path = "out.fa", .data = "old output\n" });
+    const path = try tmp.dir.realPathFileAlloc(io, "out.fa", std.testing.allocator);
     defer std.testing.allocator.free(path);
-    var vtable = std.testing.io.vtable.*;
-    vtable.dirRename = Fault.rename;
-    vtable.dirDeleteFile = Fault.remove;
-    var failure: diagnostics.Failure = undefined;
-    failure.reset(.validate);
-    try std.testing.expectError(error.Io, writeFixed(.{ .userdata = std.testing.io.userdata, .vtable = &vtable }, data, &.{4}, path, input, before, &failure));
-    try std.testing.expectEqual(diagnostics.Code.@"io.publish_failed", failure.primary().?.code());
-    try std.testing.expectEqual(error.AccessDenied, failure.primary().?.cause.?.zig);
-    try std.testing.expectEqual(@as(u8, 1), failure.secondary_len);
-    try std.testing.expectEqual(diagnostics.Code.@"io.cleanup_failed", failure.secondary[0].code());
-    try std.testing.expectEqual(.unknown, failure.outputs.file.state);
-    const after = try tmp.dir.readFileAlloc(std.testing.io, "out.fa", std.testing.allocator, .limited(1024));
-    defer std.testing.allocator.free(after);
-    try std.testing.expectEqualStrings("old output\n", after);
+    for ([_]@TypeOf(Fault.scenario){ .published, .refused, .cleanup_failed }) |scenario| {
+        Fault.scenario = scenario;
+        try tmp.dir.writeFile(io, .{ .sub_path = "out.fa", .data = "old output\n" });
+        var vtable = io.vtable.*;
+        vtable.dirRename = Fault.rename;
+        if (scenario == .cleanup_failed) vtable.dirDeleteFile = Fault.remove;
+        var failure: diagnostics.Failure = undefined;
+        failure.reset(.validate);
+        try std.testing.expectError(error.Io, writeFixed(.{ .userdata = io.userdata, .vtable = &vtable }, data, &.{4}, path, input, before, &failure));
+        const after = try tmp.dir.readFileAlloc(io, "out.fa", std.testing.allocator, .limited(1024));
+        defer std.testing.allocator.free(after);
+        try std.testing.expectEqualStrings(if (scenario == .published) data else "old output\n", after);
+        const primary = failure.primary().?;
+        try std.testing.expectEqual(diagnostics.Code.@"io.publish_failed", primary.code());
+        try std.testing.expectEqual(error.AccessDenied, primary.cause.?.zig);
+        try std.testing.expectEqual(diagnostics.Stage.publish, primary.stage);
+        try std.testing.expectEqual(diagnostics.SourceId.output, primary.at.source);
+        try std.testing.expectEqual(.unknown, failure.outputs.file.state);
+        try std.testing.expectEqual(.succeeded, failure.outputs.file.final_flush);
+        try std.testing.expectEqual(@as(usize, if (scenario == .cleanup_failed) 1 else 0), failure.secondaryItems().len);
+        if (scenario == .cleanup_failed) {
+            try std.testing.expectEqual(diagnostics.Code.@"io.cleanup_failed", failure.secondary[0].code());
+            try std.testing.expectEqual(error.AccessDenied, failure.secondary[0].cause.?.zig);
+        }
+    }
 }
 
 test "[failure] - [validator rewrite]: failed flush aborts staging and preserves the destination" {
