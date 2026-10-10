@@ -51,7 +51,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     try std.testing.expectEqual(@as(u64, 2), indexed.record_count);
     try expectComplete(&failure);
 
-    const get_options = commands.getter.GetOptions{ .source = .{ .positional = &.{"seq1:1-4"} } };
+    const get_options = commands.getter.Options{ .source = .{ .positional = &.{"seq1:1-4"} } };
     try std.testing.expectError(error.Io, commands.getter.runGetWithOptions(allocator, io, missing, get_options, &failure));
     try expectMissing(&failure, .get);
     const extracted = try commands.getter.runGetWithOptions(allocator, io, valid, get_options, &failure);

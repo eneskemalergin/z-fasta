@@ -10,8 +10,13 @@ pub const bed_parser = @import("bed_parser.zig");
 pub const stats = @import("stats.zig");
 pub const validator = @import("validator.zig");
 
-const diagnostics = index_format.diagnostics;
+const diagnostics = @import("diagnostics");
 pub const reporting = @import("reporting.zig");
+
+pub fn main(init: std.process.Init.Minimal) void {
+    const status = runCli(init);
+    if (status != 0) std.process.exit(status);
+}
 
 const VERSION = "0.3.5";
 const STRAND_AWARE_FLAG = "--strand-aware";
@@ -81,9 +86,6 @@ const USAGE =
     \\  z-fasta validate --json --summary genome.fa
     \\
 ;
-
-const GET_USAGE_ERROR =
-    "error: usage: z-fasta get <file.fasta> (<region>... | --names file.txt|- | --bed file.bed|-)\n";
 
 const ParseTransformFlagsError = error{ConflictingTransformFlags};
 
@@ -249,11 +251,6 @@ fn writeStdoutFast(bytes: []const u8) ?FastWriteFailure {
         written += result;
     }
     return null;
-}
-
-pub fn main(init: std.process.Init.Minimal) void {
-    const status = runCli(init);
-    if (status != 0) std.process.exit(status);
 }
 
 fn runCli(init: std.process.Init.Minimal) u8 {
@@ -439,7 +436,7 @@ fn invalidWidth(cli: *Cli, raw: []const u8) diagnostics.Error {
     return cli.fail(.{ .@"usage.invalid_option_value" = .{ .option = .max_header_len, .expected = .positive_usize, .value = cli.failure.retain(raw, 32) } });
 }
 
-const Notice = union(enum) { index: struct { path: []const u8, count: u64 }, get: getter.GetResult, cap: bool };
+const Notice = union(enum) { index: struct { path: []const u8, count: u64 }, get: getter.Result, cap: bool };
 
 fn writeNotice(cli: *Cli, notice: Notice) diagnostics.Error!void {
     const failure = cli.failure;
@@ -469,7 +466,7 @@ fn writeNoticeBytes(writer: *std.Io.Writer, format: ErrorFormat, failure: *const
     }
 }
 
-fn writeGetSummary(writer: *std.Io.Writer, result: getter.GetResult) std.Io.Writer.Error!void {
+fn writeGetSummary(writer: *std.Io.Writer, result: getter.Result) std.Io.Writer.Error!void {
     const seconds = if (result.elapsed_ns == 0) 0.0 else @as(f64, @floatFromInt(result.elapsed_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s));
     const regions_per_second = if (seconds == 0.0) 0.0 else @as(f64, @floatFromInt(result.region_count)) / seconds;
     try writer.print("summary: regions={d} total_bases={d} elapsed_s={d:.6} regions_per_s={d:.1}\n", .{ result.region_count, result.total_bases, seconds, regions_per_second });

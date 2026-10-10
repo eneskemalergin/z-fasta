@@ -3,17 +3,17 @@
 const std = @import("std");
 const diagnostics = @import("diagnostics");
 
-pub const BedStrand = enum {
+pub const Strand = enum {
     forward,
     reverse,
     invalid,
 };
 
-pub const BedRegion = struct {
+pub const Region = struct {
     chrom: []const u8,
     start_1based: u64,
     end_1based: u64,
-    strand: BedStrand,
+    strand: Strand,
 };
 
 pub const ParseError = error{
@@ -27,10 +27,10 @@ pub const ParseError = error{
 
 pub const ParseResult = union(enum) {
     skip,
-    region: BedRegion,
+    region: Region,
 };
 
-fn parseStrand(field: []const u8) BedStrand {
+fn parseStrand(field: []const u8) Strand {
     if (field.len == 0) return .forward;
     if (field.len != 1) return .invalid;
 

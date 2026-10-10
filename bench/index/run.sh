@@ -409,7 +409,7 @@ run_tests() {
     echo "Correctness: edge cases"
     echo "Generating edge case files..."
 
-    > "$EDGE_DIR/empty.fasta"
+    : > "$EDGE_DIR/empty.fasta"
     echo -n ">" > "$EDGE_DIR/single_byte.fasta"
     echo -n ">seq1" > "$EDGE_DIR/header_no_newline.fasta"
     echo ">seq1" > "$EDGE_DIR/header_only.fasta"

@@ -294,7 +294,7 @@ test "[integration] - [stats report]: ZFI and FAI render identical mixed nucleot
         const fasta_file = try std.Io.Dir.cwd().openFile(io, fasta_path, .{});
         defer fasta_file.close(io);
         const fasta_stat = try fasta_file.stat(io);
-        var index = try main.indexer.scanZfiData(fasta_data, true, allocator);
+        var index = try main.indexer.scanZfiData(allocator, fasta_data, true);
         defer index.deinit(allocator);
         try main.indexer.writeZfiIndexFile(
             io,

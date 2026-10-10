@@ -185,7 +185,7 @@ pub fn build(b: *std.Build) void {
         }),
     }));
     run_commands_caller.step.dependOn(&gen_simple_index.step);
-    const diagnostics_step = b.step("test-diagnostics", "Run diagnostics tests and a separate caller");
+    const diagnostics_step = b.step("test-diagnostics", "Run diagnostics tests and separate callers");
     diagnostics_step.dependOn(reporting_step);
     diagnostics_step.dependOn(&run_commands_caller.step);
     diagnostics_step.dependOn(&run_test_diagnostics.step);

@@ -104,7 +104,7 @@ fn checkValidatorProperties(data: []const u8) !void {
 }
 
 fn scanZfi(allocator: std.mem.Allocator, data: []const u8) !main.indexer.ZfiIndex {
-    return main.indexer.scanZfiData(data, true, allocator);
+    return main.indexer.scanZfiData(allocator, data, true);
 }
 
 fn expectHasSideTable(index: *const main.indexer.ZfiIndex) !void {
@@ -1353,4 +1353,19 @@ test "[cli] - [validate cap]: keeps complete counts and explains retained exampl
     try std.testing.expectEqual(error.BrokenPipe, failure.primary().?.cause.?.zig);
     try std.testing.expect(failure.work_complete and !failure.complete);
     try std.testing.expectEqual(.not_attempted, failure.outputs.stdout.final_flush);
+}
+
+test "[edge] - [validate fix widths]: equal frequencies select the first seen width" {
+    const cases = [_]struct { input: []const u8, width: u32, fixed: []const u8 }{
+        .{ .input = ">seq\nAAA\nCC\nGGGG\n", .width = 3, .fixed = ">seq\nAAA\nCCG\nGGG\n" },
+        .{ .input = ">seq\nCC\nAAA\nGGGG\n", .width = 2, .fixed = ">seq\nCC\nAA\nAG\nGG\nG\n" },
+    };
+    for (cases) |case| {
+        var summary = try validator.validateData(std.testing.allocator, case.input, .{});
+        defer summary.deinit(std.testing.allocator);
+        try std.testing.expectEqual(case.width, summary.record_widths.items[0]);
+        const fixed = try validator.fixData(std.testing.allocator, case.input, summary.record_widths.items);
+        defer std.testing.allocator.free(fixed);
+        try std.testing.expectEqualStrings(case.fixed, fixed);
+    }
 }

@@ -121,7 +121,7 @@ pub fn writeZfi(
     enable_dedup: bool,
 ) !void {
     const io = std.testing.io;
-    var index = try main.indexer.scanZfiData(data, enable_dedup, allocator);
+    var index = try main.indexer.scanZfiData(allocator, data, enable_dedup);
     defer index.deinit(allocator);
 
     var path_buffer: [4096]u8 = undefined;

@@ -1611,12 +1611,12 @@ section5() {
             fi
         fi
         if [[ -x "$NOODLES" && "$exp_noo" != "-" ]]; then
-            local noo_exit=0; noo_out=$("$NOODLES" get "$fasta" "$region" 2>/dev/null) || noo_exit=$?
+            local noo_exit=0; "$NOODLES" get "$fasta" "$region" >/dev/null 2>&1 || noo_exit=$?
             (( (exp_noo == 0 && noo_exit == 0) || (exp_noo == 1 && noo_exit != 0) )) \
                 && pass "$tag $desc noodles exit ok" || fail "$tag $desc noodles (expected $exp_noo, got $noo_exit)"
         fi
         if [[ -x "$RUSTBIO" && "$exp_rb" != "-" ]]; then
-            local rb_exit=0; rb_out=$("$RUSTBIO" get "$fasta" "$region" 2>/dev/null) || rb_exit=$?
+            local rb_exit=0; "$RUSTBIO" get "$fasta" "$region" >/dev/null 2>&1 || rb_exit=$?
             (( (exp_rb == 0 && rb_exit == 0) || (exp_rb == 1 && rb_exit != 0) )) \
                 && pass "$tag $desc rustbio exit ok" || fail "$tag $desc rustbio (expected $exp_rb, got $rb_exit)"
         fi
@@ -2205,8 +2205,9 @@ run_perf_multi() {
             bench_has_tool noodles && get_add_command perf_multi "$workload" noodles noodles "$json" "$nd_cmd" "$nbytes" "$total_bases"
             bench_has_tool rustbio && get_add_command perf_multi "$workload" rustbio-custom-get rustbio "$json" "$rb_cmd" "$nbytes" "$total_bases"
             if [[ "${GET_MULTI_REFERENCE:-}" == "1" ]]; then
-                local seqtk_loop="while IFS= read -r r; do printf '%s\\n' \"\$r\" | $qt subseq $qfai - > /dev/null; done < $(quote_arg "$path")"
-                local fh_loop="while IFS= read -r r; do $qh -r \"\$r\" $qfai > /dev/null; done < $(quote_arg "$path")"
+                local seqtk_loop fh_loop
+                seqtk_loop="while IFS= read -r r; do printf '%s\\n' \"\$r\" | $qt subseq $qfai - > /dev/null; done < $(quote_arg "$path")"
+                fh_loop="while IFS= read -r r; do $qh -r \"\$r\" $qfai > /dev/null; done < $(quote_arg "$path")"
                 bench_has_tool seqtk && get_add_command perf_multi "$workload" seqtk-reference seqtk "$json" "$seqtk_loop" "$nbytes" "$total_bases"
                 bench_has_tool fastahack && get_add_command perf_multi "$workload" fastahack-reference fastahack "$json" "$fh_loop" "$nbytes" "$total_bases"
             fi

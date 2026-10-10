@@ -108,9 +108,10 @@ existing_section_dir() {
 
 # Core versions every suite manifest records.
 export_manifest_core_versions() {
-    export BENCH_VER_ZEBRAC="$(bench_tool_version zebrac)"
-    export BENCH_VER_ZFASTA="$(bench_tool_version z-fasta 2>/dev/null || echo unknown)"
-    export BENCH_VER_SAMTOOLS="$(bench_tool_version samtools 2>/dev/null || echo unknown)"
+    BENCH_VER_ZEBRAC="$(bench_tool_version zebrac 2>/dev/null || echo unknown)"
+    BENCH_VER_ZFASTA="$(bench_tool_version z-fasta 2>/dev/null || echo unknown)"
+    BENCH_VER_SAMTOOLS="$(bench_tool_version samtools 2>/dev/null || echo unknown)"
+    export BENCH_VER_ZEBRAC BENCH_VER_ZFASTA BENCH_VER_SAMTOOLS
 }
 
 # Always export BENCH_VER_<TOOL> (unknown if missing). seqtk uses the first line only.

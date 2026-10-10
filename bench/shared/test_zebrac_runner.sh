@@ -4,7 +4,21 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/zebrac_runner.sh"
+source "$SCRIPT_DIR/runner_common.sh"
+
+# Metadata tests use controlled version probes and never launch a measurement.
+(
+    bench_tool_version() { return 1; }
+    export_manifest_core_versions
+    [[ "$BENCH_VER_ZEBRAC" == unknown && "$BENCH_VER_ZFASTA" == unknown && "$BENCH_VER_SAMTOOLS" == unknown ]]
+    bench_tool_version() { printf '%s version\n' "$1"; }
+    export_manifest_core_versions
+    [[ "$BENCH_VER_ZEBRAC" == 'zebrac version' && "$BENCH_VER_ZFASTA" == 'z-fasta version' && "$BENCH_VER_SAMTOOLS" == 'samtools version' ]]
+)
+if [[ "${1:-}" == --metadata-only ]]; then
+    echo "shared runner metadata tests passed"
+    exit 0
+fi
 
 TMPDIR_LOCAL="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_LOCAL"' EXIT

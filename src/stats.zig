@@ -4,14 +4,89 @@
 //! descriptor-owned bounded read window over indexed sequence spans.
 
 const std = @import("std");
-const index_format = @import("index_format.zig");
 
-const IndexRecord = index_format.IndexRecord;
-const LoadedIndex = index_format.LoadedIndex;
-const SideTableLine = index_format.SideTableLine;
+const index_format = @import("index_format.zig");
 const diagnostics = @import("diagnostics");
 
-const StatsDiagnostics = struct {
+/// Sequence class shared by stats, GET transformation guards, and validation.
+pub const SequenceType = enum { nucleotide, protein };
+
+/// Bases sampled per record for GET transformation guards.
+pub const GET_TYPE_SAMPLE_BASES: u64 = 256;
+
+/// Bases sampled across the file for validation alphabet selection.
+pub const VALIDATE_TYPE_SAMPLE_BASES: u64 = 100_000;
+
+/// Computes indexed statistics and delivers the report to stdout. Path labels
+/// borrow fasta_path until the caller handles the failure or resets storage.
+/// Resets once, returns after cleanup, and discards pending output on failure.
+pub fn runStats(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, failure: *diagnostics.Failure) diagnostics.Error!void {
+    failure.reset(.stats);
+    failure.sources.set(.stdout, .{ .label = .{ .borrowed = "stdout" }, .kind = .stream });
+    var diag = Diagnostics{ .failure = failure };
+    var idx = try index_format.loadIndexCheckedWithMode(allocator, io, fasta_path, .stats_scan, failure);
+    defer idx.deinit();
+    var computed: ComputedStats = undefined;
+    try computeStats(allocator, &idx, &computed, &diag);
+    var out_buf: [65536]u8 = undefined;
+    var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
+    errdefer {
+        stdout_fw.interface.end = 0;
+        if (stdout_fw.err) |cause| {
+            if (failure.primary()) |primary| {
+                if (primary.code() == .@"io.write_failed") failure.primary_storage.cause = .{ .zig = cause };
+            }
+        }
+    }
+    try writeComputedReport(&stdout_fw.interface, fasta_path, &idx, &computed, &diag);
+    stdout_fw.flush() catch |err| {
+        failure.outputs.stdout.final_flush = .failed;
+        return diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .stdout, null, stdout_fw.err orelse err);
+    };
+    failure.outputs.stdout.final_flush = .succeeded;
+    failure.succeed();
+}
+
+/// Detects whether represented sequence counts are nucleotide or protein.
+///
+/// Shared by stats (full-file counts), GET (per-record sample), and validate
+/// (prefix sample). Threshold: nucleotide if IUPAC nuc letters are strictly
+/// more than 90% of counted bases (`nuc * 10 > total * 9`). The caller supplies
+/// `total` for the same sample represented by `counts`. Empty samples are nucleotide.
+pub fn detectType(counts: *const [256]u64, total: u64) SequenceType {
+    if (total == 0) return .nucleotide;
+
+    const nuc_count = counts['A'] + counts['a'] +
+        counts['C'] + counts['c'] +
+        counts['G'] + counts['g'] +
+        counts['T'] + counts['t'] +
+        counts['R'] + counts['r'] +
+        counts['Y'] + counts['y'] +
+        counts['S'] + counts['s'] +
+        counts['W'] + counts['w'] +
+        counts['K'] + counts['k'] +
+        counts['M'] + counts['m'] +
+        counts['B'] + counts['b'] +
+        counts['D'] + counts['d'] +
+        counts['H'] + counts['h'] +
+        counts['V'] + counts['v'] +
+        counts['N'] + counts['n'] +
+        counts['U'] + counts['u'];
+
+    // u128 avoids overflow on genome-scale totals (total * 9 and nuc * 10).
+    if (@as(u128, nuc_count) * 10 > @as(u128, total) * 9) {
+        return .nucleotide;
+    }
+    return .protein;
+}
+
+const IndexRecord = index_format.IndexRecord;
+
+const LoadedIndex = index_format.LoadedIndex;
+
+const SideTableLine = index_format.SideTableLine;
+
+const Diagnostics = struct {
     failure: *diagnostics.Failure,
     index_source: diagnostics.SourceId = .zfi,
     record: ?u64 = null,
@@ -67,20 +142,16 @@ const StatsDiagnostics = struct {
 };
 
 const SIMD_CHUNK_SIZE = 32;
+
 const SimdVec = @Vector(SIMD_CHUNK_SIZE, u8);
+
 const TAIL_CHUNK_SIZE = 8;
+
 const TailVec = @Vector(TAIL_CHUNK_SIZE, u8);
+
 const FINAL_CHUNK_SIZE = 4;
+
 const FinalVec = @Vector(FINAL_CHUNK_SIZE, u8);
-
-/// Sequence class shared by stats, GET transformation guards, and validation.
-pub const SequenceType = enum { nucleotide, protein };
-
-/// Bases sampled per record for GET transformation guards.
-pub const GET_TYPE_SAMPLE_BASES: u64 = 256;
-
-/// Bases sampled across the file for validation alphabet selection.
-pub const VALIDATE_TYPE_SAMPLE_BASES: u64 = 100_000;
 
 const CompositionStats = struct {
     counts: [256]u64 = .{0} ** 256,
@@ -164,7 +235,7 @@ fn medianSorted(values: []const u64) u64 {
     return lower + (values[middle] - lower) / 2;
 }
 
-fn summarizeLengths(records: []const IndexRecord, lengths: []u64, diag: *StatsDiagnostics) diagnostics.Error!LengthSummary {
+fn summarizeLengths(records: []const IndexRecord, lengths: []u64, diag: *Diagnostics) diagnostics.Error!LengthSummary {
     if (records.len == 0 or records.len != lengths.len) return diag.consistency(.record_reservation);
     var total: u64 = 0;
     var shortest_index: usize = 0;
@@ -259,7 +330,7 @@ fn countLetter(comp: *const CompositionStats, upper: u8) u128 {
     return @as(u128, comp.counts[upper]) + comp.counts[upper + ('a' - 'A')];
 }
 
-fn summarizeComposition(comp: *const CompositionStats, diag: *StatsDiagnostics) diagnostics.Error!CompositionSummary {
+fn summarizeComposition(comp: *const CompositionStats, diag: *Diagnostics) diagnostics.Error!CompositionSummary {
     if (comp.total_bases == 0 or comp.lowercase_count > comp.total_bases) return diag.consistency(.composition_accounting);
     if (comp.seq_type == .nucleotide) {
         const a = countLetter(comp, 'A');
@@ -394,36 +465,6 @@ fn writeReport(
     }
 }
 
-/// Computes indexed statistics and delivers the report to stdout. Path labels
-/// borrow fasta_path until the caller handles the failure or resets storage.
-/// Resets once, returns after cleanup, and discards pending output on failure.
-pub fn runStats(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, failure: *diagnostics.Failure) diagnostics.Error!void {
-    failure.reset(.stats);
-    failure.sources.set(.stdout, .{ .label = .{ .borrowed = "stdout" }, .kind = .stream });
-    var diag = StatsDiagnostics{ .failure = failure };
-    var idx = try index_format.loadIndexCheckedWithMode(allocator, io, fasta_path, .stats_scan, failure);
-    defer idx.deinit();
-    var computed: ComputedStats = undefined;
-    try computeStats(allocator, &idx, &computed, &diag);
-    var out_buf: [65536]u8 = undefined;
-    var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
-    errdefer {
-        stdout_fw.interface.end = 0;
-        if (stdout_fw.err) |cause| {
-            if (failure.primary()) |primary| {
-                if (primary.code() == .@"io.write_failed") failure.primary_storage.cause = .{ .zig = cause };
-            }
-        }
-    }
-    try writeComputedReport(&stdout_fw.interface, fasta_path, &idx, &computed, &diag);
-    stdout_fw.flush() catch |err| {
-        failure.outputs.stdout.final_flush = .failed;
-        return diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .stdout, null, stdout_fw.err orelse err);
-    };
-    failure.outputs.stdout.final_flush = .succeeded;
-    failure.succeed();
-}
-
 const ComputedStats = struct {
     summary: LengthSummary,
     comp: CompositionStats,
@@ -432,7 +473,7 @@ const ComputedStats = struct {
     longest_name: []const u8,
 };
 
-fn computeStats(allocator: std.mem.Allocator, idx: *const LoadedIndex, computed: *ComputedStats, diag: *StatsDiagnostics) diagnostics.Error!void {
+fn computeStats(allocator: std.mem.Allocator, idx: *const LoadedIndex, computed: *ComputedStats, diag: *Diagnostics) diagnostics.Error!void {
     diag.index_source = if (idx.source == .zfi) .zfi else .fai;
     const records = idx.records;
     if (records.len == 0) return diag.fail(.{ .@"index.no_records" = .{ .format = if (idx.source == .zfi) .zfi else .fai } }, .scan, diag.index_source, null, null);
@@ -451,23 +492,23 @@ fn computeStats(allocator: std.mem.Allocator, idx: *const LoadedIndex, computed:
     diag.failure.work_complete = true;
 }
 
-fn writeComputedReport(writer: *std.Io.Writer, fasta_path: []const u8, idx: *const LoadedIndex, computed: *const ComputedStats, diag: *StatsDiagnostics) diagnostics.Error!void {
+fn writeComputedReport(writer: *std.Io.Writer, fasta_path: []const u8, idx: *const LoadedIndex, computed: *const ComputedStats, diag: *Diagnostics) diagnostics.Error!void {
     try writeReportChecked(writer, fasta_path, if (idx.source == .zfi) ".zfi" else ".fai", idx.fasta_size, idx.records, computed.summary, computed.shortest_name, computed.longest_name, &computed.comp, computed.composition, diag);
 }
 
-fn checkTotal(indexed: u64, observed: u64, diag: *StatsDiagnostics) diagnostics.Error!void {
+fn checkTotal(indexed: u64, observed: u64, diag: *Diagnostics) diagnostics.Error!void {
     if (observed != indexed) return diag.fail(.{ .@"pair.total_length_mismatch" = .{
         .indexed_total = indexed,
         .observed_total = observed,
     } }, .scan, .fasta, null, null);
 }
 
-fn retainedName(idx: *const LoadedIndex, record_index: usize, check: diagnostics.Check, diag: *StatsDiagnostics) diagnostics.Error![]const u8 {
+fn retainedName(idx: *const LoadedIndex, record_index: usize, check: diagnostics.Check, diag: *Diagnostics) diagnostics.Error![]const u8 {
     diag.record = record_index + 1;
     return idx.recordName(record_index) orelse diag.consistency(check);
 }
 
-fn writeReportChecked(writer: *std.Io.Writer, fasta_path: []const u8, extension: []const u8, size: u64, records: []const IndexRecord, summary: LengthSummary, shortest: []const u8, longest: []const u8, comp: *const CompositionStats, composition: CompositionSummary, diag: *StatsDiagnostics) diagnostics.Error!void {
+fn writeReportChecked(writer: *std.Io.Writer, fasta_path: []const u8, extension: []const u8, size: u64, records: []const IndexRecord, summary: LengthSummary, shortest: []const u8, longest: []const u8, comp: *const CompositionStats, composition: CompositionSummary, diag: *Diagnostics) diagnostics.Error!void {
     const output = if (diag.output_source == .stdout) &diag.failure.outputs.stdout else &diag.failure.outputs.file;
     output.state = .streaming;
     output.may_be_partial = true;
@@ -484,7 +525,7 @@ const BoundedFastaReader = struct {
     buffer: []u8,
     start: u64 = 0,
     len: usize = 0,
-    diag: *StatsDiagnostics,
+    diag: *Diagnostics,
 
     fn read(self: *BoundedFastaReader, offset: u64, limit: u64) diagnostics.Error![]const u8 {
         if (self.buffer.len == 0) return self.diag.consistency(.reader_buffer);
@@ -607,7 +648,7 @@ fn scanRecord(
     }
 }
 
-fn scanComposition(allocator: std.mem.Allocator, idx: *const LoadedIndex, diag: *StatsDiagnostics) diagnostics.Error!CompositionStats {
+fn scanComposition(allocator: std.mem.Allocator, idx: *const LoadedIndex, diag: *Diagnostics) diagnostics.Error!CompositionStats {
     var comp: CompositionStats = .{};
     var buffer: [STATS_READ_BUFFER_BYTES]u8 = undefined;
     var reader = BoundedFastaReader{
@@ -656,12 +697,12 @@ fn recordsInSeqOffsetOrder(records: []const IndexRecord) bool {
 
 // Counts and lowercase counts cannot exceed the represented total. Checking
 // room for one whole slice keeps the SIMD loop free of per-byte guards.
-fn countSliceChecked(data: []const u8, comp: *CompositionStats, diag: *StatsDiagnostics) diagnostics.Error!void {
+fn countSliceChecked(data: []const u8, comp: *CompositionStats, diag: *Diagnostics) diagnostics.Error!void {
     if (data.len > std.math.maxInt(u64) - comp.total_bases) return diag.overflow(.total_symbols, comp.total_bases, data.len, std.math.maxInt(u64), .fasta);
     countCompositionSlice(data, comp);
 }
 
-fn countFilteredChecked(data: []const u8, comp: *CompositionStats, diag: *StatsDiagnostics) diagnostics.Error!void {
+fn countFilteredChecked(data: []const u8, comp: *CompositionStats, diag: *Diagnostics) diagnostics.Error!void {
     if (data.len <= std.math.maxInt(u64) - comp.total_bases) {
         countCompositionFiltered(data, comp);
         return;
@@ -721,39 +762,6 @@ fn countCompositionSlice(data: []const u8, comp: *CompositionStats) void {
     }
 }
 
-/// Detects whether represented sequence counts are nucleotide or protein.
-///
-/// Shared by stats (full-file counts), GET (per-record sample), and validate
-/// (prefix sample). Threshold: nucleotide if IUPAC nuc letters are strictly
-/// more than 90% of counted bases (`nuc * 10 > total * 9`). The caller supplies
-/// `total` for the same sample represented by `counts`. Empty samples are nucleotide.
-pub fn detectType(counts: *const [256]u64, total: u64) SequenceType {
-    if (total == 0) return .nucleotide;
-
-    const nuc_count = counts['A'] + counts['a'] +
-        counts['C'] + counts['c'] +
-        counts['G'] + counts['g'] +
-        counts['T'] + counts['t'] +
-        counts['R'] + counts['r'] +
-        counts['Y'] + counts['y'] +
-        counts['S'] + counts['s'] +
-        counts['W'] + counts['w'] +
-        counts['K'] + counts['k'] +
-        counts['M'] + counts['m'] +
-        counts['B'] + counts['b'] +
-        counts['D'] + counts['d'] +
-        counts['H'] + counts['h'] +
-        counts['V'] + counts['v'] +
-        counts['N'] + counts['n'] +
-        counts['U'] + counts['u'];
-
-    // u128 avoids overflow on genome-scale totals (total * 9 and nuc * 10).
-    if (@as(u128, nuc_count) * 10 > @as(u128, total) * 9) {
-        return .nucleotide;
-    }
-    return .protein;
-}
-
 fn testIndexRecord(seq_offset: u64, seq_len: u64, line_bases: u32, line_bytes: u32) IndexRecord {
     return .{
         .name_offset = 0,
@@ -763,6 +771,36 @@ fn testIndexRecord(seq_offset: u64, seq_len: u64, line_bases: u32, line_bytes: u
         .line_bases = line_bases,
         .line_bytes = line_bytes,
     };
+}
+
+fn checkStatsAllocationFailure(allocator: std.mem.Allocator, path: []const u8, seen: *u64) !void {
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.stats);
+    var diag = Diagnostics{ .failure = &failure, .output_source = .output };
+    var idx = index_format.loadIndexCheckedWithMode(allocator, std.testing.io, path, .stats_scan, &failure) catch |err| {
+        try recordStatsAllocationFailure(err, &failure, seen);
+        return error.OutOfMemory;
+    };
+    defer idx.deinit();
+    var computed: ComputedStats = undefined;
+    computeStats(allocator, &idx, &computed, &diag) catch |err| {
+        try recordStatsAllocationFailure(err, &failure, seen);
+        return error.OutOfMemory;
+    };
+    var storage: [8192]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&storage);
+    try writeComputedReport(&writer, path, &idx, &computed, &diag);
+    try std.testing.expect(failure.work_complete and !failure.complete);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Composition:\n") != null);
+}
+
+fn recordStatsAllocationFailure(err: diagnostics.Error, failure: *const diagnostics.Failure, seen: *u64) !void {
+    try std.testing.expectEqual(error.OutOfMemory, err);
+    try std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", failure.primary().?.code());
+    const role = failure.primary().?.details.@"resource.out_of_memory".allocation_role;
+    seen.* |= @as(u64, 1) << @intCast(@intFromEnum(role));
+    try std.testing.expect(!failure.work_complete);
+    try std.testing.expectEqual(.not_started, failure.outputs.file.state);
 }
 
 test "[unit] - [stats scan order]: detects sorted and unsorted offsets" {
@@ -804,7 +842,7 @@ test "[property] - [stats composition]: SIMD matches scalar counts at every tail
 test "[integration] - [stats composition]: scans uniform line-ending variants" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.stats);
-    var diag = StatsDiagnostics{ .failure = &failure };
+    var diag = Diagnostics{ .failure = &failure };
     const Case = struct {
         bytes: []const u8,
         record: IndexRecord,
@@ -851,7 +889,7 @@ test "[integration] - [stats composition]: scans uniform line-ending variants" {
 test "[integration] - [stats composition]: excludes bytes outside indexed spans" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.stats);
-    var diag = StatsDiagnostics{ .failure = &failure };
+    var diag = Diagnostics{ .failure = &failure };
     const bytes = ">one\nAC\nGT\n>two\nTT\n";
     const buffer_sizes = [_]usize{ 3, 32 };
     var tmp = std.testing.tmpDir(.{});
@@ -893,7 +931,7 @@ test "[integration] - [stats composition]: excludes bytes outside indexed spans"
 test "[integration] - [stats composition]: coalesces only adjacent side-table spans" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.stats);
-    var diag = StatsDiagnostics{ .failure = &failure };
+    var diag = Diagnostics{ .failure = &failure };
     const bytes = "AC\nGT\nignored\nnn\r\n";
     const lines = [_]SideTableLine{
         .{ .base_start = 0, .byte_offset = 0, .line_bytes = 3, .line_bases = 2 },
@@ -928,7 +966,7 @@ test "[integration] - [stats composition]: coalesces only adjacent side-table sp
 test "[failure] - [stats composition]: rejects invalid uniform geometry" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.stats);
-    var diag = StatsDiagnostics{ .failure = &failure };
+    var diag = Diagnostics{ .failure = &failure };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{});
@@ -970,7 +1008,7 @@ test "[failure] - [stats composition]: rejects invalid uniform geometry" {
 test "[failure] - [stats composition]: propagates positional read failure" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.stats);
-    var diag = StatsDiagnostics{ .failure = &failure };
+    var diag = Diagnostics{ .failure = &failure };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(std.testing.io, "source.fa", .{ .read = true });
@@ -1001,7 +1039,7 @@ test "[edge] - [stats lengths]: computes a near-maximum median without overflow"
 test "[failure] - [stats lengths]: rejects total-symbol overflow" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.stats);
-    var diag = StatsDiagnostics{ .failure = &failure };
+    var diag = Diagnostics{ .failure = &failure };
     const records = [_]IndexRecord{
         testIndexRecord(0, std.math.maxInt(u64), 1, 2),
         testIndexRecord(0, 1, 1, 2),
@@ -1021,7 +1059,7 @@ test "[failure] - [stats lengths]: rejects total-symbol overflow" {
 test "[edge] - [stats lengths]: accumulates and formats auN above u64" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.stats);
-    var diag = StatsDiagnostics{ .failure = &failure };
+    var diag = Diagnostics{ .failure = &failure };
     const length: u64 = 1 << 32;
     const records = [_]IndexRecord{
         testIndexRecord(0, length, 1, 2),
@@ -1057,7 +1095,7 @@ test "[unit] - [stats formatting]: rounds fixed decimals exactly" {
 test "[failure] - [stats report]: propagates a full destination" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.stats);
-    var diag = StatsDiagnostics{ .failure = &failure };
+    var diag = Diagnostics{ .failure = &failure };
     const records = [_]IndexRecord{
         testIndexRecord(0, 4, 4, 5),
     };
@@ -1106,7 +1144,7 @@ test "[failure] - [stats report]: propagates a full destination" {
 test "[failure] - [stats composition]: rejects categories above total symbols" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.stats);
-    var diag = StatsDiagnostics{ .failure = &failure };
+    var diag = Diagnostics{ .failure = &failure };
     const sequence_types = [_]SequenceType{ .nucleotide, .protein };
     for (sequence_types) |sequence_type| {
         var comp: CompositionStats = .{
@@ -1135,7 +1173,7 @@ test "[failure] - [stats reader]: retains read causes, short counts and original
     for (0..2) |i| {
         var failure: diagnostics.Failure = undefined;
         failure.reset(.stats);
-        var diag = StatsDiagnostics{ .failure = &failure, .record = 7 };
+        var diag = Diagnostics{ .failure = &failure, .record = 7 };
         var vtable = std.testing.io.vtable.*;
         vtable.fileReadPositional = if (i == 0) Fault.read else Fault.short;
         var storage: [8]u8 = undefined;
@@ -1162,7 +1200,7 @@ test "[failure] - [stats reader]: retains read causes, short counts and original
 test "[failure] - [stats counts]: guards slices and accepts whitespace near the limit" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.stats);
-    var diag = StatsDiagnostics{ .failure = &failure, .record = 3 };
+    var diag = Diagnostics{ .failure = &failure, .record = 3 };
     var comp = CompositionStats{ .total_bases = std.math.maxInt(u64) - 1 };
     comp.counts['A'] = comp.total_bases;
     try std.testing.expectError(error.CountOverflow, countSliceChecked("AA", &comp, &diag));
@@ -1187,7 +1225,7 @@ test "[failure] - [stats names and aggregate]: distinguishes extrema and complet
     failure.reset(.stats);
     var idx = try index_format.loadIndexCheckedWithMode(std.testing.allocator, std.testing.io, "tests/data/simple.fasta", .stats_scan, &failure);
     defer idx.deinit();
-    var diag = StatsDiagnostics{ .failure = &failure };
+    var diag = Diagnostics{ .failure = &failure };
     idx.stats_name_indices = .{ std.math.maxInt(usize), std.math.maxInt(usize) };
     for ([_]diagnostics.Check{ .retained_shortest_name, .retained_longest_name }) |check| {
         failure.reset(.stats);
@@ -1202,36 +1240,6 @@ test "[failure] - [stats names and aggregate]: distinguishes extrema and complet
     try std.testing.expectEqual(@as(u64, 10), detail.indexed_total);
     try std.testing.expectEqual(@as(u64, 9), detail.observed_total);
     try std.testing.expect(failure.primary().?.at.record == null);
-}
-
-fn checkStatsAllocationFailure(allocator: std.mem.Allocator, path: []const u8, seen: *u64) !void {
-    var failure: diagnostics.Failure = undefined;
-    failure.reset(.stats);
-    var diag = StatsDiagnostics{ .failure = &failure, .output_source = .output };
-    var idx = index_format.loadIndexCheckedWithMode(allocator, std.testing.io, path, .stats_scan, &failure) catch |err| {
-        try recordStatsAllocationFailure(err, &failure, seen);
-        return error.OutOfMemory;
-    };
-    defer idx.deinit();
-    var computed: ComputedStats = undefined;
-    computeStats(allocator, &idx, &computed, &diag) catch |err| {
-        try recordStatsAllocationFailure(err, &failure, seen);
-        return error.OutOfMemory;
-    };
-    var storage: [8192]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&storage);
-    try writeComputedReport(&writer, path, &idx, &computed, &diag);
-    try std.testing.expect(failure.work_complete and !failure.complete);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Composition:\n") != null);
-}
-
-fn recordStatsAllocationFailure(err: diagnostics.Error, failure: *const diagnostics.Failure, seen: *u64) !void {
-    try std.testing.expectEqual(error.OutOfMemory, err);
-    try std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", failure.primary().?.code());
-    const role = failure.primary().?.details.@"resource.out_of_memory".allocation_role;
-    seen.* |= @as(u64, 1) << @intCast(@intFromEnum(role));
-    try std.testing.expect(!failure.work_complete);
-    try std.testing.expectEqual(.not_started, failure.outputs.file.state);
 }
 
 test "[failure] - [stats allocations]: releases required lengths and unsorted traversal storage" {

@@ -70,7 +70,6 @@ DO_FULL=true
 DO_SCALE=true
 DO_SCALE_SIZE=true
 DO_SCALE_SEQS=true
-DO_MESSY=true
 DO_REPORT=true
 REGENERATE_FIXTURES=false
 ALLOW_INCOMPLETE=false
@@ -86,7 +85,7 @@ while [[ $# -gt 0 ]]; do
         --skip-scale) DO_SCALE=false; shift ;;
         --skip-size) DO_SCALE_SIZE=false; shift ;;
         --skip-seqs) DO_SCALE_SEQS=false; shift ;;
-        --skip-messy) DO_MESSY=false; shift ;;
+        --skip-messy) shift ;;
         --skip-report) DO_REPORT=false; shift ;;
         --regenerate-fixtures) REGENERATE_FIXTURES=true; shift ;;
         --allow-incomplete) ALLOW_INCOMPLETE=true; shift ;;

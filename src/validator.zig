@@ -4,51 +4,15 @@
 //! Shared sequence-type sampling uses `stats.detectType`.
 
 const std = @import("std");
+
 const platform = @import("platform.zig");
 const stats = @import("stats.zig");
 const diagnostics = @import("diagnostics");
-
 const reporting = @import("reporting.zig");
-
-const ValidateDiagnostics = struct {
-    failure: *diagnostics.Failure,
-    at: diagnostics.Reference = .{ .source = .fasta },
-
-    fn fail(self: *@This(), details: diagnostics.Details, stage: diagnostics.Stage, source: diagnostics.SourceId, cause: ?anyerror) diagnostics.Error {
-        @branchHint(.cold);
-        return self.failure.fail(.{ .details = details, .stage = stage, .at = if (self.at.source == source) self.at else .{ .source = source }, .cause = if (cause) |err| .{ .zig = err } else null });
-    }
-
-    fn oom(self: *@This(), role: diagnostics.AllocationRole, cause: anyerror) diagnostics.Error {
-        return self.fail(.{ .@"resource.out_of_memory" = .{ .allocation_role = role } }, .allocate, .fasta, cause);
-    }
-
-    fn add(self: *@This(), counter: diagnostics.Counter, current: usize, increment: usize) diagnostics.Error!usize {
-        return std.math.add(usize, current, increment) catch return self.overflow(counter, current, increment);
-    }
-
-    fn overflow(self: *@This(), counter: diagnostics.Counter, current: usize, increment: usize) diagnostics.Error {
-        @branchHint(.cold);
-        return self.fail(.{ .@"resource.count_overflow" = .{ .counter = counter, .max_value = std.math.maxInt(usize), .current = current, .increment = increment } }, .scan, .fasta, null);
-    }
-};
-
-const UTF8_BOM = "\xEF\xBB\xBF";
-const DEFAULT_MAX_HEADER_LEN = 1024;
-const DEFAULT_FIX_WIDTH = 60;
-const SIMD_CHUNK_SIZE = 32;
-const SimdVec = @Vector(SIMD_CHUNK_SIZE, u8);
 
 /// Hard cap on retained validate events. Further issues set `Summary.truncated`
 /// instead of growing an unbounded list.
 pub const MAX_VALIDATE_EVENTS: usize = 10_000;
-
-comptime {
-    // Keep the validate help line in src/main.zig synchronized with this value.
-    if (MAX_VALIDATE_EVENTS != 10_000) {
-        @compileError("update validate help text for MAX_VALIDATE_EVENTS");
-    }
-}
 
 /// Selects the stable text, JSON-lines, or aggregate JSON report.
 pub const OutputMode = enum {
@@ -132,11 +96,9 @@ pub const Kind = enum {
     }
 };
 
-const KIND_COUNT = @typeInfo(Kind).@"enum".fields.len;
-
 /// One retained issue. `name` borrows the validated input; other optional fields apply only
 /// to the issue kinds that expose them in the report schema.
-pub const ValidateEvent = struct {
+pub const Event = struct {
     level: Level,
     kind: Kind,
     line: usize,
@@ -155,7 +117,7 @@ pub const ValidateEvent = struct {
 /// Owns retained events and rewrite widths while borrowing event names from the input.
 /// Counts remain complete when `truncated` is true, although `events` does not.
 pub const Summary = struct {
-    events: std.ArrayList(ValidateEvent),
+    events: std.ArrayList(Event),
     record_widths: std.ArrayList(u32),
     sequence_type: stats.SequenceType = .nucleotide,
     /// Bases fed into `detectType` (capped at `stats.VALIDATE_TYPE_SAMPLE_BASES`).
@@ -170,8 +132,8 @@ pub const Summary = struct {
     truncated: bool = false,
     /// Fix blocker found after event retention reached its cap.
     truncated_fix_rejection: ?Kind = null,
-    first_blocker: ?ValidateEvent = null,
-    first_invalid: ?ValidateEvent = null,
+    first_blocker: ?Event = null,
+    first_invalid: ?Event = null,
     preamble: ?PreamblePosition = null,
 
     /// Releases owned storage with the allocator passed to `validateData`.
@@ -181,51 +143,19 @@ pub const Summary = struct {
     }
 };
 
-const WidthCount = struct {
-    width: u32,
-    count: usize,
-    first_order: usize,
-};
-
-const RecordState = struct {
-    active: bool = false,
-    name: []const u8 = "",
-    header_line: usize = 0,
-    has_bases: bool = false,
-    expected_width: ?u32 = null,
-    pending_width: ?u32 = null,
-    pending_line: usize = 0,
-    width_warning_emitted: bool = false,
-    widths: std.ArrayList(WidthCount) = .empty,
-    width_order: usize = 0,
-
-    fn reset(self: *RecordState) void {
-        self.active = false;
-        self.name = "";
-        self.header_line = 0;
-        self.has_bases = false;
-        self.expected_width = null;
-        self.pending_width = null;
-        self.pending_line = 0;
-        self.width_warning_emitted = false;
-        self.widths.clearRetainingCapacity();
-        self.width_order = 0;
-    }
-};
-
 /// Scalar validation outcome after complete report delivery. No input names borrow
 /// from the released mapping; findings and their legacy counts stay in stdout.
-pub const ValidateResult = struct { status: u8, truncated: bool, fix_written: bool };
+pub const Result = struct { status: u8, truncated: bool, fix_written: bool };
 
 /// Validates, optionally rewrites, and delivers the legacy report. Resets once
 /// and returns after cleanup. Source path labels borrow caller strings through
 /// handling/reset; the input mapping remains alive while report names borrow it.
-pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, options: Options, failure: *diagnostics.Failure) diagnostics.Error!ValidateResult {
+pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, options: Options, failure: *diagnostics.Failure) diagnostics.Error!Result {
     failure.reset(.validate);
     failure.sources.set(.fasta, .{ .label = .{ .borrowed = fasta_path }, .kind = .path });
     failure.sources.set(.stdout, .{ .label = .{ .borrowed = "stdout" }, .kind = .stream });
     if (options.output_path) |path| failure.sources.set(.output, .{ .label = .{ .borrowed = path }, .kind = .path });
-    var diag = ValidateDiagnostics{ .failure = failure };
+    var diag = Diagnostics{ .failure = failure };
     const file = std.Io.Dir.cwd().openFile(io, fasta_path, .{}) catch |err| return diag.fail(switch (err) {
         error.FileNotFound => .{ .@"io.file_not_found" = {} },
         error.AccessDenied => .{ .@"io.access_denied" = {} },
@@ -267,7 +197,7 @@ pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const
         return diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .stdout, stdout_fw.err orelse err);
     };
     failure.outputs.stdout.final_flush = .succeeded;
-    const result = ValidateResult{ .status = if (summary.truncated and !options.fix) 1 else exitCodeForOptions(&summary, options), .truncated = summary.truncated, .fix_written = options.fix };
+    const result = Result{ .status = if (summary.truncated and !options.fix) 1 else exitCodeForOptions(&summary, options), .truncated = summary.truncated, .fix_written = options.fix };
     failure.succeed();
     return result;
 }
@@ -293,13 +223,198 @@ pub fn validateData(allocator: std.mem.Allocator, data: []const u8, options: Opt
 pub fn validateDataChecked(allocator: std.mem.Allocator, data: []const u8, options: Options, failure: *diagnostics.Failure) diagnostics.Error!Summary {
     failure.reset(.validate);
     failure.sources.set(.fasta, .{ .label = .{ .borrowed = "validated input" }, .kind = .memory });
-    var diag = ValidateDiagnostics{ .failure = failure };
+    var diag = Diagnostics{ .failure = failure };
     const result = try validateDataInternal(allocator, data, options, &diag);
     failure.succeed();
     return result;
 }
 
-fn validateDataInternal(allocator: std.mem.Allocator, data: []const u8, options: Options, diag: *ValidateDiagnostics) diagnostics.Error!Summary {
+/// Returns the validate status for complete severity counts and strictness.
+pub fn exitCode(error_count: usize, warning_count: usize, strict: bool) u8 {
+    if (error_count > 0) return 1;
+    if (warning_count > 0) return if (strict) 1 else 2;
+    return 0;
+}
+
+/// Returns validate status after excluding warnings repaired by a requested format rewrite.
+pub fn exitCodeForOptions(summary: *const Summary, options: Options) u8 {
+    if (!options.fix) return exitCode(summary.error_count, summary.warning_count, options.strict);
+
+    return exitCode(
+        summary.error_count,
+        summary.warning_count - summary.format_warning_count,
+        options.strict,
+    );
+}
+
+/// Returns the first legacy Kind that blocks a rewrite, including past-cap events.
+/// Use fixRejectionChecked to include preamble safety and retain original facts.
+pub fn fixRejection(summary: *const Summary, options: Options) ?Kind {
+    for (summary.events.items) |event| {
+        switch (event.kind) {
+            .invalid_character => if (!options.fix_format_only) return .invalid_character,
+            .no_sequences, .duplicate_name, .null_byte => return event.kind,
+            else => {},
+        }
+    }
+    if (summary.truncated_fix_rejection) |kind| {
+        if (kind != .invalid_character or !options.fix_format_only) return kind;
+    }
+    return null;
+}
+
+/// Records the original blocker for a requested fix without resetting Failure.
+/// Summary event names must still borrow live input; retained previews own bytes.
+/// Use the options that produced Summary, with the requested fix policy.
+pub fn fixRejectionChecked(summary: *const Summary, options: Options, failure: *diagnostics.Failure) diagnostics.Error!void {
+    if (summary.preamble) |position| return failure.fail(.{
+        .details = .{ .@"repair.blocked" = .{ .blocker = .{ .content_before_header = .{ .content_bytes = .{ .at_least = 1 } } }, .repair_policy = if (options.fix_format_only) .legacy_format_only else .legacy_safe } },
+        .stage = .scan,
+        .at = .{ .source = .fasta, .location = .{ .offset = position.offset, .line = position.line, .column = position.column } },
+    });
+    const event = summary.first_blocker orelse if (!options.fix_format_only) summary.first_invalid orelse return else return;
+    const blocker: diagnostics.Blocker = switch (event.kind) {
+        .no_sequences => .{ .no_records = {} },
+        .duplicate_name => .{ .duplicate_identifier = .{ .identifier = failure.retain(event.name, 32) } },
+        .null_byte => if (event.control_place == .header) .{ .header_control_byte = .{ .byte = 0, .grammar = .legacy_nul_only } } else if (event.control_place == .sequence) .{ .sequence_control_byte = .{ .byte = 0, .grammar = .legacy_nul_only } } else .{ .content_before_header = .{ .content_bytes = .{ .at_least = 1 } } },
+        .invalid_character => blk: {
+            var policy = diagnostics.AlphabetPolicy{ .alphabet = if (options.custom_alphabet != null) .custom else if (summary.sequence_type == .nucleotide) .nucleotide else .protein, .selection = if (options.custom_alphabet != null) .custom else .automatic, .sample = if (options.custom_alphabet == null) .{ .symbols = @intCast(summary.type_bases_sampled), .rule = .nucleotide_above_90_percent } else null };
+            if (options.custom_alphabet) |custom| {
+                var bits: [32]u8 = .{0} ** 32;
+                for (custom) |byte| bits[byte / 8] |= @as(u8, 1) << @intCast(byte % 8);
+                policy.custom_symbols = bits;
+            }
+            break :blk .{ .invalid_symbol = .{ .byte = event.byte, .policy = policy } };
+        },
+        else => return failure.fail(.{ .details = .{ .@"internal.consistency_failed" = .{ .component = .validator, .check = .codec_state } }, .stage = .scan, .at = eventReference(event) }),
+    };
+    return failure.fail(.{ .details = .{ .@"repair.blocked" = .{ .blocker = blocker, .repair_policy = if (options.fix_format_only) .legacy_format_only else .legacy_safe } }, .stage = .scan, .at = eventReference(event), .related = if (event.kind == .duplicate_name) .{ .source = .fasta, .location = .{ .line = event.first_line } } else null });
+}
+
+/// Rewrite format-level issues to normalized LF FASTA bytes. Caller must run validateData first.
+/// Allocates the full result for tests and library callers; CLI `--fix` streams via `writeFixed`.
+/// Allocator-backed writer failures are reported as `error.OutOfMemory`.
+/// Non-format content before the first header returns `error.RepairRefused`.
+/// Returns normalized bytes allocated with `allocator`; release with `allocator.free`.
+/// Input and widths borrow only during this call.
+/// Compatibility helper; native callers use fixDataChecked.
+pub fn fixData(allocator: std.mem.Allocator, data: []const u8, record_widths: []const u32) diagnostics.Error![]u8 {
+    var failure: diagnostics.Failure = undefined;
+    return fixDataChecked(allocator, data, record_widths, &failure);
+}
+
+/// Returns normalized bytes allocated with `allocator`; release with `allocator.free`.
+/// Input and widths borrow only during this call. Captures native failure facts;
+/// resets once, rejects unsafe preamble content and never publishes a destination.
+pub fn fixDataChecked(allocator: std.mem.Allocator, data: []const u8, record_widths: []const u32, failure: *diagnostics.Failure) diagnostics.Error![]u8 {
+    failure.reset(.validate);
+    failure.sources.set(.fasta, .{ .label = .{ .borrowed = "rewrite input" }, .kind = .memory });
+    var diag = Diagnostics{ .failure = failure };
+    try checkPreamble(data, .{}, failure);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    writeFixedContent(&aw.writer, data, record_widths) catch |err| return diag.oom(.rewrite_bytes, err);
+    const result = aw.toOwnedSlice() catch |err| return diag.oom(.rewrite_bytes, err);
+    failure.succeed();
+    return result;
+}
+
+/// Returns one JSON event object allocated with `allocator`, without a trailing newline.
+/// Release with `allocator.free`; event names borrow only during this call.
+/// Allocator-backed writer failures are reported as `error.OutOfMemory`.
+/// Compatibility projection; native callers use renderJsonEventChecked.
+pub fn renderJsonEvent(allocator: std.mem.Allocator, event: Event) error{OutOfMemory}![]u8 {
+    var failure: diagnostics.Failure = undefined;
+    return renderJsonEventChecked(allocator, event, &failure) catch return error.OutOfMemory;
+}
+
+/// Returns a legacy v1 event allocated with `allocator`; release with `allocator.free`.
+/// Captures native allocation facts and resets once; names borrow only during this
+/// call. Invalid UTF-8 escaping is not byte-reversible.
+pub fn renderJsonEventChecked(allocator: std.mem.Allocator, event: Event, failure: *diagnostics.Failure) diagnostics.Error![]u8 {
+    failure.reset(.validate);
+    failure.sources.set(.fasta, .{ .label = .{ .borrowed = "validation event" }, .kind = .memory });
+    var diag = Diagnostics{ .failure = failure, .at = eventReference(event) };
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    writeJsonEventObject(&aw.writer, event) catch |err| return diag.oom(.serialized_event, err);
+    const result = aw.toOwnedSlice() catch |err| return diag.oom(.serialized_event, err);
+    failure.succeed();
+    return result;
+}
+
+const Diagnostics = struct {
+    failure: *diagnostics.Failure,
+    at: diagnostics.Reference = .{ .source = .fasta },
+
+    fn fail(self: *@This(), details: diagnostics.Details, stage: diagnostics.Stage, source: diagnostics.SourceId, cause: ?anyerror) diagnostics.Error {
+        @branchHint(.cold);
+        return self.failure.fail(.{ .details = details, .stage = stage, .at = if (self.at.source == source) self.at else .{ .source = source }, .cause = if (cause) |err| .{ .zig = err } else null });
+    }
+
+    fn oom(self: *@This(), role: diagnostics.AllocationRole, cause: anyerror) diagnostics.Error {
+        return self.fail(.{ .@"resource.out_of_memory" = .{ .allocation_role = role } }, .allocate, .fasta, cause);
+    }
+
+    fn add(self: *@This(), counter: diagnostics.Counter, current: usize, increment: usize) diagnostics.Error!usize {
+        return std.math.add(usize, current, increment) catch return self.overflow(counter, current, increment);
+    }
+
+    fn overflow(self: *@This(), counter: diagnostics.Counter, current: usize, increment: usize) diagnostics.Error {
+        @branchHint(.cold);
+        return self.fail(.{ .@"resource.count_overflow" = .{ .counter = counter, .max_value = std.math.maxInt(usize), .current = current, .increment = increment } }, .scan, .fasta, null);
+    }
+};
+
+const UTF8_BOM = "\xEF\xBB\xBF";
+
+const DEFAULT_MAX_HEADER_LEN = 1024;
+
+const DEFAULT_FIX_WIDTH = 60;
+
+const SIMD_CHUNK_SIZE = 32;
+
+const SimdVec = @Vector(SIMD_CHUNK_SIZE, u8);
+
+comptime {
+    // Keep the validate help line in src/main.zig synchronized with this value.
+    if (MAX_VALIDATE_EVENTS != 10_000) {
+        @compileError("update validate help text for MAX_VALIDATE_EVENTS");
+    }
+}
+
+const KIND_COUNT = @typeInfo(Kind).@"enum".fields.len;
+
+const WidthCount = struct {
+    width: u32,
+    count: usize,
+};
+
+const RecordState = struct {
+    active: bool = false,
+    name: []const u8 = "",
+    header_line: usize = 0,
+    has_bases: bool = false,
+    expected_width: ?u32 = null,
+    pending_width: ?u32 = null,
+    pending_line: usize = 0,
+    width_warning_emitted: bool = false,
+    widths: std.ArrayList(WidthCount) = .empty,
+
+    fn reset(self: *RecordState) void {
+        self.active = false;
+        self.name = "";
+        self.header_line = 0;
+        self.has_bases = false;
+        self.expected_width = null;
+        self.pending_width = null;
+        self.pending_line = 0;
+        self.width_warning_emitted = false;
+        self.widths.clearRetainingCapacity();
+    }
+};
+
+fn validateDataInternal(allocator: std.mem.Allocator, data: []const u8, options: Options, diag: *Diagnostics) diagnostics.Error!Summary {
     var summary = Summary{
         .events = .empty,
         .record_widths = .empty,
@@ -411,24 +526,6 @@ fn validateDataInternal(allocator: std.mem.Allocator, data: []const u8, options:
     return summary;
 }
 
-/// Returns the validate status for complete severity counts and strictness.
-pub fn exitCode(error_count: usize, warning_count: usize, strict: bool) u8 {
-    if (error_count > 0) return 1;
-    if (warning_count > 0) return if (strict) 1 else 2;
-    return 0;
-}
-
-/// Returns validate status after excluding warnings repaired by a requested format rewrite.
-pub fn exitCodeForOptions(summary: *const Summary, options: Options) u8 {
-    if (!options.fix) return exitCode(summary.error_count, summary.warning_count, options.strict);
-
-    return exitCode(
-        summary.error_count,
-        summary.warning_count - summary.format_warning_count,
-        options.strict,
-    );
-}
-
 fn isFixedByFormatRewrite(kind: Kind) bool {
     return switch (kind) {
         .utf8_bom,
@@ -441,27 +538,11 @@ fn isFixedByFormatRewrite(kind: Kind) bool {
     };
 }
 
-/// Returns the first legacy Kind that blocks a rewrite, including past-cap events.
-/// Use fixRejectionChecked to include preamble safety and retain original facts.
-pub fn fixRejection(summary: *const Summary, options: Options) ?Kind {
-    for (summary.events.items) |event| {
-        switch (event.kind) {
-            .invalid_character => if (!options.fix_format_only) return .invalid_character,
-            .no_sequences, .duplicate_name, .null_byte => return event.kind,
-            else => {},
-        }
-    }
-    if (summary.truncated_fix_rejection) |kind| {
-        if (kind != .invalid_character or !options.fix_format_only) return kind;
-    }
-    return null;
-}
-
-fn eventReference(event: ValidateEvent) diagnostics.Reference {
+fn eventReference(event: Event) diagnostics.Reference {
     return .{ .source = .fasta, .location = .{ .offset = event.offset, .line = event.line, .column = event.column }, .record = event.record };
 }
 
-fn appendEvent(allocator: std.mem.Allocator, summary: *Summary, diag: *ValidateDiagnostics, original: ValidateEvent) diagnostics.Error!void {
+fn appendEvent(allocator: std.mem.Allocator, summary: *Summary, diag: *Diagnostics, original: Event) diagnostics.Error!void {
     const scan_at = diag.at;
     defer diag.at = scan_at;
     var event = original;
@@ -522,7 +603,7 @@ fn startRecord(
     line: []const u8,
     line_number: usize,
     options: Options,
-    diag: *ValidateDiagnostics,
+    diag: *Diagnostics,
 ) diagnostics.Error!void {
     const line_offset = diag.at.location.offset.?;
     const first_column = diag.at.location.column.?;
@@ -582,7 +663,7 @@ fn startRecord(
     }
 }
 
-fn finalizeRecord(allocator: std.mem.Allocator, summary: *Summary, state: *RecordState, diag: *ValidateDiagnostics) diagnostics.Error!void {
+fn finalizeRecord(allocator: std.mem.Allocator, summary: *Summary, state: *RecordState, diag: *Diagnostics) diagnostics.Error!void {
     if (!state.active) return;
 
     if (!state.width_warning_emitted) {
@@ -628,7 +709,7 @@ fn scanSequenceLine(
     type_total: *u64,
     byte_counts: *[256]u64,
     first_byte_at: *[256]diagnostics.Reference,
-    diag: *ValidateDiagnostics,
+    diag: *Diagnostics,
 ) diagnostics.Error!void {
     const line_offset = diag.at.location.offset.?;
     const first_column = diag.at.location.column.?;
@@ -695,7 +776,7 @@ fn scanNullsOutsideSequence(
     summary: *Summary,
     line: []const u8,
     line_number: usize,
-    diag: *ValidateDiagnostics,
+    diag: *Diagnostics,
 ) diagnostics.Error!void {
     const line_offset = diag.at.location.offset.?;
     const first_column = diag.at.location.column.?;
@@ -714,7 +795,7 @@ fn scanNullsOutsideSequence(
     }
 }
 
-fn updateWidth(allocator: std.mem.Allocator, state: *RecordState, width: u32, diag: *ValidateDiagnostics) diagnostics.Error!void {
+fn updateWidth(allocator: std.mem.Allocator, state: *RecordState, width: u32, diag: *Diagnostics) diagnostics.Error!void {
     for (state.widths.items) |*entry| {
         if (entry.width == width) {
             entry.count += 1;
@@ -725,20 +806,16 @@ fn updateWidth(allocator: std.mem.Allocator, state: *RecordState, width: u32, di
     state.widths.append(allocator, .{
         .width = width,
         .count = 1,
-        .first_order = state.width_order,
     }) catch |err| return diag.oom(.line_widths, err);
-    state.width_order += 1;
 }
 
 fn modalWidth(state: *const RecordState) u32 {
     var best_width: u32 = DEFAULT_FIX_WIDTH;
     var best_count: usize = 0;
-    var best_order: usize = std.math.maxInt(usize);
     for (state.widths.items) |entry| {
-        if (entry.count > best_count or (entry.count == best_count and entry.first_order < best_order)) {
+        if (entry.count > best_count) {
             best_width = entry.width;
             best_count = entry.count;
-            best_order = entry.first_order;
         }
     }
     return if (best_width == 0) DEFAULT_FIX_WIDTH else best_width;
@@ -751,7 +828,7 @@ fn appendInvalidCharacterEvents(
     sequence_type: stats.SequenceType,
     byte_counts: [256]u64,
     first_byte_at: [256]diagnostics.Reference,
-    diag: *ValidateDiagnostics,
+    diag: *Diagnostics,
 ) diagnostics.Error!void {
     const alphabet = if (options.custom_alphabet) |custom|
         buildAlphabet(custom)
@@ -792,7 +869,7 @@ fn trimSequenceRight(line: []const u8) []const u8 {
     return line[0..end];
 }
 
-fn countLines(data: []const u8, diag: *ValidateDiagnostics) diagnostics.Error!usize {
+fn countLines(data: []const u8, diag: *Diagnostics) diagnostics.Error!usize {
     if (data.len == 0) return 1;
     var lines: usize = 1;
 
@@ -859,66 +936,13 @@ fn matchesRefseq(header: []const u8) bool {
     return false;
 }
 
-fn checkedWidth(width: usize, diag: *ValidateDiagnostics) diagnostics.Error!u32 {
+fn checkedWidth(width: usize, diag: *Diagnostics) diagnostics.Error!u32 {
     return std.math.cast(u32, width) orelse diag.fail(.{ .@"index.sequence_line_too_long" = .{
         .field = .line_bytes,
         .observed = .{ .exact = width },
         .limit = std.math.maxInt(u32),
         .width_role = .validator_width,
     } }, .scan, .fasta, null);
-}
-
-/// Records the original blocker for a requested fix without resetting Failure.
-/// Summary event names must still borrow live input; retained previews own bytes.
-/// Use the options that produced Summary, with the requested fix policy.
-pub fn fixRejectionChecked(summary: *const Summary, options: Options, failure: *diagnostics.Failure) diagnostics.Error!void {
-    if (summary.preamble) |position| return failure.fail(.{
-        .details = .{ .@"repair.blocked" = .{ .blocker = .{ .content_before_header = .{ .content_bytes = .{ .at_least = 1 } } }, .repair_policy = if (options.fix_format_only) .legacy_format_only else .legacy_safe } },
-        .stage = .scan,
-        .at = .{ .source = .fasta, .location = .{ .offset = position.offset, .line = position.line, .column = position.column } },
-    });
-    const event = summary.first_blocker orelse if (!options.fix_format_only) summary.first_invalid orelse return else return;
-    const blocker: diagnostics.Blocker = switch (event.kind) {
-        .no_sequences => .{ .no_records = {} },
-        .duplicate_name => .{ .duplicate_identifier = .{ .identifier = failure.retain(event.name, 32) } },
-        .null_byte => if (event.control_place == .header) .{ .header_control_byte = .{ .byte = 0, .grammar = .legacy_nul_only } } else if (event.control_place == .sequence) .{ .sequence_control_byte = .{ .byte = 0, .grammar = .legacy_nul_only } } else .{ .content_before_header = .{ .content_bytes = .{ .at_least = 1 } } },
-        .invalid_character => blk: {
-            var policy = diagnostics.AlphabetPolicy{ .alphabet = if (options.custom_alphabet != null) .custom else if (summary.sequence_type == .nucleotide) .nucleotide else .protein, .selection = if (options.custom_alphabet != null) .custom else .automatic, .sample = if (options.custom_alphabet == null) .{ .symbols = @intCast(summary.type_bases_sampled), .rule = .nucleotide_above_90_percent } else null };
-            if (options.custom_alphabet) |custom| {
-                var bits: [32]u8 = .{0} ** 32;
-                for (custom) |byte| bits[byte / 8] |= @as(u8, 1) << @intCast(byte % 8);
-                policy.custom_symbols = bits;
-            }
-            break :blk .{ .invalid_symbol = .{ .byte = event.byte, .policy = policy } };
-        },
-        else => return failure.fail(.{ .details = .{ .@"internal.consistency_failed" = .{ .component = .validator, .check = .codec_state } }, .stage = .scan, .at = eventReference(event) }),
-    };
-    return failure.fail(.{ .details = .{ .@"repair.blocked" = .{ .blocker = blocker, .repair_policy = if (options.fix_format_only) .legacy_format_only else .legacy_safe } }, .stage = .scan, .at = eventReference(event), .related = if (event.kind == .duplicate_name) .{ .source = .fasta, .location = .{ .line = event.first_line } } else null });
-}
-
-/// Rewrite format-level issues to normalized LF FASTA bytes. Caller must run validateData first.
-/// Allocates the full result for tests and library callers; CLI `--fix` streams via `writeFixed`.
-/// Allocator-backed writer failures are reported as `error.OutOfMemory`.
-/// Non-format content before the first header returns `error.RepairRefused`.
-/// Compatibility helper; native callers use fixDataChecked.
-pub fn fixData(allocator: std.mem.Allocator, data: []const u8, record_widths: []const u32) diagnostics.Error![]u8 {
-    var failure: diagnostics.Failure = undefined;
-    return fixDataChecked(allocator, data, record_widths, &failure);
-}
-
-/// Returns normalized owned bytes with native failure facts. Resets once;
-/// rejects unsafe preamble content and never publishes a file destination.
-pub fn fixDataChecked(allocator: std.mem.Allocator, data: []const u8, record_widths: []const u32, failure: *diagnostics.Failure) diagnostics.Error![]u8 {
-    failure.reset(.validate);
-    failure.sources.set(.fasta, .{ .label = .{ .borrowed = "rewrite input" }, .kind = .memory });
-    var diag = ValidateDiagnostics{ .failure = failure };
-    try checkPreamble(data, .{}, failure);
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    errdefer aw.deinit();
-    writeFixedContent(&aw.writer, data, record_widths) catch |err| return diag.oom(.rewrite_bytes, err);
-    const result = aw.toOwnedSlice() catch |err| return diag.oom(.rewrite_bytes, err);
-    failure.succeed();
-    return result;
 }
 
 fn cleanupFixed(file: *std.Io.File.Atomic, io: std.Io, failure: *diagnostics.Failure) void {
@@ -945,7 +969,7 @@ fn cleanupFixed(file: *std.Io.File.Atomic, io: std.Io, failure: *diagnostics.Fai
 }
 
 fn writeFixed(io: std.Io, data: []const u8, record_widths: []const u32, output_path: []const u8, input: std.Io.File, before: std.Io.File.Stat, failure: *diagnostics.Failure) diagnostics.Error!void {
-    var diag = ValidateDiagnostics{ .failure = failure };
+    var diag = Diagnostics{ .failure = failure };
     var atomic_file = std.Io.Dir.cwd().createFileAtomic(io, output_path, .{ .replace = true }) catch |err| return diag.fail(.{ .@"io.create_failed" = {} }, .create, .output, err);
     defer cleanupFixed(&atomic_file, io, failure);
     failure.outputs.file.state = .staged;
@@ -1121,7 +1145,7 @@ fn writeText(writer: anytype, summary: *const Summary) !void {
     }
 }
 
-fn writeMessage(writer: anytype, event: ValidateEvent, comptime escape_names: bool) !void {
+fn writeMessage(writer: anytype, event: Event, comptime escape_names: bool) !void {
     switch (event.kind) {
         .no_sequences => try writer.writeAll("no sequences found"),
         .duplicate_name => {
@@ -1204,7 +1228,7 @@ fn writeJsonSummary(writer: anytype, summary: *const Summary) !void {
     try writer.writeAll("}}\n");
 }
 
-fn writeJsonEventObject(writer: anytype, event: ValidateEvent) !void {
+fn writeJsonEventObject(writer: anytype, event: Event) !void {
     try writer.print(
         "{{\"schema_version\":\"v1\",\"level\":\"{s}\",\"line\":{d},\"kind\":\"{s}\",\"message\":\"",
         .{ event.level.text(), event.line, event.kind.text() },
@@ -1261,50 +1285,15 @@ fn writeJsonStringBytes(writer: anytype, text: []const u8) !void {
     }
 }
 
-/// Returns one caller-owned JSON event object without a trailing newline.
-/// Allocator-backed writer failures are reported as `error.OutOfMemory`.
-/// Compatibility projection; native callers use renderJsonEventChecked.
-pub fn renderJsonEvent(allocator: std.mem.Allocator, event: ValidateEvent) error{OutOfMemory}![]u8 {
-    var failure: diagnostics.Failure = undefined;
-    return renderJsonEventChecked(allocator, event, &failure) catch return error.OutOfMemory;
-}
-
-/// Allocates a legacy v1 event with native allocation facts. Resets once; names
-/// borrow only during this call. Invalid UTF-8 escaping is not byte-reversible.
-pub fn renderJsonEventChecked(allocator: std.mem.Allocator, event: ValidateEvent, failure: *diagnostics.Failure) diagnostics.Error![]u8 {
-    failure.reset(.validate);
-    failure.sources.set(.fasta, .{ .label = .{ .borrowed = "validation event" }, .kind = .memory });
-    var diag = ValidateDiagnostics{ .failure = failure, .at = eventReference(event) };
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    errdefer aw.deinit();
-    writeJsonEventObject(&aw.writer, event) catch |err| return diag.oom(.serialized_event, err);
-    const result = aw.toOwnedSlice() catch |err| return diag.oom(.serialized_event, err);
-    failure.succeed();
-    return result;
-}
-
 fn allKinds() []const Kind {
-    return &.{
-        .no_sequences,
-        .duplicate_name,
-        .invalid_character,
-        .null_byte,
-        .utf8_bom,
-        .inconsistent_line_widths,
-        .trailing_whitespace,
-        .empty_sequence,
-        .missing_terminal_newline,
-        .mixed_line_endings,
-        .long_header,
-        .schema_violation,
-    };
+    return std.meta.tags(Kind);
 }
 
 fn countKind(summary: *const Summary, kind: Kind) usize {
     return summary.kind_counts[@intFromEnum(kind)];
 }
 
-fn firstKind(summary: *const Summary, kind: Kind) ?ValidateEvent {
+fn firstKind(summary: *const Summary, kind: Kind) ?Event {
     for (summary.events.items) |event| {
         if (event.kind == kind) return event;
     }
@@ -1383,7 +1372,7 @@ test "[failure] - [rewrite safety]: observed source change prevents atomic publi
 test "[failure] - [validator counters]: captures limits before arithmetic and allocation" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.validate);
-    var diag = ValidateDiagnostics{ .failure = &failure, .at = .{ .source = .fasta, .location = .{ .offset = 5, .line = 2, .column = 1 }, .record = 1 } };
+    var diag = Diagnostics{ .failure = &failure, .at = .{ .source = .fasta, .location = .{ .offset = 5, .line = 2, .column = 1 }, .record = 1 } };
     var summary = Summary{ .events = .empty, .record_widths = .empty, .error_count = std.math.maxInt(usize) };
     defer summary.deinit(std.testing.allocator);
     try std.testing.expectError(error.CountOverflow, appendEvent(std.testing.allocator, &summary, &diag, .{ .level = .error_level, .kind = .null_byte, .line = 2, .offset = 9, .column = 5 }));
