@@ -70,6 +70,14 @@ Check each command's exit status before starting the next suite. Review its mani
 
 The correctness-only commands above disable both ordinary and messy measurements and report generation. They cannot supply timing, RSS, allocation, stack or binary-size evidence for a report refresh. For the 0.3.5 candidate, those measurements remain uncollected here; the existing 0.3.4 reports remain the measured results.
 
+## Source and executable records
+
+New raw metadata and run manifests record `z_fasta_build`: the checkout Git revision and dirty state, plus the executable path, file size, mtime, ctime, device and inode. These cheap file facts do not prove byte equality or that the executable was built from the current checkout. No input hashing is added.
+
+`declared_build` records `BENCH_BUILD_REVISION`, `BENCH_BUILD_ZIG_VERSION`, `BENCH_BUILD_OPTIMIZE` and `BENCH_BUILD_TARGET` when supplied by the builder. Missing facts remain JSON null. The index runner records its own ReleaseFast build mode/compiler and records a revision only for a clean checkout when it builds the default subject. GET/stats use the existing executable and leave undeclared build facts unknown. Report readers retain these records and new reports display them; historical 0.3.4 reports keep their existing labels.
+
+Stats resumes retain a prior verification result only when the recorded source, executable, fixture and peer-tool file facts match and the checkout is clean. Missing records, dirty source or changed file facts leave the resumed run unverified. A timestamp or green log cannot override that result. Historical manifests keep their original report interpretation. These comparisons use file metadata, not byte equality.
+
 ## How the tools are built
 
 `tools/install.sh` is the central builder. The shared version coordinates live in [`tools/versions.sh`](../tools/versions.sh), and the installer uses those same values when it downloads, builds, verifies, and publishes the tools.
@@ -90,7 +98,7 @@ These wrappers add argument parsing, indexing or index reading, output formattin
 
 ## Binary sizes
 
-These are the executable files currently used by this checkout on Linux x86_64. The sizes are useful for comparing this local bundle, but they are not universal upstream sizes. Compiler versions, link mode, debug information, stripping, and dependency versions all change them. Every compiled executable in this table is stripped in the current bundle. The table is therefore a build comparison, not a ranking of the projects.
+These sizes describe the Linux x86_64 tool bundle used for the 0.3.4 reports. The 0.3.5 candidate needs a new size check when its executable changes settle. Compiler versions, link mode, debug information, stripping, and dependency versions all change the sizes. Every compiled executable in this historical table was stripped. The table compares that build bundle; it does not rank the projects.
 
 | command     | version or implementation                   |                      file size |
 | ----------- | ------------------------------------------- | -----------------------------: |

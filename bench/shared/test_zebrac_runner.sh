@@ -11,10 +11,32 @@ source "$SCRIPT_DIR/runner_common.sh"
     bench_tool_version() { return 1; }
     export_manifest_core_versions
     [[ "$BENCH_VER_ZEBRAC" == unknown && "$BENCH_VER_ZFASTA" == unknown && "$BENCH_VER_SAMTOOLS" == unknown ]]
+    bench_tool_version() { return 0; }
+    export_manifest_core_versions
+    [[ "$BENCH_VER_ZEBRAC" == unknown && "$BENCH_VER_ZFASTA" == unknown && "$BENCH_VER_SAMTOOLS" == unknown ]]
+    export_manifest_required_tool_versions seqtk seqkit
+    [[ "$BENCH_VER_SEQTK" == unknown && "$BENCH_VER_SEQKIT" == unknown ]]
+    bench_tool_version() { printf 'partial'; return 1; }
+    export_manifest_core_versions
+    [[ "$BENCH_VER_ZEBRAC" == unknown && "$BENCH_VER_ZFASTA" == unknown && "$BENCH_VER_SAMTOOLS" == unknown ]]
     bench_tool_version() { printf '%s version\n' "$1"; }
     export_manifest_core_versions
     [[ "$BENCH_VER_ZEBRAC" == 'zebrac version' && "$BENCH_VER_ZFASTA" == 'z-fasta version' && "$BENCH_VER_SAMTOOLS" == 'samtools version' ]]
 )
+python3 - "$SCRIPT_DIR/zebrac_runner.sh" <<'PYTEST'
+import json
+import subprocess
+import sys
+
+payload = "".join(chr(byte) for byte in range(1, 32)) + 'quote" slash\\ plain'
+encoded = subprocess.run(
+    ["bash", "-c", 'source "$1"; zebrac_json_string "$2"', "bash", sys.argv[1], payload],
+    check=True,
+    capture_output=True,
+).stdout
+assert json.loads(encoded) == payload
+PYTEST
+
 if [[ "${1:-}" == --metadata-only ]]; then
     echo "shared runner metadata tests passed"
     exit 0

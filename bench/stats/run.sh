@@ -149,14 +149,26 @@ export_manifest_tool_versions() {
     export_manifest_optional_tool_versions seqkit noodles rustbio
 }
 
+stats_verification_identity() {
+    python3 "$BENCH_SHARED_DIR/verification_identity.py" "$PROJECT_ROOT" "$ZFASTA" \
+        "$SAMTOOLS" "$SEQTK" "$SEQKIT" "$NOODLES" "$RUSTBIO" "$PYTHON"
+}
+
 write_run_manifest() {
     local manifest="$1" timestamp="$2" metadata="$3"
+    BENCH_ZFASTA_BUILD="$(bench_build_identity)" || return 1
+    export BENCH_ZFASTA_BUILD
+    BENCH_CURRENT_VERIFICATION="$(stats_verification_identity)" || return 1
+    export BENCH_CURRENT_VERIFICATION
+    export BENCH_VERIFICATION_MODULE_DIR="$BENCH_SHARED_DIR"
     python3 - "$manifest" "$timestamp" "$metadata" "$RUNS" "$WARMUP" "$ZEBRAC_DURATION_MS" \
         "$DO_TESTS" \
         "${SECTION_FULL:-}" \
         "${SECTION_SCALE_SIZE:-}" "${SECTION_SCALE_SEQS:-}" <<'PY'
 import json, os, sys
 from pathlib import Path
+sys.path.insert(0, os.environ["BENCH_VERIFICATION_MODULE_DIR"])
+from verification_identity import can_resume
 
 manifest, ts, metadata, runs, warmup, duration = sys.argv[1:7]
 do_verify = sys.argv[7] == "true"
@@ -184,6 +196,7 @@ out = {
     "mode": "warm",
     "zebrac": os.environ.get("BENCH_VER_ZEBRAC", ""),
     "z_fasta": os.environ.get("BENCH_VER_ZFASTA", ""),
+    "z_fasta_build": json.loads(os.environ["BENCH_ZFASTA_BUILD"]),
     "runs": int(runs),
     "warmup": int(warmup),
     "duration_ms": int(duration),
@@ -198,31 +211,28 @@ out = {
     "sections": sections,
 }
 
-# Resume with --skip-verify must not erase a prior green verify for this timestamp.
-manifest_path = Path(manifest)
-if not do_verify:
-    prior_pass = None
-    if manifest_path.is_file():
+current_identity = json.loads(os.environ["BENCH_CURRENT_VERIFICATION"])
+verified_identity = json.loads(os.environ.get("BENCH_VERIFY_IDENTITY", "null"))
+out["verification_identity"] = None
+if do_verify and verified_identity == current_identity:
+    out["verification_identity"] = verified_identity
+else:
+    out["verify_skipped"] = True
+    out["verify_pass"] = None
+    manifest_path = Path(manifest)
+    if not do_verify and manifest_path.is_file() and can_resume(current_identity):
         try:
             prior = json.loads(manifest_path.read_text())
-            if prior.get("verify_pass") is not None and not prior.get("verify_skipped", True):
-                prior_pass = str(prior["verify_pass"])
-        except Exception:
-            prior_pass = None
-    if prior_pass is None:
-        log = manifest_path.parent / f"verify_{ts}.log"
-        if log.is_file():
-            text = log.read_text(encoding="utf-8", errors="replace")
-            if "ALL PASSED" in text:
-                for line in text.splitlines():
-                    if line.startswith("Results:"):
-                        parts = line.split()
-                        if len(parts) >= 2:
-                            prior_pass = parts[1]
-                        break
-    if prior_pass is not None:
-        out["verify_skipped"] = False
-        out["verify_pass"] = prior_pass
+        except (OSError, ValueError):
+            prior = {}
+        if not isinstance(prior, dict):
+            prior = {}
+        if (prior.get("verification_identity") == current_identity
+                and prior.get("verify_pass") is not None
+                and not prior.get("verify_skipped", True)):
+            out["verification_identity"] = current_identity
+            out["verify_skipped"] = False
+            out["verify_pass"] = str(prior["verify_pass"])
 
 Path(manifest).write_text(json.dumps(out, indent=2) + "\n")
 PY
@@ -253,34 +263,29 @@ run_zebrac_tool() {
     echo "  << $section $workload $tool  ${elapsed}s"
 }
 
-# Stash .zfi so the loader picks .fai; restore even on failure (shared sidecars).
-run_zebrac_tool_fai() {
+# A private FAI-only view leaves shared sidecars untouched, including on signals.
+run_zebrac_tool_fai() (
     local fa="$1" section="$2" workload="$3" tool="$4" family="$5"
-    local json_out="$6" script="$7" input_bytes="$8"
+    local json_out="$6" input_bytes="$7"
     if [[ ! -f "${fa}.fai" ]]; then
         echo "  warn: missing ${fa}.fai; skip $tool for $workload" >&2
         return 0
     fi
-    local had_zfi=false
-    if [[ -e "${fa}.zfi" ]]; then
-        if ! mv -f "${fa}.zfi" "${fa}.zfi.stash"; then
-            echo "error: could not stash ${fa}.zfi for .fai lane" >&2
-            return 1
-        fi
-        had_zfi=true
-    fi
-    if ! run_zebrac_tool "$section" "$workload" "$tool" "$family" "$json_out" "$script" "$input_bytes"; then
-        if $had_zfi && ! mv -f "${fa}.zfi.stash" "${fa}.zfi"; then
-            echo "error: could not restore ${fa}.zfi after failed .fai lane" >&2
-        fi
-        echo "error: $tool lane failed for $section $workload" >&2
-        return 1
-    fi
-    if $had_zfi && ! mv -f "${fa}.zfi.stash" "${fa}.zfi"; then
-        echo "error: could not restore ${fa}.zfi after .fai lane" >&2
-        return 1
-    fi
-}
+    local view_dir view fa_dir qz qf
+    fa_dir="$(cd -- "$(dirname -- "$fa")" && pwd)" || return 1
+    fa="$fa_dir/${fa##*/}"
+    view_dir="$(mktemp -d "${TMPDIR:-/tmp}/zfasta-stats-fai.XXXXXX")" || return 1
+    trap 'rm -rf -- "$view_dir"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    view="$view_dir/${fa##*/}"
+    ln -s "$fa" "$view" || return 1
+    ln -s "${fa}.fai" "${view}.fai" || return 1
+    qz="$(quote_arg "$ZFASTA")"
+    qf="$(quote_arg "$view")"
+    run_zebrac_tool "$section" "$workload" "$tool" "$family" "$json_out" \
+        "$qz stats $qf > /dev/null" "$input_bytes"
+)
 
 # Timed tools for one FASTA. One zebrac group per tool so progress is visible.
 run_stats_tools() {
@@ -305,8 +310,7 @@ run_stats_tools() {
 
     if [[ "$include_fai" == "true" ]]; then
         json="$out_dir/${workload}__z-fasta-fai.json"
-        run_zebrac_tool_fai "$fa" "$section" "$workload" z-fasta-fai z-fasta "$json" \
-            "$qz stats $qf > /dev/null" "$nbytes"
+        run_zebrac_tool_fai "$fa" "$section" "$workload" z-fasta-fai z-fasta "$json" "$nbytes"
     fi
 
     if [[ "$include_complete_peers" == "true" ]] && bench_has_tool noodles; then
@@ -772,7 +776,6 @@ verify_edge_paths() {
 run_tests() {
     PASS=0
     FAIL=0
-    bench_ensure_messy --fixtures
     mkdir -p "$LAYOUT_TWINS"
     local verify_tmp="$VERIFY_DATA/work"
     local previous_tmpdir="${TMPDIR-}"
@@ -988,6 +991,9 @@ if $DO_TESTS; then
     echo "================================================================"
     echo "  run_tests (correctness)"
     echo "================================================================"
+    bench_ensure_messy --fixtures
+    BENCH_VERIFY_IDENTITY="$(stats_verification_identity)"
+    export BENCH_VERIFY_IDENTITY
     _verify_log="$RESULTS_DIR/verify_${TIMESTAMP}.log"
     mkdir -p "$RESULTS_DIR"
     # pipefail: tee must not mask run_tests failure

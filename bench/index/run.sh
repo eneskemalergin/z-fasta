@@ -152,6 +152,16 @@ ensure_scaling() {
 prepare_benchmark_binary() {
     echo "Building ReleaseFast benchmark subject..."
     (cd "$PROJECT_ROOT" && zig build -Doptimize=ReleaseFast -Dstrip=true)
+    if [[ "$ZFASTA" == "$PROJECT_ROOT/zig-out/bin/z-fasta" ]]; then
+        export BENCH_BUILD_OPTIMIZE=ReleaseFast
+        BENCH_BUILD_ZIG_VERSION="$(zig version)"
+        BENCH_BUILD_TARGET="$(zig env | sed -n 's/^[[:space:]]*\.target = "\([^" ]*\)",/\1/p')"
+        BENCH_BUILD_REVISION=""
+        if [[ -z "$(git -C "$PROJECT_ROOT" status --porcelain --untracked-files=normal 2>/dev/null)" ]]; then
+            BENCH_BUILD_REVISION="$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null)" || BENCH_BUILD_REVISION=""
+        fi
+        export BENCH_BUILD_ZIG_VERSION BENCH_BUILD_REVISION BENCH_BUILD_TARGET
+    fi
 }
 
 require_real_datasets() {
@@ -179,10 +189,12 @@ require_real_datasets() {
 
 write_run_manifest() {
     local manifest="$1" timestamp="$2" metadata="$3"
+    BENCH_ZFASTA_BUILD="$(bench_build_identity)" || return 1
+    export BENCH_ZFASTA_BUILD
     local zig_version zig_target optimize
-    zig_version="$(zig version)"
-    zig_target="$(zig env | sed -n 's/^[[:space:]]*\.target = "\([^"]*\)",/\1/p')"
-    optimize="ReleaseFast"
+    zig_version="${BENCH_BUILD_ZIG_VERSION:-unknown}"
+    zig_target="${BENCH_BUILD_TARGET:-unknown}"
+    optimize="${BENCH_BUILD_OPTIMIZE:-unknown}"
     python3 - "$manifest" "$timestamp" "$metadata" "$RUNS" "$WARMUP" "$ZEBRAC_DURATION_MS" \
         "$SKIP_REAL" "$SKIP_SCALING" "$SKIP_SIZE" \
         "$zig_version" "$zig_target" "$optimize" \
@@ -225,6 +237,7 @@ out = {
     "mode": "warm",
     "zebrac": os.environ["BENCH_VER_ZEBRAC"],
     "z_fasta": os.environ["BENCH_VER_ZFASTA"],
+    "z_fasta_build": json.loads(os.environ["BENCH_ZFASTA_BUILD"]),
     "runs": int(runs),
     "warmup": int(warmup),
     "duration_ms": int(duration),

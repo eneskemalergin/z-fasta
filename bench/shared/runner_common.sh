@@ -106,11 +106,17 @@ existing_section_dir() {
     fi
 }
 
+manifest_tool_version() {
+    local version
+    version="$(bench_tool_version "$1" 2>/dev/null)" || version=unknown
+    printf '%s\n' "${version:-unknown}"
+}
+
 # Core versions every suite manifest records.
 export_manifest_core_versions() {
-    BENCH_VER_ZEBRAC="$(bench_tool_version zebrac 2>/dev/null || echo unknown)"
-    BENCH_VER_ZFASTA="$(bench_tool_version z-fasta 2>/dev/null || echo unknown)"
-    BENCH_VER_SAMTOOLS="$(bench_tool_version samtools 2>/dev/null || echo unknown)"
+    BENCH_VER_ZEBRAC="$(manifest_tool_version zebrac)"
+    BENCH_VER_ZFASTA="$(manifest_tool_version z-fasta)"
+    BENCH_VER_SAMTOOLS="$(manifest_tool_version samtools)"
     export BENCH_VER_ZEBRAC BENCH_VER_ZFASTA BENCH_VER_SAMTOOLS
 }
 
@@ -121,12 +127,12 @@ export_manifest_required_tool_versions() {
         case "$tool" in
             seqtk)
                 # Match prior stats behavior: empty stdout becomes "unknown".
-                ver="$(bench_tool_version seqtk 2>/dev/null | head -1 || true)"
+                ver="$(manifest_tool_version seqtk | head -1)"
                 export BENCH_VER_SEQTK="${ver:-unknown}"
                 ;;
             *)
                 upper="${tool^^}"
-                export "BENCH_VER_${upper}=$(bench_tool_version "$tool" 2>/dev/null || echo unknown)"
+                export "BENCH_VER_${upper}=$(manifest_tool_version "$tool")"
                 ;;
         esac
     done

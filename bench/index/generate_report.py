@@ -12,6 +12,8 @@ Defaults to bench/index/results/ (latest run via results/LATEST).
 """
 
 import json
+import math
+import shlex
 import argparse
 import os
 from pathlib import Path
@@ -225,20 +227,25 @@ def load_metadata(results_dir: Path, manifest: dict | None = None) -> pd.DataFra
     """Load metadata JSONL for the active run (manifest-linked when available)."""
     paths: list[Path] = []
     if manifest is not None:
-        metadata_name = manifest.get("metadata")
-        if not isinstance(metadata_name, str):
+        if "metadata" not in manifest:
             return None
+        metadata_name = manifest["metadata"]
+        if not isinstance(metadata_name, str) or not metadata_name:
+            raise ValueError("declared metadata must be a nonempty filename")
         candidate = results_dir / metadata_name
         if not candidate.is_file():
-            return None
+            raise ValueError(f"missing declared metadata file: {candidate}")
         paths = [candidate]
     else:
         latest = results_dir / "LATEST"
-        if latest.exists():
+        if latest.is_file():
             ts = latest.read_text().strip()
+            if not ts:
+                raise ValueError(f"empty LATEST pointer: {latest}")
             candidate = results_dir / f"metadata_{ts}.jsonl"
-            if candidate.exists():
-                paths = [candidate]
+            if not candidate.is_file():
+                return None
+            paths = [candidate]
     if manifest is None and not paths:
         found = sorted(results_dir.glob("metadata_*.jsonl"), reverse=True)
         if found:
@@ -253,15 +260,17 @@ def load_metadata(results_dir: Path, manifest: dict | None = None) -> pd.DataFra
                     continue
                 row = json.loads(line)
                 rows.append(row)
-    if not rows:
+    if not paths:
         return None
     return pd.DataFrame(rows)
 
 
 def meta_rows_for_json(metadata_df: pd.DataFrame | None, path: Path) -> list[dict]:
     """Rows from metadata JSONL whose raw_json matches path."""
-    if metadata_df is None or metadata_df.empty or "raw_json" not in metadata_df.columns:
+    if metadata_df is None:
         return []
+    if metadata_df.empty or "raw_json" not in metadata_df.columns:
+        raise ValueError(f"{path}: expected metadata match for result file, found no rows")
     resolved = path.resolve()
     rows = []
     for _, row in metadata_df.iterrows():
@@ -272,26 +281,83 @@ def meta_rows_for_json(metadata_df: pd.DataFrame | None, path: Path) -> list[dic
         except OSError:
             if raw == path:
                 rows.append(row.to_dict())
+    if not rows:
+        raise ValueError(f"{path}: expected metadata match for result file, found no rows")
     return rows
+
+
+def match_zebrac_metadata(result: dict, meta_rows: list[dict], path: Path) -> dict:
+    if not meta_rows:
+        return {}
+    matches = []
+    matched_fields = []
+    for raw in meta_rows:
+        row = {key: None if isinstance(value, float) and math.isnan(value) else value for key, value in raw.items()}
+        command = row.get("command")
+        same_command = isinstance(command, str) and command == result.get("command")
+        if not same_command and isinstance(command, str) and isinstance(result.get("argv"), list):
+            try:
+                same_command = shlex.split(command) == result["argv"]
+            except ValueError:
+                pass
+        fields = {key: value for key, value in row.items() if key not in ("command", "raw_json")}
+        if same_command and fields not in matched_fields:
+            matches.append(row)
+            matched_fields.append(fields)
+    if len(matches) != 1:
+        raise ValueError(f"{path}: expected one metadata match, found {len(matches)}")
+    return matches[0]
+
+
+def zebrac_results(data: dict, path: Path) -> list[dict]:
+    if not isinstance(data, dict) or "zebrac_version" not in data:
+        raise ValueError(f"expected zebrac JSON, got unsupported format: {path}")
+    results = data.get("results")
+    if not isinstance(results, list) or not results or any(not isinstance(row, dict) for row in results):
+        raise ValueError(f"{path}: expected a nonempty results list of benchmark objects")
+    return results
+
+
+def validate_zebrac_samples(result: dict, path: Path) -> None:
+    for field in ("sample_count", "failed_sample_count"):
+        if field not in result:
+            continue
+        value = result[field]
+        valid = type(value) is int and (value > 0 if field == "sample_count" else value == 0)
+        if not valid:
+            raise ValueError(f"{path}: invalid {field} for successful benchmark results")
+
+
+def required_zebrac_mean(result: dict, metric: str, path: Path) -> float:
+    section = result.get(metric)
+    expected_unit = {"wall_time": "nanoseconds", "peak_rss": "bytes"}.get(metric)
+    if isinstance(section, dict) and "unit" in section and expected_unit is not None:
+        if section["unit"] != expected_unit:
+            raise ValueError(f"{path}: invalid {metric}.unit, expected {expected_unit}")
+    value = section.get("mean") if isinstance(section, dict) else None
+    try:
+        number = float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else math.nan
+    except OverflowError:
+        number = math.nan
+    if not math.isfinite(number) or number < 0:
+        raise ValueError(f"{path}: missing or invalid {metric}.mean")
+    return number
 
 
 def load_zebrac_json(path: Path, metadata_df: pd.DataFrame | None = None) -> pd.DataFrame:
     with open(path) as f:
         data = json.load(f)
-    if "zebrac_version" not in data:
-        raise ValueError(f"expected zebrac JSON, got unsupported format: {path}")
+    results = zebrac_results(data, path)
 
     meta_rows = meta_rows_for_json(metadata_df, path)
-    meta_by_command = {row.get("command"): row for row in meta_rows}
     rows = []
-    for idx, result in enumerate(data.get("results", [])):
+    for result in results:
+        validate_zebrac_samples(result, path)
         command = result.get("command", "")
-        meta = meta_by_command.get(command, {})
-        if not meta and idx < len(meta_rows):
-            meta = meta_rows[idx]
+        meta = match_zebrac_metadata(result, meta_rows, path)
         wall = result.get("wall_time", {})
         peak_rss = result.get("peak_rss", {})
-        mean_s = wall.get("mean", 0) / 1_000_000_000.0
+        mean_s = required_zebrac_mean(result, "wall_time", path) / 1_000_000_000.0
         input_bytes = meta.get("input_bytes")
         throughput_mibs = None
         input_mib = None
@@ -301,13 +367,14 @@ def load_zebrac_json(path: Path, metadata_df: pd.DataFrame | None = None) -> pd.
                 throughput_mibs = input_mib / mean_s
         rows.append(
             {
+                "z_fasta_build": meta.get("z_fasta_build"),
                 "tool": meta.get("tool", command),
                 "mean": mean_s,
                 "stddev": wall.get("std_dev", 0) / 1_000_000_000.0,
                 "median": wall.get("median", 0) / 1_000_000_000.0,
                 "min": wall.get("min", 0) / 1_000_000_000.0,
                 "max": wall.get("max", 0) / 1_000_000_000.0,
-                "peak_rss_mb": peak_rss.get("mean", 0) / (1024 * 1024),
+                "peak_rss_mb": required_zebrac_mean(result, "peak_rss", path) / (1024 * 1024),
                 "peak_rss_stddev_mb": peak_rss.get("std_dev", 0) / (1024 * 1024),
                 "peak_rss_min_mb": peak_rss.get("min", 0) / (1024 * 1024),
                 "peak_rss_max_mb": peak_rss.get("max", 0) / (1024 * 1024),
@@ -339,7 +406,10 @@ def discover_latest(results_dir: Path, prefix: str, manifest: dict | None = None
                 return None
         else:
             candidate = results_dir / rel
-            return candidate if candidate.exists() else None
+            present = candidate.is_file() if section_key == "correctness" else candidate.is_dir()
+            if not present:
+                raise ValueError(f"missing declared {section_key} section: {candidate}")
+            return candidate
 
     # Unmapped prefixes (e.g. tests_*.csv): pin to the run timestamp.
     if manifest is not None:
@@ -368,15 +438,18 @@ def discover_latest(results_dir: Path, prefix: str, manifest: dict | None = None
 def load_run_manifest(
     results_dir: Path, manifest_path: Path | None = None
 ) -> dict | None:
-    """Load an explicit manifest, then LATEST, then the newest timestamped run."""
+    """Use an explicit manifest or LATEST; discover a run only without either."""
     if manifest_path is not None:
         return json.loads(manifest_path.read_text())
     latest = results_dir / "LATEST"
     if latest.is_file():
         ts = latest.read_text().strip()
+        if not ts:
+            raise ValueError(f"empty LATEST pointer: {latest}")
         path = results_dir / f"run_{ts}.json"
-        if path.is_file():
-            return json.loads(path.read_text())
+        if not path.is_file():
+            raise ValueError(f"LATEST names a missing run manifest: {path}")
+        return json.loads(path.read_text())
     paths = sorted(results_dir.glob("run_*.json"), reverse=True)
     if paths:
         return json.loads(paths[0].read_text())
@@ -1392,6 +1465,13 @@ def md_overview(manifest: dict | None) -> str:
     )
 
 
+def md_build_identity(manifest: dict) -> str:
+    identity = manifest.get("z_fasta_build")
+    if not isinstance(identity, dict):
+        return ""
+    return "**Source and executable facts**\n\n```json\n" + json.dumps(identity, indent=2) + "\n```"
+
+
 def md_run_provenance(manifest: dict | None) -> str:
     """Summarize the build and benchmark setup."""
     if not manifest:
@@ -1411,6 +1491,7 @@ def md_run_provenance(manifest: dict | None) -> str:
             f"{mode} cache; {manifest.get('runs', '?')} measured samples after "
             f"{manifest.get('warmup', '?')} warmups; "
             f"{manifest.get('duration_ms', '?')} ms budget per command.",
+            md_build_identity(manifest),
         )
     )
 
