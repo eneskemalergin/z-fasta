@@ -1,6 +1,5 @@
-//! Separate executable calling the four core operations through existing exports.
-//! No CLI dispatcher runs. The caller handles failures, then calls each command
-//! again with valid input, discarding only stdout through the test backend.
+//! Separate program that calls the four commands' entry points without the CLI dispatcher, first
+//! with failing input and then with valid input.
 
 const std = @import("std");
 const commands = @import("main");

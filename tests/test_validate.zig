@@ -1,6 +1,4 @@
-//! Validate unit and CLI tests: issue kinds, JSON rendering, fix flow, and gates fixtures.
-//!
-//! Also covers validator/indexer agreement on `tests/data/validator_indexer_agreement.fasta`.
+//! Validate tests: issue kinds, JSON output, `--fix`, and agreement with the indexer.
 
 const std = @import("std");
 const main = @import("main");

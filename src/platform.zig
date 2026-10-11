@@ -1,16 +1,11 @@
-//! Cross-platform policy for read-only file mapping and memory advice.
+//! Read-only file mapping and memory advice, with the platform differences kept here.
 
 const std = @import("std");
 const builtin = @import("builtin");
 
-/// Read-only mapped bytes aligned for platform mapping APIs. The corresponding
-/// `MemoryMap` owns the lifetime.
 pub const MappedBytes = []align(std.heap.page_size_min) const u8;
 
-/// Maps exactly `len` nonzero bytes read-only without prefaulting pages on POSIX.
-///
-/// Zig 0.16's Windows `NtCreateSection` path requires `.populate = true`; false
-/// produces `STATUS_INVALID_PARAMETER`. Call `MemoryMap.destroy` when finished.
+/// Windows needs `.populate = true` (Zig 0.16 fails with `STATUS_INVALID_PARAMETER` otherwise).
 pub fn mapFileReadOnly(io: std.Io, file: std.Io.File, len: usize) std.Io.File.MemoryMap.CreateError!std.Io.File.MemoryMap {
     return file.createMemoryMap(io, .{
         .len = len,
@@ -19,7 +14,7 @@ pub fn mapFileReadOnly(io: std.Io, file: std.Io.File, len: usize) std.Io.File.Me
     });
 }
 
-/// Hints that a mapped region will be read sequentially. No-op on Windows.
+/// No-op on Windows.
 pub fn adviseSequential(memory: MappedBytes) void {
     if (comptime builtin.os.tag == .windows) return;
     if (memory.len == 0) return;

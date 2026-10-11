@@ -1,7 +1,4 @@
-//! Index unit and integration tests: reader boundaries, `.zfi`/`.fai` validation, fixtures.
-//!
-//! Covers exact index behavior, malformed indexes, gates fixtures under
-//! `tests/data/gates/`, and reader fragmentation.
+//! Index tests: scanning across read boundaries, sidecar loading and validation, gates fixtures.
 
 const std = @import("std");
 const builtin = @import("builtin");

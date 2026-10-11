@@ -1,7 +1,5 @@
-//! Public z-fasta package: `const zfasta = @import("z-fasta");`.
-//!
-//! Only the declarations below are supported. Calls return `diagnostics.Error!T`
-//! and fill a caller-owned `diagnostics.Failure`; they never print or exit.
+//! The `z-fasta` package. Only these declarations are supported. Calls fill a caller-owned
+//! `diagnostics.Failure` and never print or exit.
 
 const indexed_reader = @import("indexed_reader.zig");
 

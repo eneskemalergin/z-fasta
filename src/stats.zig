@@ -1,25 +1,17 @@
-//! Assembly and proteome statistics from indexed FASTA files.
-//!
-//! Length statistics come from index metadata. Type and composition use one
-//! descriptor-owned bounded read window over indexed sequence spans.
+//! Computes `z-fasta stats` from an index. Lengths come from the index records; composition reads
+//! each indexed sequence span once, in file order, through one fixed read window.
 
 const std = @import("std");
 
 const index_format = @import("index_format.zig");
 const diagnostics = @import("diagnostics");
 
-/// Sequence class shared by stats, GET transformation guards, and validation.
 pub const SequenceType = enum { nucleotide, protein };
 
-/// Bases sampled per record for GET transformation guards.
 pub const GET_TYPE_SAMPLE_BASES: u64 = 256;
 
-/// Bases sampled across the file for validation alphabet selection.
 pub const VALIDATE_TYPE_SAMPLE_BASES: u64 = 100_000;
 
-/// Computes indexed statistics and delivers the report to stdout. Path labels
-/// borrow fasta_path until the caller handles the failure or resets storage.
-/// Resets once, returns after cleanup, and discards pending output on failure.
 pub fn runStats(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, failure: *diagnostics.Failure) diagnostics.Error!void {
     failure.reset(.stats);
     failure.sources.set(.stdout, .{ .label = .{ .borrowed = "stdout" }, .kind = .stream });
@@ -47,12 +39,7 @@ pub fn runStats(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8
     failure.succeed();
 }
 
-/// Detects whether represented sequence counts are nucleotide or protein.
-///
-/// Shared by stats (full-file counts), GET (per-record sample), and validate
-/// (prefix sample). Threshold: nucleotide if IUPAC nuc letters are strictly
-/// more than 90% of counted bases (`nuc * 10 > total * 9`). The caller supplies
-/// `total` for the same sample represented by `counts`. Empty samples are nucleotide.
+/// Nucleotide when IUPAC nucleotide letters are more than 90% of `total`; empty is nucleotide.
 pub fn detectType(counts: *const [256]u64, total: u64) SequenceType {
     if (total == 0) return .nucleotide;
 

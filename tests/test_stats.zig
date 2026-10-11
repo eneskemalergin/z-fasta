@@ -1,6 +1,4 @@
-//! Stats tests: type detection, exact reports, index parity, and CLI failures.
-//!
-//! Exercises complete stats output against fixture FASTAs.
+//! Stats tests: type detection, exact reports, `.zfi` and `.fai` parity, and CLI failures.
 
 const std = @import("std");
 const main = @import("main");

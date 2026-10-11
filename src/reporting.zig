@@ -1,6 +1,5 @@
-//! Bounded text and NDJSON rendering of caller-owned diagnostic facts.
-//! Rendering borrows the result, never allocates or flushes, and returns a
-//! failed write to the adapter without changing the original failure.
+//! Renders a `Failure` as text or as one NDJSON object. Never allocates or flushes; a failed write
+//! is returned and the original failure is left unchanged.
 
 const std = @import("std");
 const diagnostics = @import("diagnostics");
@@ -10,8 +9,7 @@ pub const JSON_BYTES_LIMIT = 16384;
 
 pub const GetMetrics = struct { region_count: u64, total_bases: u64, elapsed_ns: u64 };
 
-/// Version is trusted UTF-8 product metadata of at most 32 bytes. The adapter
-/// supplies acceptance; incomplete work or a blocking failure overrides it.
+/// `version` must be trusted UTF-8 of at most 32 bytes.
 pub const Options = struct {
     version: ?[]const u8 = null,
     accepted: bool = false,
@@ -20,8 +18,7 @@ pub const Options = struct {
 
 pub const Bootstrap = enum { argv_oom, missing_command, unknown_command, invalid_format };
 
-/// Static reporting before a normal result exists. A failed write returns once;
-/// the adapter must not attempt another report to the same broken sink.
+/// For failures before a `Failure` exists; do not retry on the same broken sink.
 pub fn writeBootstrap(writer: *std.Io.Writer, reason: Bootstrap) std.Io.Writer.Error!void {
     const code: diagnostics.Code = switch (reason) {
         .argv_oom => .@"resource.out_of_memory",
@@ -37,8 +34,6 @@ pub fn writeBootstrap(writer: *std.Io.Writer, reason: Bootstrap) std.Io.Writer.E
     } });
 }
 
-/// Writes one newline-terminated object. Does not certify delivery of its own
-/// bytes; the adapter must check its writer's final flush and process status.
 pub fn writeJson(writer: *std.Io.Writer, failure: *const diagnostics.Failure, options: Options) std.Io.Writer.Error!void {
     if (options.version) |version| {
         std.debug.assert(version.len <= 32 and std.unicode.utf8ValidateSlice(version));
@@ -115,8 +110,6 @@ pub fn writeJson(writer: *std.Io.Writer, failure: *const diagnostics.Failure, op
     try writer.writeByte('\n');
 }
 
-/// Writes escaped primary/secondary facts and a concrete action. A success
-/// result has no failure text. The caller owns all write/flush failure policy.
 pub fn writeText(writer: *std.Io.Writer, failure: *const diagnostics.Failure) std.Io.Writer.Error!void {
     const primary = failure.primary() orelse return;
     try textDiagnostic(writer, failure, primary, "error");
@@ -125,8 +118,7 @@ pub fn writeText(writer: *std.Io.Writer, failure: *const diagnostics.Failure) st
     try writer.print("hint: {s}\n", .{actionText(diagnostics.metadata(primary.code()).action)});
 }
 
-/// Writes printable ASCII verbatim and escapes controls, opaque bytes, quotes
-/// and backslashes without adding enclosing quotes. Does not allocate.
+/// Printable ASCII as is; controls, non-ASCII bytes, quotes, and backslashes escaped.
 pub fn writeEscapedBytes(writer: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Error!void {
     for (bytes) |byte| switch (byte) {
         '"', '\\' => {

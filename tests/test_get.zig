@@ -1,6 +1,4 @@
-//! GET integration and CLI tests: region resolution, extraction, and failure paths.
-//!
-//! Includes indexed extraction and exact-exit CLI failure contracts.
+//! GET tests: region parsing, extraction through both sidecars, and CLI failures.
 
 const std = @import("std");
 const main = @import("main");

@@ -1,13 +1,10 @@
-//! A separately compiled consumer of diagnostics, with no CLI-module import.
-//! The caller handles failures, releases partial allocations, transfers success
-//! resources, and continues. Injected faults test facts, not real disk behavior.
+//! Separate program that uses `diagnostics` directly, without the CLI, to check that a caller can
+//! handle failures and release partial allocations. Faults are injected, not real disk errors.
 
 const std = @import("std");
 const diagnostics = @import("diagnostics");
 const reporting = @import("reporting");
 
-/// Used by the standalone executable and subsystem tests. All labels are owned
-/// by this caller until the failure is handled; helpers retain no stack paths.
 pub fn exercise(allocator: std.mem.Allocator) !void {
     var failure: diagnostics.Failure = undefined;
     const caller_path = [_]u8{ 's', 'a', 'm', 'p', 'l', 'e', '.', 'f', 'a' };

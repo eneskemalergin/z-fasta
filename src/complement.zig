@@ -1,14 +1,13 @@
-//! IUPAC byte complementation for GET transforms.
+//! IUPAC complement table for `get` transforms. Case is kept, U maps to A one way, and every
+//! other byte passes through unchanged.
 
 const std = @import("std");
 
-/// Returns the IUPAC complement for one byte.
-/// Unknown bytes pass through unchanged.
 pub fn complement(byte: u8) u8 {
     return IUPAC_COMPLEMENT_TABLE[byte];
 }
 
-/// Write the IUPAC complement of `src` into `dst`; asserts equal lengths.
+/// Caller assumes `dst.len == src.len`; only Debug checks it.
 pub fn complementInto(dst: []u8, src: []const u8) void {
     std.debug.assert(dst.len == src.len);
     var i: usize = 0;

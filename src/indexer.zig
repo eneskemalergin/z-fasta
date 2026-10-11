@@ -1,70 +1,56 @@
-//! FASTA indexing through one bounded reader for `.zfi` and `.fai` output.
-//!
-//! The parser skips empty lines for geometry, sets `seq_offset` to the first base-bearing
-//! line, invents a separator when the final line has no newline, and rejects names longer
-//! than `MAX_INDEX_NAME_LEN`. Proven dense blocks update the same `ChunkParseState`; the
-//! first anomaly resumes the general line machine at the exact unconsumed byte.
-//!
-//! Duplicate-name filtering is first-wins and collision-safe: lookup may use a hash, but
-//! identity is always full-string equality, including source-backed name references.
+//! Builds `.zfi` and `.fai` indexes in one pass through a 256 KiB reader.
+//! A header starts with `>` at line start and its name ends at space or tab; a base is any byte
+//! above ASCII space. Empty records are skipped. Duplicate names are first-wins by exact string
+//! equality, even when hashes collide.
+//! A record is uniform when all lines share one width (a shorter last line is allowed); any other
+//! layout gets a side table, and `--emit-fai` rejects it. Dense runs of lines are checked in
+//! vector blocks; the first odd byte drops back to the line parser at that byte.
+//! Inputs over 32 MiB stream records to the output and spill names and side tables to disk after
+//! 1 MiB. Output is published only after re-checking the FASTA's size and mtime, and `.fai`
+//! reaches stdout only after the whole file is accepted.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const index_format = @import("index_format.zig");
 const diagnostics = @import("diagnostics");
 
-/// Size in bytes of the scanner's sequence read buffer.
 pub const INDEX_READ_BUFFER_SIZE = 256 * 1024;
 
-/// Maximum identifier length in bytes for both index formats.
 pub const MAX_INDEX_NAME_LEN = std.math.maxInt(u16);
 
-/// Reader policy; identifier limits may be stricter than `MAX_INDEX_NAME_LEN`.
 pub const ScanOptions = struct {
     enable_dedup: bool,
     max_name_len: ?usize = null,
     collect_side_tables: bool = false,
     require_initial_header: bool = false,
-    /// Borrowed diagnostic destination, initialized by the owning operation.
     failure: ?*diagnostics.Failure = null,
 };
 
-/// Selects CLI output format and first-occurrence duplicate filtering.
 pub const Options = struct {
     emit_fai: bool = false,
     enable_dedup: bool = true,
 };
 
-/// Number of retained nonempty records after publication and required cleanup.
 pub const Result = struct { record_count: u32 };
 
-/// First-wins name set whose decisions use full-string equality despite hash collisions.
-/// FAI owns stable keys in a child arena; `.zfi` shares names with its output blob.
 pub const NameDedup = NameDedupWith(std.hash_map.StringContext);
 
-/// One parsed FASTA record passed to reader emit callbacks.
-/// Name and side-table slices are borrowed only for the callback's duration.
+/// Slices are borrowed only for the duration of the callback.
 pub const FastaRecordEmit = struct {
     record: IndexRecord,
     name: []const u8,
-    /// Original FASTA position; borrowed only for the callback duration.
     source_reference: ?*const diagnostics.Reference = null,
     nonuniform_reason: diagnostics.NonuniformReason = .nonuniform_layout,
     uses_uniform_formula: bool,
-    /// Incremental side-table bytes for `.zfi` (line count plus `SideTableLine` rows).
     side_table: []const u8 = &.{},
-    /// When true, `record` already has blob-relative `name_offset`/`name_len` and `NAME_IN_ZFI_FLAG`
-    /// (`.zfi` blob-backed `NameDedup`); skip `embedZfiName`.
     name_embedded: bool = false,
 };
 
-/// Owned records, side tables, and names; release with `deinit` using the scan allocator.
 pub const ZfiIndex = struct {
     records: std.ArrayList(IndexRecord),
     side_tables: std.ArrayList(u8),
     name_blob: std.ArrayList(u8),
 
-    /// Releases all catalog storage with the allocator used to create it.
     pub fn deinit(self: *ZfiIndex, allocator: std.mem.Allocator) void {
         self.records.deinit(allocator);
         self.side_tables.deinit(allocator);
@@ -72,7 +58,6 @@ pub const ZfiIndex = struct {
     }
 };
 
-/// Collects an owned `.zfi` catalog; `read_buf` must be nonempty and remains caller-owned.
 pub fn scanZfiReader(
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
@@ -87,7 +72,6 @@ pub fn scanZfiReader(
     );
 }
 
-/// Collects an owned `.zfi` catalog from borrowed FASTA bytes.
 pub fn scanZfiData(
     allocator: std.mem.Allocator,
     data: []const u8,
@@ -98,7 +82,6 @@ pub fn scanZfiData(
     return scanZfiReader(allocator, &r, &read_buf, enable_dedup);
 }
 
-/// Writes a collected catalog directly to `path`; the CLI owns atomic publication.
 pub fn writeZfiIndexFile(
     io: std.Io,
     path: []const u8,
@@ -116,7 +99,6 @@ pub fn writeZfiIndexFile(
     try file_fw.flush();
 }
 
-/// Caller owns the returned production-layout bytes.
 pub fn zfiIndexToBytes(
     allocator: std.mem.Allocator,
     index: *const ZfiIndex,
@@ -126,17 +108,10 @@ pub fn zfiIndexToBytes(
     return serializeZfiIndex(allocator, index, source_size, source_mtime_ns, .{});
 }
 
-/// Serializes an owned index without resetting the caller's diagnostic destination.
-/// The returned bytes belong to `allocator`; rejects counts above the ZFI u32 limit.
-/// Allocation failures retain OOM facts without allocating diagnostic storage.
 pub fn zfiIndexToBytesChecked(allocator: std.mem.Allocator, index: *const ZfiIndex, source_size: u64, source_mtime_ns: u64, failure: *diagnostics.Failure) diagnostics.Error![]u8 {
     return serializeZfiIndex(allocator, index, source_size, source_mtime_ns, .{ .failure = failure }) catch return diagnostics.metadata(failure.primary().?.code()).returned_error;
 }
 
-/// Scans records through a nonempty caller-owned buffer and returns the retained count.
-/// Callback slices expire on return; an external name set is borrowed and may be updated.
-/// Returns `TooManySequences` before emitting more than 4294967295 retained records.
-/// Rejects empty buffers and buffers larger than 4294967295 bytes before reading.
 pub fn scanFastaReader(
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
@@ -150,7 +125,6 @@ pub fn scanFastaReader(
     return scanFastaReaderWithDedup(allocator, reader, read_buf, options, external_dedup, ctx, emitRecord);
 }
 
-/// Writes `.fai` rows to `writer`; errors may leave a prefix in this low-level API.
 pub fn scanFaiData(
     allocator: std.mem.Allocator,
     data: []const u8,
@@ -162,9 +136,6 @@ pub fn scanFaiData(
     return scanFaiReader(allocator, &r, &read_buf, writer, .{ .enable_dedup = enable_dedup });
 }
 
-/// Indexes a file and returns after publication and required temporary-file removal.
-/// The caller owns `failure` and `path` through diagnostic handling. This entry resets
-/// `failure` once. ZFI replaces its sidecar atomically; FAI stdout starts after a valid scan.
 pub fn runIndex(
     io: std.Io,
     environ: std.process.Environ,
@@ -349,7 +320,6 @@ fn NameDedupWith(comptime Context: type) type {
 
         const Self = @This();
 
-        /// Owns a name set using `allocator` until `deinit`.
         pub fn init(allocator: std.mem.Allocator) Self {
             return .{
                 .map = std.HashMap([]const u8, void, Context, std.hash_map.default_max_load_percentage).init(allocator),
@@ -382,7 +352,6 @@ fn NameDedupWith(comptime Context: type) type {
             self.map.ensureTotalCapacity(min_cap) catch return self.diag.oom(.dedup_table, null);
         }
 
-        /// Releases the map and its owned names.
         pub fn deinit(self: *Self) void {
             if (self.ref_map) |*rm| {
                 rm.deinit();
@@ -394,7 +363,7 @@ fn NameDedupWith(comptime Context: type) type {
             self.name_blob = null;
         }
 
-        /// Returns true for an existing exact name; otherwise retains a stable copy.
+        /// True when the exact name was already seen; otherwise keeps a copy.
         pub fn observe(self: *Self, name: []const u8) !bool {
             if (self.name_blob) |blob| {
                 var rm = &(self.ref_map orelse unreachable);

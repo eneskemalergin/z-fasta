@@ -1,4 +1,5 @@
-//! BED line parser: 0-based half-open intervals to 1-based inclusive requests.
+//! Parses BED rows for `get --bed`: zero-based half-open in, one-based inclusive out.
+//! Comment, `track`, and `browser` rows are skipped. The chrom slice borrows the input line.
 
 const std = @import("std");
 const diagnostics = @import("diagnostics");
@@ -30,11 +31,6 @@ pub const ParseResult = union(enum) {
     region: Region,
 };
 
-/// Parses a BED row and records precise field failures in caller-owned storage.
-/// `at` identifies the original row; offsets and columns are byte locations.
-/// The caller initializes `failure` once for the operation. This helper does
-/// not reset it. Returned chromosome bytes borrow `line`; failure previews own
-/// bounded copies. Invalid strands are rejected only when `honor_strand` is set.
 pub fn parseBedLineChecked(
     line: []const u8,
     honor_strand: bool,
@@ -55,16 +51,12 @@ pub fn parseBedLineChecked(
     return parsed;
 }
 
-/// Parses one BED row into a 1-based inclusive request.
-///
-/// Empty, comment, track, and browser lines return `.skip`. Coordinates must
-/// contain only decimal digits and satisfy `end > start`. `chrom` borrows
-/// from `line`. Invalid strands are retained for the caller to accept or reject.
+/// Same rules without diagnostics, returning the legacy error set.
 pub fn parseBedLine(line: []const u8) ParseError!ParseResult {
     return parseLine(line, .{});
 }
 
-/// Borrows a chromosome for lookup collection. Output callers still parse the complete row.
+/// Reads only the chrom column; the rest of the row is not checked.
 pub fn requestChrom(line: []const u8) ?[]const u8 {
     const trimmed = requestLine(line) orelse return null;
     const end = std.mem.findScalar(u8, trimmed, '\t') orelse trimmed.len;

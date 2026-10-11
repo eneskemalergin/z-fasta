@@ -1,39 +1,33 @@
-//! `.zfi` binary and `.fai` text index load/write helpers (`LoadedIndex`, staleness, geometry).
-//!
-//! On-disk `.zfi` bytes follow the frozen little-endian contract in `plan/docs/zfi-format.md`.
-//! Host `extern struct` views are allowed only when comptime checks prove native layout
-//! matches that contract (little-endian + fixed sizes/offsets).
+//! Loads and checks `.zfi` and `.fai` sidecars; owns the `.zfi` byte layout and `LoadedIndex`.
+//! A present `.zfi` wins; `.fai` is tried only when `.zfi` is absent, unless one is selected.
+//! An index older than its FASTA is rejected. `.zfi` also stores the FASTA size and mtime.
+//! `.zfi` is little-endian with fixed sizes (`plan/docs/zfi-format.md`); host structs are read
+//! in place because comptime checks prove the layout matches.
+//! `LoadedIndex.deinit` releases the FASTA descriptor, mappings, and arena; names and records
+//! borrow them until then. Loaders never reset the caller's `Failure`.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const platform = @import("platform.zig");
 pub const diagnostics = @import("diagnostics");
 
-/// Four-byte magic and version for the supported `.zfi` wire format.
 pub const ZFI_MAGIC: [4]u8 = .{ 'Z', 'F', 'I', 0x01 };
 
-/// Record flag indicating that its name is embedded in the `.zfi` name blob.
 pub const NAME_IN_ZFI_FLAG: u8 = 2;
 
 pub const MAX_SIDE_TABLE_OFFSET = (1 << (SIDE_TABLE_OFFSET_BYTES * 8)) - 1;
 
 pub const ZFI_NAME_FOOTER_MAGIC: [4]u8 = .{ 'Z', 'F', 'N', 'M' };
 
-/// On-disk sizes from the wire contract (must match `@sizeOf` under the frozen layout).
 pub const ZFI_HEADER_BYTES: usize = 16;
 pub const ZFI_INDEX_RECORD_BYTES: usize = 40;
 pub const ZFI_SIDE_TABLE_LINE_BYTES: usize = 32;
 
-/// On-disk name-table footer size (4-byte magic + little-endian u64 length).
 pub const ZFI_NAME_FOOTER_BYTES: usize = 12;
 
-/// Trailing source-identity block (`ZFID` + FASTA mtime ns) written immediately
-/// before the name footer. Production writers always include it. Legacy files
-/// without it use the weaker mtime policy.
 pub const ZFI_SOURCE_ID_MAGIC: [4]u8 = .{ 'Z', 'F', 'I', 'D' };
 pub const ZFI_SOURCE_ID_BYTES: usize = 12;
 
-/// Encodes the trailing name-blob length in the frozen little-endian layout.
 pub fn encodeZfiNameFooter(name_blob_len: u64) [ZFI_NAME_FOOTER_BYTES]u8 {
     var out: [ZFI_NAME_FOOTER_BYTES]u8 = undefined;
     @memcpy(out[0..4], &ZFI_NAME_FOOTER_MAGIC);
@@ -41,7 +35,6 @@ pub fn encodeZfiNameFooter(name_blob_len: u64) [ZFI_NAME_FOOTER_BYTES]u8 {
     return out;
 }
 
-/// Encodes the source modification time in the frozen little-endian layout.
 pub fn encodeZfiSourceId(source_mtime_ns: u64) [ZFI_SOURCE_ID_BYTES]u8 {
     var out: [ZFI_SOURCE_ID_BYTES]u8 = undefined;
     @memcpy(out[0..4], &ZFI_SOURCE_ID_MAGIC);
@@ -49,22 +42,16 @@ pub fn encodeZfiSourceId(source_mtime_ns: u64) [ZFI_SOURCE_ID_BYTES]u8 {
     return out;
 }
 
-/// Converts a non-negative timestamp to the unsigned `.zfi` representation.
 pub fn timestampToNs(ts: std.Io.Timestamp) error{TimestampOutOfRange}!u64 {
     return std.math.cast(u64, ts.nanoseconds) orelse error.TimestampOutOfRange;
 }
 
-/// Frozen 16-byte `.zfi` header.
 pub const ZfiHeader = extern struct {
     magic: [4]u8,
     record_count: u32,
     source_size: u64,
 };
 
-/// One line entry for non-uniform FASTA records.
-///
-/// `base_start` is the 0-based sequence coordinate of the first base on this line.
-/// It makes side-table lookup a binary search instead of a linear prefix sum.
 pub const SideTableLine = extern struct {
     base_start: u64,
     byte_offset: u64,
@@ -72,15 +59,7 @@ pub const SideTableLine = extern struct {
     line_bases: u64,
 };
 
-/// Frozen 40-byte record shared by `.zfi` and normalized in-memory `.fai` loads.
-///
-/// For `.zfi` indexes, `name_offset` / `name_len` point into the embedded name blob.
-/// For full-map `.fai` loads, they point into the mapped `.fai` line. Matched
-/// `.zfi` and streamed `.fai` loads keep copied names separately. Use `LoadedIndex.recordName` when
-/// the index source is not already known.
-///
-/// `flags_and_offset[0] & 1 == 0` selects the uniform O(1) line formula. Non-uniform records
-/// store a 40-bit little-endian absolute side-table offset in `flags_and_offset[1..6]`.
+/// Name offsets point into the `.zfi` blob or the mapped `.fai`; prefer `LoadedIndex.recordName`.
 pub const IndexRecord = extern struct {
     name_offset: u64,
     name_len: u16,
@@ -90,8 +69,7 @@ pub const IndexRecord = extern struct {
     line_bases: u32,
     line_bytes: u32,
 
-    /// Caller assumes the record name range was validated against `data`; violating
-    /// this is undefined behavior.
+    /// Caller assumes the name range was validated against `data`.
     pub fn getName(self: IndexRecord, data: []const u8) []const u8 {
         return data[self.name_offset..][0..self.name_len];
     }
@@ -112,7 +90,6 @@ pub const IndexRecord = extern struct {
         return offset;
     }
 
-    /// Marks the record non-uniform or returns `SideTableOffsetTooLarge`.
     pub fn markNonUniform(self: *IndexRecord, offset: u64) !void {
         if (offset > MAX_SIDE_TABLE_OFFSET) return error.SideTableOffsetTooLarge;
         const preserve = self.flags_and_offset[0] & NAME_IN_ZFI_FLAG;
@@ -124,7 +101,6 @@ pub const IndexRecord = extern struct {
     }
 };
 
-/// Explicit little-endian header bytes (must match `asBytes` on little-endian hosts).
 pub fn encodeZfiHeader(header: ZfiHeader) [ZFI_HEADER_BYTES]u8 {
     var out: [ZFI_HEADER_BYTES]u8 = undefined;
     @memcpy(out[0..4], &header.magic);
@@ -133,7 +109,6 @@ pub fn encodeZfiHeader(header: ZfiHeader) [ZFI_HEADER_BYTES]u8 {
     return out;
 }
 
-/// Explicit little-endian record bytes (must match `asBytes` on little-endian hosts).
 pub fn encodeIndexRecord(rec: IndexRecord) [ZFI_INDEX_RECORD_BYTES]u8 {
     var out: [ZFI_INDEX_RECORD_BYTES]u8 = undefined;
     std.mem.writeInt(u64, out[0..8], rec.name_offset, .little);
@@ -146,7 +121,6 @@ pub fn encodeIndexRecord(rec: IndexRecord) [ZFI_INDEX_RECORD_BYTES]u8 {
     return out;
 }
 
-/// Explicit little-endian side-table line bytes (must match `asBytes` on little-endian hosts).
 pub fn encodeSideTableLine(line: SideTableLine) [ZFI_SIDE_TABLE_LINE_BYTES]u8 {
     var out: [ZFI_SIDE_TABLE_LINE_BYTES]u8 = undefined;
     std.mem.writeInt(u64, out[0..8], line.base_start, .little);
@@ -156,8 +130,6 @@ pub fn encodeSideTableLine(line: SideTableLine) [ZFI_SIDE_TABLE_LINE_BYTES]u8 {
     return out;
 }
 
-/// Selects the records, names, and lookup state retained by a loader.
-/// Sidecar choice: automatic `.zfi`-then-`.fai` discovery, or one explicit path.
 pub const IndexSelection = union(enum) {
     automatic,
     zfi: []const u8,
@@ -166,30 +138,14 @@ pub const IndexSelection = union(enum) {
 
 pub const LoadMode = union(enum) {
     lookup_full_map,
-    /// Stats composition: retain every record and only the two report names for streamed FAI.
+    /// Keeps every record; a streamed `.fai` keeps only the two names a report prints.
     stats_scan,
-    /// Positional GET: retain first FAI matches; keep the complete mapped ZFI catalog.
+    /// Maps a `.zfi` whole; keeps only first matches from a `.fai`.
     positional: []const []const u8,
-    /// Seekable batch GET: validate the complete sidecar and retain only first matches.
+    /// Checks the whole sidecar but keeps only the requested records.
     matched: []const []const u8,
 };
 
-/// Loaded FASTA + index state (from `.zfi` or samtools-compatible `.fai`).
-///
-/// Ownership (one owner each; `deinit()` is the only cleanup entry point):
-/// - **FASTA file**: `fasta_file` remains open until `deinit`.
-/// - **Sidecar maps**: `deinit` destroys the optional `.zfi` / `.fai` maps. Byte
-///   slices and typed views borrow from those maps.
-/// - **Arena**: owns heap for matched `.zfi` and streamed `.fai` records, names,
-///   and retained side-table bytes,
-///   plus `name_map` table storage. Reclaimed
-///   only via `arena.deinit()` (do not `name_map.deinit()` on an arena-backed map).
-/// - **`name_map` keys**: borrowed from a sidecar map for full loads, or from
-///   arena-owned `name_slices` for matched loads.
-/// - **`io`**: borrowed for reads and cleanup; caller must keep it alive until `deinit`.
-///
-/// GET and stats load through this type and only call `deinit()`. Validator maps
-/// the FASTA independently.
 pub const LoadedIndex = struct {
     io: std.Io,
     fasta_file: std.Io.File,
@@ -197,15 +153,11 @@ pub const LoadedIndex = struct {
     fai_map: ?std.Io.File.MemoryMap = null,
     records: []const IndexRecord,
     name_map: ?std.StringHashMapUnmanaged(u32) = null,
-    /// Arena-owned names: one per retained matched record, or stats extrema only.
     name_slices: []const []const u8 = &.{},
-    /// Record indices for the two extrema names retained by streamed FAI stats loads.
     stats_name_indices: ?[2]usize = null,
-    /// Borrow into `zfi_map` for a mapped `.zfi` load.
     name_blob: ?[]const u8 = null,
     fai_data: ?platform.MappedBytes = null,
     fasta_size: u64,
-    /// Complete mapped ZFI bytes, or arena-owned side-table bytes for matched loads.
     zfi_data: ?[]align(@alignOf(SideTableLine)) const u8,
     zfi_side_start: usize = 0,
     zfi_side_end: usize = 0,
@@ -218,8 +170,7 @@ pub const LoadedIndex = struct {
         return if (self.source == .zfi) self.name_blob.? else self.fai_data.?;
     }
 
-    /// Returns a retained record name, or `null` when the selected load mode did
-    /// not retain that record's name.
+    /// Null when the load mode did not keep this record's name.
     pub fn recordName(self: *const LoadedIndex, rec_idx: usize) ?[]const u8 {
         if (rec_idx >= self.records.len) return null;
         if (self.stats_name_indices) |indices| {
@@ -236,7 +187,6 @@ pub const LoadedIndex = struct {
         return null;
     }
 
-    /// Releases all mappings, arena allocations, and the FASTA descriptor.
     pub fn deinit(self: *LoadedIndex) void {
         if (self.zfi_map) |*m| m.destroy(self.io);
         if (self.fai_map) |*m| m.destroy(self.io);
@@ -244,7 +194,6 @@ pub const LoadedIndex = struct {
         self.fasta_file.close(self.io);
     }
 
-    /// Returns the first retained record whose name exactly matches `name`.
     pub fn lookupName(self: *const LoadedIndex, name: []const u8) ?usize {
         if (self.name_map) |name_map| {
             const rec_idx = name_map.get(name) orelse return null;
@@ -275,7 +224,6 @@ pub const LoadedIndex = struct {
         return null;
     }
 
-    /// Returns borrowed lines for a loaded non-uniform record, or empty if unavailable.
     pub fn sideTableLines(self: *const LoadedIndex, rec: IndexRecord) []const SideTableLine {
         if (rec.isUniformWidth()) return &.{};
         const zfi = self.zfi_data orelse return &.{};
@@ -310,14 +258,10 @@ pub const LoadIndexError = error{
     OutOfMemory,
 };
 
-/// Loads a complete catalog. Reset Failure once in the owning operation before
-/// calling. Path labels borrow fasta_path through handling or Failure.reset.
 pub fn loadIndexChecked(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, failure: *diagnostics.Failure) diagnostics.Error!LoadedIndex {
     return loadIndexCheckedWithMode(allocator, io, fasta_path, .lookup_full_map, failure);
 }
 
-/// Loads one mode without resetting the owning operation's diagnostics.
-/// Missing optional sidecars are silent; a present ZFI remains authoritative.
 pub fn loadIndexCheckedWithMode(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -328,8 +272,6 @@ pub fn loadIndexCheckedWithMode(
     return loadIndexSelected(allocator, io, fasta_path, .automatic, mode, failure);
 }
 
-/// Loads the selected sidecar without resetting the owning operation's diagnostics.
-/// An explicit sidecar is the only one tried; its label borrows the given path.
 pub fn loadIndexSelected(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -383,8 +325,6 @@ pub fn loadIndexSelected(
     return (try tryLoadFai(allocator, io, fai_path, fasta_file, fasta_stat, mode, &context)) orelse context.fail(.{ .@"index.not_found" = .{ .zfi_source = .zfi, .fai_source = .fai } });
 }
 
-/// Compatibility loader retaining the legacy coarse error set. Native command
-/// callers use loadIndexChecked and inspect their caller-owned Failure.
 pub fn loadIndexCheckedLegacy(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8) LoadIndexError!LoadedIndex {
     return loadIndexCheckedWithModeLegacy(allocator, io, fasta_path, .lookup_full_map);
 }

@@ -1,7 +1,11 @@
-//! FASTA structure, alphabet, and header validation with optional fix streaming.
-//!
-//! Events are capped (`MAX_VALIDATE_EVENTS`). JSON output escapes arbitrary header bytes.
-//! Shared sequence-type sampling uses `stats.detectType`.
+//! Validates FASTA structure, alphabet, and headers for `z-fasta validate`, and rewrites the file
+//! with `--fix`. The whole input is mapped; event names borrow it.
+//! At most `MAX_VALIDATE_EVENTS` events are kept, but counts and fix blockers continue past it.
+//! Reports are legacy v1: `invalid_character` counts distinct byte values, not occurrences, and
+//! invalid UTF-8 in names is escaped in a way that cannot be reversed.
+//! The alphabet is chosen from a 100,000-base sample through `stats.detectType`.
+//! `--fix` refuses content before the first header and an output that is the input, and writes
+//! through atomic replacement.
 
 const std = @import("std");
 
@@ -10,28 +14,21 @@ const stats = @import("stats.zig");
 const diagnostics = @import("diagnostics");
 const reporting = @import("reporting.zig");
 
-/// Hard cap on retained validate events. Further issues set `Summary.truncated`
-/// instead of growing an unbounded list.
 pub const MAX_VALIDATE_EVENTS: usize = 10_000;
 
-/// Selects the stable text, JSON-lines, or aggregate JSON report.
 pub const OutputMode = enum {
     text,
     json_lines,
     json_summary,
 };
 
-/// Optional header convention checked in addition to ordinary FASTA validation.
 pub const Schema = enum {
     none,
     uniprot,
     refseq,
 };
 
-/// Controls validation, reporting, and format-only rewriting.
-///
-/// `output_path` and `custom_alphabet` are borrowed for the call. Direct CLI-equivalent
-/// callers must pair `fix_format_only` and `output_path` with `fix`.
+/// Not validated here: `fix_format_only` and `output_path` require `fix`.
 pub const Options = struct {
     strict: bool = false,
     output_mode: OutputMode = .text,
@@ -43,7 +40,6 @@ pub const Options = struct {
     max_header_len: usize = DEFAULT_MAX_HEADER_LEN,
 };
 
-/// Severity used for report events and exit-status accounting.
 pub const Level = enum {
     error_level,
     warning,
@@ -63,7 +59,6 @@ pub const Level = enum {
     }
 };
 
-/// Stable validation issue families used by text and JSON reports.
 pub const Kind = enum {
     no_sequences,
     duplicate_name,
@@ -96,8 +91,6 @@ pub const Kind = enum {
     }
 };
 
-/// One retained issue. `name` borrows the validated input; other optional fields apply only
-/// to the issue kinds that expose them in the report schema.
 pub const Event = struct {
     level: Level,
     kind: Kind,
@@ -114,13 +107,10 @@ pub const Event = struct {
     control_place: enum { header, sequence, preamble } = .sequence,
 };
 
-/// Owns retained events and rewrite widths while borrowing event names from the input.
-/// Counts remain complete when `truncated` is true, although `events` does not.
 pub const Summary = struct {
     events: std.ArrayList(Event),
     record_widths: std.ArrayList(u32),
     sequence_type: stats.SequenceType = .nucleotide,
-    /// Bases fed into `detectType` (capped at `stats.VALIDATE_TYPE_SAMPLE_BASES`).
     type_bases_sampled: u64 = 0,
     sequence_count: usize = 0,
     header_count: usize = 0,
@@ -128,28 +118,20 @@ pub const Summary = struct {
     warning_count: usize = 0,
     format_warning_count: usize = 0,
     kind_counts: [KIND_COUNT]usize = .{0} ** KIND_COUNT,
-    /// True when more issues were found after `MAX_VALIDATE_EVENTS` were retained.
     truncated: bool = false,
-    /// Fix blocker found after event retention reached its cap.
     truncated_fix_rejection: ?Kind = null,
     first_blocker: ?Event = null,
     first_invalid: ?Event = null,
     preamble: ?PreamblePosition = null,
 
-    /// Releases owned storage with the allocator passed to `validateData`.
     pub fn deinit(self: *Summary, allocator: std.mem.Allocator) void {
         self.events.deinit(allocator);
         self.record_widths.deinit(allocator);
     }
 };
 
-/// Scalar validation outcome after complete report delivery. No input names borrow
-/// from the released mapping; findings and their legacy counts stay in stdout.
 pub const Result = struct { status: u8, truncated: bool, fix_written: bool };
 
-/// Validates, optionally rewrites, and delivers the legacy report. Resets once
-/// and returns after cleanup. Source path labels borrow caller strings through
-/// handling/reset; the input mapping remains alive while report names borrow it.
 pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, options: Options, failure: *diagnostics.Failure) diagnostics.Error!Result {
     failure.reset(.validate);
     failure.sources.set(.fasta, .{ .label = .{ .borrowed = fasta_path }, .kind = .path });
@@ -202,10 +184,6 @@ pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const
     return result;
 }
 
-/// Scans all input bytes and returns an owning summary whose event names borrow `data`.
-/// Retained events are capped, but counts, fix blockers, and rewrite widths remain complete.
-/// Compatibility projection: native callers use validateDataChecked. A sequence
-/// line above u32 returns SequenceLineTooLong; allocation/count failures keep tags.
 pub fn validateData(allocator: std.mem.Allocator, data: []const u8, options: Options) error{ OutOfMemory, SequenceLineTooLong, CountOverflow, Internal }!Summary {
     var failure: diagnostics.Failure = undefined;
     return validateDataChecked(allocator, data, options, &failure) catch |err| {
@@ -218,8 +196,6 @@ pub fn validateData(allocator: std.mem.Allocator, data: []const u8, options: Opt
     };
 }
 
-/// Scans borrowed bytes with native failure facts. Resets once; returned Summary
-/// owns lists but event/blocker names borrow data until Summary.deinit.
 pub fn validateDataChecked(allocator: std.mem.Allocator, data: []const u8, options: Options, failure: *diagnostics.Failure) diagnostics.Error!Summary {
     failure.reset(.validate);
     failure.sources.set(.fasta, .{ .label = .{ .borrowed = "validated input" }, .kind = .memory });
@@ -229,14 +205,12 @@ pub fn validateDataChecked(allocator: std.mem.Allocator, data: []const u8, optio
     return result;
 }
 
-/// Returns the validate status for complete severity counts and strictness.
 pub fn exitCode(error_count: usize, warning_count: usize, strict: bool) u8 {
     if (error_count > 0) return 1;
     if (warning_count > 0) return if (strict) 1 else 2;
     return 0;
 }
 
-/// Returns validate status after excluding warnings repaired by a requested format rewrite.
 pub fn exitCodeForOptions(summary: *const Summary, options: Options) u8 {
     if (!options.fix) return exitCode(summary.error_count, summary.warning_count, options.strict);
 
@@ -247,8 +221,6 @@ pub fn exitCodeForOptions(summary: *const Summary, options: Options) u8 {
     );
 }
 
-/// Returns the first legacy Kind that blocks a rewrite, including past-cap events.
-/// Use fixRejectionChecked to include preamble safety and retain original facts.
 pub fn fixRejection(summary: *const Summary, options: Options) ?Kind {
     for (summary.events.items) |event| {
         switch (event.kind) {
@@ -263,9 +235,6 @@ pub fn fixRejection(summary: *const Summary, options: Options) ?Kind {
     return null;
 }
 
-/// Records the original blocker for a requested fix without resetting Failure.
-/// Summary event names must still borrow live input; retained previews own bytes.
-/// Use the options that produced Summary, with the requested fix policy.
 pub fn fixRejectionChecked(summary: *const Summary, options: Options, failure: *diagnostics.Failure) diagnostics.Error!void {
     if (summary.preamble) |position| return failure.fail(.{
         .details = .{ .@"repair.blocked" = .{ .blocker = .{ .content_before_header = .{ .content_bytes = .{ .at_least = 1 } } }, .repair_policy = if (options.fix_format_only) .legacy_format_only else .legacy_safe } },
@@ -291,21 +260,11 @@ pub fn fixRejectionChecked(summary: *const Summary, options: Options, failure: *
     return failure.fail(.{ .details = .{ .@"repair.blocked" = .{ .blocker = blocker, .repair_policy = if (options.fix_format_only) .legacy_format_only else .legacy_safe } }, .stage = .scan, .at = eventReference(event), .related = if (event.kind == .duplicate_name) .{ .source = .fasta, .location = .{ .line = event.first_line } } else null });
 }
 
-/// Rewrite format-level issues to normalized LF FASTA bytes. Caller must run validateData first.
-/// Allocates the full result for tests and library callers; CLI `--fix` streams via `writeFixed`.
-/// Allocator-backed writer failures are reported as `error.OutOfMemory`.
-/// Non-format content before the first header returns `error.RepairRefused`.
-/// Returns normalized bytes allocated with `allocator`; release with `allocator.free`.
-/// Input and widths borrow only during this call.
-/// Compatibility helper; native callers use fixDataChecked.
 pub fn fixData(allocator: std.mem.Allocator, data: []const u8, record_widths: []const u32) diagnostics.Error![]u8 {
     var failure: diagnostics.Failure = undefined;
     return fixDataChecked(allocator, data, record_widths, &failure);
 }
 
-/// Returns normalized bytes allocated with `allocator`; release with `allocator.free`.
-/// Input and widths borrow only during this call. Captures native failure facts;
-/// resets once, rejects unsafe preamble content and never publishes a destination.
 pub fn fixDataChecked(allocator: std.mem.Allocator, data: []const u8, record_widths: []const u32, failure: *diagnostics.Failure) diagnostics.Error![]u8 {
     failure.reset(.validate);
     failure.sources.set(.fasta, .{ .label = .{ .borrowed = "rewrite input" }, .kind = .memory });
@@ -319,18 +278,11 @@ pub fn fixDataChecked(allocator: std.mem.Allocator, data: []const u8, record_wid
     return result;
 }
 
-/// Returns one JSON event object allocated with `allocator`, without a trailing newline.
-/// Release with `allocator.free`; event names borrow only during this call.
-/// Allocator-backed writer failures are reported as `error.OutOfMemory`.
-/// Compatibility projection; native callers use renderJsonEventChecked.
 pub fn renderJsonEvent(allocator: std.mem.Allocator, event: Event) error{OutOfMemory}![]u8 {
     var failure: diagnostics.Failure = undefined;
     return renderJsonEventChecked(allocator, event, &failure) catch return error.OutOfMemory;
 }
 
-/// Returns a legacy v1 event allocated with `allocator`; release with `allocator.free`.
-/// Captures native allocation facts and resets once; names borrow only during this
-/// call. Invalid UTF-8 escaping is not byte-reversible.
 pub fn renderJsonEventChecked(allocator: std.mem.Allocator, event: Event, failure: *diagnostics.Failure) diagnostics.Error![]u8 {
     failure.reset(.validate);
     failure.sources.set(.fasta, .{ .label = .{ .borrowed = "validation event" }, .kind = .memory });

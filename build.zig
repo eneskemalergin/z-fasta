@@ -1,4 +1,5 @@
-//! Builds the z-fasta executable and its unit, integration, and CLI test suites.
+//! Builds the `z-fasta` executable, the `z-fasta` package (`src/root.zig`), and the tests.
+//! Command tests run in a build-owned copy of the declared fixtures, never in `tests/data/`.
 
 const std = @import("std");
 

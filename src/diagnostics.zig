@@ -1,6 +1,10 @@
-//! Typed diagnostic facts and bounded caller-owned failure storage.
-//! Fallible operations return Error!T, reset Failure once at entry, and retain
-//! facts before returning. This module does not allocate, print, log, or exit.
+//! Error codes, their typed facts, and the fixed-size `Failure` that carries them.
+//! An operation resets its `Failure` once; the check that finds a problem calls `fail` and returns
+//! the `Error` tag. Tags are coarse, so callers read the code and facts from `Failure`.
+//! The first failure is primary; later cleanup or report failures become secondaries.
+//! Nothing here allocates. Previews and views borrow the `Failure` until its next reset.
+//! Offsets are zero-based; lines, columns, records, and requests are one-based; null means not
+//! observed.
 
 const std = @import("std");
 
@@ -10,8 +14,6 @@ pub const SOURCE_LIMIT = 16;
 pub const TEMP_ATTEMPT_LIMIT = 4;
 pub const FAILURE_BYTES_LIMIT = 2048;
 
-/// Error tags control Zig propagation and errdefer. Inspect Failure for the
-/// precise code and facts; multiple codes intentionally share an error tag.
 pub const Error = error{
     InvalidArgument,
     Io,
@@ -48,7 +50,6 @@ pub const Category = enum {
     internal,
 };
 
-/// Suggested action, independent of exit status, severity, and retry policy.
 pub const Action = enum {
     correct_arguments,
     inspect_io,
@@ -66,7 +67,6 @@ pub const Action = enum {
     report_defect,
 };
 
-/// Stable roles within one operation; their labels need no registration heap.
 pub const SourceId = enum(u4) {
     fasta,
     zfi,
@@ -88,21 +88,17 @@ pub const SourceId = enum(u4) {
 pub const SourceKind = enum { path, stream, memory };
 pub const Suffix = enum { none, zfi, fai };
 
-/// A borrowed label lives through handling/rendering or Failure.reset. A
-/// retained label uses the owning Failure's preview pool. Derived paths use
-/// the original caller label plus a static suffix, without a stack-built path.
 pub const Source = struct {
     label: union(enum) { borrowed: []const u8, retained: Preview },
     kind: SourceKind,
     suffix: Suffix = .none,
 };
 
-/// Fixed role table. Unregistered roles return null, not an invented path.
 pub const Sources = struct {
     entries: [SOURCE_LIMIT]Source = undefined,
     registered: u16 = 0,
 
-    /// Register each role once after operation reset, before fallible work.
+    /// Each role once per reset; Debug asserts it.
     pub fn set(self: *Sources, id: SourceId, source: Source) void {
         const bit = @as(u16, 1) << @intFromEnum(id);
         std.debug.assert(self.registered & bit == 0);
@@ -110,8 +106,6 @@ pub const Sources = struct {
         self.registered |= bit;
     }
 
-    /// Borrowed bytes expire with their caller. Retained references expire at
-    /// the owning Failure's reset; resolve those through Failure.sourceLabel.
     pub fn get(self: *const Sources, id: SourceId) ?Source {
         const bit = @as(u16, 1) << @intFromEnum(id);
         if (self.registered & bit == 0) return null;
@@ -119,16 +113,12 @@ pub const Sources = struct {
     }
 };
 
-/// Byte offset is zero-based. Text line and byte column are one-based.
-/// null means unobserved; zero is a valid known byte offset.
 pub const Location = struct {
     offset: ?u64 = null,
     line: ?u64 = null,
     column: ?u64 = null,
 };
 
-/// Record/request numbers are original one-based ordinals, not retained slots.
-/// Binary fields can have only an offset. Unknown values stay null.
 pub const Reference = struct {
     source: ?SourceId = null,
     location: Location = .{},
@@ -136,8 +126,6 @@ pub const Reference = struct {
     request: ?u64 = null,
 };
 
-/// A fixed-pool reference, not a slice into Failure. Copying Failure preserves
-/// this reference. Views borrow that Failure until its next reset or overwrite.
 pub const Preview = struct {
     original_bytes: u64,
     start: u16,
@@ -146,18 +134,14 @@ pub const Preview = struct {
     length_kind: std.meta.Tag(ByteLength),
 };
 
-/// Byte length of the original value, independent of the retained prefix.
 pub const ByteLength = union(enum(u8)) { exact: u64, at_least: u64 };
 
-/// An observed bound must not be presented as an exact measurement.
 pub const Measurement = union(enum) { exact: u128, at_least: u128 };
 pub const NativeError = struct {
     domain: enum { posix_errno, win32, ntstatus },
     number: u32,
 };
 
-/// Retained backend evidence; the Zig interface tag may itself be coarse.
-/// null at the owning Diagnostic means that no cause was retained.
 pub const Cause = union(enum) { zig: anyerror, native: NativeError };
 
 pub const Stage = enum {
@@ -184,16 +168,12 @@ pub const Stage = enum {
 };
 pub const OutputState = struct {
     state: enum { not_started, staged, published, streaming, unknown, aborted } = .not_started,
-    /// Records completed by the writer, not a promise about the visible prefix.
     records: ?u64 = null,
-    /// Bytes accepted by the writer; buffering does not prove delivery.
     logical_bytes: ?u64 = null,
     final_flush: enum { not_attempted, succeeded, failed } = .not_attempted,
     may_be_partial: bool = false,
 };
 
-/// stdout, a requested destination, and stderr can reach different states.
-/// `file` also tracks caller-supplied writers whose path/kind is unobserved.
 pub const Outputs = struct {
     stdout: OutputState = .{},
     file: OutputState = .{},
@@ -301,7 +281,6 @@ pub const TempAttempts = struct {
     len: u8 = 0,
     truncated: bool = false,
 
-    /// Keep the first attempts without allocating. Later attempts set truncation.
     pub fn append(self: *TempAttempts, attempt: TempAttempt) void {
         if (self.len == TEMP_ATTEMPT_LIMIT) {
             self.truncated = true;
@@ -318,7 +297,6 @@ pub const TempAttempts = struct {
 
 pub const FileSnapshot = struct {
     bytes: ?u64 = null,
-    /// Signed nanoseconds, preserving pre-epoch observations.
     mtime_ns: ?i128 = null,
 };
 pub const ChangedFields = packed struct(u8) {
@@ -331,7 +309,7 @@ pub const SourceChange = struct {
     changed_fields: ChangedFields,
     before: FileSnapshot,
     after: ?FileSnapshot,
-    /// A required comparison observed disappearance, rather than access denial.
+    /// The file was gone, as opposed to unreadable.
     disappeared: bool = false,
 };
 
@@ -341,12 +319,10 @@ pub const Grammar = enum { legacy_nul_only };
 pub const Alphabet = enum { dna, rna, nucleotide, protein, custom };
 pub const AlphabetSelection = enum { explicit, automatic, custom };
 pub const ClassifierRule = enum { nucleotide_above_90_percent };
-/// One-based inclusive interval. No conversion from BED is implicit.
+/// One-based inclusive, unlike the package's zero-based `Interval`.
 pub const Interval = struct { start: u64, end: u64 };
-/// Zero-based half-open byte extent in the source, not a retained buffer.
 pub const ByteSpan = struct { start: u64, end: u64 };
 pub const Sample = struct {
-    /// Actual classified symbols, not the configured cap.
     symbols: u32,
     rule: ClassifierRule,
     interval: ?Interval = null,
@@ -355,7 +331,7 @@ pub const Sample = struct {
 pub const AlphabetPolicy = struct {
     alphabet: Alphabet,
     selection: AlphabetSelection,
-    /// Exact custom byte set when selected; bit n allows byte n.
+    /// Bit n allows byte n.
     custom_symbols: ?[32]u8 = null,
     sample: ?Sample = null,
 };
@@ -442,7 +418,6 @@ pub const RecordLimit = struct { record_count: Measurement, max_records: u64, fo
 pub const SideOffsetLimit = struct { offset: u64, max_offset: u64, offset_role: OffsetRole };
 pub const TimestampRange = struct { timestamp_ns: i128, min_ns: i128, max_ns: i128 };
 pub const Nonuniform = struct { reason: NonuniformReason, expected: ?Geometry = null, observed: ?Geometry = null };
-/// Both permitted formats were attempted, in ZFI then FAI order.
 pub const IndexDiscovery = struct { zfi_source: SourceId, fai_source: SourceId };
 pub const Magic = struct { expected_magic: [4]u8, actual: ?Preview = null };
 pub const Version = struct { found_version: u8, supported_version: u8 };
@@ -488,8 +463,6 @@ pub const ProteinTransform = struct { transform: Transform, classification: Alph
 pub const OutputAlias = struct { input: SourceId, output: SourceId, comparison: IdentityComparison };
 pub const UnknownIdentity = struct { input: SourceId, output: SourceId };
 
-/// A rewrite refusal retains the observed blocker, not a second finding count.
-/// Its location is Diagnostic.at; a duplicate's first definition is related.
 pub const Blocker = union(enum) {
     no_records: void,
     content_before_header: Preamble,
@@ -512,7 +485,6 @@ pub const Blocker = union(enum) {
 pub const RepairBlock = struct { blocker: Blocker, repair_policy: RepairPolicy };
 pub const Consistency = struct { component: Component, check: Check };
 
-/// The code is the payload tag. A different code requires its own typed facts.
 pub const Details = union(enum(u8)) {
     @"usage.command_required": void,
     @"usage.unknown_command": struct { command: ?Preview = null },
@@ -624,9 +596,6 @@ pub const Metadata = struct {
     returned_error: Error,
 };
 
-/// One compiled registry. Tag names supply the stable strings; the exhaustive
-/// switch requires metadata for every payload. Neither formatters nor callers
-/// maintain a second list of code strings.
 pub const REGISTRY = blk: {
     const codes = std.enums.values(Code);
     var entries: [codes.len]Metadata = undefined;
@@ -634,13 +603,10 @@ pub const REGISTRY = blk: {
     break :blk entries;
 };
 
-/// Static metadata; no formatting or allocation occurs at lookup.
 pub fn metadata(code: Code) *const Metadata {
     return &REGISTRY[@intFromEnum(code)];
 }
 
-/// Source, location, original ordinals, and one related location are independent
-/// of optional byte previews. stage names the observed work, not a guessed cause.
 pub const Diagnostic = struct {
     details: Details,
     stage: Stage,
@@ -653,11 +619,6 @@ pub const Diagnostic = struct {
     }
 };
 
-/// Reserve once in the caller. No helper returns this object by value.
-/// Previews and retained labels own copied bytes; borrowed labels live with
-/// their caller through handling.
-/// Reset invalidates all preview views and registered source references.
-/// This stores ordinary failures, not validator finding counts or event owners.
 pub const Failure = struct {
     primary_storage: Diagnostic = undefined,
     has_primary: bool = false,
@@ -669,15 +630,10 @@ pub const Failure = struct {
     preview_len: u16 = 0,
     sources: Sources = .{},
     operation: Operation,
-    /// Work can finish before publication, cleanup, or report delivery fails.
     work_complete: bool = false,
-    /// Includes required side effects. Any blocking failure sets this false.
     complete: bool = false,
     outputs: Outputs = .{},
 
-    /// Initialize undefined caller storage or reset it once at operation entry.
-    /// Never call this from a propagating helper; existing facts must survive.
-    /// Only live fields reset; unused preview/source/secondary arrays stay untouched.
     pub fn reset(self: *Failure, operation: Operation) void {
         self.has_primary = false;
         self.primary_deferred = false;
@@ -691,15 +647,11 @@ pub const Failure = struct {
         self.outputs = .{};
     }
 
-    /// Copy up to limit bytes and the remaining shared budget. An exhausted
-    /// budget returns a truncated preview; it cannot prevent a failure return.
     pub fn retain(self: *Failure, bytes: []const u8, limit: u16) Preview {
         return self.retainPrefix(bytes, .{ .exact = bytes.len }, limit);
     }
 
-    /// A streaming parser can keep a prefix without retaining the full field.
-    /// original records its exact length or observed lower bound. A zero limit
-    /// retains that scalar evidence even when byte previews are disabled.
+    /// `original` is the full length, exact or a lower bound; `limit` may be zero.
     pub fn retainPrefix(self: *Failure, prefix: []const u8, original: ByteLength, limit: u16) Preview {
         const original_bytes = switch (original) {
             .exact, .at_least => |bytes| bytes,
@@ -718,16 +670,13 @@ pub const Failure = struct {
         };
     }
 
-    /// A view borrows this Failure. Do not retain it across reset/overwrite.
     pub fn preview(self: *const Failure, reference: Preview) []const u8 {
         const end = @as(usize, reference.start) + reference.len;
         std.debug.assert(end <= self.preview_len);
         return self.previews[reference.start..end];
     }
 
-    /// Resolve base label bytes, excluding the static suffix. Borrowed labels
-    /// live with their caller; retained labels borrow this Failure until reset.
-    /// A retained label can be truncated; Source.label retains its length facts.
+    /// Base label without the static sidecar suffix.
     pub fn sourceLabel(self: *const Failure, id: SourceId) ?[]const u8 {
         const source = self.sources.get(id) orelse return null;
         return switch (source.label) {
@@ -736,16 +685,10 @@ pub const Failure = struct {
         };
     }
 
-    /// The view borrows this Failure until reset or later mutation. A separate
-    /// presence flag avoids clearing the inactive payload at entry.
     pub fn primary(self: *const Failure) ?*const Diagnostic {
         return if (self.has_primary) &self.primary_storage else null;
     }
 
-    /// Capture the first failure, or retain a later one as secondary. Returning
-    /// the primary's projection keeps tag and facts consistent during cleanup.
-    /// A deferred failure uses the same storage; promote selects a later primary
-    /// only where the owning operation explicitly requires that priority.
     pub fn fail(self: *Failure, diagnostic: Diagnostic) Error {
         @branchHint(.cold);
         if (self.primary_deferred) return self.promote(diagnostic);
@@ -759,9 +702,6 @@ pub const Failure = struct {
         return metadata(self.primary_storage.code()).returned_error;
     }
 
-    /// Retain a deliberately deferred failure while work continues. A later
-    /// ordinary fail promotes its own facts and preserves this first cause.
-    /// Subsequent deferred observations use the bounded secondary slots.
     pub fn deferFailure(self: *Failure, diagnostic: Diagnostic) void {
         @branchHint(.cold);
         std.debug.assert(!self.has_primary or self.primary_deferred);
@@ -775,8 +715,6 @@ pub const Failure = struct {
         }
     }
 
-    /// After higher-priority work, return the retained failure without creating
-    /// another diagnostic. This does not finish I/O or mark work complete.
     pub fn finishDeferred(self: *Failure) Error!void {
         if (self.has_primary) {
             @branchHint(.cold);
@@ -785,7 +723,6 @@ pub const Failure = struct {
         }
     }
 
-    /// Preserve the primary when checked cleanup/reporting also fails.
     pub fn addSecondary(self: *Failure, diagnostic: Diagnostic) void {
         @branchHint(.cold);
         std.debug.assert(self.has_primary);
@@ -798,8 +735,6 @@ pub const Failure = struct {
         self.secondary_len += 1;
     }
 
-    /// Select an explicitly higher-priority failure. The displaced primary
-    /// becomes the first secondary; retained causes/previews are unchanged.
     pub fn promote(self: *Failure, diagnostic: Diagnostic) Error {
         @branchHint(.cold);
         if (self.has_primary) {
@@ -819,12 +754,10 @@ pub const Failure = struct {
         return metadata(diagnostic.code()).returned_error;
     }
 
-    /// Borrowed diagnostic views expire at reset or later mutation.
     pub fn secondaryItems(self: *const Failure) []const Diagnostic {
         return self.secondary[0..self.secondary_len];
     }
 
-    /// Mark completion only after work and all required finish/cleanup succeed.
     pub fn succeed(self: *Failure) void {
         std.debug.assert(!self.has_primary);
         self.work_complete = true;
@@ -832,8 +765,6 @@ pub const Failure = struct {
     }
 };
 
-/// Convert an observed zero-based ordinal with checked addition. The maximum
-/// cannot wrap to an invented zero; unknown callers do not call this function.
 pub fn oneBased(failure: *Failure, zero_based: u64, at: Reference) Error!u64 {
     return std.math.add(u64, zero_based, 1) catch {
         @branchHint(.cold);

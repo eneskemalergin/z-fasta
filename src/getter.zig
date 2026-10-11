@@ -1,7 +1,8 @@
-//! Sequence extraction: positional regions, BED/names batching, strand, and RC transforms.
-//!
-//! Uniform records use O(1) byte-offset math; non-uniform records use side-table lookup.
-//! A present `.zfi` is authoritative; `.fai` is used only when `.zfi` is absent.
+//! Extracts sequence for `z-fasta get` and for `IndexedReader.fetchInto`.
+//! Requests are one-based inclusive; an end past the record is clamped, and a suffix that does
+//! not parse as a range stays part of the name. Lookups are first-wins.
+//! Byte spans come from the uniform line formula or a side-table search; reads are positional.
+//! Output is wrapped at 60 and written per record, so a later failure can leave a valid prefix.
 
 const std = @import("std");
 const complement = @import("complement.zig");
@@ -10,8 +11,6 @@ const index_format = @import("index_format.zig");
 const stats = @import("stats.zig");
 const diagnostics = @import("diagnostics");
 
-/// A borrowed sequence name with an optional 1-based inclusive interval.
-/// `is_full` preserves the distinct header form of a bare name.
 pub const Region = struct {
     name: []const u8,
     start: u64,
@@ -19,7 +18,6 @@ pub const Region = struct {
     is_full: bool,
 };
 
-/// Independent reverse and complement operations composed by toggling each operation.
 pub const Orientation = struct {
     reverse: bool = false,
     complement: bool = false,
@@ -48,30 +46,25 @@ pub const Orientation = struct {
     }
 };
 
-/// GET execution options for one borrowed request source.
-/// Direct callers must supply combinations accepted by the CLI contract.
+/// Not validated here; callers pass only combinations the CLI accepts.
 pub const Options = struct {
     source: RequestSource,
     honor_strand: bool = false,
-    /// Capture elapsed time for the caller to report.
     measure_elapsed: bool = false,
     orientation: Orientation = .{},
     annotate_transform: bool = false,
 };
 
-/// Borrowed positional tokens or a names/BED path; a path of `-` selects stdin.
+/// A names or BED path of `-` reads stdin.
 pub const RequestSource = union(enum) {
     positional: []const []const u8,
     names: []const u8,
     bed: []const u8,
 };
 
-/// Completed GET data output. The CLI writes a requested summary afterward.
-/// `elapsed_ns` is zero when timing was not requested through `measure_elapsed`.
+/// `elapsed_ns` is zero unless `measure_elapsed` was set.
 pub const Result = struct { region_count: usize, total_bases: u64, elapsed_ns: u64 };
 
-/// Parses a borrowed name or rightmost `:START-END`/`:START-` suffix.
-/// Invalid or overflowing suffixes remain part of the literal name.
 pub fn parseRegion(input: []const u8) Region {
     if (std.mem.findScalarLast(u8, input, ':')) |cp| {
         const suffix = input[cp + 1 ..];
@@ -94,8 +87,6 @@ pub fn parseRegion(input: []const u8) Region {
     };
 }
 
-/// A validated extraction request borrowing its name and non-uniform line table.
-/// Coordinates are 1-based inclusive; `display_end` preserves an unclamped request end.
 pub const ResolvedRegion = struct {
     name: []const u8,
     start: u64,
@@ -111,11 +102,6 @@ pub const ResolvedRegion = struct {
     annotate_transform: bool,
 };
 
-/// Resolves one request, borrowing its name and side table from input/index.
-/// Resets caller-owned failure storage once; returns without printing or exiting.
-/// Failure input labels borrow `region_str` through handling or the next reset.
-/// A supplied index does not carry complete-selection evidence, so misses report
-/// `retained_matches` rather than claiming absence from the complete catalog.
 pub fn resolveRegion(idx: *const LoadedIndex, region_str: []const u8, failure: *diagnostics.Failure) diagnostics.Error!ResolvedRegion {
     failure.reset(.get);
     failure.sources.set(.request_snapshot, .{ .label = .{ .borrowed = region_str }, .kind = .memory });
@@ -125,10 +111,7 @@ pub fn resolveRegion(idx: *const LoadedIndex, region_str: []const u8, failure: *
     return result;
 }
 
-/// Writes one resolved request with 60-base wrapping. Failure storage resets
-/// once; a failed writer may have accepted a prefix, including a partial header.
-/// The caller owns the writer and its final flush. Its state is `outputs.file`
-/// with source role `output`; failure input labels borrow `region_str`.
+/// The caller owns `writer` and its flush.
 pub fn extractRegion(idx: *const LoadedIndex, region_str: []const u8, writer: anytype, failure: *diagnostics.Failure) diagnostics.Error!void {
     failure.reset(.get);
     failure.sources.set(.output, .{ .label = .{ .borrowed = "caller writer" }, .kind = .stream });
@@ -192,9 +175,6 @@ pub fn fetchSymbols(idx: *const LoadedIndex, ordinal: usize, start: u64, end: u6
     return symbols;
 }
 
-/// Runs one GET source and finishes stdout. Caller-owned diagnostics reset once.
-/// Returns after discarding pending output on failure and releasing temporary
-/// storage. A successful result does not deliver the CLI's requested summary.
 pub fn runGetWithOptions(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, options: Options, failure: *diagnostics.Failure) diagnostics.Error!Result {
     failure.reset(.get);
     failure.sources.set(.stdout, .{ .label = .{ .borrowed = "stdout" }, .kind = .stream });
