@@ -27,7 +27,7 @@ Running `z-fasta get --error-format=json` returns exit 1 and one newline-termina
 ```json
 {
   "schema_version": "v2",
-  "catalog_revision": "0.3.5-1",
+  "catalog_revision": "0.4.0-1",
   "producer": {
     "name": "z-fasta",
     "version": "0.3.5"
@@ -71,7 +71,7 @@ Read `failure.primary.code`, not the English message or the numeric Zig error ta
 
 ## Interpret the report
 
-`schema_version` identifies the envelope format. `catalog_revision` identifies the code definitions (`0.3.5-1` for this catalog), and `producer.version` identifies the executable. They are separate values. Preserve unknown codes and fields when forwarding a report; do not turn an unknown code into success or infer a retry policy from its category or suggested `action`.
+`schema_version` identifies the envelope format. `catalog_revision` identifies the code definitions (`0.4.0-1` for this catalog), and `producer.version` identifies the executable. They are separate values. Preserve unknown codes and fields when forwarding a report; do not turn an unknown code into success or infer a retry policy from its category or suggested `action`.
 
 `operation.work_complete` records whether the command's work finished. `operation.complete` also requires its required side effects to finish. `accepted` cannot be true for incomplete work or a blocking failure. A failed notice can therefore return exit 1 after data has already reached stdout.
 
@@ -117,7 +117,7 @@ See [For contributors](For-Contributors) for the source owners and checks.
 
 ## Active code catalog
 
-The registry contains 91 codes. This table lists the native detail fields from `diagnostics.Details`; shared `stage`, `source`, `location`, `record`, `request`, `related` and `cause` sit outside those fields. The finding codes also describe retained repair blockers. They do not imply that every validator finding is emitted as a v2 diagnostic.
+The registry contains 95 codes. This table lists the native detail fields from `diagnostics.Details`; shared `stage`, `source`, `location`, `record`, `request`, `related` and `cause` sit outside those fields. The finding codes also describe retained repair blockers. They do not imply that every validator finding is emitted as a v2 diagnostic.
 
 The machine renderer preserves the native fields with these explicit conversions:
 
@@ -161,6 +161,7 @@ A field ending in `offset` or describing a byte extent refers to bytes in its na
 | `resource.count_overflow` | failure | none | `counter`, `max_value`, `current`, `increment` |
 | `resource.line_buffer_exceeded` | failure | none | `buffer_bytes`, `observed_bytes` |
 | `input.changed` | failure | none | `changed_fields`, `before`, `after`, `disappeared` |
+| `input.unsupported_format` | failure | none | `detected` |
 | `fasta.no_records` | finding | file | none |
 | `fasta.content_before_header` | finding | line | `content_bytes` |
 | `fasta.header_control_byte` | finding | byte | `byte`, `grammar` |
@@ -211,6 +212,9 @@ A field ending in `offset` or describing a byte extent refers to bytes in its na
 | `request.start_before_one` | failure | none | `start`, `coordinate_system` |
 | `request.start_after_sequence` | failure | none | `start`, `sequence_length` |
 | `request.end_before_start` | failure | none | `start`, `end` |
+| `request.end_after_sequence` | failure | none | `end`, `sequence_length` |
+| `request.ordinal_out_of_range` | failure | none | `ordinal`, `record_count` |
+| `request.output_buffer_too_small` | failure | none | `required_bytes`, `available_bytes` |
 | `request.identifier_too_long` | failure | none | `identifier_bytes`, `limit_bytes` |
 | `request.bed.field_missing` | failure | none | `field`, `column_number` |
 | `request.bed.invalid_coordinate` | failure | none | `field`, `coordinate_system`, `value` |

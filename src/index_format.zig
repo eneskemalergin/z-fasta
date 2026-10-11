@@ -157,6 +157,13 @@ pub fn encodeSideTableLine(line: SideTableLine) [ZFI_SIDE_TABLE_LINE_BYTES]u8 {
 }
 
 /// Selects the records, names, and lookup state retained by a loader.
+/// Sidecar choice: automatic `.zfi`-then-`.fai` discovery, or one explicit path.
+pub const IndexSelection = union(enum) {
+    automatic,
+    zfi: []const u8,
+    fai: []const u8,
+};
+
 pub const LoadMode = union(enum) {
     lookup_full_map,
     /// Stats composition: retain every record and only the two report names for streamed FAI.
@@ -318,6 +325,24 @@ pub fn loadIndexCheckedWithMode(
     mode: LoadMode,
     failure: *diagnostics.Failure,
 ) diagnostics.Error!LoadedIndex {
+    return loadIndexSelected(allocator, io, fasta_path, .automatic, mode, failure);
+}
+
+/// Loads the selected sidecar without resetting the owning operation's diagnostics.
+/// An explicit sidecar is the only one tried; its label borrows the given path.
+pub fn loadIndexSelected(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    fasta_path: []const u8,
+    selection: IndexSelection,
+    mode: LoadMode,
+    failure: *diagnostics.Failure,
+) diagnostics.Error!LoadedIndex {
+    switch (selection) {
+        .automatic => {},
+        .zfi => |path| failure.sources.set(.zfi, .{ .label = .{ .borrowed = path }, .kind = .path }),
+        .fai => |path| failure.sources.set(.fai, .{ .label = .{ .borrowed = path }, .kind = .path }),
+    }
     inline for (.{ diagnostics.SourceId.fasta, diagnostics.SourceId.zfi, diagnostics.SourceId.fai }) |source| {
         if (failure.sources.get(source) == null) failure.sources.set(source, .{
             .label = .{ .borrowed = fasta_path },
@@ -334,6 +359,18 @@ pub fn loadIndexCheckedWithMode(
     errdefer fasta_file.close(io);
     const fasta_stat = fasta_file.stat(io) catch |err| return context.ioFailure(.stat, err);
     if (fasta_stat.size == 0) return context.fail(.{ .@"fasta.no_records" = {} });
+
+    switch (selection) {
+        .automatic => {},
+        .zfi => |path| {
+            context.at.source = .zfi;
+            return (try tryLoadZfi(allocator, io, path, fasta_file, fasta_stat, mode, &context)) orelse context.ioFailure(.open, error.FileNotFound);
+        },
+        .fai => |path| {
+            context.at.source = .fai;
+            return (try tryLoadFai(allocator, io, path, fasta_file, fasta_stat, mode, &context)) orelse context.ioFailure(.open, error.FileNotFound);
+        },
+    }
 
     var zfi_path_buf: [4096]u8 = undefined;
     context.at.source = .zfi;

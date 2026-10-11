@@ -46,7 +46,7 @@ pub fn writeJson(writer: *std.Io.Writer, failure: *const diagnostics.Failure, op
     var json: std.json.Stringify = .{ .writer = writer };
     try json.beginObject();
     try field(&json, "schema_version", "v2");
-    try field(&json, "catalog_revision", "0.3.5-1");
+    try field(&json, "catalog_revision", "0.4.0-1");
     try json.objectField("producer");
     try json.beginObject();
     try field(&json, "name", "z-fasta");
@@ -568,6 +568,7 @@ fn message(code: diagnostics.Code) []const u8 {
         .@"resource.count_overflow" => "An exact counter exceeds its numeric limit.",
         .@"resource.line_buffer_exceeded" => "Input line exceeds the reader limit.",
         .@"input.changed" => "Input changed during the operation.",
+        .@"input.unsupported_format" => "Input uses a compressed format that is not accepted here.",
         .@"fasta.no_records" => "No FASTA records were found.",
         .@"fasta.content_before_header" => "Content appears before the first FASTA header.",
         .@"fasta.header_control_byte" => "Header contains a prohibited control byte.",
@@ -618,6 +619,9 @@ fn message(code: diagnostics.Code) []const u8 {
         .@"request.start_before_one" => "Inclusive request start must be at least one.",
         .@"request.start_after_sequence" => "Request start exceeds the indexed sequence length.",
         .@"request.end_before_start" => "Request end is before its start.",
+        .@"request.end_after_sequence" => "Request end exceeds the indexed sequence length.",
+        .@"request.ordinal_out_of_range" => "Record ordinal is outside the open index.",
+        .@"request.output_buffer_too_small" => "Output requires more bytes than the destination holds.",
         .@"request.identifier_too_long" => "Request identifier exceeds its byte limit.",
         .@"request.bed.field_missing" => "A required BED field is missing or empty.",
         .@"request.bed.invalid_coordinate" => "BED coordinate must contain unsigned decimal digits.",

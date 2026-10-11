@@ -473,6 +473,11 @@ pub const TotalMismatch = struct { indexed_total: u64, observed_total: u64 };
 pub const MissingSequence = struct { lookup_scope: LookupScope, index_source: SourceId, identifier: ?Preview = null };
 pub const StartAfter = struct { start: u64, sequence_length: u64 };
 pub const ReversedInterval = struct { start: u64, end: u64 };
+pub const EndAfter = struct { end: u64, sequence_length: u64 };
+pub const OrdinalRange = struct { ordinal: u64, record_count: u64 };
+pub const BufferShortfall = struct { required_bytes: u64, available_bytes: u64 };
+pub const UnsupportedFormat = struct { detected: DetectedFormat };
+pub const DetectedFormat = enum { gzip };
 pub const RequestIdentifier = struct { identifier_bytes: u64, limit_bytes: u64 };
 pub const MissingBedField = struct { field: BedField, column_number: u8 };
 pub const BedInteger = struct { field: BedCoordinate, coordinate_system: CoordinateSystem, value: ?Preview = null };
@@ -539,6 +544,7 @@ pub const Details = union(enum(u8)) {
     @"resource.count_overflow": CountOverflow,
     @"resource.line_buffer_exceeded": LineBuffer,
     @"input.changed": SourceChange,
+    @"input.unsupported_format": UnsupportedFormat,
     @"fasta.no_records": void,
     @"fasta.content_before_header": Preamble,
     @"fasta.header_control_byte": ControlByte,
@@ -589,6 +595,9 @@ pub const Details = union(enum(u8)) {
     @"request.start_before_one": struct { start: u64, coordinate_system: CoordinateSystem },
     @"request.start_after_sequence": StartAfter,
     @"request.end_before_start": ReversedInterval,
+    @"request.end_after_sequence": EndAfter,
+    @"request.ordinal_out_of_range": OrdinalRange,
+    @"request.output_buffer_too_small": BufferShortfall,
     @"request.identifier_too_long": RequestIdentifier,
     @"request.bed.field_missing": MissingBedField,
     @"request.bed.invalid_coordinate": BedInteger,
@@ -877,6 +886,7 @@ fn describeCode(code: Code) Metadata {
         .@"resource.count_overflow" => describe(code, .resources, .failure, .none, .check_counts, error.CountOverflow),
         .@"resource.line_buffer_exceeded" => describe(code, .resources, .failure, .none, .check_capacity, error.CapacityExceeded),
         .@"input.changed" => describe(code, .source_stability, .failure, .none, .check_source, error.InputChanged),
+        .@"input.unsupported_format" => describe(code, .structure, .failure, .none, .correct_data, error.InvalidFasta),
         .@"fasta.no_records" => describe(code, .structure, .finding, .file, .correct_data, error.InvalidFasta),
         .@"fasta.content_before_header" => describe(code, .structure, .finding, .line, .correct_data, error.InvalidFasta),
         .@"fasta.header_control_byte" => describe(code, .structure, .finding, .byte, .correct_data, error.InvalidFasta),
@@ -927,6 +937,9 @@ fn describeCode(code: Code) Metadata {
         .@"request.start_before_one" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
         .@"request.start_after_sequence" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
         .@"request.end_before_start" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
+        .@"request.end_after_sequence" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
+        .@"request.ordinal_out_of_range" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
+        .@"request.output_buffer_too_small" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
         .@"request.identifier_too_long" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
         .@"request.bed.field_missing" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
         .@"request.bed.invalid_coordinate" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),

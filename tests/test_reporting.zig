@@ -99,7 +99,7 @@ test "[unit] - [reporting]: machine facts preserve wide values and publication s
     defer parsed.deinit();
     const envelope = parsed.value;
     try testing.expectEqualStrings("v2", object(envelope, "schema_version").string);
-    try testing.expectEqualStrings("0.3.5-1", object(envelope, "catalog_revision").string);
+    try testing.expectEqualStrings("0.4.0-1", object(envelope, "catalog_revision").string);
     try testing.expectEqualStrings("0.3.5", object(object(envelope, "producer"), "version").string);
     try testing.expect(!object(envelope, "accepted").bool);
     try testing.expect(object(object(envelope, "operation"), "work_complete").bool);

@@ -142,6 +142,56 @@ pub fn extractRegion(idx: *const LoadedIndex, region_str: []const u8, writer: an
     failure.succeed();
 }
 
+/// Strict fetch behind `IndexedReader.fetchInto`; `input_buffer` must not alias `dst`.
+pub fn fetchSymbols(idx: *const LoadedIndex, ordinal: usize, start: u64, end: u64, dst: []u8, input_buffer: []u8, failure: *diagnostics.Failure) diagnostics.Error![]u8 {
+    failure.reset(.get);
+    failure.sources.set(.output, .{ .label = .{ .borrowed = "caller buffer" }, .kind = .memory });
+    const index_source: diagnostics.SourceId = if (idx.source == .zfi) .zfi else .fai;
+    var context = Diagnostics{ .failure = failure, .output_source = .output, .index_source = index_source, .at = .{ .source = index_source } };
+    const diag = &context;
+    if (ordinal >= idx.records.len) return diag.fail(.{ .@"request.ordinal_out_of_range" = .{ .ordinal = ordinal, .record_count = idx.records.len } }, .resolve, index_source, null, null);
+    const rec = idx.records[ordinal];
+    if (end < start) return diag.fail(.{ .@"request.end_before_start" = .{ .start = start, .end = end } }, .resolve, index_source, null, null);
+    if (end > rec.seq_len) return diag.fail(.{ .@"request.end_after_sequence" = .{ .end = end, .sequence_length = rec.seq_len } }, .resolve, index_source, null, null);
+    const count = end - start;
+    if (count > dst.len) return diag.fail(.{ .@"request.output_buffer_too_small" = .{ .required_bytes = count, .available_bytes = dst.len } }, .resolve, .output, null, null);
+    const symbols = dst[0..@intCast(count)];
+    if (count == 0) {
+        failure.succeed();
+        return symbols;
+    }
+
+    const side_table = idx.sideTableLines(rec);
+    if (!rec.isUniformWidth() and side_table.len == 0) return diag.consistency(.missing_side_table);
+    if (side_table.len == 0 and (rec.line_bases == 0 or rec.line_bytes < rec.line_bases)) return diag.consistency(.traversal_position);
+    const resolved = ResolvedRegion{
+        .name = idx.recordName(ordinal) orelse "",
+        .start = start + 1,
+        .display_end = end,
+        .is_full = false,
+        .seq_offset = rec.seq_offset,
+        .num_bases = count,
+        .line_bases = rec.line_bases,
+        .line_bytes = rec.line_bytes,
+        .side_table = side_table,
+        .record_index = ordinal,
+        .orientation = .{},
+        .annotate_transform = false,
+    };
+    const source = fastaSource(idx);
+    const span = try regionSpan(resolved, source, diag);
+    var output = RegionOutput{ .bytes = symbols, .diag = diag, .wrap = false };
+    var unused: std.Io.Writer = .failing;
+    try copyRegion(resolved, span, source, input_buffer, &output, &unused, diag);
+    if (side_table.len == 0) {
+        var dense: u64 = 0;
+        for (symbols) |byte| dense += @intFromBool(byte > ' ');
+        if (dense != count) return diag.mismatch(resolved, span, dense);
+    }
+    failure.succeed();
+    return symbols;
+}
+
 /// Runs one GET source and finishes stdout. Caller-owned diagnostics reset once.
 /// Returns after discarding pending output on failure and releasing temporary
 /// storage. A successful result does not deliver the CLI's requested summary.
@@ -550,6 +600,7 @@ const RegionOutput = struct {
     bases_written: u64 = 0,
     bytes: []u8,
     diag: *Diagnostics,
+    wrap: bool = true,
 
     fn flush(self: *RegionOutput, writer: anytype) diagnostics.Error!void {
         if (self.len == 0) return;
@@ -560,8 +611,8 @@ const RegionOutput = struct {
     fn appendForward(self: *RegionOutput, src: []const u8, do_complement: bool, writer: anytype) diagnostics.Error!void {
         var start: usize = 0;
         while (start < src.len) {
-            const chunk = @min(src.len - start, 60 - self.line_pos);
-            if (self.bytes.len - self.len < chunk + 1) try self.flush(writer);
+            const chunk = if (self.wrap) @min(src.len - start, 60 - self.line_pos) else src.len - start;
+            if (self.bytes.len - self.len < chunk + @intFromBool(self.wrap)) try self.flush(writer);
             const dst = self.bytes[self.len .. self.len + chunk];
             if (do_complement) {
                 complement.complementInto(dst, src[start .. start + chunk]);
@@ -572,7 +623,7 @@ const RegionOutput = struct {
             self.bases_written += chunk;
             self.line_pos += chunk;
             start += chunk;
-            if (self.line_pos == 60) {
+            if (self.wrap and self.line_pos == 60) {
                 self.bytes[self.len] = '\n';
                 self.len += 1;
                 self.line_pos = 0;
@@ -583,8 +634,8 @@ const RegionOutput = struct {
     fn appendReverse(self: *RegionOutput, src: []const u8, do_complement: bool, writer: anytype) diagnostics.Error!void {
         var end = src.len;
         while (end > 0) {
-            const chunk = @min(end, 60 - self.line_pos);
-            if (self.bytes.len - self.len < chunk + 1) try self.flush(writer);
+            const chunk = if (self.wrap) @min(end, 60 - self.line_pos) else end;
+            if (self.bytes.len - self.len < chunk + @intFromBool(self.wrap)) try self.flush(writer);
             var j: usize = 0;
             while (j < chunk) : (j += 1) {
                 const byte = src[end - 1 - j];
@@ -594,7 +645,7 @@ const RegionOutput = struct {
             self.bases_written += chunk;
             self.line_pos += chunk;
             end -= chunk;
-            if (self.line_pos == 60) {
+            if (self.wrap and self.line_pos == 60) {
                 self.bytes[self.len] = '\n';
                 self.len += 1;
                 self.line_pos = 0;
@@ -828,12 +879,30 @@ fn emitRegion(
     writer: anytype,
     diag: *Diagnostics,
 ) diagnostics.Error!void {
+    const span = try regionSpan(resolved, source, diag);
+    try writeRegionHeader(resolved, writer, diag);
+    var output = RegionOutput{ .bytes = output_buffer, .diag = diag };
+    try copyRegion(resolved, span, source, input_buffer, &output, writer, diag);
+    try output.finish(writer);
+    diag.output().records = (diag.output().records orelse 0) + 1;
+}
+
+fn regionSpan(resolved: ResolvedRegion, source: FastaSource, diag: *Diagnostics) diagnostics.Error!DiskSpan {
     const span = try diskSpanForRegion(resolved, diag);
     if (span.end > source.size) return diag.span(span.end, source.size);
     if (span.start >= span.end) return diag.consistency(.traversal_position);
+    return span;
+}
 
-    try writeRegionHeader(resolved, writer, diag);
-    var output = RegionOutput{ .bytes = output_buffer, .diag = diag };
+fn copyRegion(
+    resolved: ResolvedRegion,
+    span: DiskSpan,
+    source: FastaSource,
+    input_buffer: []u8,
+    output: *RegionOutput,
+    writer: anytype,
+    diag: *Diagnostics,
+) diagnostics.Error!void {
     var skip = if (resolved.orientation.reverse) span.trailing_bases else span.leading_bases;
     var base_index = if (resolved.orientation.reverse)
         resolved.start - 1 + resolved.num_bases - 1
@@ -847,9 +916,9 @@ fn emitRegion(
             const got = std.Io.File.readPositionalAll(source.file, source.io, input_buffer[0..wanted], offset) catch |err| return diag.read(offset, wanted, null, err);
             if (got != wanted) return diag.read(offset, wanted, got, null);
             if (resolved.side_table.len == 0) {
-                try consumeUniformForwardChunk(resolved, offset, input_buffer[0..got], &base_index, &output, writer, diag);
+                try consumeUniformForwardChunk(resolved, offset, input_buffer[0..got], &base_index, output, writer, diag);
             } else {
-                try consumeForwardBytes(resolved, input_buffer[0..got], &skip, &output, writer);
+                try consumeForwardBytes(resolved, input_buffer[0..got], &skip, output, writer);
             }
             offset += got;
         }
@@ -861,17 +930,15 @@ fn emitRegion(
             const got = std.Io.File.readPositionalAll(source.file, source.io, input_buffer[0..wanted], offset) catch |err| return diag.read(offset, wanted, null, err);
             if (got != wanted) return diag.read(offset, wanted, got, null);
             if (resolved.side_table.len == 0) {
-                try consumeUniformReverseChunk(resolved, offset, input_buffer[0..got], &base_index, &output, writer, diag);
+                try consumeUniformReverseChunk(resolved, offset, input_buffer[0..got], &base_index, output, writer, diag);
             } else {
-                try consumeReverseBytes(resolved, input_buffer[0..got], &skip, &output, writer);
+                try consumeReverseBytes(resolved, input_buffer[0..got], &skip, output, writer);
             }
             end = offset;
         }
     }
 
     if (output.bases_written != resolved.num_bases) return diag.mismatch(resolved, span, output.bases_written);
-    try output.finish(writer);
-    diag.output().records = (diag.output().records orelse 0) + 1;
 }
 
 fn emitResolvedBatch(

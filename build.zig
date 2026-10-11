@@ -21,6 +21,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const library_module = b.addModule("z-fasta", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "diagnostics", .module = diagnostics_module }},
+    });
 
     const exe = b.addExecutable(.{
         .name = "z-fasta",
@@ -82,6 +88,19 @@ pub fn build(b: *std.Build) void {
     }));
 
     const run_test_main_unit = b.addRunArtifact(b.addTest(.{ .filters = test_filters, .root_module = main_module }));
+
+    const run_test_library = b.addRunArtifact(b.addTest(.{
+        .filters = test_filters,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/test_library.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "z-fasta", .module = library_module },
+                .{ .name = "test_options", .module = test_options_module },
+            },
+        }),
+    }));
 
     const run_test_indexer_unit = b.addRunArtifact(b.addTest(.{
         .filters = test_filters,
@@ -239,6 +258,8 @@ pub fn build(b: *std.Build) void {
     validate_step.dependOn(&run_test_validator_unit.step);
     const cli_step = b.step("test-cli", "Run CLI dispatch tests");
     cli_step.dependOn(&run_test_main_unit.step);
+    const library_step = b.step("test-library", "Run public package tests");
+    library_step.dependOn(&run_test_library.step);
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(diagnostics_step);
@@ -249,4 +270,5 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_test_stats.step);
     test_step.dependOn(&run_test_validate.step);
     test_step.dependOn(&run_test_validator_unit.step);
+    test_step.dependOn(&run_test_library.step);
 }
