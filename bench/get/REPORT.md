@@ -41,7 +41,7 @@ Run **`20261010_143023`** used **zebrac** in **warm** mode: 5 measured samples, 
   "checkout_revision": "1c114b61b2ce127637f3294bef025c5de215a9d8",
   "checkout_dirty": true,
   "executable": {
-    "path": "/home/eke/Github/personal/bioinformatics/z-fasta/zig-out/bin/z-fasta",
+    "path": "zig-out/bin/z-fasta",
     "size": 819416,
     "mtime_ns": 1791662483099699088,
     "ctime_ns": 1791662879343879968,

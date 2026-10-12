@@ -1469,6 +1469,15 @@ def md_build_identity(manifest: dict) -> str:
     identity = manifest.get("z_fasta_build")
     if not isinstance(identity, dict):
         return ""
+    executable = identity.get("executable")
+    if isinstance(executable, dict) and isinstance(executable.get("path"), str):
+        # Reports are published, so the path is shown relative to the checkout.
+        path = Path(executable["path"])
+        try:
+            shown = path.relative_to(Path(__file__).resolve().parents[2]).as_posix()
+        except ValueError:
+            shown = path.name
+        identity = {**identity, "executable": {**executable, "path": shown}}
     return "**Source and executable facts**\n\n```json\n" + json.dumps(identity, indent=2) + "\n```"
 
 

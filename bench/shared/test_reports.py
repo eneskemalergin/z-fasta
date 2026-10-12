@@ -276,6 +276,15 @@ class ReportReaderTests(unittest.TestCase):
                 self.assertIn('"checkout_revision": "first"', text)
         self.assertEqual(self.index.md_build_identity({"z_fasta": "0.3.4"}), "")
 
+    def test_build_facts_show_no_absolute_executable_path(self):
+        for path, shown in ((ROOT / "zig-out/bin/z-fasta", "zig-out/bin/z-fasta"), (Path("/elsewhere/bin/z-fasta"), "z-fasta")):
+            with self.subTest(path=path):
+                identity = {"checkout_revision": "first", "executable": {"path": str(path), "size": 10}}
+                text = self.index.md_build_identity({"z_fasta_build": identity})
+                self.assertIn(f'"path": "{shown}"', text)
+                self.assertIn('"size": 10', text)
+                self.assertEqual(identity["executable"]["path"], str(path))
+
     def test_stats_resume_requires_unchanged_recorded_files(self):
         source = (ROOT / "bench/stats/run.sh").read_text()
         function = source.split("write_run_manifest() {", 1)[1]
