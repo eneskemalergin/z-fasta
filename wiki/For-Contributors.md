@@ -41,7 +41,7 @@ The filter applies to Zig tests. Separate native callers still run when selected
 - `src/stats.zig`: length and composition reports.
 - `src/validator.zig`: events, JSON, fix policy, and normalized rewrite.
 - `src/bed_parser.zig`: BED row conversion and strand parsing.
-- `src/fasta.zig`: bases, identifier ends, alphabet detection, and the IUPAC complement.
+- `src/fasta.zig`: bases, identifier ends, alphabet detection, the IUPAC complement, and the record reader.
 - `src/platform.zig`: portable read-only mapping and advice.
 
 The Wiki owns public behavior and workflow documentation. Source files and their tests own implementation details that are not part of the public contract.

@@ -3,8 +3,12 @@
 //! which `index`, `get`, and `stats` skip in sequence lines. An identifier ends at the first
 //! space, tab, CR, or LF. The complement keeps case, maps U to A one way, and passes every other
 //! byte through.
+//! `RecordReader` streams whole records under the same rules into caller storage. As in `index`,
+//! the first byte must be `>`, and a record without bases is skipped.
 
 const std = @import("std");
+
+const diagnostics = @import("diagnostics");
 
 pub const SequenceType = enum { nucleotide, protein };
 
@@ -133,6 +137,208 @@ pub fn complementInto(dst: []u8, src: []const u8) void {
         dst[i] = IUPAC_COMPLEMENT_TABLE[src[i]];
     }
 }
+
+pub const RecordReader = struct {
+    source: *std.Io.Reader,
+    storage: []u8,
+    failure: *diagnostics.Failure,
+    state: enum { start, header, done } = .start,
+    failed: ?diagnostics.Error = null,
+    offset: u64 = 0,
+    header_offset: u64 = 0,
+    headers: u64 = 0,
+    byte: [1]u8 = undefined,
+    byte_held: bool = false,
+
+    pub const Record = struct {
+        id: []const u8,
+        description: []const u8,
+        sequence: []const u8,
+    };
+
+    /// `storage` holds one record: the bytes of its header line before LF, then its bases.
+    pub fn init(source: *std.Io.Reader, storage: []u8, failure: *diagnostics.Failure) RecordReader {
+        failure.reset(.index);
+        return .{ .source = source, .storage = storage, .failure = failure };
+    }
+
+    /// The record borrows `storage` until the next call; after a failure, each call returns that error.
+    pub fn next(self: *RecordReader) diagnostics.Error!?Record {
+        if (self.failed) |err| return err;
+        return self.readRecord() catch |err| {
+            self.failed = err;
+            return err;
+        };
+    }
+
+    fn readRecord(self: *RecordReader) diagnostics.Error!?Record {
+        while (true) {
+            switch (self.state) {
+                .done => return null,
+                .header => {},
+                .start => {
+                    const bytes = try self.window();
+                    if (bytes.len == 0) {
+                        self.finish();
+                        return null;
+                    }
+                    if (bytes[0] != '>') return self.failure.fail(.{
+                        .details = .{ .@"fasta.content_before_header" = .{ .content_bytes = .{ .at_least = 1 } } },
+                        .stage = .scan,
+                        .at = .{ .source = .fasta, .location = .{ .offset = 0, .line = 1, .column = 1 } },
+                    });
+                    self.startHeader();
+                },
+            }
+            const header_len = try self.readHeader();
+            const end = try self.readSequence(header_len);
+            if (end > header_len) return makeRecord(self.storage[0..header_len], self.storage[header_len..end]);
+        }
+    }
+
+    fn readHeader(self: *RecordReader) diagnostics.Error!usize {
+        var len: usize = 0;
+        while (true) {
+            const bytes = try self.window();
+            if (bytes.len == 0) return len;
+            const line_end = std.mem.indexOfScalar(u8, bytes, '\n');
+            const piece = bytes[0 .. line_end orelse bytes.len];
+            len = try self.append(len, piece);
+            self.consume(piece.len + @intFromBool(line_end != null));
+            if (line_end != null) return len;
+        }
+    }
+
+    fn readSequence(self: *RecordReader, start: usize) diagnostics.Error!usize {
+        var len = start;
+        var line_start = true;
+        while (true) {
+            const bytes = try self.window();
+            if (bytes.len == 0) {
+                self.finish();
+                return len;
+            }
+            const header = findHeader(bytes, line_start);
+            if (header == 0) {
+                self.startHeader();
+                return len;
+            }
+            const segment = bytes[0 .. header orelse bytes.len];
+            len = try self.appendBases(len, segment);
+            line_start = segment[segment.len - 1] == '\n';
+            self.consume(segment.len);
+        }
+    }
+
+    fn findHeader(bytes: []const u8, line_start: bool) ?usize {
+        if (line_start and bytes[0] == '>') return 0;
+        var from: usize = 0;
+        while (std.mem.indexOfScalarPos(u8, bytes, from, '>')) |at| : (from = at + 1) {
+            if (at > 0 and bytes[at - 1] == '\n') return at;
+        }
+        return null;
+    }
+
+    fn appendBases(self: *RecordReader, start: usize, segment: []const u8) diagnostics.Error!usize {
+        var out = start;
+        var in: usize = 0;
+        while (segment.len - in >= 2 * SIMD_CHUNK_SIZE and self.storage.len - out >= 2 * SIMD_CHUNK_SIZE) : (in += SIMD_CHUNK_SIZE) {
+            const chunk: SimdVec = segment[in..][0..SIMD_CHUNK_SIZE].*;
+            const lanes: @Vector(SIMD_CHUNK_SIZE, u1) = @bitCast(chunk > @as(SimdVec, @splat(' ')));
+            var bases: u64 = @as(u32, @bitCast(lanes));
+            while (bases != 0) {
+                const run_start = @ctz(bases);
+                const run_len = @ctz(~(bases >> @intCast(run_start)));
+                // The loop bounds keep this full-width store in storage; bytes past the run are rewritten.
+                self.storage[out..][0..SIMD_CHUNK_SIZE].* = segment[in + run_start ..][0..SIMD_CHUNK_SIZE].*;
+                out += run_len;
+                bases &= ~((@as(u64, 1) << @intCast(run_start + run_len)) - 1);
+            }
+        }
+        for (segment[in..], in..) |byte, at| {
+            if (!isBase(byte)) continue;
+            if (out == self.storage.len) return self.tooLarge(@as(u64, out) + countBases(segment[at..]));
+            self.storage[out] = byte;
+            out += 1;
+        }
+        return out;
+    }
+
+    fn append(self: *RecordReader, len: usize, bytes: []const u8) diagnostics.Error!usize {
+        if (bytes.len > self.storage.len - len) return self.tooLarge(@as(u64, len) + bytes.len);
+        @memcpy(self.storage[len..][0..bytes.len], bytes);
+        return len + bytes.len;
+    }
+
+    fn window(self: *RecordReader) diagnostics.Error![]const u8 {
+        if (self.source.buffer.len != 0) {
+            return self.source.peekGreedy(1) catch |err| switch (err) {
+                error.EndOfStream => return &.{},
+                error.ReadFailed => return self.readFailed(err),
+            };
+        }
+        if (!self.byte_held) {
+            const count = self.source.readSliceShort(&self.byte) catch |err| return self.readFailed(err);
+            if (count == 0) return &.{};
+            self.byte_held = true;
+        }
+        return &self.byte;
+    }
+
+    fn consume(self: *RecordReader, count: usize) void {
+        if (self.source.buffer.len != 0) {
+            self.source.toss(count);
+        } else {
+            std.debug.assert(count == 1);
+            self.byte_held = false;
+        }
+        self.offset +|= count;
+    }
+
+    fn startHeader(self: *RecordReader) void {
+        self.header_offset = self.offset;
+        self.headers +|= 1;
+        self.consume(1);
+        self.state = .header;
+    }
+
+    fn finish(self: *RecordReader) void {
+        self.state = .done;
+        self.failure.succeed();
+    }
+
+    fn reference(self: *const RecordReader, offset: u64) diagnostics.Reference {
+        return .{ .source = .fasta, .location = .{ .offset = offset }, .record = if (self.headers == 0) null else self.headers };
+    }
+
+    fn tooLarge(self: *RecordReader, required: u64) diagnostics.Error {
+        @branchHint(.cold);
+        return self.failure.fail(.{
+            .details = .{ .@"resource.line_buffer_exceeded" = .{ .buffer_bytes = self.storage.len, .observed_bytes = .{ .at_least = required } } },
+            .stage = .read,
+            .at = self.reference(self.header_offset),
+        });
+    }
+
+    fn readFailed(self: *RecordReader, err: anyerror) diagnostics.Error {
+        @branchHint(.cold);
+        return self.failure.fail(.{
+            .details = diagnostics.readFailure(1, null),
+            .stage = .read,
+            .at = self.reference(self.offset),
+            .cause = .{ .zig = err },
+        });
+    }
+
+    fn makeRecord(header: []const u8, sequence: []const u8) Record {
+        const id_end = findNameDelimiter(header, 0);
+        return .{
+            .id = header[0..id_end],
+            .description = std.mem.trim(u8, header[id_end..], " \t\r"),
+            .sequence = sequence,
+        };
+    }
+};
 
 const SIMD_CHUNK_SIZE = 32;
 const SimdVec = @Vector(SIMD_CHUNK_SIZE, u8);

@@ -3,12 +3,16 @@
 //! `IndexedReader` opens a FASTA and its sidecar once and fetches many intervals from it.
 //! Intervals are zero-based half-open and never clipped. A reader is not safe for concurrent use,
 //! and its `io` must outlive it.
+//! `RecordReader` streams every record of a FASTA from any `std.Io.Reader`, by `index`'s rules.
 
 const std = @import("std");
 
 pub const diagnostics = @import("diagnostics");
+const fasta = @import("fasta.zig");
 const getter = @import("getter.zig");
 const index_format = @import("index_format.zig");
+
+pub const RecordReader = fasta.RecordReader;
 
 pub const Interval = struct {
     start: u64,
