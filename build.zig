@@ -84,6 +84,16 @@ pub fn build(b: *std.Build) void {
         }),
     }));
 
+    const run_test_getter_unit = b.addRunArtifact(b.addTest(.{
+        .filters = test_filters,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/getter.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "diagnostics", .module = diagnostics_module }},
+        }),
+    }));
+
     const run_test_main_unit = b.addRunArtifact(b.addTest(.{ .filters = test_filters, .root_module = main_module }));
 
     const run_test_library = b.addRunArtifact(b.addTest(.{
@@ -139,6 +149,24 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "diagnostics", .module = diagnostics_module }},
+        }),
+    }));
+
+    const run_test_fasta_unit = b.addRunArtifact(b.addTest(.{
+        .filters = test_filters,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/fasta.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    }));
+
+    const run_test_platform_unit = b.addRunArtifact(b.addTest(.{
+        .filters = test_filters,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform.zig"),
+            .target = target,
+            .optimize = optimize,
         }),
     }));
 
@@ -250,9 +278,9 @@ pub fn build(b: *std.Build) void {
         prepare_fixtures.addFileArg(b.path(path));
     }
     for ([_]*std.Build.Step.Run{
-        run_test_index,      run_test_get,         run_test_main_unit, run_test_indexer_unit,
-        run_test_stats,      run_test_stats_unit,  run_test_validate,  run_test_validator_unit,
-        run_commands_caller, run_test_diagnostics,
+        run_test_index,      run_test_get,         run_test_main_unit,   run_test_indexer_unit,
+        run_test_stats,      run_test_stats_unit,  run_test_validate,    run_test_validator_unit,
+        run_commands_caller, run_test_diagnostics, run_test_getter_unit,
     }) |run| run.setCwd(fixture_root);
 
     const index_step = b.step("test-index", "Run index tests");
@@ -260,6 +288,7 @@ pub fn build(b: *std.Build) void {
     index_step.dependOn(&run_test_indexer_unit.step);
     const get_step = b.step("test-get", "Run GET tests");
     get_step.dependOn(&run_test_get.step);
+    get_step.dependOn(&run_test_getter_unit.step);
     const stats_step = b.step("test-stats", "Run stats tests");
     stats_step.dependOn(&run_test_stats.step);
     stats_step.dependOn(&run_test_stats_unit.step);
@@ -268,6 +297,7 @@ pub fn build(b: *std.Build) void {
     validate_step.dependOn(&run_test_validator_unit.step);
     const cli_step = b.step("test-cli", "Run CLI dispatch tests");
     cli_step.dependOn(&run_test_main_unit.step);
+    cli_step.dependOn(&run_test_diagnostics.step);
     const library_step = b.step("test-library", "Run public package tests");
     library_step.dependOn(&run_test_library.step);
 
@@ -275,11 +305,14 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(diagnostics_step);
     test_step.dependOn(&run_test_index.step);
     test_step.dependOn(&run_test_get.step);
+    test_step.dependOn(&run_test_getter_unit.step);
     test_step.dependOn(&run_test_main_unit.step);
     test_step.dependOn(&run_test_indexer_unit.step);
     test_step.dependOn(&run_test_stats.step);
     test_step.dependOn(&run_test_stats_unit.step);
     test_step.dependOn(&run_test_validate.step);
     test_step.dependOn(&run_test_validator_unit.step);
+    test_step.dependOn(&run_test_fasta_unit.step);
+    test_step.dependOn(&run_test_platform_unit.step);
     test_step.dependOn(&run_test_library.step);
 }
