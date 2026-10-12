@@ -781,6 +781,32 @@ pub fn oneBased(failure: *Failure, zero_based: u64, at: Reference) Error!u64 {
     };
 }
 
+pub fn openFailure(err: anyerror) Details {
+    return switch (err) {
+        error.FileNotFound => .{ .@"io.file_not_found" = {} },
+        error.AccessDenied => .{ .@"io.access_denied" = {} },
+        error.NameTooLong => .{ .@"io.invalid_path" = .{ .reason = .too_long } },
+        else => .{ .@"io.open_failed" = {} },
+    };
+}
+
+pub fn readFailure(requested: u64, received: ?u64) Details {
+    return if (received) |got|
+        .{ .@"io.unexpected_eof" = .{ .exact = .{ .requested_bytes = requested, .received_bytes = got } } }
+    else
+        .{ .@"io.read_failed" = .{ .requested_bytes = requested } };
+}
+
+/// Flushes `writer` and records the outcome in `state`; returns the error to report when the flush fails.
+pub fn flushOutput(writer: *std.Io.File.Writer, state: ?*OutputState) ?anyerror {
+    writer.flush() catch |err| {
+        if (state) |output| output.final_flush = .failed;
+        return writer.err orelse err;
+    };
+    if (state) |output| output.final_flush = .succeeded;
+    return null;
+}
+
 fn describe(code: Code, category: Category, kind: Kind, unit: Unit, action: Action, returned_error: Error) Metadata {
     return .{ .code = code, .name = @tagName(code), .category = category, .kind = kind, .severity = .@"error", .unit = unit, .action = action, .returned_error = returned_error };
 }

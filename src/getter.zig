@@ -250,10 +250,7 @@ const Diagnostics = struct {
 
     fn read(self: *@This(), offset: u64, wanted: u64, received: ?u64, cause: ?anyerror) diagnostics.Error {
         @branchHint(.cold);
-        return self.fail(if (received) |got| .{ .@"io.unexpected_eof" = .{ .exact = .{
-            .requested_bytes = wanted,
-            .received_bytes = got,
-        } } } else .{ .@"io.read_failed" = .{ .requested_bytes = wanted } }, .read, .fasta, offset, cause);
+        return self.fail(diagnostics.readFailure(wanted, received), .read, .fasta, offset, cause);
     }
 
     fn span(self: *@This(), end: u128, size: u64) diagnostics.Error {
@@ -1315,15 +1312,7 @@ fn processRequestPath(
         diag.request_reader = &reader;
         return processRequestReader(allocator, idx, &reader.interface, source, 0, annotate_transform, writer, fasta_source, diag, null, buffers);
     }
-    const file = if (opened_file) |opened| opened.file else std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| {
-        const details: diagnostics.Details = switch (err) {
-            error.FileNotFound => .{ .@"io.file_not_found" = {} },
-            error.AccessDenied => .{ .@"io.access_denied" = {} },
-            error.NameTooLong => .{ .@"io.invalid_path" = .{ .reason = .too_long } },
-            else => .{ .@"io.open_failed" = {} },
-        };
-        return diag.fail(details, .open, diag.at.source orelse .names, null, err);
-    };
+    const file = if (opened_file) |opened| opened.file else std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| return diag.fail(diagnostics.openFailure(err), .open, diag.at.source orelse .names, null, err);
     defer if (opened_file == null) file.close(io);
     const name_reservation: usize = switch (source) {
         .names => blk: {
@@ -1420,11 +1409,7 @@ fn emitGet(
         .bed => .bed,
     } } }, .resolve, diag.at.source orelse .request_snapshot, null, null);
     diag.failure.work_complete = true;
-    stdout_fw.flush() catch |err| {
-        diag.failure.outputs.stdout.final_flush = .failed;
-        return diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .stdout, null, stdout_fw.err orelse err);
-    };
-    diag.failure.outputs.stdout.final_flush = .succeeded;
+    if (diagnostics.flushOutput(&stdout_fw, &diag.failure.outputs.stdout)) |cause| return diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .stdout, null, cause);
     return totals;
 }
 

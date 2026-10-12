@@ -425,12 +425,7 @@ const Diagnostics = struct {
     fn ioFailure(self: *const Diagnostics, stage: IoStage, err: anyerror) diagnostics.Error {
         @branchHint(.cold);
         const details: diagnostics.Details = switch (stage) {
-            .open => switch (err) {
-                error.FileNotFound => .{ .@"io.file_not_found" = {} },
-                error.AccessDenied => .{ .@"io.access_denied" = {} },
-                error.NameTooLong => .{ .@"io.invalid_path" = .{ .reason = .too_long } },
-                else => .{ .@"io.open_failed" = {} },
-            },
+            .open => diagnostics.openFailure(err),
             .stat => .{ .@"io.stat_failed" = {} },
             .read => .{ .@"io.read_failed" = .{} },
         };
@@ -441,10 +436,11 @@ const Diagnostics = struct {
         }, .at = self.at, .cause = .{ .zig = err } });
     }
 
-    fn readFailure(self: *const Diagnostics, offset: u64, requested: u64, err: anyerror) diagnostics.Error {
+    fn read(self: *const Diagnostics, offset: u64, requested: u64, received: ?u64, cause: ?anyerror) diagnostics.Error {
+        @branchHint(.cold);
         var at = self.at;
         at.location.offset = offset;
-        return self.failure.fail(.{ .details = .{ .@"io.read_failed" = .{ .requested_bytes = requested } }, .stage = .read, .at = at, .cause = .{ .zig = err } });
+        return self.failure.fail(.{ .details = diagnostics.readFailure(requested, received), .stage = .read, .at = at, .cause = if (cause) |err| .{ .zig = err } else null });
     }
 
     fn lineBuffer(self: *const Diagnostics, observed: usize) diagnostics.Error {
@@ -485,12 +481,6 @@ const Diagnostics = struct {
 
     fn truncated(self: *const Diagnostics, section: diagnostics.Section, required: u128, available: u64) diagnostics.Error {
         return self.fail(.{ .@"index.truncated" = .{ .section = section, .required_end = required, .available_end = available } });
-    }
-
-    fn shortRead(self: *const Diagnostics, offset: u64, requested: u64, received: u64) diagnostics.Error {
-        var at = self.at;
-        at.location.offset = offset;
-        return self.failure.fail(.{ .details = .{ .@"io.unexpected_eof" = .{ .exact = .{ .requested_bytes = requested, .received_bytes = received } } }, .stage = .read, .at = at });
     }
 };
 
@@ -709,7 +699,7 @@ const ZfiReadWindow = struct {
 
     fn take(self: *ZfiReadWindow, offset: u64, len: usize, context: *Diagnostics) diagnostics.Error![]const u8 {
         if (self.mapped) |data| {
-            if (offset > data.len or len > data.len - offset) return context.shortRead(offset, len, if (offset < data.len) data.len - offset else 0);
+            if (offset > data.len or len > data.len - offset) return context.read(offset, len, if (offset < data.len) data.len - offset else 0, null);
             return data[@intCast(offset)..][0..len];
         }
         if (len == 0) return self.buffer[0..0];
@@ -719,9 +709,9 @@ const ZfiReadWindow = struct {
                 return self.buffer[@intCast(relative)..][0..len];
             }
         }
-        self.len = std.Io.File.readPositionalAll(self.file, self.io, self.buffer, offset) catch |err| return context.readFailure(offset, self.buffer.len, err);
+        self.len = std.Io.File.readPositionalAll(self.file, self.io, self.buffer, offset) catch |err| return context.read(offset, self.buffer.len, null, err);
         self.start = offset;
-        if (self.len < len) return context.shortRead(offset, len, self.len);
+        if (self.len < len) return context.read(offset, len, self.len, null);
         return self.buffer[0..len];
     }
 };
@@ -872,7 +862,7 @@ fn checkMatchedNameFlags(reader: *std.Io.File.Reader, count: u32, context: *Diag
         context.at = .{ .source = .zfi, .record = i + 1, .location = .{ .offset = ZFI_HEADER_BYTES + i * ZFI_INDEX_RECORD_BYTES } };
         const bytes = reader.interface.takeArray(ZFI_INDEX_RECORD_BYTES) catch |err| switch (err) {
             error.ReadFailed => return context.ioFailure(.read, reader.err orelse err),
-            error.EndOfStream => return context.shortRead(reader.logicalPos(), ZFI_INDEX_RECORD_BYTES, reader.interface.buffered().len),
+            error.EndOfStream => return context.read(reader.logicalPos(), ZFI_INDEX_RECORD_BYTES, reader.interface.buffered().len, null),
         };
         const rec = std.mem.bytesToValue(IndexRecord, bytes);
         if (!rec.nameInZfi()) {
@@ -889,7 +879,7 @@ fn loadZfiMatched(backing_allocator: std.mem.Allocator, io: std.Io, zfi_file: st
     var reader = zfi_file.reader(io, &record_buffer);
     const header_bytes = reader.interface.takeArray(ZFI_HEADER_BYTES) catch |err| switch (err) {
         error.ReadFailed => return context.ioFailure(.read, reader.err orelse err),
-        error.EndOfStream => return context.shortRead(0, ZFI_HEADER_BYTES, reader.interface.buffered().len),
+        error.EndOfStream => return context.read(0, ZFI_HEADER_BYTES, reader.interface.buffered().len, null),
     };
     const header = std.mem.bytesToValue(ZfiHeader, header_bytes);
     try checkZfiMagic(header.magic, context);
@@ -905,13 +895,13 @@ fn loadZfiMatched(backing_allocator: std.mem.Allocator, io: std.Io, zfi_file: st
     const buffered_body = if (zfi_size <= record_buffer.len)
         reader.interface.peek(zfi_size - ZFI_HEADER_BYTES) catch |err| switch (err) {
             error.ReadFailed => return context.ioFailure(.read, reader.err orelse err),
-            error.EndOfStream => return context.shortRead(ZFI_HEADER_BYTES, zfi_size - ZFI_HEADER_BYTES, reader.interface.buffered().len),
+            error.EndOfStream => return context.read(ZFI_HEADER_BYTES, zfi_size - ZFI_HEADER_BYTES, reader.interface.buffered().len, null),
         }
     else
         null;
     const tail_bytes = if (buffered_body) |body| body[body.len - tail_len ..] else tail_read: {
-        const got = std.Io.File.readPositionalAll(zfi_file, io, tail[0..tail_len], tail_start) catch |err| return context.readFailure(tail_start, tail_len, err);
-        if (got != tail_len) return context.shortRead(tail_start, tail_len, got);
+        const got = std.Io.File.readPositionalAll(zfi_file, io, tail[0..tail_len], tail_start) catch |err| return context.read(tail_start, tail_len, null, err);
+        if (got != tail_len) return context.read(tail_start, tail_len, got, null);
         break :tail_read tail[0..tail_len];
     };
     context.at.location.offset = zfi_size;
@@ -956,7 +946,7 @@ fn loadZfiMatched(backing_allocator: std.mem.Allocator, io: std.Io, zfi_file: st
         context.at = .{ .source = .zfi, .record = i + 1, .location = .{ .offset = ZFI_HEADER_BYTES + i * ZFI_INDEX_RECORD_BYTES } };
         const bytes = reader.interface.takeArray(ZFI_INDEX_RECORD_BYTES) catch |err| switch (err) {
             error.ReadFailed => return context.ioFailure(.read, reader.err orelse err),
-            error.EndOfStream => return context.shortRead(reader.logicalPos(), ZFI_INDEX_RECORD_BYTES, reader.interface.buffered().len),
+            error.EndOfStream => return context.read(reader.logicalPos(), ZFI_INDEX_RECORD_BYTES, reader.interface.buffered().len, null),
         };
         var rec = std.mem.bytesToValue(IndexRecord, bytes);
         if (!rec.nameInZfi()) {
@@ -1331,8 +1321,8 @@ fn readFaiName(
     name_context.at = name_ref.at;
     const name = allocator.alloc(u8, name_ref.len) catch return name_context.allocation(.retained_names, name_ref.len);
     if (name.len == 0) return name;
-    const got = std.Io.File.readPositionalAll(fai_file, io, name, name_ref.offset) catch |err| return name_context.readFailure(name_ref.offset, name.len, err);
-    if (got != name.len) return name_context.shortRead(name_ref.offset, name.len, got);
+    const got = std.Io.File.readPositionalAll(fai_file, io, name, name_ref.offset) catch |err| return name_context.read(name_ref.offset, name.len, null, err);
+    if (got != name.len) return name_context.read(name_ref.offset, name.len, got, null);
     return name;
 }
 

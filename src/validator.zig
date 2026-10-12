@@ -138,12 +138,7 @@ pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const
     failure.sources.set(.stdout, .{ .label = .{ .borrowed = "stdout" }, .kind = .stream });
     if (options.output_path) |path| failure.sources.set(.output, .{ .label = .{ .borrowed = path }, .kind = .path });
     var diag = Diagnostics{ .failure = failure };
-    const file = std.Io.Dir.cwd().openFile(io, fasta_path, .{}) catch |err| return diag.fail(switch (err) {
-        error.FileNotFound => .{ .@"io.file_not_found" = {} },
-        error.AccessDenied => .{ .@"io.access_denied" = {} },
-        error.NameTooLong => .{ .@"io.invalid_path" = .{ .reason = .too_long } },
-        else => .{ .@"io.open_failed" = {} },
-    }, .open, .fasta, err);
+    const file = std.Io.Dir.cwd().openFile(io, fasta_path, .{}) catch |err| return diag.fail(diagnostics.openFailure(err), .open, .fasta, err);
     defer file.close(io);
     const stat = file.stat(io) catch |err| return diag.fail(.{ .@"io.stat_failed" = {} }, .stat, .fasta, err);
     var fasta_map: ?std.Io.File.MemoryMap = null;
@@ -174,11 +169,7 @@ pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const
     failure.outputs.stdout.state = .streaming;
     failure.outputs.stdout.may_be_partial = true;
     writeSummary(&stdout_fw.interface, &summary, options) catch |err| return diag.fail(.{ .@"io.write_failed" = {} }, .report, .stdout, stdout_fw.err orelse err);
-    stdout_fw.flush() catch |err| {
-        failure.outputs.stdout.final_flush = .failed;
-        return diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .stdout, stdout_fw.err orelse err);
-    };
-    failure.outputs.stdout.final_flush = .succeeded;
+    if (diagnostics.flushOutput(&stdout_fw, &failure.outputs.stdout)) |cause| return diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .stdout, cause);
     const result = Result{ .status = if (summary.truncated and !options.fix) 1 else exitCodeForOptions(&summary, options), .truncated = summary.truncated, .fix_written = options.fix };
     failure.succeed();
     return result;
@@ -894,11 +885,7 @@ fn writeFixed(io: std.Io, data: []const u8, record_widths: []const u32, output_p
     var file_fw = atomic_file.file.writer(io, &out_buf);
     errdefer file_fw.interface.end = 0;
     writeFixedContent(&file_fw.interface, data, record_widths) catch |err| return diag.fail(.{ .@"io.write_failed" = {} }, .write, .output, file_fw.err orelse err);
-    file_fw.flush() catch |err| {
-        failure.outputs.file.final_flush = .failed;
-        return diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .output, file_fw.err orelse err);
-    };
-    failure.outputs.file.final_flush = .succeeded;
+    if (diagnostics.flushOutput(&file_fw, &failure.outputs.file)) |cause| return diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .output, cause);
     try checkRewriteSource(io, input, before, failure);
     atomic_file.replace(io) catch |err| {
         failure.outputs.file.state = .unknown;

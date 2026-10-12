@@ -81,7 +81,7 @@ const READ_BUFFER_BYTES = 256 * 1024;
 fn rejectCompressed(index: index_format.LoadedIndex, failure: *diagnostics.Failure) diagnostics.Error!void {
     var magic: [2]u8 = undefined;
     const got = index.fasta_file.readPositionalAll(index.io, &magic, 0) catch |err| return failure.fail(.{
-        .details = .{ .@"io.read_failed" = .{ .requested_bytes = magic.len } },
+        .details = diagnostics.readFailure(magic.len, null),
         .stage = .read,
         .at = .{ .source = .fasta, .location = .{ .offset = 0 } },
         .cause = .{ .zig = err },

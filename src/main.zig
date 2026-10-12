@@ -209,15 +209,13 @@ fn reportFailure(io: std.Io, format: ErrorFormat, failure: *diagnostics.Failure)
         }
         return 1;
     };
-    fw.flush() catch |err| {
+    if (diagnostics.flushOutput(&fw, &failure.outputs.stderr)) |cause| {
         fw.interface.end = 0;
-        failure.outputs.stderr.final_flush = .failed;
-        switch (failure.fail(.{ .details = .{ .@"io.flush_failed" = {} }, .stage = .flush, .at = .{ .source = .stderr }, .cause = .{ .zig = fw.err orelse err } })) {
+        switch (failure.fail(.{ .details = .{ .@"io.flush_failed" = {} }, .stage = .flush, .at = .{ .source = .stderr }, .cause = .{ .zig = cause } })) {
             else => {},
         }
         return 1;
-    };
-    failure.outputs.stderr.final_flush = .succeeded;
+    }
     return 1;
 }
 
@@ -448,11 +446,7 @@ fn writeNotice(cli: *Cli, notice: Notice) diagnostics.Error!void {
     var fw = std.Io.File.Writer.initStreaming(.stderr(), cli.io, &buffer);
     errdefer fw.interface.end = 0;
     writeNoticeBytes(&fw.interface, cli.format, failure, notice) catch |err| return failure.fail(.{ .details = .{ .@"io.write_failed" = {} }, .stage = .report, .at = .{ .source = .stderr }, .cause = .{ .zig = fw.err orelse err } });
-    fw.flush() catch |err| {
-        failure.outputs.stderr.final_flush = .failed;
-        return failure.fail(.{ .details = .{ .@"io.flush_failed" = {} }, .stage = .flush, .at = .{ .source = .stderr }, .cause = .{ .zig = fw.err orelse err } });
-    };
-    failure.outputs.stderr.final_flush = .succeeded;
+    if (diagnostics.flushOutput(&fw, &failure.outputs.stderr)) |cause| return failure.fail(.{ .details = .{ .@"io.flush_failed" = {} }, .stage = .flush, .at = .{ .source = .stderr }, .cause = .{ .zig = cause } });
 }
 
 fn writeNoticeBytes(writer: *std.Io.Writer, format: ErrorFormat, failure: *const diagnostics.Failure, notice: Notice) std.Io.Writer.Error!void {

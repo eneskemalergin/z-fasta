@@ -193,7 +193,7 @@ pub fn scanFastaReader(
     while (true) {
         var read_diag = state.diag;
         read_diag.at = .{ .source = .fasta, .location = .{ .offset = file_offset } };
-        const n = reader.readSliceShort(read_buf) catch |err| return read_diag.fail(.{ .@"io.read_failed" = .{ .requested_bytes = read_buf.len } }, .read, .fasta, err, error.SourceReadFailed);
+        const n = reader.readSliceShort(read_buf) catch |err| return read_diag.fail(diagnostics.readFailure(read_buf.len, null), .read, .fasta, err, error.SourceReadFailed);
         if (n == 0) break;
         if (file_offset == 0 and options.require_initial_header and read_buf[0] != '>') {
             return read_diag.fail(.{ .@"index.initial_header_required" = .{ .byte = read_buf[0] } }, .scan, .fasta, null, error.NotFasta);
@@ -247,12 +247,7 @@ pub fn runIndex(
     failure.sources.set(.stdout, .{ .label = .{ .borrowed = "stdout" }, .kind = .stream });
     const diag = Diagnostics{ .failure = failure, .format = if (options.emit_fai) .fai else .zfi };
     const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| return failure.fail(.{
-        .details = switch (err) {
-            error.FileNotFound => .{ .@"io.file_not_found" = {} },
-            error.AccessDenied => .{ .@"io.access_denied" = {} },
-            error.NameTooLong => .{ .@"io.invalid_path" = .{ .reason = .too_long } },
-            else => .{ .@"io.open_failed" = {} },
-        },
+        .details = diagnostics.openFailure(err),
         .stage = .open,
         .at = .{ .source = .fasta },
         .cause = .{ .zig = err },
@@ -319,11 +314,7 @@ const Diagnostics = struct {
         @branchHint(.cold);
         var diag = self;
         diag.at = .{ .source = source, .location = .{ .offset = offset } };
-        const details: diagnostics.Details = if (received) |actual|
-            .{ .@"io.unexpected_eof" = .{ .exact = .{ .requested_bytes = requested, .received_bytes = actual } } }
-        else
-            .{ .@"io.read_failed" = .{ .requested_bytes = requested } };
-        return diag.fail(details, .read, source, cause, legacy);
+        return diag.fail(diagnostics.readFailure(requested, received), .read, source, cause, legacy);
     }
 
     fn fail(self: @This(), details: diagnostics.Details, stage: diagnostics.Stage, source: diagnostics.SourceId, cause: ?anyerror, legacy: anyerror) anyerror {
@@ -1647,7 +1638,7 @@ fn indexFai(
         retainScanCause(diag.failure, reader, &tmp_fw);
         return err;
     };
-    tmp_fw.interface.flush() catch |err| return diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .fai_spool, if (tmp_fw.err) |cause| cause else err, error.FaiSpoolWriteFailed);
+    if (diagnostics.flushOutput(&tmp_fw, null)) |cause| return diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .fai_spool, cause, error.FaiSpoolWriteFailed);
     if (count == 0) return noIndexableRecords(options, diag);
     try checkSourceUnchanged(io, .cwd(), path, stat, diag);
     const tmp_size = (spool.file.stat(io) catch |err| return diag.fail(.{ .@"io.stat_failed" = {} }, .stat, .fai_spool, err, error.FaiSpoolReadFailed)).size;
@@ -1667,12 +1658,8 @@ fn indexFai(
         offset += n;
         if (diag.failure) |failure| failure.outputs.stdout.logical_bytes = offset;
     }
-    stdout_fw.flush() catch |err| {
-        if (diag.failure) |failure| failure.outputs.stdout.final_flush = .failed;
-        return diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .stdout, if (stdout_fw.err) |cause| cause else err, error.StdoutFlushFailed);
-    };
+    if (diagnostics.flushOutput(&stdout_fw, if (diag.failure) |failure| &failure.outputs.stdout else null)) |cause| return diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .stdout, cause, error.StdoutFlushFailed);
     if (diag.failure) |failure| {
-        failure.outputs.stdout.final_flush = .succeeded;
         failure.outputs.stdout.records = count;
         failure.outputs.stdout.may_be_partial = false;
         failure.work_complete = true;
@@ -1708,11 +1695,7 @@ fn runIndexSmall(allocator: std.mem.Allocator, io: std.Io, environ: std.process.
     var out_buf: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
     var output = atomic.file.writer(io, &out_buf);
     writeZfiIndex(&output.interface, &index, stat.size, mtime) catch |err| return diag.fail(.{ .@"io.write_failed" = {} }, .write, .zfi, if (output.err) |cause| cause else err, error.ZfiWriteFailed);
-    output.flush() catch |err| {
-        if (diag.failure) |failure| failure.outputs.file.final_flush = .failed;
-        return diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .zfi, if (output.err) |cause| cause else err, error.ZfiWriteFailed);
-    };
-    if (diag.failure) |failure| failure.outputs.file.final_flush = .succeeded;
+    if (diagnostics.flushOutput(&output, if (diag.failure) |failure| &failure.outputs.file else null)) |cause| return diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .zfi, cause, error.ZfiWriteFailed);
     try checkSourceUnchanged(io, .cwd(), path, stat, diag);
     atomic.replace(io) catch |err| {
         if (diag.failure) |failure| failure.outputs.file.state = .unknown;
@@ -2062,7 +2045,7 @@ const SourceDedup = struct {
         const read = self.file.readPositionalAll(self.io, self.scratch.items[0..needed], offset) catch |err| {
             var diag = self.diag;
             diag.at.location.offset = offset;
-            switch (diag.fail(.{ .@"io.read_failed" = .{ .requested_bytes = needed } }, .read, .fasta, err, error.SourceReadFailed)) {
+            switch (diag.fail(diagnostics.readFailure(needed, null), .read, .fasta, err, error.SourceReadFailed)) {
                 else => {},
             }
             self.read_failed = true;
@@ -2077,7 +2060,7 @@ const SourceDedup = struct {
             }
             var diag = self.diag;
             diag.at.location.offset = offset;
-            switch (diag.fail(.{ .@"io.unexpected_eof" = .{ .exact = .{ .requested_bytes = needed, .received_bytes = read } } }, .read, .fasta, null, error.SourceReadFailed)) {
+            switch (diag.fail(diagnostics.readFailure(needed, read), .read, .fasta, null, error.SourceReadFailed)) {
                 else => {},
             }
             self.read_failed = true;
@@ -2313,8 +2296,8 @@ const CatalogBytes = struct {
         return reader.take(count) catch |err| {
             if (self.spool == null) return self.diag.consistency(.codec_state, err);
             const cause: anyerror = if (file_reader) |input| if (input.err) |failure| failure else err else err;
-            if (err == error.EndOfStream) return self.diag.fail(.{ .@"io.unexpected_eof" = .{ .exact = .{ .requested_bytes = count, .received_bytes = reader.bufferedLen() } } }, .read, self.role, null, err);
-            return self.diag.fail(.{ .@"io.read_failed" = .{ .requested_bytes = count } }, .read, self.role, cause, err);
+            if (err == error.EndOfStream) return self.diag.fail(diagnostics.readFailure(count, reader.bufferedLen()), .read, self.role, null, err);
+            return self.diag.fail(diagnostics.readFailure(count, null), .read, self.role, cause, err);
         };
     }
 
@@ -2548,11 +2531,7 @@ const StreamedCatalog = struct {
         };
         output.interface.writeAll(&index_format.encodeZfiSourceId(mtime)) catch |err| return self.diag.fail(.{ .@"io.write_failed" = {} }, .write, .zfi, if (output.err) |cause| cause else err, error.ZfiWriteFailed);
         output.interface.writeAll(&index_format.encodeZfiNameFooter(self.names.raw_len)) catch |err| return self.diag.fail(.{ .@"io.write_failed" = {} }, .write, .zfi, if (output.err) |cause| cause else err, error.ZfiWriteFailed);
-        output.flush() catch |err| {
-            if (self.diag.failure) |failure| failure.outputs.file.final_flush = .failed;
-            return self.diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .zfi, if (output.err) |cause| cause else err, error.ZfiWriteFailed);
-        };
-        if (self.diag.failure) |failure| failure.outputs.file.final_flush = .succeeded;
+        if (diagnostics.flushOutput(&output, if (self.diag.failure) |failure| &failure.outputs.file else null)) |cause| return self.diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .zfi, cause, error.ZfiWriteFailed);
     }
 
     fn retainWriteCause(self: *@This(), cause: ?std.Io.File.Writer.Error) void {
@@ -2669,8 +2648,8 @@ const StagedNames = struct {
         records.seekTo(@sizeOf(ZfiHeader)) catch |err| return self.raw.diag.fail(.{ .@"io.seek_failed" = .{ .requested_offset = @sizeOf(ZfiHeader) } }, .seek, .catalog_spool, if (records.seek_err) |cause| cause else err, error.ReadFailed);
         for (0..self.count) |ordinal| {
             const record = records.interface.takeArray(@sizeOf(IndexRecord)) catch |err| {
-                if (err == error.EndOfStream) return self.raw.diag.fail(.{ .@"io.unexpected_eof" = .{ .exact = .{ .requested_bytes = @sizeOf(IndexRecord), .received_bytes = records.interface.bufferedLen() } } }, .read, .catalog_spool, null, err);
-                return self.raw.diag.fail(.{ .@"io.read_failed" = .{ .requested_bytes = @sizeOf(IndexRecord) } }, .read, .catalog_spool, if (records.err) |cause| cause else err, err);
+                if (err == error.EndOfStream) return self.raw.diag.fail(diagnostics.readFailure(@sizeOf(IndexRecord), records.interface.bufferedLen()), .read, .catalog_spool, null, err);
+                return self.raw.diag.fail(diagnostics.readFailure(@sizeOf(IndexRecord), null), .read, .catalog_spool, if (records.err) |cause| cause else err, err);
             };
             const start = @offsetOf(IndexRecord, "name_len");
             const len = std.mem.readInt(u16, record[start..][0..2], .little);

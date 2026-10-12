@@ -403,3 +403,23 @@ test "[failure] - [diagnostics]: every partial allocation cleans up without diag
     try testing.checkAllAllocationFailures(testing.allocator, allocationCheck, .{});
     try caller.exercise(testing.allocator);
 }
+
+test "[unit] - [diagnostics]: maps open and read errors to their codes" {
+    const cases = [_]struct { err: anyerror, code: diagnostics.Code }{
+        .{ .err = error.FileNotFound, .code = .@"io.file_not_found" },
+        .{ .err = error.AccessDenied, .code = .@"io.access_denied" },
+        .{ .err = error.NameTooLong, .code = .@"io.invalid_path" },
+        .{ .err = error.NotDir, .code = .@"io.open_failed" },
+        .{ .err = error.SymLinkLoop, .code = .@"io.open_failed" },
+    };
+    for (cases) |case| {
+        const diagnostic = diagnostics.Diagnostic{ .details = diagnostics.openFailure(case.err), .stage = .open, .at = .{} };
+        try testing.expectEqual(case.code, diagnostic.code());
+    }
+    try testing.expect(diagnostics.openFailure(error.NameTooLong).@"io.invalid_path".reason == .too_long);
+
+    try testing.expectEqual(@as(?u64, 10), diagnostics.readFailure(10, null).@"io.read_failed".requested_bytes);
+    const eof = diagnostics.readFailure(10, 4).@"io.unexpected_eof".exact;
+    try testing.expectEqual(@as(u64, 10), eof.requested_bytes);
+    try testing.expectEqual(@as(u64, 4), eof.received_bytes);
+}

@@ -31,11 +31,7 @@ pub fn runStats(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8
         }
     }
     try writeComputedReport(&stdout_fw.interface, fasta_path, &idx, &computed, &diag);
-    stdout_fw.flush() catch |err| {
-        failure.outputs.stdout.final_flush = .failed;
-        return diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .stdout, null, stdout_fw.err orelse err);
-    };
-    failure.outputs.stdout.final_flush = .succeeded;
+    if (diagnostics.flushOutput(&stdout_fw, &failure.outputs.stdout)) |cause| return diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .stdout, null, cause);
     failure.succeed();
 }
 
@@ -120,10 +116,7 @@ const Diagnostics = struct {
 
     fn read(self: *@This(), offset: u64, wanted: u64, received: ?u64, cause: ?anyerror) diagnostics.Error {
         @branchHint(.cold);
-        return self.fail(if (received) |got| .{ .@"io.unexpected_eof" = .{ .exact = .{
-            .requested_bytes = wanted,
-            .received_bytes = got,
-        } } } else .{ .@"io.read_failed" = .{ .requested_bytes = wanted } }, .read, .fasta, offset, cause);
+        return self.fail(diagnostics.readFailure(wanted, received), .read, .fasta, offset, cause);
     }
 };
 

@@ -198,6 +198,12 @@ test "[cli] - [stats]: rejects invalid FASTA path counts" {
         1,
         "error [io.file_not_found] stats: \"tests/data/definitely-mi\" (47 bytes): Required file was not found.; cause=\"FileNotFound\"\nhint: Check the named input/output and retained I/O cause.\n",
     );
+    try expectCliFailure(
+        allocator,
+        &.{ ZFASTA_BIN, "stats", "tests/data/simple.fasta/child" },
+        1,
+        "error [io.open_failed] stats: \"tests/data/simple.fasta/\" (29 bytes): Could not open the required input.; cause=\"NotDir\"\nhint: Check the named input/output and retained I/O cause.\n",
+    );
 }
 
 test "[cli] - [stats]: reports missing and corrupt indexes" {

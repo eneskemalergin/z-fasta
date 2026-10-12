@@ -287,6 +287,10 @@ test "[cli] - [validate]: rejects invalid arguments with exact diagnostics" {
             .stderr = "error [io.file_not_found] validate: \"tests/data/definitely-mi\" (47 bytes): Required file was not found.; cause=\"FileNotFound\"\nhint: Check the named input/output and retained I/O cause.\n",
         },
         .{
+            .argv = &.{ ZFASTA_BIN, "validate", "tests/data/simple.fasta/child" },
+            .stderr = "error [io.open_failed] validate: \"tests/data/simple.fasta/\" (29 bytes): Could not open the required input.; cause=\"NotDir\"\nhint: Check the named input/output and retained I/O cause.\n",
+        },
+        .{
             .argv = &.{ ZFASTA_BIN, "validate", "tests/data/simple.fasta", "tests/data/single.fasta" },
             .stderr = "error [usage.extra_argument] validate: Too many arguments. argument=fasta_path allowed_count=1\nhint: Correct the command arguments; use --help for accepted options.\n",
         },

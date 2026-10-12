@@ -418,6 +418,7 @@ test "[cli] - [get]: missing FASTA path returns an exact error" {
     const expected = "error [io.file_not_found] get: \"tests/data/definitely-mi\" (47 bytes): Required file was not found.; cause=\"FileNotFound\"\nhint: Check the named input/output and retained I/O cause.\n";
 
     try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", missing, "seq1" }, 1, expected);
+    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta/child", "seq1" }, 1, "error [io.open_failed] get: \"tests/data/simple.fasta/\" (29 bytes): Could not open the required input.; cause=\"NotDir\"\nhint: Check the named input/output and retained I/O cause.\n");
 }
 
 test "[cli] - [get]: validates FASTA and sidecar before request input" {
@@ -436,6 +437,12 @@ test "[cli] - [get]: validates FASTA and sidecar before request input" {
         &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", "tests/data/also-missing.txt" },
         1,
         "error [io.file_not_found] get: \"tests/data/also-missing.\" (27 bytes): Required file was not found.; cause=\"FileNotFound\"\nhint: Check the named input/output and retained I/O cause.\n",
+    );
+    try expectCliFailure(
+        allocator,
+        &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", "tests/data/simple.fasta/child" },
+        1,
+        "error [io.open_failed] get: \"tests/data/simple.fasta/\" (29 bytes): Could not open the required input.; cause=\"NotDir\"\nhint: Check the named input/output and retained I/O cause.\n",
     );
 }
 
