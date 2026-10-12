@@ -23,7 +23,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         const path = try std.fmt.allocPrint(allocator, "{s}/tests/data/{s}", .{ root, name });
         defer allocator.free(path);
         var failure: commands.index_format.diagnostics.Failure = undefined;
-        _ = commands.indexer.runIndex(io, init.environ, path, .{}, &failure) catch |err| {
+        _ = commands.indexer.runIndex(std.heap.page_allocator, io, init.environ, path, .{}, &failure) catch |err| {
             var buffer: [4096]u8 = undefined;
             var output = std.Io.File.stderr().writer(io, &buffer);
             try commands.reporting.writeText(&output.interface, &failure);

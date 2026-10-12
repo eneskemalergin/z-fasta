@@ -106,7 +106,7 @@ pub fn resolveRegion(idx: *const LoadedIndex, region_str: []const u8, failure: *
     failure.reset(.get);
     failure.sources.set(.request_snapshot, .{ .label = .{ .borrowed = region_str }, .kind = .memory });
     var context = Diagnostics{ .failure = failure, .lookup_scope = .retained_matches, .index_source = if (idx.source == .zfi) .zfi else .fai, .at = .{ .source = .request_snapshot, .request = 1 } };
-    const result = try resolveRegionInternal(idx, region_str, &context);
+    const result = try resolveRegionText(idx, region_str, &context);
     failure.succeed();
     return result;
 }
@@ -118,7 +118,7 @@ pub fn extractRegion(idx: *const LoadedIndex, region_str: []const u8, writer: an
     failure.sources.set(.request_snapshot, .{ .label = .{ .borrowed = region_str }, .kind = .memory });
     var context = Diagnostics{ .failure = failure, .output_source = .output, .lookup_scope = .retained_matches, .index_source = if (idx.source == .zfi) .zfi else .fai, .at = .{ .source = .request_snapshot, .request = 1 } };
     const diag = &context;
-    const resolved = try resolveRegionInternal(idx, region_str, diag);
+    const resolved = try resolveRegionText(idx, region_str, diag);
     var input_buffer: [FASTA_INPUT_BUFFER_BYTES]u8 = undefined;
     var output_buffer: [REGION_OUTPUT_BUFFER_BYTES]u8 = undefined;
     try emitRegion(resolved, fastaSource(idx), &input_buffer, &output_buffer, writer, diag);
@@ -175,7 +175,7 @@ pub fn fetchSymbols(idx: *const LoadedIndex, ordinal: usize, start: u64, end: u6
     return symbols;
 }
 
-pub fn runGetWithOptions(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, options: Options, failure: *diagnostics.Failure) diagnostics.Error!Result {
+pub fn runGet(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, options: Options, failure: *diagnostics.Failure) diagnostics.Error!Result {
     failure.reset(.get);
     failure.sources.set(.stdout, .{ .label = .{ .borrowed = "stdout" }, .kind = .stream });
     var context = Diagnostics{ .failure = failure };
@@ -394,7 +394,7 @@ fn parseRangeSuffix(suffix: []const u8) ?ParsedRange {
     return .{ .start = start, .end = end };
 }
 
-fn resolveRegionInternal(idx: *const LoadedIndex, region_str: []const u8, diag: *Diagnostics) diagnostics.Error!ResolvedRegion {
+fn resolveRegionText(idx: *const LoadedIndex, region_str: []const u8, diag: *Diagnostics) diagnostics.Error!ResolvedRegion {
     const region = parseRegion(region_str);
     const rec_idx = idx.lookupName(region.name) orelse return diag.missing(region.name);
     return resolveParsedRequest(idx, .{ .region = region, .orientation = .{} }, rec_idx, false, diag);
@@ -1040,7 +1040,7 @@ fn appendOwnedRequest(allocator: std.mem.Allocator, workspace: *RequestWorkspace
 
 fn appendBedLineRequest(allocator: std.mem.Allocator, workspace: *RequestWorkspace, line: []const u8, line_number: usize, honor_strand: bool, global_orientation: Orientation, diag: *Diagnostics) diagnostics.Error!void {
     diag.at.location.line = line_number;
-    const parsed = try bed_parser.parseBedLineChecked(line, honor_strand, diag.at, diag.failure);
+    const parsed = try bed_parser.parseBedLine(line, honor_strand, diag.at, diag.failure);
     switch (parsed) {
         .skip => {},
         .region => |region| {
@@ -1347,7 +1347,7 @@ fn runPositionalGet(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path
     try appendCliRequests(allocator, &requests, regions, options.orientation, diag);
     const names = allocator.alloc([]const u8, requests.items.len) catch return diag.oom(.request_names);
     for (requests.items, names) |request, *name| name.* = request.region.name;
-    var idx = try index_format.loadIndexCheckedWithMode(backing_allocator, io, fasta_path, .{ .positional = names }, diag.failure);
+    var idx = try index_format.loadIndex(backing_allocator, io, fasta_path, .automatic, .{ .positional = names }, diag.failure);
     defer idx.deinit();
     diag.index_source = if (idx.source == .zfi) .zfi else .fai;
     return emitGet(allocator, io, &idx, options, requests.items, null, null, null, diag, buffers);
@@ -1376,7 +1376,7 @@ fn runFileGet(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path: []co
             if (buffered_requests == null) diag.lookup_scope = .retained_matches;
             break :matched .{ .matched = requested.names.items };
         } else .lookup_full_map;
-        break :load try index_format.loadIndexCheckedWithMode(backing_allocator, io, fasta_path, load_mode, diag.failure);
+        break :load try index_format.loadIndex(backing_allocator, io, fasta_path, .automatic, load_mode, diag.failure);
     };
     defer idx.deinit();
     diag.index_source = if (idx.source == .zfi) .zfi else .fai;
@@ -1428,6 +1428,12 @@ fn emitGet(
     return totals;
 }
 
+fn loadTestIndex(test_io: std.Io, fasta_path: []const u8) diagnostics.Error!LoadedIndex {
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.get);
+    return index_format.loadIndex(std.testing.allocator, test_io, fasta_path, .automatic, .lookup_full_map, &failure);
+}
+
 fn collectNamesForAllocationCheck(allocator: std.mem.Allocator, stable_input: bool) !void {
     var requested = RequestedNames.init(allocator);
     defer requested.deinit();
@@ -1442,7 +1448,7 @@ fn collectNamesForAllocationCheck(allocator: std.mem.Allocator, stable_input: bo
 }
 
 fn checkGetRequestAllocations(allocator: std.mem.Allocator) !void {
-    var idx = try index_format.loadIndexCheckedLegacy(std.testing.allocator, std.testing.io, "tests/data/simple.fasta");
+    var idx = try loadTestIndex(std.testing.io, "tests/data/simple.fasta");
     defer idx.deinit();
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
@@ -1521,7 +1527,7 @@ test "[edge] - [get request workspace]: retains the name crossing its byte targe
 
 test "[unit] - [get names reader]: handles line endings and a final unterminated line" {
     const test_io = std.testing.io;
-    var idx = try index_format.loadIndexCheckedLegacy(std.testing.allocator, test_io, "tests/data/simple.fasta");
+    var idx = try loadTestIndex(test_io, "tests/data/simple.fasta");
     defer idx.deinit();
     var reader = std.Io.Reader.fixed("# comment\r\n\r\nseq2\r\nseq1\nseq2");
     var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -1556,7 +1562,7 @@ test "[unit] - [get names reader]: handles line endings and a final unterminated
 
 test "[edge] - [get names reader]: resets storage at the request-count boundary" {
     const test_io = std.testing.io;
-    var idx = try index_format.loadIndexCheckedLegacy(std.testing.allocator, test_io, "tests/data/simple.fasta");
+    var idx = try loadTestIndex(test_io, "tests/data/simple.fasta");
     defer idx.deinit();
     var names = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer names.deinit();
@@ -1595,7 +1601,7 @@ test "[edge] - [get names reader]: resets storage at the request-count boundary"
 
 test "[unit] - [get BED reader]: streams rows in source order" {
     const test_io = std.testing.io;
-    var idx = try index_format.loadIndexCheckedLegacy(std.testing.allocator, test_io, "tests/data/simple.fasta");
+    var idx = try loadTestIndex(test_io, "tests/data/simple.fasta");
     defer idx.deinit();
 
     const bed_data =
@@ -1637,7 +1643,7 @@ test "[unit] - [get BED reader]: streams rows in source order" {
 
 test "[edge] - [get BED reader]: preserves output across request-batch boundaries" {
     const test_io = std.testing.io;
-    var idx = try index_format.loadIndexCheckedLegacy(std.testing.allocator, test_io, "tests/data/simple.fasta");
+    var idx = try loadTestIndex(test_io, "tests/data/simple.fasta");
     defer idx.deinit();
 
     const counts = [_]usize{
@@ -1691,7 +1697,7 @@ test "[edge] - [get BED reader]: preserves output across request-batch boundarie
 }
 
 test "[failure] - [GET request facts]: keeps original rows and ordinals across skipped rows and batches" {
-    var idx = try index_format.loadIndexCheckedLegacy(std.testing.allocator, std.testing.io, "tests/data/simple.fasta");
+    var idx = try loadTestIndex(std.testing.io, "tests/data/simple.fasta");
     defer idx.deinit();
     var rows = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer rows.deinit();
@@ -1719,7 +1725,7 @@ test "[failure] - [GET request facts]: keeps original rows and ordinals across s
 }
 
 test "[failure] - [GET totals]: rejects repeated-request overflow before writing another region" {
-    var idx = try index_format.loadIndexCheckedLegacy(std.testing.allocator, std.testing.io, "tests/data/simple.fasta");
+    var idx = try loadTestIndex(std.testing.io, "tests/data/simple.fasta");
     defer idx.deinit();
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
@@ -1761,7 +1767,7 @@ test "[failure] - [GET request replay]: detects metadata changes and limits equa
     try file.setLength(io, before.size);
     try file.setTimestamps(io, .{ .modify_timestamp = .{ .new = before.mtime } });
     failure.reset(.get);
-    var idx = try index_format.loadIndexCheckedWithMode(std.testing.allocator, io, "tests/data/simple.fasta", .{ .matched = &.{"seq1"} }, &failure);
+    var idx = try index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta", .automatic, .{ .matched = &.{"seq1"} }, &failure);
     defer idx.deinit();
     try checkRequestSource(io, opened, &context);
     var input: [64]u8 = undefined;
@@ -1812,7 +1818,7 @@ test "[failure] - [GET request IO]: retains required read and comparison causes"
     var buffer: [128]u8 = undefined;
     var reader = file.reader(fault_io, &buffer);
     context.request_reader = &reader;
-    var idx = try index_format.loadIndexCheckedLegacy(std.testing.allocator, io, "tests/data/simple.fasta");
+    var idx = try loadTestIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
     var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer writer.deinit();
@@ -1902,7 +1908,7 @@ test "[regression] - [GET discovery]: retries interrupted discovery with the ful
             Fault.output_len = 0;
             var failure: diagnostics.Failure = undefined;
             if (scenario == .persistent) {
-                try std.testing.expectError(error.Io, runGetWithOptions(std.testing.allocator, fault_io, "tests/data/simple.fasta", options, &failure));
+                try std.testing.expectError(error.Io, runGet(std.testing.allocator, fault_io, "tests/data/simple.fasta", options, &failure));
                 const primary = failure.primary().?;
                 try std.testing.expectEqual(diagnostics.Code.@"io.read_failed", primary.code());
                 try std.testing.expectEqual(error.InputOutput, primary.cause.?.zig);
@@ -1912,7 +1918,7 @@ test "[regression] - [GET discovery]: retries interrupted discovery with the ful
                 try std.testing.expectEqual(@as(usize, 0), Fault.output_len);
                 try std.testing.expect(!failure.complete and !failure.work_complete);
             } else {
-                const result = try runGetWithOptions(std.testing.allocator, fault_io, "tests/data/simple.fasta", options, &failure);
+                const result = try runGet(std.testing.allocator, fault_io, "tests/data/simple.fasta", options, &failure);
                 try std.testing.expectEqual(@as(usize, 2), result.region_count);
                 try std.testing.expectEqual(@as(u64, if (bed) 4 else 36), result.total_bases);
                 const expected = if (bed) ">seq1:1-2\nAC\n>seq2:1-2\nGG\n" else ">seq1\nACGTACGTACGTACGTACGTACGT\n>seq2\nGGGGCCCCAAAA\n";

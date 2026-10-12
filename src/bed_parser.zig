@@ -17,43 +17,26 @@ pub const Region = struct {
     strand: Strand,
 };
 
-pub const ParseError = error{
-    MissingChrom,
-    MissingStart,
-    MissingEnd,
-    InvalidStart,
-    InvalidEnd,
-    EmptyInterval,
-};
-
 pub const ParseResult = union(enum) {
     skip,
     region: Region,
 };
 
-pub fn parseBedLineChecked(
+pub fn parseBedLine(
     line: []const u8,
     honor_strand: bool,
     at: diagnostics.Reference,
     failure: *diagnostics.Failure,
 ) diagnostics.Error!ParseResult {
     const diag = BedDiagnostics{ .failure = failure, .at = at };
-    const parsed = parseLine(line, diag) catch {
-        return diagnostics.metadata(failure.primary().?.code()).returned_error;
-    };
+    const parsed = try parseLine(line, diag);
     if (honor_strand and parsed == .region and parsed.region.strand == .invalid) {
         var fields = std.mem.splitScalar(u8, requestLine(line).?, '\t');
         for (0..5) |_| _ = fields.next();
         const field = fields.next().?;
-        diag.capture(.{ .@"request.bed.invalid_strand" = .{ .strand = diag.preview(field) } }, @intFromPtr(field.ptr) - @intFromPtr(line.ptr));
-        return diagnostics.metadata(failure.primary().?.code()).returned_error;
+        return diag.fail(.{ .@"request.bed.invalid_strand" = .{ .strand = diag.preview(field) } }, @intFromPtr(field.ptr) - @intFromPtr(line.ptr));
     }
     return parsed;
-}
-
-/// Same rules without diagnostics, returning the legacy error set.
-pub fn parseBedLine(line: []const u8) ParseError!ParseResult {
-    return parseLine(line, .{});
 }
 
 /// Reads only the chrom column; the rest of the row is not checked.
@@ -76,29 +59,20 @@ fn parseStrand(field: []const u8) Strand {
 }
 
 const BedDiagnostics = struct {
-    failure: ?*diagnostics.Failure = null,
+    failure: *diagnostics.Failure,
     at: diagnostics.Reference = .{},
 
-    fn fail(self: @This(), details: diagnostics.Details, field_start: usize, legacy: ParseError) ParseError {
-        self.capture(details, field_start);
-        return legacy;
-    }
-
-    fn capture(self: @This(), details: diagnostics.Details, field_start: usize) void {
-        if (self.failure) |failure| {
-            var at = self.at;
-            if (at.location.offset) |offset| {
-                at.location.offset = std.math.add(u64, offset, field_start) catch null;
-            }
-            at.location.column = std.math.add(u64, at.location.column orelse 1, field_start) catch null;
-            switch (failure.fail(.{ .details = details, .stage = .parse, .at = at })) {
-                else => {},
-            }
+    fn fail(self: @This(), details: diagnostics.Details, field_start: usize) diagnostics.Error {
+        var at = self.at;
+        if (at.location.offset) |offset| {
+            at.location.offset = std.math.add(u64, offset, field_start) catch null;
         }
+        at.location.column = std.math.add(u64, at.location.column orelse 1, field_start) catch null;
+        return self.failure.fail(.{ .details = details, .stage = .parse, .at = at });
     }
 
     fn preview(self: @This(), bytes: []const u8) ?diagnostics.Preview {
-        return if (self.failure) |failure| failure.retain(bytes, 32) else null;
+        return self.failure.retain(bytes, 32);
     }
 };
 
@@ -120,25 +94,24 @@ fn rejectedCoordinate(remaining: []const u8) Coordinate {
     return .out_of_range;
 }
 
-fn checkedCoordinate(field: []const u8, kind: diagnostics.BedCoordinate, field_start: usize, diag: BedDiagnostics) ParseError!u64 {
-    const legacy: ParseError = if (kind == .start) error.InvalidStart else error.InvalidEnd;
+fn checkedCoordinate(field: []const u8, kind: diagnostics.BedCoordinate, field_start: usize, diag: BedDiagnostics) diagnostics.Error!u64 {
     return switch (parseCoordinate(field)) {
         .value => |value| value,
         .invalid => diag.fail(.{ .@"request.bed.invalid_coordinate" = .{
             .field = kind,
             .coordinate_system = .zero_based_half_open,
             .value = diag.preview(field),
-        } }, field_start, legacy),
+        } }, field_start),
         .out_of_range => diag.fail(.{ .@"request.bed.coordinate_out_of_range" = .{
             .field = kind,
             .max_value = std.math.maxInt(u64),
             .coordinate_system = .zero_based_half_open,
             .value = diag.preview(field),
-        } }, field_start, legacy),
+        } }, field_start),
     };
 }
 
-fn parseLine(line: []const u8, diag: BedDiagnostics) ParseError!ParseResult {
+fn parseLine(line: []const u8, diag: BedDiagnostics) diagnostics.Error!ParseResult {
     const trimmed = requestLine(line) orelse return .skip;
     var fields = std.mem.splitScalar(u8, trimmed, '\t');
 
@@ -146,27 +119,27 @@ fn parseLine(line: []const u8, diag: BedDiagnostics) ParseError!ParseResult {
     if (chrom.len == 0) return diag.fail(.{ .@"request.bed.field_missing" = .{
         .field = .chrom,
         .column_number = 1,
-    } }, 0, error.MissingChrom);
+    } }, 0);
 
     const start_field = fields.next() orelse return diag.fail(.{ .@"request.bed.field_missing" = .{
         .field = .start,
         .column_number = 2,
-    } }, trimmed.len, error.MissingStart);
+    } }, trimmed.len);
     const start_pos = @intFromPtr(start_field.ptr) - @intFromPtr(trimmed.ptr);
     if (start_field.len == 0) return diag.fail(.{ .@"request.bed.field_missing" = .{
         .field = .start,
         .column_number = 2,
-    } }, start_pos, error.MissingStart);
+    } }, start_pos);
 
     const end_field = fields.next() orelse return diag.fail(.{ .@"request.bed.field_missing" = .{
         .field = .end,
         .column_number = 3,
-    } }, trimmed.len, error.MissingEnd);
+    } }, trimmed.len);
     const end_pos = @intFromPtr(end_field.ptr) - @intFromPtr(trimmed.ptr);
     if (end_field.len == 0) return diag.fail(.{ .@"request.bed.field_missing" = .{
         .field = .end,
         .column_number = 3,
-    } }, end_pos, error.MissingEnd);
+    } }, end_pos);
 
     const start_0based = try checkedCoordinate(start_field, .start, start_pos, diag);
     const end_0based = try checkedCoordinate(end_field, .end, end_pos, diag);
@@ -174,7 +147,7 @@ fn parseLine(line: []const u8, diag: BedDiagnostics) ParseError!ParseResult {
         .start = start_0based,
         .end = end_0based,
         .coordinate_system = .zero_based_half_open,
-    } }, start_pos, error.EmptyInterval);
+    } }, start_pos);
 
     _ = fields.next();
     _ = fields.next();

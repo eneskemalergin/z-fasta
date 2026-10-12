@@ -33,7 +33,7 @@ pub const IndexedReader = struct {
 
     pub fn open(allocator: std.mem.Allocator, io: std.Io, path: []const u8, options: Options, failure: *diagnostics.Failure) diagnostics.Error!IndexedReader {
         failure.reset(.get);
-        var index = try index_format.loadIndexSelected(allocator, io, path, options.index, .lookup_full_map, failure);
+        var index = try index_format.loadIndex(allocator, io, path, options.index, .lookup_full_map, failure);
         errdefer index.deinit();
         try rejectCompressed(index, failure);
         const read_buffer = index.arena.allocator().alloc(u8, READ_BUFFER_BYTES) catch return failure.fail(.{

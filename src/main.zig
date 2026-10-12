@@ -231,9 +231,9 @@ fn bootstrap(reason: reporting.Bootstrap) u8 {
     return 1;
 }
 
-const FastWriteFailure = struct { cause: ?diagnostics.Cause };
+const DirectWriteFailure = struct { cause: ?diagnostics.Cause };
 
-fn writeStdoutFast(bytes: []const u8) ?FastWriteFailure {
+fn writeStdoutDirect(bytes: []const u8) ?DirectWriteFailure {
     if (comptime builtin.os.tag != .linux) {
         var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
         defer threaded.deinit();
@@ -269,7 +269,7 @@ fn runCli(init: std.process.Init.Minimal) u8 {
     if (command) |cmd| {
         if (format == .text and terminal_command) {
             const bytes = if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) USAGE else "z-fasta " ++ VERSION ++ "\n";
-            const write_failure = writeStdoutFast(bytes) orelse return 0;
+            const write_failure = writeStdoutDirect(bytes) orelse return 0;
             var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
             defer threaded.deinit();
             var failure: diagnostics.Failure = undefined;
@@ -325,7 +325,7 @@ fn runIndex(cli: *Cli, environ: std.process.Environ) diagnostics.Error!u8 {
         }
     }
     const fasta = path orelse return cli.fail(.{ .@"usage.missing_argument" = .{ .argument = .fasta_path } });
-    const result = try indexer.runIndex(cli.io, environ, fasta, .{ .emit_fai = emit_fai, .enable_dedup = enable_dedup }, cli.failure);
+    const result = try indexer.runIndex(std.heap.page_allocator, cli.io, environ, fasta, .{ .emit_fai = emit_fai, .enable_dedup = enable_dedup }, cli.failure);
     if (!emit_fai and cli.format == .text) try writeNotice(cli, .{ .index = .{ .path = fasta, .count = result.record_count } });
     return 0;
 }
@@ -379,7 +379,7 @@ fn runGetCmd(cli: *Cli) diagnostics.Error!u8 {
     };
     if (transform.annotate_transform and transform.orientation.isIdentity() and !honor_strand) return cli.fail(.{ .@"usage.option_requires" = .{ .option = .annotate_rc, .required = .transform_or_strand } });
     const source: getter.RequestSource = if (bed_path) |bed| .{ .bed = bed } else if (names_path) |names| .{ .names = names } else .{ .positional = regions[0..count] };
-    const result = try getter.runGetWithOptions(std.heap.page_allocator, cli.io, path, .{ .source = source, .honor_strand = honor_strand, .measure_elapsed = summary, .orientation = transform.orientation, .annotate_transform = transform.annotate_transform }, cli.failure);
+    const result = try getter.runGet(std.heap.page_allocator, cli.io, path, .{ .source = source, .honor_strand = honor_strand, .measure_elapsed = summary, .orientation = transform.orientation, .annotate_transform = transform.annotate_transform }, cli.failure);
     if (summary) try writeNotice(cli, .{ .get = result });
     return 0;
 }

@@ -158,14 +158,14 @@ pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const
         break :blk fasta_map.?.memory;
     };
     if (fasta_map) |*map| platform.adviseSequential(map.memory);
-    var summary = try validateDataInternal(allocator, data, options, &diag);
+    var summary = try scanData(allocator, data, options, &diag);
     defer summary.deinit(allocator);
     failure.work_complete = true;
     diag.at = .{ .source = .fasta };
     if (options.fix) {
         const output_path = options.output_path orelse return diag.fail(.{ .@"usage.option_requires" = .{ .option = .fix, .required = .output } }, .arguments, .fasta, null);
         try checkRewriteDestination(io, fasta_path, output_path, failure);
-        try fixRejectionChecked(&summary, options, failure);
+        try checkFixAllowed(&summary, options, failure);
         try writeFixed(io, data, summary.record_widths.items, output_path, file, stat, failure);
     }
     var out_buf: [65536]u8 = undefined;
@@ -184,23 +184,11 @@ pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const
     return result;
 }
 
-pub fn validateData(allocator: std.mem.Allocator, data: []const u8, options: Options) error{ OutOfMemory, SequenceLineTooLong, CountOverflow, Internal }!Summary {
-    var failure: diagnostics.Failure = undefined;
-    return validateDataChecked(allocator, data, options, &failure) catch |err| {
-        if (failure.primary().?.code() == .@"index.sequence_line_too_long") return error.SequenceLineTooLong;
-        return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            error.CountOverflow => error.CountOverflow,
-            else => error.Internal,
-        };
-    };
-}
-
-pub fn validateDataChecked(allocator: std.mem.Allocator, data: []const u8, options: Options, failure: *diagnostics.Failure) diagnostics.Error!Summary {
+pub fn validateData(allocator: std.mem.Allocator, data: []const u8, options: Options, failure: *diagnostics.Failure) diagnostics.Error!Summary {
     failure.reset(.validate);
     failure.sources.set(.fasta, .{ .label = .{ .borrowed = "validated input" }, .kind = .memory });
     var diag = Diagnostics{ .failure = failure };
-    const result = try validateDataInternal(allocator, data, options, &diag);
+    const result = try scanData(allocator, data, options, &diag);
     failure.succeed();
     return result;
 }
@@ -221,21 +209,7 @@ pub fn exitCodeForOptions(summary: *const Summary, options: Options) u8 {
     );
 }
 
-pub fn fixRejection(summary: *const Summary, options: Options) ?Kind {
-    for (summary.events.items) |event| {
-        switch (event.kind) {
-            .invalid_character => if (!options.fix_format_only) return .invalid_character,
-            .no_sequences, .duplicate_name, .null_byte => return event.kind,
-            else => {},
-        }
-    }
-    if (summary.truncated_fix_rejection) |kind| {
-        if (kind != .invalid_character or !options.fix_format_only) return kind;
-    }
-    return null;
-}
-
-pub fn fixRejectionChecked(summary: *const Summary, options: Options, failure: *diagnostics.Failure) diagnostics.Error!void {
+pub fn checkFixAllowed(summary: *const Summary, options: Options, failure: *diagnostics.Failure) diagnostics.Error!void {
     if (summary.preamble) |position| return failure.fail(.{
         .details = .{ .@"repair.blocked" = .{ .blocker = .{ .content_before_header = .{ .content_bytes = .{ .at_least = 1 } } }, .repair_policy = if (options.fix_format_only) .legacy_format_only else .legacy_safe } },
         .stage = .scan,
@@ -260,12 +234,7 @@ pub fn fixRejectionChecked(summary: *const Summary, options: Options, failure: *
     return failure.fail(.{ .details = .{ .@"repair.blocked" = .{ .blocker = blocker, .repair_policy = if (options.fix_format_only) .legacy_format_only else .legacy_safe } }, .stage = .scan, .at = eventReference(event), .related = if (event.kind == .duplicate_name) .{ .source = .fasta, .location = .{ .line = event.first_line } } else null });
 }
 
-pub fn fixData(allocator: std.mem.Allocator, data: []const u8, record_widths: []const u32) diagnostics.Error![]u8 {
-    var failure: diagnostics.Failure = undefined;
-    return fixDataChecked(allocator, data, record_widths, &failure);
-}
-
-pub fn fixDataChecked(allocator: std.mem.Allocator, data: []const u8, record_widths: []const u32, failure: *diagnostics.Failure) diagnostics.Error![]u8 {
+pub fn fixData(allocator: std.mem.Allocator, data: []const u8, record_widths: []const u32, failure: *diagnostics.Failure) diagnostics.Error![]u8 {
     failure.reset(.validate);
     failure.sources.set(.fasta, .{ .label = .{ .borrowed = "rewrite input" }, .kind = .memory });
     var diag = Diagnostics{ .failure = failure };
@@ -278,12 +247,7 @@ pub fn fixDataChecked(allocator: std.mem.Allocator, data: []const u8, record_wid
     return result;
 }
 
-pub fn renderJsonEvent(allocator: std.mem.Allocator, event: Event) error{OutOfMemory}![]u8 {
-    var failure: diagnostics.Failure = undefined;
-    return renderJsonEventChecked(allocator, event, &failure) catch return error.OutOfMemory;
-}
-
-pub fn renderJsonEventChecked(allocator: std.mem.Allocator, event: Event, failure: *diagnostics.Failure) diagnostics.Error![]u8 {
+pub fn renderJsonEvent(allocator: std.mem.Allocator, event: Event, failure: *diagnostics.Failure) diagnostics.Error![]u8 {
     failure.reset(.validate);
     failure.sources.set(.fasta, .{ .label = .{ .borrowed = "validation event" }, .kind = .memory });
     var diag = Diagnostics{ .failure = failure, .at = eventReference(event) };
@@ -367,7 +331,7 @@ const RecordState = struct {
     }
 };
 
-fn validateDataInternal(allocator: std.mem.Allocator, data: []const u8, options: Options, diag: *Diagnostics) diagnostics.Error!Summary {
+fn scanData(allocator: std.mem.Allocator, data: []const u8, options: Options, diag: *Diagnostics) diagnostics.Error!Summary {
     var summary = Summary{
         .events = .empty,
         .record_widths = .empty,

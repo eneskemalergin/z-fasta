@@ -7,6 +7,30 @@ const main = @import("main");
 const test_options = @import("test_options");
 pub const ZFASTA_BIN = if (std.fs.path.isAbsolute(test_options.binary_path)) test_options.binary_path else test_options.build_root ++ std.fs.path.sep_str ++ test_options.binary_path;
 
+pub const LoadFailureGroup = error{ FileNotFound, AccessDenied, Io, EmptyFile, PathTooLong, MmapFailed, CorruptIndex, StaleIndex, NoIndexFound, OutOfMemory };
+
+/// Loads with automatic selection and reports a failure as the group loader tests assert.
+pub fn loadIndexGrouped(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, mode: main.index_format.LoadMode) LoadFailureGroup!main.index_format.LoadedIndex {
+    var failure: main.index_format.diagnostics.Failure = undefined;
+    failure.reset(if (mode == .stats_scan) .stats else .get);
+    return main.index_format.loadIndex(allocator, io, fasta_path, .automatic, mode, &failure) catch |err| switch (failure.primary().?.code()) {
+        .@"io.file_not_found" => error.FileNotFound,
+        .@"io.access_denied" => error.AccessDenied,
+        .@"io.invalid_path" => error.PathTooLong,
+        .@"io.map_failed" => error.MmapFailed,
+        .@"fasta.no_records" => error.EmptyFile,
+        .@"index.older_than_source", .@"index.source_size_mismatch", .@"index.source_mtime_mismatch" => error.StaleIndex,
+        .@"index.not_found" => error.NoIndexFound,
+        .@"resource.line_buffer_exceeded" => error.CorruptIndex,
+        .@"resource.capacity_limit_exceeded" => if (failure.primary().?.details.@"resource.capacity_limit_exceeded".capacity_role == .map_bytes) error.MmapFailed else error.OutOfMemory,
+        else => switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.InvalidIndex => error.CorruptIndex,
+            else => error.Io,
+        },
+    };
+}
+
 pub fn expectCliResult(
     allocator: std.mem.Allocator,
     argv: []const []const u8,
@@ -135,7 +159,7 @@ pub fn captureExtractRegion(
     fasta_path: []const u8,
     region: []const u8,
 ) ![]u8 {
-    var index = try main.index_format.loadIndexCheckedLegacy(allocator, std.testing.io, fasta_path);
+    var index = try loadIndexGrouped(allocator, std.testing.io, fasta_path, .lookup_full_map);
     defer index.deinit();
 
     var output = std.Io.Writer.Allocating.init(allocator);

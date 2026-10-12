@@ -62,14 +62,62 @@ pub fn scanZfiReader(
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
     read_buf: []u8,
-    enable_dedup: bool,
+    options: ScanOptions,
 ) !ZfiIndex {
-    return scanZfiReaderWithOptions(
+    var index = ZfiIndex{
+        .records = .empty,
+        .side_tables = .empty,
+        .name_blob = .empty,
+    };
+    errdefer index.deinit(allocator);
+    const diag = Diagnostics{ .failure = options.failure };
+    try checkReadBufferSize(read_buf.len, options.failure);
+    index.records.ensureTotalCapacity(allocator, ZFI_INITIAL_RECORD_CAPACITY) catch return diag.oom(.records, ZFI_INITIAL_RECORD_CAPACITY * @sizeOf(IndexRecord));
+
+    const Ctx = struct {
+        index: *ZfiIndex,
+        allocator: std.mem.Allocator,
+        diag: Diagnostics,
+
+        fn emit(ctx: *@This(), emit_info: FastaRecordEmit) !void {
+            var rec = emit_info.record;
+            if (!emit_info.uses_uniform_formula) {
+                const local_offset = ctx.index.side_tables.items.len;
+                ctx.index.side_tables.appendSlice(ctx.allocator, emit_info.side_table) catch return ctx.diag.forRecord(emit_info).oom(.side_tables, emit_info.side_table.len);
+                try ctx.diag.forRecord(emit_info).markNonUniform(&rec, local_offset, .local);
+            }
+            if (!emit_info.name_embedded) {
+                try embedZfiName(ctx.allocator, &rec, emit_info.name, &ctx.index.name_blob, ctx.diag.forRecord(emit_info));
+            }
+            ctx.index.records.append(ctx.allocator, rec) catch return ctx.diag.forRecord(emit_info).oom(.records, @sizeOf(IndexRecord));
+        }
+    };
+
+    var ctx = Ctx{ .index = &index, .allocator = allocator, .diag = diag };
+    var blob_dedup: ?NameDedup = null;
+    defer if (blob_dedup) |*seen| seen.deinit();
+    if (options.enable_dedup) {
+        blob_dedup = NameDedup.initOwningBlob(allocator, &index.name_blob);
+        blob_dedup.?.diag = diag;
+        try blob_dedup.?.ensureCapacity(DEDUP_INITIAL_CAPACITY);
+    }
+    const external_dedup: ?*NameDedup = if (blob_dedup) |*s| s else null;
+    _ = try scanFastaReader(
         allocator,
         reader,
         read_buf,
-        .{ .enable_dedup = enable_dedup },
+        .{
+            .enable_dedup = options.enable_dedup,
+            .collect_side_tables = true,
+            .require_initial_header = options.require_initial_header,
+            .failure = options.failure,
+        },
+        external_dedup,
+        &ctx,
+        Ctx.emit,
     );
+    try finalizeSideTableOffsets(&index, diag);
+    return index;
 }
 
 pub fn scanZfiData(
@@ -79,7 +127,7 @@ pub fn scanZfiData(
 ) !ZfiIndex {
     var r = std.Io.Reader.fixed(data);
     var read_buf: [INDEX_READ_BUFFER_SIZE]u8 = undefined;
-    return scanZfiReader(allocator, &r, &read_buf, enable_dedup);
+    return scanZfiReader(allocator, &r, &read_buf, .{ .enable_dedup = enable_dedup });
 }
 
 pub fn writeZfiIndexFile(
@@ -99,16 +147,7 @@ pub fn writeZfiIndexFile(
     try file_fw.flush();
 }
 
-pub fn zfiIndexToBytes(
-    allocator: std.mem.Allocator,
-    index: *const ZfiIndex,
-    source_size: u64,
-    source_mtime_ns: u64,
-) ![]u8 {
-    return serializeZfiIndex(allocator, index, source_size, source_mtime_ns, .{});
-}
-
-pub fn zfiIndexToBytesChecked(allocator: std.mem.Allocator, index: *const ZfiIndex, source_size: u64, source_mtime_ns: u64, failure: *diagnostics.Failure) diagnostics.Error![]u8 {
+pub fn zfiIndexToBytes(allocator: std.mem.Allocator, index: *const ZfiIndex, source_size: u64, source_mtime_ns: u64, failure: *diagnostics.Failure) diagnostics.Error![]u8 {
     return serializeZfiIndex(allocator, index, source_size, source_mtime_ns, .{ .failure = failure }) catch return diagnostics.metadata(failure.primary().?.code()).returned_error;
 }
 
@@ -117,12 +156,70 @@ pub fn scanFastaReader(
     reader: *std.Io.Reader,
     read_buf: []u8,
     options: ScanOptions,
-    external_dedup: ?*NameDedup,
+    external_dedup: anytype,
     ctx: anytype,
     comptime emitRecord: fn (@TypeOf(ctx), FastaRecordEmit) anyerror!void,
 ) !u32 {
     try checkReadBufferSize(read_buf.len, options.failure);
-    return scanFastaReaderWithDedup(allocator, reader, read_buf, options, external_dedup, ctx, emitRecord);
+    var owned_original: ?NameDedup = null;
+    defer if (owned_original) |*seen| seen.deinit();
+    const Dedup = if (@TypeOf(external_dedup) == ?*SourceAdapter) SourceAdapter else if (@TypeOf(external_dedup) == ?*PackedNames) PackedNames else NameDedup;
+    const external: ?*Dedup = external_dedup;
+    const dedup_ptr: ?*Dedup = blk: {
+        if (external) |pointer| break :blk pointer;
+        if (comptime Dedup == NameDedup) {
+            if (options.enable_dedup) {
+                owned_original = NameDedup.init(allocator);
+                owned_original.?.diag = .{ .failure = options.failure };
+                try owned_original.?.ensureCapacity(DEDUP_INITIAL_CAPACITY);
+                break :blk &owned_original.?;
+            }
+        } else {
+            std.debug.assert(!options.enable_dedup);
+        }
+        break :blk null;
+    };
+
+    var state = ChunkParseState{
+        .allocator = allocator,
+        .collect_side_tables = options.collect_side_tables,
+        .diag = .{ .failure = options.failure, .format = if (options.collect_side_tables) .zfi else .fai },
+    };
+    defer state.name.deinit(allocator);
+    defer if (options.collect_side_tables) state.side_table.deinit(allocator);
+    var record_count: u32 = 0;
+    var file_offset: u64 = 0;
+
+    while (true) {
+        var read_diag = state.diag;
+        read_diag.at = .{ .source = .fasta, .location = .{ .offset = file_offset } };
+        const n = reader.readSliceShort(read_buf) catch |err| return read_diag.fail(.{ .@"io.read_failed" = .{ .requested_bytes = read_buf.len } }, .read, .fasta, err, error.SourceReadFailed);
+        if (n == 0) break;
+        if (file_offset == 0 and options.require_initial_header and read_buf[0] != '>') {
+            return read_diag.fail(.{ .@"index.initial_header_required" = .{ .byte = read_buf[0] } }, .scan, .fasta, null, error.NotFasta);
+        }
+        const next_offset = std.math.add(u64, file_offset, n) catch return read_diag.fail(.{ .@"resource.count_overflow" = .{ .counter = .source_bytes, .max_value = std.math.maxInt(u64), .current = file_offset, .increment = n } }, .scan, .fasta, null, error.SourceTooLong);
+        if (comptime Dedup == SourceAdapter) {
+            if (dedup_ptr) |seen| seen.source_names.setChunk(read_buf[0..n], file_offset);
+        }
+        try processChunkBytes(
+            &state,
+            read_buf[0..n],
+            file_offset,
+            options.max_name_len,
+            dedup_ptr,
+            ctx,
+            emitRecord,
+            &record_count,
+        );
+        file_offset = next_offset;
+    }
+
+    if (state.active) {
+        try state.emitRecordIfReady(ctx, dedup_ptr, emitRecord, &record_count);
+    }
+
+    return record_count;
 }
 
 pub fn scanFaiData(
@@ -133,10 +230,11 @@ pub fn scanFaiData(
 ) !u32 {
     var r = std.Io.Reader.fixed(data);
     var read_buf: [INDEX_READ_BUFFER_SIZE]u8 = undefined;
-    return scanFaiReader(allocator, &r, &read_buf, writer, .{ .enable_dedup = enable_dedup });
+    return scanFaiReader(allocator, &r, &read_buf, writer, .{ .enable_dedup = enable_dedup }, null);
 }
 
 pub fn runIndex(
+    allocator: std.mem.Allocator,
     io: std.Io,
     environ: std.process.Environ,
     path: []const u8,
@@ -163,9 +261,9 @@ pub fn runIndex(
     const stat = file.stat(io) catch |err| return failure.fail(.{ .details = .{ .@"io.stat_failed" = {} }, .stage = .stat, .at = .{ .source = .fasta }, .cause = .{ .zig = err } });
     if (stat.size == 0) return failure.fail(.{ .details = .{ .@"fasta.no_records" = {} }, .stage = .stat, .at = .{ .source = .fasta } });
     const count = (if (stat.size <= SMALL_INDEX_MAX_BYTES)
-        runIndexSmall(io, environ, path, options, file, stat, diag)
+        runIndexSmall(allocator, io, environ, path, options, file, stat, diag)
     else
-        runIndexLarge(io, environ, path, options, file, stat, diag)) catch |err| {
+        runIndexLarge(allocator, io, environ, path, options, file, stat, diag)) catch |err| {
         if (failure.primary()) |primary| return diagnostics.metadata(primary.code()).returned_error;
         return failure.fail(.{ .details = .{ .@"internal.consistency_failed" = .{ .component = .indexer, .check = .codec_state } }, .stage = .scan, .at = .{ .source = .fasta }, .cause = .{ .zig = err } });
     };
@@ -700,68 +798,6 @@ fn embedZfiName(
     rec.name_len = @intCast(name.len);
     name_blob.appendSlice(allocator, name) catch return diag.oom(.names, name.len);
     rec.flags_and_offset[0] |= index_format.NAME_IN_ZFI_FLAG;
-}
-
-fn scanZfiReaderWithOptions(
-    allocator: std.mem.Allocator,
-    reader: *std.Io.Reader,
-    read_buf: []u8,
-    options: ScanOptions,
-) !ZfiIndex {
-    var index = ZfiIndex{
-        .records = .empty,
-        .side_tables = .empty,
-        .name_blob = .empty,
-    };
-    errdefer index.deinit(allocator);
-    const diag = Diagnostics{ .failure = options.failure };
-    try checkReadBufferSize(read_buf.len, options.failure);
-    index.records.ensureTotalCapacity(allocator, ZFI_INITIAL_RECORD_CAPACITY) catch return diag.oom(.records, ZFI_INITIAL_RECORD_CAPACITY * @sizeOf(IndexRecord));
-
-    const Ctx = struct {
-        index: *ZfiIndex,
-        allocator: std.mem.Allocator,
-        diag: Diagnostics,
-
-        fn emit(ctx: *@This(), emit_info: FastaRecordEmit) !void {
-            var rec = emit_info.record;
-            if (!emit_info.uses_uniform_formula) {
-                const local_offset = ctx.index.side_tables.items.len;
-                ctx.index.side_tables.appendSlice(ctx.allocator, emit_info.side_table) catch return ctx.diag.forRecord(emit_info).oom(.side_tables, emit_info.side_table.len);
-                try ctx.diag.forRecord(emit_info).markNonUniform(&rec, local_offset, .local);
-            }
-            if (!emit_info.name_embedded) {
-                try embedZfiName(ctx.allocator, &rec, emit_info.name, &ctx.index.name_blob, ctx.diag.forRecord(emit_info));
-            }
-            ctx.index.records.append(ctx.allocator, rec) catch return ctx.diag.forRecord(emit_info).oom(.records, @sizeOf(IndexRecord));
-        }
-    };
-
-    var ctx = Ctx{ .index = &index, .allocator = allocator, .diag = diag };
-    var blob_dedup: ?NameDedup = null;
-    defer if (blob_dedup) |*seen| seen.deinit();
-    if (options.enable_dedup) {
-        blob_dedup = NameDedup.initOwningBlob(allocator, &index.name_blob);
-        blob_dedup.?.diag = diag;
-        try blob_dedup.?.ensureCapacity(DEDUP_INITIAL_CAPACITY);
-    }
-    const external_dedup: ?*NameDedup = if (blob_dedup) |*s| s else null;
-    _ = try scanFastaReader(
-        allocator,
-        reader,
-        read_buf,
-        .{
-            .enable_dedup = options.enable_dedup,
-            .collect_side_tables = true,
-            .require_initial_header = options.require_initial_header,
-            .failure = options.failure,
-        },
-        external_dedup,
-        &ctx,
-        Ctx.emit,
-    );
-    try finalizeSideTableOffsets(&index, diag);
-    return index;
 }
 
 fn writeZfiIndex(
@@ -1302,76 +1338,6 @@ fn processChunkBytes(
     }
 }
 
-fn scanFastaReaderWithDedup(
-    allocator: std.mem.Allocator,
-    reader: *std.Io.Reader,
-    read_buf: []u8,
-    options: ScanOptions,
-    external_dedup: anytype,
-    ctx: anytype,
-    comptime emitRecord: fn (@TypeOf(ctx), FastaRecordEmit) anyerror!void,
-) !u32 {
-    var owned_original: ?NameDedup = null;
-    defer if (owned_original) |*seen| seen.deinit();
-    const Dedup = if (@TypeOf(external_dedup) == ?*SourceAdapter) SourceAdapter else if (@TypeOf(external_dedup) == ?*PackedNames) PackedNames else NameDedup;
-    const external: ?*Dedup = external_dedup;
-    const dedup_ptr: ?*Dedup = blk: {
-        if (external) |pointer| break :blk pointer;
-        if (comptime Dedup == NameDedup) {
-            if (options.enable_dedup) {
-                owned_original = NameDedup.init(allocator);
-                owned_original.?.diag = .{ .failure = options.failure };
-                try owned_original.?.ensureCapacity(DEDUP_INITIAL_CAPACITY);
-                break :blk &owned_original.?;
-            }
-        } else {
-            std.debug.assert(!options.enable_dedup);
-        }
-        break :blk null;
-    };
-
-    var state = ChunkParseState{
-        .allocator = allocator,
-        .collect_side_tables = options.collect_side_tables,
-        .diag = .{ .failure = options.failure, .format = if (options.collect_side_tables) .zfi else .fai },
-    };
-    defer state.name.deinit(allocator);
-    defer if (options.collect_side_tables) state.side_table.deinit(allocator);
-    var record_count: u32 = 0;
-    var file_offset: u64 = 0;
-
-    while (true) {
-        var read_diag = state.diag;
-        read_diag.at = .{ .source = .fasta, .location = .{ .offset = file_offset } };
-        const n = reader.readSliceShort(read_buf) catch |err| return read_diag.fail(.{ .@"io.read_failed" = .{ .requested_bytes = read_buf.len } }, .read, .fasta, err, error.SourceReadFailed);
-        if (n == 0) break;
-        if (file_offset == 0 and options.require_initial_header and read_buf[0] != '>') {
-            return read_diag.fail(.{ .@"index.initial_header_required" = .{ .byte = read_buf[0] } }, .scan, .fasta, null, error.NotFasta);
-        }
-        const next_offset = std.math.add(u64, file_offset, n) catch return read_diag.fail(.{ .@"resource.count_overflow" = .{ .counter = .source_bytes, .max_value = std.math.maxInt(u64), .current = file_offset, .increment = n } }, .scan, .fasta, null, error.SourceTooLong);
-        if (comptime Dedup == SourceAdapter) {
-            if (dedup_ptr) |seen| seen.source_names.setChunk(read_buf[0..n], file_offset);
-        }
-        try processChunkBytes(
-            &state,
-            read_buf[0..n],
-            file_offset,
-            options.max_name_len,
-            dedup_ptr,
-            ctx,
-            emitRecord,
-            &record_count,
-        );
-        file_offset = next_offset;
-    }
-
-    if (state.active) {
-        try state.emitRecordIfReady(ctx, dedup_ptr, emitRecord, &record_count);
-    }
-
-    return record_count;
-}
-
 fn checkReadBufferSize(len: usize, failure: ?*diagnostics.Failure) !void {
     if (len == 0 or len > std.math.maxInt(u32)) {
         @branchHint(.cold);
@@ -1606,16 +1572,6 @@ fn scanFaiReader(
     read_buf: []u8,
     writer: anytype,
     options: ScanOptions,
-) !u32 {
-    return scanFaiReaderWithDedup(allocator, reader, read_buf, writer, options, @as(?*NameDedup, null));
-}
-
-fn scanFaiReaderWithDedup(
-    allocator: std.mem.Allocator,
-    reader: *std.Io.Reader,
-    read_buf: []u8,
-    writer: anytype,
-    options: ScanOptions,
     dedup: anytype,
 ) !u32 {
     try checkReadBufferSize(read_buf.len, options.failure);
@@ -1638,7 +1594,7 @@ fn scanFaiReaderWithDedup(
         }
     }
     var ctx = Ctx{ .buffer = &fai_buf };
-    const count = try scanFastaReaderWithDedup(allocator, reader, read_buf, options, dedup, &ctx, Ctx.emit);
+    const count = try scanFastaReader(allocator, reader, read_buf, options, dedup, &ctx, Ctx.emit);
     try fai_buf.flush();
     return count;
 }
@@ -1687,7 +1643,7 @@ fn indexFai(
     }
     var tmp_io_buf: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
     var tmp_fw = spool.file.writer(io, &tmp_io_buf);
-    const count = scanFaiReaderWithDedup(allocator, &reader.interface, read_buf, &tmp_fw.interface, .{ .enable_dedup = options.enable_dedup, .require_initial_header = true, .failure = diag.failure }, dedup) catch |err| {
+    const count = scanFaiReader(allocator, &reader.interface, read_buf, &tmp_fw.interface, .{ .enable_dedup = options.enable_dedup, .require_initial_header = true, .failure = diag.failure }, dedup) catch |err| {
         retainScanCause(diag.failure, reader, &tmp_fw);
         return err;
     };
@@ -1724,8 +1680,7 @@ fn indexFai(
     return count;
 }
 
-fn runIndexSmall(io: std.Io, environ: std.process.Environ, path: []const u8, options: Options, file: std.Io.File, stat: std.Io.File.Stat, diag: Diagnostics) !u32 {
-    const allocator = std.heap.page_allocator;
+fn runIndexSmall(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, path: []const u8, options: Options, file: std.Io.File, stat: std.Io.File.Stat, diag: Diagnostics) !u32 {
     var io_buf: [FILE_IO_BUF_SIZE]u8 = undefined;
     var read_buf: [INDEX_READ_BUFFER_SIZE]u8 = undefined;
     var file_reader = file.reader(io, &io_buf);
@@ -1739,7 +1694,7 @@ fn runIndexSmall(io: std.Io, environ: std.process.Environ, path: []const u8, opt
     }
     var path_buf: [INDEX_PATH_BUFFER_SIZE]u8 = undefined;
     const zfi_path = try zfiOutputPath(&path_buf, path, diag);
-    var index = scanZfiReaderWithOptions(allocator, &file_reader.interface, &read_buf, .{ .enable_dedup = options.enable_dedup, .require_initial_header = true, .failure = diag.failure }) catch |err| {
+    var index = scanZfiReader(allocator, &file_reader.interface, &read_buf, .{ .enable_dedup = options.enable_dedup, .require_initial_header = true, .failure = diag.failure }) catch |err| {
         retainScanCause(diag.failure, &file_reader, null);
         return err;
     };
@@ -1771,8 +1726,7 @@ fn runIndexSmall(io: std.Io, environ: std.process.Environ, path: []const u8, opt
     return count;
 }
 
-fn runIndexLarge(io: std.Io, environ: std.process.Environ, path: []const u8, options: Options, file: std.Io.File, stat: std.Io.File.Stat, diag: Diagnostics) !u32 {
-    const allocator = std.heap.page_allocator;
+fn runIndexLarge(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, path: []const u8, options: Options, file: std.Io.File, stat: std.Io.File.Stat, diag: Diagnostics) !u32 {
     var names = SourceDedup.init(allocator, io, file, stat.size);
     names.diag = diag;
     defer names.deinit();
@@ -1793,7 +1747,7 @@ fn runIndexLarge(io: std.Io, environ: std.process.Environ, path: []const u8, opt
     defer catalog.deinit();
     names.replay_context = &catalog;
     names.replay_fn = StreamedCatalog.replayNames;
-    const count = scanFastaReaderWithDedup(allocator, &reader.interface, &read_buf, .{ .enable_dedup = options.enable_dedup, .require_initial_header = true, .collect_side_tables = true, .failure = diag.failure }, dedup, &catalog, StreamedCatalog.emit) catch |err| {
+    const count = scanFastaReader(allocator, &reader.interface, &read_buf, .{ .enable_dedup = options.enable_dedup, .require_initial_header = true, .collect_side_tables = true, .failure = diag.failure }, dedup, &catalog, StreamedCatalog.emit) catch |err| {
         retainScanCause(diag.failure, &reader, null);
         return err;
     };
@@ -2811,7 +2765,7 @@ fn checkStagedNameReplay(allocator: std.mem.Allocator, data: []const u8, compres
     names.replay_fn = StreamedCatalog.replayNames;
     var reader = std.Io.Reader.fixed(data);
     var read_buffer: [31]u8 = undefined;
-    const count = try scanFastaReaderWithDedup(
+    const count = try scanFastaReader(
         allocator,
         &reader,
         &read_buffer,
@@ -2846,9 +2800,9 @@ fn checkCollectedIndexAllocations(allocator: std.mem.Allocator) !void {
     const data = ">one\nACGT\nAC\nTTTT\n>two\nA C\n>one\nTT\n";
     var reader = std.Io.Reader.fixed(data);
     var buffer: [7]u8 = undefined;
-    var index = try scanZfiReaderWithOptions(allocator, &reader, &buffer, .{ .enable_dedup = true, .failure = &failure });
+    var index = try scanZfiReader(allocator, &reader, &buffer, .{ .enable_dedup = true, .failure = &failure });
     defer index.deinit(allocator);
-    const bytes = try zfiIndexToBytesChecked(allocator, &index, data.len, 0, &failure);
+    const bytes = try zfiIndexToBytes(allocator, &index, data.len, 0, &failure);
     defer allocator.free(bytes);
     try std.testing.expectEqual(@as(usize, 2), index.records.items.len);
     try std.testing.expect(failure.primary() == null);
@@ -2992,6 +2946,7 @@ test "[unit] - [FASTA scanner]: gates initial-header validation by option" {
             &read_buf,
             &output.writer,
             .{ .enable_dedup = true },
+            null,
         ),
     );
 
@@ -3004,6 +2959,7 @@ test "[unit] - [FASTA scanner]: gates initial-header validation by option" {
             &read_buf,
             &output.writer,
             .{ .enable_dedup = true, .require_initial_header = true },
+            null,
         ),
     );
 }
@@ -3120,6 +3076,7 @@ test "[failure] - [FASTA scanner]: maps reader failures to SourceReadFailed" {
             &read_buf,
             &output.writer,
             .{ .enable_dedup = true },
+            null,
         ),
     );
 }
@@ -3137,6 +3094,7 @@ test "[failure] - [FAI scanner]: maps writer failures to FaiSpoolWriteFailed" {
             &read_buf,
             &writer,
             .{ .enable_dedup = true },
+            null,
         ),
     );
 }
@@ -3722,7 +3680,7 @@ test "[edge] - [index preflight]: buffer width and ZFI count reject before narro
     var output_bytes: [16]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_bytes);
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    try std.testing.expectError(error.InvalidArgument, scanFaiReader(failing.allocator(), &reader, &empty_buffer, &output, .{ .enable_dedup = true, .failure = &failure }));
+    try std.testing.expectError(error.InvalidArgument, scanFaiReader(failing.allocator(), &reader, &empty_buffer, &output, .{ .enable_dedup = true, .failure = &failure }, null));
     try std.testing.expectEqual(@as(usize, 0), output.buffered().len);
     try std.testing.expectEqual(@as(usize, 0), reader.seek);
     try std.testing.expectEqual(@as(usize, 0), failing.allocations);

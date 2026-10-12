@@ -15,16 +15,16 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var failure: diagnostics.Failure = undefined;
     const missing = "tests/data/diagnostics-caller-does-not-exist.fa";
     const valid = "tests/data/simple.fasta";
-    try std.testing.expectError(error.Io, commands.indexer.runIndex(io, init.environ, missing, .{ .emit_fai = true }, &failure));
+    try std.testing.expectError(error.Io, commands.indexer.runIndex(std.heap.page_allocator, io, init.environ, missing, .{ .emit_fai = true }, &failure));
     try expectMissing(&failure, .index);
-    const indexed = try commands.indexer.runIndex(io, init.environ, valid, .{ .emit_fai = true }, &failure);
+    const indexed = try commands.indexer.runIndex(std.heap.page_allocator, io, init.environ, valid, .{ .emit_fai = true }, &failure);
     try std.testing.expectEqual(@as(u64, 2), indexed.record_count);
     try expectComplete(&failure);
 
     const get_options = commands.getter.Options{ .source = .{ .positional = &.{"seq1:1-4"} } };
-    try std.testing.expectError(error.Io, commands.getter.runGetWithOptions(allocator, io, missing, get_options, &failure));
+    try std.testing.expectError(error.Io, commands.getter.runGet(allocator, io, missing, get_options, &failure));
     try expectMissing(&failure, .get);
-    const extracted = try commands.getter.runGetWithOptions(allocator, io, valid, get_options, &failure);
+    const extracted = try commands.getter.runGet(allocator, io, valid, get_options, &failure);
     try std.testing.expectEqual(@as(u64, 4), extracted.total_bases);
     try expectComplete(&failure);
 

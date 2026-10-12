@@ -245,34 +245,7 @@ pub const LoadedIndex = struct {
     }
 };
 
-pub const LoadIndexError = error{
-    FileNotFound,
-    AccessDenied,
-    Io,
-    EmptyFile,
-    PathTooLong,
-    MmapFailed,
-    CorruptIndex,
-    StaleIndex,
-    NoIndexFound,
-    OutOfMemory,
-};
-
-pub fn loadIndexChecked(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, failure: *diagnostics.Failure) diagnostics.Error!LoadedIndex {
-    return loadIndexCheckedWithMode(allocator, io, fasta_path, .lookup_full_map, failure);
-}
-
-pub fn loadIndexCheckedWithMode(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    fasta_path: []const u8,
-    mode: LoadMode,
-    failure: *diagnostics.Failure,
-) diagnostics.Error!LoadedIndex {
-    return loadIndexSelected(allocator, io, fasta_path, .automatic, mode, failure);
-}
-
-pub fn loadIndexSelected(
+pub fn loadIndex(
     allocator: std.mem.Allocator,
     io: std.Io,
     fasta_path: []const u8,
@@ -323,33 +296,6 @@ pub fn loadIndexSelected(
     context.at.source = .fai;
     const fai_path = std.fmt.bufPrint(&fai_path_buf, "{s}.fai", .{fasta_path}) catch return context.pathLimit(fai_path_buf.len);
     return (try tryLoadFai(allocator, io, fai_path, fasta_file, fasta_stat, mode, &context)) orelse context.fail(.{ .@"index.not_found" = .{ .zfi_source = .zfi, .fai_source = .fai } });
-}
-
-pub fn loadIndexCheckedLegacy(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8) LoadIndexError!LoadedIndex {
-    return loadIndexCheckedWithModeLegacy(allocator, io, fasta_path, .lookup_full_map);
-}
-
-pub fn loadIndexCheckedWithModeLegacy(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, mode: LoadMode) LoadIndexError!LoadedIndex {
-    var failure: diagnostics.Failure = undefined;
-    failure.reset(if (mode == .stats_scan) .stats else .get);
-    return loadIndexCheckedWithMode(allocator, io, fasta_path, mode, &failure) catch |err| {
-        return switch (failure.primary().?.code()) {
-            .@"io.file_not_found" => error.FileNotFound,
-            .@"io.access_denied" => error.AccessDenied,
-            .@"io.invalid_path" => error.PathTooLong,
-            .@"io.map_failed" => error.MmapFailed,
-            .@"fasta.no_records" => error.EmptyFile,
-            .@"index.older_than_source", .@"index.source_size_mismatch", .@"index.source_mtime_mismatch" => error.StaleIndex,
-            .@"index.not_found" => error.NoIndexFound,
-            .@"resource.line_buffer_exceeded" => error.CorruptIndex,
-            .@"resource.capacity_limit_exceeded" => if (failure.primary().?.details.@"resource.capacity_limit_exceeded".capacity_role == .map_bytes) error.MmapFailed else error.OutOfMemory,
-            else => switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-                error.InvalidIndex => error.CorruptIndex,
-                else => error.Io,
-            },
-        };
-    };
 }
 
 const NON_UNIFORM_WIDTH_FLAG: u8 = 1;
@@ -628,7 +574,7 @@ fn zfiRecordsEnd(record_count: u32, context: *Diagnostics) diagnostics.Error!usi
     return std.math.add(usize, @sizeOf(ZfiHeader), records_bytes) catch return context.overflow(.record_count, .add, @sizeOf(ZfiHeader), records_bytes, std.math.maxInt(usize));
 }
 
-fn buildNameMapFast(
+fn buildNameMap(
     allocator: std.mem.Allocator,
     records: []const IndexRecord,
     name_data: []const u8,
@@ -732,7 +678,7 @@ fn tryLoadZfi(
     };
 
     const name_map = if (build_name_map)
-        try buildNameMapFast(allocator, records, name_blob, context)
+        try buildNameMap(allocator, records, name_blob, context)
     else
         null;
 
@@ -1181,7 +1127,7 @@ fn tryLoadFai(
     }
 
     const loaded_records = records[0..record_count];
-    const name_map = try buildNameMapFast(allocator, loaded_records, fai_data, context);
+    const name_map = try buildNameMap(allocator, loaded_records, fai_data, context);
 
     return LoadedIndex{
         .io = io,

@@ -14,6 +14,32 @@ const writeFastaArtifact = utility.writeFastaArtifact;
 const writeZfi = utility.writeZfi;
 const captureExtractRegion = utility.captureExtractRegion;
 
+fn validateBytes(allocator: std.mem.Allocator, data: []const u8, options: validator.Options) main.index_format.diagnostics.Error!validator.Summary {
+    var failure: main.index_format.diagnostics.Failure = undefined;
+    return validator.validateData(allocator, data, options, &failure);
+}
+
+fn fixBytes(allocator: std.mem.Allocator, data: []const u8, record_widths: []const u32) main.index_format.diagnostics.Error![]u8 {
+    var failure: main.index_format.diagnostics.Failure = undefined;
+    return validator.fixData(allocator, data, record_widths, &failure);
+}
+
+fn renderEvent(allocator: std.mem.Allocator, event: validator.Event) main.index_format.diagnostics.Error![]u8 {
+    var failure: main.index_format.diagnostics.Failure = undefined;
+    return validator.renderJsonEvent(allocator, event, &failure);
+}
+
+/// The blocker `checkFixAllowed` records, or null when the fix may proceed.
+fn fixBlocker(summary: *const validator.Summary, options: validator.Options) !?std.meta.Tag(main.index_format.diagnostics.Blocker) {
+    var failure: main.index_format.diagnostics.Failure = undefined;
+    failure.reset(.validate);
+    validator.checkFixAllowed(summary, options, &failure) catch |err| {
+        if (err != error.RepairRefused) return err;
+        return std.meta.activeTag(failure.primary().?.details.@"repair.blocked".blocker);
+    };
+    return null;
+}
+
 fn countKind(summary: *const validator.Summary, kind: validator.Kind) usize {
     var count: usize = 0;
     for (summary.events.items) |event| {
@@ -23,35 +49,35 @@ fn countKind(summary: *const validator.Summary, kind: validator.Kind) usize {
 }
 
 fn expectFixIdempotent(allocator: std.mem.Allocator, broken: []const u8) !void {
-    var before = try validator.validateData(allocator, broken, .{});
+    var before = try validateBytes(allocator, broken, .{});
     defer before.deinit(allocator);
-    try std.testing.expect(validator.fixRejection(&before, .{}) == null);
+    try std.testing.expectEqual(null, try fixBlocker(&before, .{}));
 
-    const fixed = try validator.fixData(allocator, broken, before.record_widths.items);
+    const fixed = try fixBytes(allocator, broken, before.record_widths.items);
     defer allocator.free(fixed);
 
-    var after = try validator.validateData(allocator, fixed, .{});
+    var after = try validateBytes(allocator, fixed, .{});
     defer after.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 0), after.events.items.len);
 
-    const fixed_again = try validator.fixData(allocator, fixed, after.record_widths.items);
+    const fixed_again = try fixBytes(allocator, fixed, after.record_widths.items);
     defer allocator.free(fixed_again);
     try std.testing.expectEqualStrings(fixed, fixed_again);
 }
 
 fn validateAndDeinitForAllocationCheck(allocator: std.mem.Allocator, data: []const u8) !void {
-    var summary = try validator.validateData(allocator, data, .{});
+    var summary = try validateBytes(allocator, data, .{});
     defer summary.deinit(allocator);
 }
 
 fn fixAndFreeForAllocationCheck(allocator: std.mem.Allocator, data: []const u8) !void {
     const widths = [_]u32{4};
-    const fixed = try validator.fixData(allocator, data, &widths);
+    const fixed = try fixBytes(allocator, data, &widths);
     defer allocator.free(fixed);
 }
 
 fn renderAndFreeForAllocationCheck(allocator: std.mem.Allocator, name: []const u8) !void {
-    const json = try validator.renderJsonEvent(allocator, .{
+    const json = try renderEvent(allocator, .{
         .level = .error_level,
         .kind = .duplicate_name,
         .line = 2,
@@ -67,7 +93,7 @@ fn fuzzValidator(_: void, smith: *std.testing.Smith) !void {
 }
 
 fn checkValidatorProperties(data: []const u8) !void {
-    var summary = try validator.validateData(std.testing.allocator, data, .{});
+    var summary = try validateBytes(std.testing.allocator, data, .{});
     defer summary.deinit(std.testing.allocator);
 
     try std.testing.expect(summary.events.items.len <= validator.MAX_VALIDATE_EVENTS);
@@ -81,18 +107,18 @@ fn checkValidatorProperties(data: []const u8) !void {
 
     var failure: main.index_format.diagnostics.Failure = undefined;
     failure.reset(.validate);
-    validator.fixRejectionChecked(&summary, .{}, &failure) catch |err| switch (err) {
+    validator.checkFixAllowed(&summary, .{}, &failure) catch |err| switch (err) {
         error.RepairRefused => return,
         else => return err,
     };
-    const fixed = try validator.fixData(std.testing.allocator, data, summary.record_widths.items);
+    const fixed = try fixBytes(std.testing.allocator, data, summary.record_widths.items);
     defer std.testing.allocator.free(fixed);
 
-    var fixed_summary = try validator.validateData(std.testing.allocator, fixed, .{});
+    var fixed_summary = try validateBytes(std.testing.allocator, fixed, .{});
     defer fixed_summary.deinit(std.testing.allocator);
     failure.reset(.validate);
-    try validator.fixRejectionChecked(&fixed_summary, .{}, &failure);
-    const fixed_again = try validator.fixData(
+    try validator.checkFixAllowed(&fixed_summary, .{}, &failure);
+    const fixed_again = try fixBytes(
         std.testing.allocator,
         fixed,
         fixed_summary.record_widths.items,
@@ -122,14 +148,14 @@ fn expectAllUniformNoSideTable(index: *const main.indexer.ZfiIndex) !void {
 }
 
 fn fixFormatOnly(allocator: std.mem.Allocator, broken: []const u8) ![]u8 {
-    var summary = try validator.validateData(allocator, broken, .{});
+    var summary = try validateBytes(allocator, broken, .{});
     defer summary.deinit(allocator);
-    try std.testing.expect(validator.fixRejection(&summary, .{}) == null);
-    return validator.fixData(allocator, broken, summary.record_widths.items);
+    try std.testing.expectEqual(null, try fixBlocker(&summary, .{}));
+    return fixBytes(allocator, broken, summary.record_widths.items);
 }
 
 fn expectValidateClean(allocator: std.mem.Allocator, data: []const u8) !void {
-    var summary = try validator.validateData(allocator, data, .{});
+    var summary = try validateBytes(allocator, data, .{});
     defer summary.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 0), summary.events.items.len);
 }
@@ -190,20 +216,20 @@ fn zfiEmbeddedName(index: *const main.indexer.ZfiIndex, rec_idx: usize) []const 
 fn checkNativeValidatorAllocations(allocator: std.mem.Allocator, data: []const u8) !void {
     const diagnostics = main.index_format.diagnostics;
     var failure: diagnostics.Failure = undefined;
-    var summary = validator.validateDataChecked(allocator, data, .{}, &failure) catch |err| {
+    var summary = validator.validateData(allocator, data, .{}, &failure) catch |err| {
         try std.testing.expectEqual(error.OutOfMemory, err);
         try std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", failure.primary().?.code());
         try std.testing.expectEqual(error.OutOfMemory, failure.primary().?.cause.?.zig);
         return error.OutOfMemory;
     };
     defer summary.deinit(allocator);
-    const fixed = validator.fixDataChecked(allocator, data, summary.record_widths.items, &failure) catch |err| {
+    const fixed = validator.fixData(allocator, data, summary.record_widths.items, &failure) catch |err| {
         try std.testing.expectEqual(error.OutOfMemory, err);
         try std.testing.expectEqual(diagnostics.AllocationRole.rewrite_bytes, failure.primary().?.details.@"resource.out_of_memory".allocation_role);
         return error.OutOfMemory;
     };
     defer allocator.free(fixed);
-    const json = validator.renderJsonEventChecked(allocator, .{ .level = .warning, .kind = .empty_sequence, .line = 1, .name = "seq" }, &failure) catch |err| {
+    const json = validator.renderJsonEvent(allocator, .{ .level = .warning, .kind = .empty_sequence, .line = 1, .name = "seq" }, &failure) catch |err| {
         try std.testing.expectEqual(error.OutOfMemory, err);
         try std.testing.expectEqual(diagnostics.AllocationRole.serialized_event, failure.primary().?.details.@"resource.out_of_memory".allocation_role);
         return error.OutOfMemory;
@@ -372,7 +398,7 @@ test "[cli] - [validate options]: applies schema, alphabet, and header limits to
 }
 
 test "[unit] - [validate scan]: reports duplicate names and empty records" {
-    var summary = try validator.validateData(std.testing.allocator, ">dup\nAAAA\n>dup\n", .{});
+    var summary = try validateBytes(std.testing.allocator, ">dup\nAAAA\n>dup\n", .{});
     defer summary.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .duplicate_name));
@@ -383,7 +409,7 @@ test "[unit] - [validate scan]: reports duplicate names and empty records" {
 }
 
 test "[edge] - [validate scan]: reports the complete empty-file contract" {
-    var summary = try validator.validateData(std.testing.allocator, "", .{});
+    var summary = try validateBytes(std.testing.allocator, "", .{});
     defer summary.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 0), summary.header_count);
@@ -439,13 +465,13 @@ test "[edge] - [validate events]: caps retained events without losing counts" {
         try at_cap.appendSlice(allocator, "ACGT \n");
     }
 
-    var capped = try validator.validateData(allocator, at_cap.items, .{});
+    var capped = try validateBytes(allocator, at_cap.items, .{});
     defer capped.deinit(allocator);
     try std.testing.expect(!capped.truncated);
     try std.testing.expectEqual(validator.MAX_VALIDATE_EVENTS, capped.events.items.len);
 
     try at_cap.appendSlice(allocator, "ACGT \n");
-    var over = try validator.validateData(allocator, at_cap.items, .{});
+    var over = try validateBytes(allocator, at_cap.items, .{});
     defer over.deinit(allocator);
     try std.testing.expect(over.truncated);
     try std.testing.expectEqual(validator.MAX_VALIDATE_EVENTS, over.events.items.len);
@@ -465,16 +491,13 @@ test "[edge] - [validate events]: retains fix blockers after truncation" {
     }
     try input.appendSlice(allocator, ">dup\nA\n");
 
-    var summary = try validator.validateData(allocator, input.items, .{});
+    var summary = try validateBytes(allocator, input.items, .{});
     defer summary.deinit(allocator);
 
     try std.testing.expect(summary.truncated);
     try std.testing.expectEqual(@as(usize, 1), summary.error_count);
-    try std.testing.expectEqual(validator.Kind.duplicate_name, validator.fixRejection(&summary, .{}).?);
-    try std.testing.expectEqual(
-        validator.Kind.duplicate_name,
-        validator.fixRejection(&summary, .{ .fix_format_only = true }).?,
-    );
+    try std.testing.expectEqual(.duplicate_identifier, (try fixBlocker(&summary, .{})).?);
+    try std.testing.expectEqual(.duplicate_identifier, (try fixBlocker(&summary, .{ .fix_format_only = true })).?);
 }
 
 test "[edge] - [validate events]: retains warnings left after a truncated format fix" {
@@ -487,7 +510,7 @@ test "[edge] - [validate events]: retains warnings left after a truncated format
     }
     try input.appendSlice(allocator, ">empty\n");
 
-    var summary = try validator.validateData(allocator, input.items, .{});
+    var summary = try validateBytes(allocator, input.items, .{});
     defer summary.deinit(allocator);
 
     try std.testing.expect(summary.truncated);
@@ -500,7 +523,7 @@ test "[edge] - [validate JSON]: preserves names longer than 256 bytes" {
     const allocator = std.testing.allocator;
     const long_name = "n" ** 400;
 
-    const json = try validator.renderJsonEvent(allocator, .{
+    const json = try renderEvent(allocator, .{
         .level = .warning,
         .kind = .empty_sequence,
         .line = 1,
@@ -520,7 +543,7 @@ test "[unit] - [validate JSON]: preserves valid non-ASCII names" {
     const allocator = std.testing.allocator;
     const name = "seq_\u{20ac}_α";
 
-    const json = try validator.renderJsonEvent(allocator, .{
+    const json = try renderEvent(allocator, .{
         .level = .warning,
         .kind = .empty_sequence,
         .line = 1,
@@ -538,7 +561,7 @@ test "[unit] - [validate JSON]: escapes JSON syntax in names" {
     const allocator = std.testing.allocator;
     const name = "seq\"a\\b";
 
-    const json = try validator.renderJsonEvent(allocator, .{
+    const json = try renderEvent(allocator, .{
         .level = .warning,
         .kind = .empty_sequence,
         .line = 1,
@@ -558,7 +581,7 @@ test "[edge] - [validate JSON]: escapes invalid UTF-8 name bytes" {
     const allocator = std.testing.allocator;
     const bad_name = "seq\xffname";
 
-    const json = try validator.renderJsonEvent(allocator, .{
+    const json = try renderEvent(allocator, .{
         .level = .error_level,
         .kind = .duplicate_name,
         .line = 3,
@@ -580,14 +603,14 @@ test "[integration] - [validate JSON]: reports invalid UTF-8 fixture names as va
 
     const utf8_data = try readTestFile(allocator, "tests/data/gates/invalid_utf8_header.fasta");
     defer allocator.free(utf8_data);
-    var utf8_summary = try validator.validateData(allocator, utf8_data, .{});
+    var utf8_summary = try validateBytes(allocator, utf8_data, .{});
     defer utf8_summary.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 2), utf8_summary.header_count);
     try std.testing.expectEqual(@as(usize, 1), countKind(&utf8_summary, .duplicate_name));
     const event = utf8_summary.events.items[0];
     try std.testing.expectEqual(validator.Kind.duplicate_name, event.kind);
     try std.testing.expectEqualSlices(u8, "bad\xffname", event.name);
-    const json = try validator.renderJsonEvent(allocator, event);
+    const json = try renderEvent(allocator, event);
     defer allocator.free(json);
     try std.testing.expect(std.unicode.utf8ValidateSlice(json));
     try std.testing.expect(std.mem.indexOf(u8, json, "\\u00ff") != null);
@@ -607,7 +630,7 @@ test "[property] - [validate alphabets]: accepts representative nucleotide and p
     for (cases) |case| {
         const fasta = try std.fmt.allocPrint(std.testing.allocator, ">seq\n{s}\n", .{case.sequence});
         defer std.testing.allocator.free(fasta);
-        var summary = try validator.validateData(std.testing.allocator, fasta, .{});
+        var summary = try validateBytes(std.testing.allocator, fasta, .{});
         defer summary.deinit(std.testing.allocator);
 
         try std.testing.expectEqual(@as(usize, 0), summary.events.items.len);
@@ -623,7 +646,7 @@ test "[edge] - [validate headers]: warns only above the configured byte limit" {
     };
 
     for (cases) |case| {
-        var summary = try validator.validateData(std.testing.allocator, case.fasta, .{ .max_header_len = 3 });
+        var summary = try validateBytes(std.testing.allocator, case.fasta, .{ .max_header_len = 3 });
         defer summary.deinit(std.testing.allocator);
         try std.testing.expectEqual(case.warning_count, countKind(&summary, .long_header));
         if (case.warning_count == 1) {
@@ -657,7 +680,7 @@ test "[cli] - [validate JSON summary]: returns the complete stable schema" {
 }
 
 test "[edge] - [validate scan]: reports missing terminal newline and invalid nucleotide byte" {
-    var summary = try validator.validateData(std.testing.allocator, ">seq\nACGTACGTAC?", .{});
+    var summary = try validateBytes(std.testing.allocator, ">seq\nACGTACGTAC?", .{});
     defer summary.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(main.stats.SequenceType.nucleotide, summary.sequence_type);
@@ -666,7 +689,7 @@ test "[edge] - [validate scan]: reports missing terminal newline and invalid nuc
 }
 
 test "[unit] - [validate alphabet]: custom symbols replace the detected alphabet" {
-    var summary = try validator.validateData(std.testing.allocator, ">seq\nACGTZ\n", .{
+    var summary = try validateBytes(std.testing.allocator, ">seq\nACGTZ\n", .{
         .custom_alphabet = "ACGTZ",
     });
     defer summary.deinit(std.testing.allocator);
@@ -675,7 +698,7 @@ test "[unit] - [validate alphabet]: custom symbols replace the detected alphabet
 }
 
 test "[unit] - [validate layout]: reports width and trailing-whitespace warnings" {
-    var summary = try validator.validateData(std.testing.allocator, ">seq\nAAAA\nCC \nGGGG\nTT\n", .{});
+    var summary = try validateBytes(std.testing.allocator, ">seq\nAAAA\nCC \nGGGG\nTT\n", .{});
     defer summary.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .trailing_whitespace));
@@ -683,7 +706,7 @@ test "[unit] - [validate layout]: reports width and trailing-whitespace warnings
 }
 
 test "[edge] - [validate layout]: reports a final line wider than the established width" {
-    var summary = try validator.validateData(std.testing.allocator, ">seq\nAA\nAAAA\n", .{});
+    var summary = try validateBytes(std.testing.allocator, ">seq\nAA\nAAAA\n", .{});
     defer summary.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .inconsistent_line_widths));
@@ -706,7 +729,7 @@ test "[unit] - [validate schemas]: distinguishes valid and invalid UniProt and R
     };
 
     for (cases) |case| {
-        var summary = try validator.validateData(std.testing.allocator, case.fasta, .{ .schema = case.schema });
+        var summary = try validateBytes(std.testing.allocator, case.fasta, .{ .schema = case.schema });
         defer summary.deinit(std.testing.allocator);
         try std.testing.expectEqual(case.violations, countKind(&summary, .schema_violation));
     }
@@ -720,7 +743,7 @@ test "[unit] - [validate status]: promotes warnings in strict mode" {
 }
 
 test "[unit] - [validate status]: ignores warnings repaired by format rewrite" {
-    var summary = try validator.validateData(std.testing.allocator, ">seq\nACGT \n", .{});
+    var summary = try validateBytes(std.testing.allocator, ">seq\nACGT \n", .{});
     defer summary.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .trailing_whitespace));
@@ -737,43 +760,47 @@ test "[property] - [validate fix]: is idempotent across supported layout rewrite
     for (cases) |input| try expectFixIdempotent(std.testing.allocator, input);
 
     const clean = cases[2];
-    var summary = try validator.validateData(std.testing.allocator, clean, .{});
+    var summary = try validateBytes(std.testing.allocator, clean, .{});
     defer summary.deinit(std.testing.allocator);
-    const fixed = try validator.fixData(std.testing.allocator, clean, summary.record_widths.items);
+    const fixed = try fixBytes(std.testing.allocator, clean, summary.record_widths.items);
     defer std.testing.allocator.free(fixed);
     try std.testing.expectEqualStrings(clean, fixed);
 }
 
 test "[failure] - [validate fix]: rejects errors outside the format-only contract" {
-    var dup = try validator.validateData(std.testing.allocator, ">dup\nACGT\n>dup\nGCTA\n", .{});
+    var dup = try validateBytes(std.testing.allocator, ">dup\nACGT\n>dup\nGCTA\n", .{});
     defer dup.deinit(std.testing.allocator);
-    try std.testing.expectEqual(.duplicate_name, validator.fixRejection(&dup, .{}).?);
+    try std.testing.expectEqual(.duplicate_identifier, (try fixBlocker(&dup, .{})).?);
 
-    var none = try validator.validateData(std.testing.allocator, "not fasta\n", .{});
+    var preamble_only = try validateBytes(std.testing.allocator, "not fasta\n", .{});
+    defer preamble_only.deinit(std.testing.allocator);
+    try std.testing.expectEqual(.content_before_header, (try fixBlocker(&preamble_only, .{})).?);
+
+    var none = try validateBytes(std.testing.allocator, "", .{});
     defer none.deinit(std.testing.allocator);
-    try std.testing.expectEqual(.no_sequences, validator.fixRejection(&none, .{}).?);
+    try std.testing.expectEqual(.no_records, (try fixBlocker(&none, .{})).?);
 
-    var bad = try validator.validateData(std.testing.allocator, ">seq\nACGT?\n", .{});
+    var bad = try validateBytes(std.testing.allocator, ">seq\nACGT?\n", .{});
     defer bad.deinit(std.testing.allocator);
-    try std.testing.expectEqual(.invalid_character, validator.fixRejection(&bad, .{}).?);
-    try std.testing.expect(validator.fixRejection(&bad, .{ .fix_format_only = true }) == null);
+    try std.testing.expectEqual(.invalid_symbol, (try fixBlocker(&bad, .{})).?);
+    try std.testing.expectEqual(null, try fixBlocker(&bad, .{ .fix_format_only = true }));
 
-    var nulls = try validator.validateData(std.testing.allocator, ">seq\nACGT\x00TT\n", .{});
+    var nulls = try validateBytes(std.testing.allocator, ">seq\nACGT\x00TT\n", .{});
     defer nulls.deinit(std.testing.allocator);
-    try std.testing.expectEqual(.null_byte, validator.fixRejection(&nulls, .{}).?);
+    try std.testing.expectEqual(.sequence_control_byte, (try fixBlocker(&nulls, .{})).?);
 }
 
 test "[property] - [validate format-only fix]: preserves invalid sequence characters" {
     const broken = ">seq\nACGT?\n";
-    var summary = try validator.validateData(std.testing.allocator, broken, .{});
+    var summary = try validateBytes(std.testing.allocator, broken, .{});
     defer summary.deinit(std.testing.allocator);
-    try std.testing.expect(validator.fixRejection(&summary, .{ .fix_format_only = true }) == null);
+    try std.testing.expectEqual(null, try fixBlocker(&summary, .{ .fix_format_only = true }));
 
-    const fixed = try validator.fixData(std.testing.allocator, broken, summary.record_widths.items);
+    const fixed = try fixBytes(std.testing.allocator, broken, summary.record_widths.items);
     defer std.testing.allocator.free(fixed);
     try std.testing.expect(std.mem.indexOf(u8, fixed, "ACGT?") != null);
 
-    var after = try validator.validateData(std.testing.allocator, fixed, .{});
+    var after = try validateBytes(std.testing.allocator, fixed, .{});
     defer after.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), countKind(&after, .invalid_character));
 }
@@ -781,15 +808,15 @@ test "[property] - [validate format-only fix]: preserves invalid sequence charac
 test "[property] - [validate fix]: preserves empty-record warnings" {
     const cases = [_][]const u8{ ">empty\n", ">empty" };
     for (cases) |broken| {
-        var summary = try validator.validateData(std.testing.allocator, broken, .{});
+        var summary = try validateBytes(std.testing.allocator, broken, .{});
         defer summary.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .empty_sequence));
 
-        const fixed = try validator.fixData(std.testing.allocator, broken, summary.record_widths.items);
+        const fixed = try fixBytes(std.testing.allocator, broken, summary.record_widths.items);
         defer std.testing.allocator.free(fixed);
         try std.testing.expectEqualStrings(">empty\n", fixed);
 
-        var after = try validator.validateData(std.testing.allocator, fixed, .{});
+        var after = try validateBytes(std.testing.allocator, fixed, .{});
         defer after.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 1), countKind(&after, .empty_sequence));
         try std.testing.expectEqual(@as(usize, 0), countKind(&after, .missing_terminal_newline));
@@ -809,9 +836,9 @@ test "[cli] - [validate fix]: replaces the output with the exact library rewrite
         \\
     ;
 
-    var summary = try validator.validateData(allocator, broken, .{});
+    var summary = try validateBytes(allocator, broken, .{});
     defer summary.deinit(allocator);
-    const expected = try validator.fixData(allocator, broken, summary.record_widths.items);
+    const expected = try fixBytes(allocator, broken, summary.record_widths.items);
 
     const in_path = try writeFastaArtifact(allocator, "validate-fix-cli-in", broken);
     defer std.Io.Dir.cwd().deleteFile(io, in_path) catch {};
@@ -928,7 +955,7 @@ test "[cli] - [validate fix]: writes a complete rewrite after report truncation"
         try input.appendSlice(allocator, "A \n");
     }
 
-    var summary = try validator.validateData(allocator, input.items, .{});
+    var summary = try validateBytes(allocator, input.items, .{});
     defer summary.deinit(allocator);
     try std.testing.expect(summary.truncated);
 
@@ -972,7 +999,7 @@ test "[cli] - [validate fix]: writes a complete rewrite after report truncation"
     try std.testing.expectEqualStrings(expected_stderr, result.stderr);
 
     const fixed = try readTestFile(allocator, out_path);
-    var fixed_summary = try validator.validateData(allocator, fixed, .{});
+    var fixed_summary = try validateBytes(allocator, fixed, .{});
     defer fixed_summary.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 0), fixed_summary.events.items.len);
 }
@@ -1033,7 +1060,7 @@ test "[integration] - [validator and indexer]: agree on messy record catalog and
     try std.testing.expect(std.mem.indexOf(u8, data, ">empty_rec\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, data, " \n") != null or std.mem.indexOf(u8, data, "\t\n") != null);
 
-    var summary = try validator.validateData(allocator, data, .{});
+    var summary = try validateBytes(allocator, data, .{});
     defer summary.deinit(allocator);
 
     try std.testing.expect(countKind(&summary, .empty_sequence) >= 1);
@@ -1072,10 +1099,10 @@ test "[integration] - [validator and indexer]: agree on messy record catalog and
 test "[cli] - [validate safety]: refuses preamble loss without changing legacy counts or destination" {
     const allocator = std.testing.allocator;
     const data = "junk\n>seq1\nACGT\n";
-    var summary = try validator.validateData(allocator, data, .{});
+    var summary = try validateBytes(allocator, data, .{});
     defer summary.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 0), summary.events.items.len);
-    try std.testing.expectError(error.RepairRefused, validator.fixData(allocator, data, summary.record_widths.items));
+    try std.testing.expectError(error.RepairRefused, fixBytes(allocator, data, summary.record_widths.items));
     const input = try writeFastaArtifact(allocator, "validate-preamble-input", data);
     defer allocator.free(input);
     defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
@@ -1178,10 +1205,10 @@ test "[failure] - [native validator blockers]: owns duplicate facts beyond retai
     const duplicate_offset = data.items.len;
     try data.appendSlice(allocator, ">dup\nA\n");
     var failure: diagnostics.Failure = undefined;
-    var summary = try validator.validateDataChecked(allocator, data.items, .{}, &failure);
+    var summary = try validator.validateData(allocator, data.items, .{}, &failure);
     try std.testing.expect(summary.truncated);
     try std.testing.expectEqual(@as(usize, 1), summary.error_count);
-    try std.testing.expectError(error.RepairRefused, validator.fixRejectionChecked(&summary, .{ .fix_format_only = true }, &failure));
+    try std.testing.expectError(error.RepairRefused, validator.checkFixAllowed(&summary, .{ .fix_format_only = true }, &failure));
     const primary = failure.primary().?;
     try std.testing.expectEqual(@as(?u64, duplicate_offset), primary.at.location.offset);
     try std.testing.expectEqual(@as(?u64, validator.MAX_VALIDATE_EVENTS + 2), primary.at.location.line);
@@ -1199,9 +1226,9 @@ test "[failure] - [native validator blockers]: distinguishes header and sequence
     const cases = [_][]const u8{ ">na\x00me\nACGT\n", ">seq\nA\x00C \n" };
     for (cases, 0..) |data, i| {
         var failure: diagnostics.Failure = undefined;
-        var summary = try validator.validateDataChecked(std.testing.allocator, data, .{}, &failure);
+        var summary = try validator.validateData(std.testing.allocator, data, .{}, &failure);
         defer summary.deinit(std.testing.allocator);
-        try std.testing.expectError(error.RepairRefused, validator.fixRejectionChecked(&summary, .{}, &failure));
+        try std.testing.expectError(error.RepairRefused, validator.checkFixAllowed(&summary, .{}, &failure));
         const primary = failure.primary().?;
         try std.testing.expectEqual(@as(?u64, if (i == 0) 3 else 6), primary.at.location.offset);
         try std.testing.expectEqual(@as(?u64, if (i == 0) 4 else 2), primary.at.location.column);
@@ -1211,10 +1238,10 @@ test "[failure] - [native validator blockers]: distinguishes header and sequence
     }
     var failure: diagnostics.Failure = undefined;
     const options = validator.Options{ .custom_alphabet = "ACGT" };
-    var summary = try validator.validateDataChecked(std.testing.allocator, ">seq\n?A#?\n", options, &failure);
+    var summary = try validator.validateData(std.testing.allocator, ">seq\n?A#?\n", options, &failure);
     defer summary.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 2), summary.kind_counts[@intFromEnum(validator.Kind.invalid_character)]);
-    try std.testing.expectError(error.RepairRefused, validator.fixRejectionChecked(&summary, options, &failure));
+    try std.testing.expectError(error.RepairRefused, validator.checkFixAllowed(&summary, options, &failure));
     const primary = failure.primary().?;
     try std.testing.expectEqual(@as(?u64, 7), primary.at.location.offset);
     try std.testing.expectEqual(@as(?u64, 3), primary.at.location.column);
@@ -1224,7 +1251,7 @@ test "[failure] - [native validator blockers]: distinguishes header and sequence
     try std.testing.expect(detail.policy.sample == null);
     try std.testing.expect(detail.policy.custom_symbols.?['A' / 8] & (@as(u8, 1) << ('A' % 8)) != 0);
     failure.reset(.validate);
-    try validator.fixRejectionChecked(&summary, .{ .fix_format_only = true, .custom_alphabet = "ACGT" }, &failure);
+    try validator.checkFixAllowed(&summary, .{ .fix_format_only = true, .custom_alphabet = "ACGT" }, &failure);
     try std.testing.expect(failure.primary() == null);
 }
 
@@ -1239,14 +1266,14 @@ test "[edge] - [native validator BOM]: retains original first-line byte columns"
     };
     for (cases) |case| {
         var failure: main.index_format.diagnostics.Failure = undefined;
-        var summary = try validator.validateDataChecked(std.testing.allocator, case.data, .{}, &failure);
+        var summary = try validator.validateData(std.testing.allocator, case.data, .{}, &failure);
         defer summary.deinit(std.testing.allocator);
-        try std.testing.expectError(error.RepairRefused, validator.fixRejectionChecked(&summary, .{}, &failure));
+        try std.testing.expectError(error.RepairRefused, validator.checkFixAllowed(&summary, .{}, &failure));
         try std.testing.expectEqual(@as(?u64, 1), failure.primary().?.at.location.line);
         try std.testing.expectEqual(@as(?u64, case.offset), failure.primary().?.at.location.offset);
         try std.testing.expectEqual(@as(?u64, case.column), failure.primary().?.at.location.column);
         if (summary.preamble != null) {
-            try std.testing.expectError(error.RepairRefused, validator.fixDataChecked(std.testing.allocator, case.data, summary.record_widths.items, &failure));
+            try std.testing.expectError(error.RepairRefused, validator.fixData(std.testing.allocator, case.data, summary.record_widths.items, &failure));
             try std.testing.expectEqual(@as(?u64, case.offset), failure.primary().?.at.location.offset);
             try std.testing.expectEqual(@as(?u64, case.column), failure.primary().?.at.location.column);
         }
@@ -1259,7 +1286,7 @@ test "[cli] - [validate text]: escapes unsafe names and keeps v1 JSON escaping" 
     defer allocator.free(input);
     defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
     try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", input }, 1, "ERROR: line 3: duplicate name 'na\\x1b\\x7f\\xffme' (first seen line 1)\n", "");
-    const json = try validator.renderJsonEvent(allocator, .{ .level = .error_level, .kind = .duplicate_name, .line = 3, .name = "\xff", .first_line = 1 });
+    const json = try renderEvent(allocator, .{ .level = .error_level, .kind = .duplicate_name, .line = 3, .name = "\xff", .first_line = 1 });
     defer allocator.free(json);
     try std.testing.expect(std.mem.indexOf(u8, json, "\\u00ff") != null);
 }
@@ -1425,10 +1452,10 @@ test "[edge] - [validate fix widths]: equal frequencies select the first seen wi
         .{ .input = ">seq\nCC\nAAA\nGGGG\n", .width = 2, .fixed = ">seq\nCC\nAA\nAG\nGG\nG\n" },
     };
     for (cases) |case| {
-        var summary = try validator.validateData(std.testing.allocator, case.input, .{});
+        var summary = try validateBytes(std.testing.allocator, case.input, .{});
         defer summary.deinit(std.testing.allocator);
         try std.testing.expectEqual(case.width, summary.record_widths.items[0]);
-        const fixed = try validator.fixData(std.testing.allocator, case.input, summary.record_widths.items);
+        const fixed = try fixBytes(std.testing.allocator, case.input, summary.record_widths.items);
         defer std.testing.allocator.free(fixed);
         try std.testing.expectEqualStrings(case.fixed, fixed);
     }
