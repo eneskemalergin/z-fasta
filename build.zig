@@ -8,13 +8,6 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const test_filter = b.option([]const u8, "test-filter", "Run tests whose names contain this text");
     const test_filters: []const []const u8 = if (test_filter) |filter| &.{filter} else &.{};
-    if (optimize == .ReleaseSmall) {
-        std.debug.print(
-            "error: ReleaseSmall is unsupported; use -Doptimize=ReleaseFast (strips by default)\n",
-            .{},
-        );
-        std.process.exit(1);
-    }
     const strip = b.option(bool, "strip", "Strip debug info") orelse (optimize != .Debug);
 
     const diagnostics_module = b.createModule(.{
@@ -40,6 +33,10 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.root_module.addImport("diagnostics", diagnostics_module);
+    if (optimize == .ReleaseSmall) {
+        const unsupported = b.addFail("ReleaseSmall is unsupported for the z-fasta executable; use -Doptimize=ReleaseFast (strips by default)");
+        exe.step.dependOn(&unsupported.step);
+    }
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
