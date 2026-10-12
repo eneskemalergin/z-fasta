@@ -328,7 +328,7 @@ test "[cli] - [validate]: rejects invalid arguments with exact diagnostics" {
     }
 }
 
-test "[cli] - [validate report]: returns exact status and output for clean and warning reports" {
+test "[cli] - [validate]: returns exact status and output for clean and warning reports" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -377,7 +377,7 @@ test "[cli] - [validate report]: returns exact status and output for clean and w
     );
 }
 
-test "[cli] - [validate options]: applies schema, alphabet, and header limits together" {
+test "[cli] - [validate]: applies schema, alphabet, and header limits together" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -425,7 +425,7 @@ test "[edge] - [validate scan]: reports the complete empty-file contract" {
     try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .missing_terminal_newline));
 }
 
-test "[failure] - [validate operations]: release partial allocations" {
+test "[failure] - [validate diagnostics]: release partial allocations" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
         validateAndDeinitForAllocationCheck,
@@ -523,7 +523,7 @@ test "[edge] - [validate events]: retains warnings left after a truncated format
     try std.testing.expectEqual(@as(u8, 1), validator.exitCodeForOptions(&summary, .{ .fix = true, .strict = true }));
 }
 
-test "[edge] - [validate JSON]: preserves names longer than 256 bytes" {
+test "[edge] - [validate json]: preserves names longer than 256 bytes" {
     const allocator = std.testing.allocator;
     const long_name = "n" ** 400;
 
@@ -543,7 +543,7 @@ test "[edge] - [validate JSON]: preserves names longer than 256 bytes" {
     try std.testing.expectEqualStrings(long_name, parsed.value.object.get("name").?.string);
 }
 
-test "[unit] - [validate JSON]: preserves valid non-ASCII names" {
+test "[unit] - [validate json]: preserves valid non-ASCII names" {
     const allocator = std.testing.allocator;
     const name = "seq_\u{20ac}_α";
 
@@ -561,7 +561,7 @@ test "[unit] - [validate JSON]: preserves valid non-ASCII names" {
     try std.testing.expectEqualStrings(name, parsed.value.object.get("name").?.string);
 }
 
-test "[unit] - [validate JSON]: escapes JSON syntax in names" {
+test "[unit] - [validate json]: escapes JSON syntax in names" {
     const allocator = std.testing.allocator;
     const name = "seq\"a\\b";
 
@@ -581,7 +581,7 @@ test "[unit] - [validate JSON]: escapes JSON syntax in names" {
     try std.testing.expectEqualStrings(name, parsed.value.object.get("name").?.string);
 }
 
-test "[edge] - [validate JSON]: escapes invalid UTF-8 name bytes" {
+test "[edge] - [validate json]: escapes invalid UTF-8 name bytes" {
     const allocator = std.testing.allocator;
     const bad_name = "seq\xffname";
 
@@ -602,7 +602,7 @@ test "[edge] - [validate JSON]: escapes invalid UTF-8 name bytes" {
     try std.testing.expectEqualStrings("seq\u{00ff}name", parsed.value.object.get("name").?.string);
 }
 
-test "[integration] - [validate JSON]: reports invalid UTF-8 fixture names as valid JSON" {
+test "[integration] - [validate json]: reports invalid UTF-8 fixture names as valid JSON" {
     const allocator = std.testing.allocator;
 
     const utf8_data = try readTestFile(allocator, "tests/data/gates/invalid_utf8_header.fasta");
@@ -620,7 +620,7 @@ test "[integration] - [validate JSON]: reports invalid UTF-8 fixture names as va
     try std.testing.expect(std.mem.indexOf(u8, json, "\\u00ff") != null);
 }
 
-test "[property] - [validate alphabets]: accepts representative nucleotide and protein symbols" {
+test "[property] - [validate alphabet]: accepts representative nucleotide and protein symbols" {
     const cases = [_]struct {
         sequence: []const u8,
         sequence_type: main.fasta.SequenceType,
@@ -643,7 +643,7 @@ test "[property] - [validate alphabets]: accepts representative nucleotide and p
     }
 }
 
-test "[edge] - [validate headers]: warns only above the configured byte limit" {
+test "[edge] - [validate scan]: warns only above the configured byte limit" {
     const cases = [_]struct { fasta: []const u8, warning_count: usize }{
         .{ .fasta = ">abc\nA\n", .warning_count = 0 },
         .{ .fasta = ">abcd\nA\n", .warning_count = 1 },
@@ -661,7 +661,7 @@ test "[edge] - [validate headers]: warns only above the configured byte limit" {
     }
 }
 
-test "[cli] - [validate JSON summary]: returns the complete stable schema" {
+test "[cli] - [validate json]: returns the complete stable schema" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -701,7 +701,7 @@ test "[unit] - [validate alphabet]: custom symbols replace the detected alphabet
     try std.testing.expectEqual(@as(usize, 0), countKind(&summary, .invalid_character));
 }
 
-test "[unit] - [validate layout]: reports width and trailing-whitespace warnings" {
+test "[unit] - [validate scan]: reports width and trailing-whitespace warnings" {
     var summary = try validateBytes(std.testing.allocator, ">seq\nAAAA\nCC \nGGGG\nTT\n", .{});
     defer summary.deinit(std.testing.allocator);
 
@@ -709,7 +709,7 @@ test "[unit] - [validate layout]: reports width and trailing-whitespace warnings
     try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .inconsistent_line_widths));
 }
 
-test "[edge] - [validate layout]: reports a final line wider than the established width" {
+test "[edge] - [validate scan]: reports a final line wider than the established width" {
     var summary = try validateBytes(std.testing.allocator, ">seq\nAA\nAAAA\n", .{});
     defer summary.deinit(std.testing.allocator);
 
@@ -739,14 +739,14 @@ test "[unit] - [validate schemas]: distinguishes valid and invalid UniProt and R
     }
 }
 
-test "[unit] - [validate status]: promotes warnings in strict mode" {
+test "[unit] - [validate]: promotes warnings in strict mode" {
     try std.testing.expectEqual(@as(u8, 0), validator.exitCode(0, 0, false));
     try std.testing.expectEqual(@as(u8, 2), validator.exitCode(0, 1, false));
     try std.testing.expectEqual(@as(u8, 1), validator.exitCode(0, 1, true));
     try std.testing.expectEqual(@as(u8, 1), validator.exitCode(1, 0, false));
 }
 
-test "[unit] - [validate status]: ignores warnings repaired by format rewrite" {
+test "[unit] - [validate]: ignores warnings repaired by format rewrite" {
     var summary = try validateBytes(std.testing.allocator, ">seq\nACGT \n", .{});
     defer summary.deinit(std.testing.allocator);
 
@@ -794,7 +794,7 @@ test "[failure] - [validate fix]: rejects errors outside the format-only contrac
     try std.testing.expectEqual(.sequence_control_byte, (try fixBlocker(&nulls, .{})).?);
 }
 
-test "[property] - [validate format-only fix]: preserves invalid sequence characters" {
+test "[property] - [validate fix]: preserves invalid sequence characters" {
     const broken = ">seq\nACGT?\n";
     var summary = try validateBytes(std.testing.allocator, broken, .{});
     defer summary.deinit(std.testing.allocator);
@@ -875,7 +875,7 @@ test "[cli] - [validate fix]: replaces the output with the exact library rewrite
     try std.testing.expectEqualStrings(expected, got);
 }
 
-test "[cli] - [validate format-only fix]: preserves invalid bytes while normal fix refuses" {
+test "[cli] - [validate fix]: preserves invalid bytes while normal fix refuses" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1049,7 +1049,7 @@ test "[integration] - [validate fix]: preserves indexed retrieval across layout 
     }
 }
 
-test "[integration] - [validator and indexer]: agree on messy record catalog and geometry" {
+test "[integration] - [validate]: agree on messy record catalog and geometry" {
     const data = try readTestFile(std.testing.allocator, "tests/data/validator_indexer_agreement.fasta");
     defer std.testing.allocator.free(data);
 
@@ -1100,7 +1100,7 @@ test "[integration] - [validator and indexer]: agree on messy record catalog and
     try std.testing.expectEqual(@as(usize, 1025), long_name.len);
 }
 
-test "[cli] - [validate safety]: refuses preamble loss without changing legacy counts or destination" {
+test "[cli] - [validate fix]: refuses preamble loss without changing legacy counts or destination" {
     const allocator = std.testing.allocator;
     const data = "junk\n>seq1\nACGT\n";
     var summary = try validateBytes(allocator, data, .{});
@@ -1132,7 +1132,7 @@ test "[cli] - [validate safety]: refuses preamble loss without changing legacy c
     }
 }
 
-test "[cli] - [validate safety]: rejects a symlink alias and safely replaces a separate hard link" {
+test "[cli] - [validate fix]: rejects a symlink alias and safely replaces a separate hard link" {
     const allocator = std.testing.allocator;
     const broken = ">seq1\nACGT";
     const input = try writeFastaArtifact(allocator, "validate-link-input", broken);
@@ -1166,7 +1166,7 @@ test "[cli] - [validate safety]: rejects a symlink alias and safely replaces a s
     try std.testing.expectEqualStrings(">seq1\nACGT\n", output_after);
 }
 
-test "[failure] - [validate safety]: refuses an output open failure before staging" {
+test "[failure] - [validate fix]: refuses an output open failure before staging" {
     const diagnostics = main.index_format.diagnostics;
     const allocator = std.testing.allocator;
     const broken = ">seq1\nACGT";
@@ -1199,7 +1199,7 @@ test "[failure] - [validate safety]: refuses an output open failure before stagi
     try std.testing.expectError(error.SymLinkLoop, std.Io.Dir.cwd().openFile(io, output, .{}));
 }
 
-test "[failure] - [native validator blockers]: owns duplicate facts beyond retained events" {
+test "[failure] - [validate diagnostics]: owns duplicate facts beyond retained events" {
     const diagnostics = main.index_format.diagnostics;
     const allocator = std.testing.allocator;
     var data: std.ArrayList(u8) = .empty;
@@ -1225,7 +1225,7 @@ test "[failure] - [native validator blockers]: owns duplicate facts beyond retai
     try std.testing.expectEqualStrings("dup", failure.preview(preview));
 }
 
-test "[failure] - [native validator blockers]: distinguishes header and sequence bytes and exact alphabet evidence" {
+test "[failure] - [validate diagnostics]: distinguishes header and sequence bytes and exact alphabet evidence" {
     const diagnostics = main.index_format.diagnostics;
     const cases = [_][]const u8{ ">na\x00me\nACGT\n", ">seq\nA\x00C \n" };
     for (cases, 0..) |data, i| {
@@ -1259,11 +1259,11 @@ test "[failure] - [native validator blockers]: distinguishes header and sequence
     try std.testing.expect(failure.primary() == null);
 }
 
-test "[failure] - [native validator allocations]: releases scanner, rewrite and event storage" {
+test "[failure] - [validate diagnostics]: releases scanner, rewrite and event storage" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, checkNativeValidatorAllocations, .{">seq\nACG \nT\n"});
 }
 
-test "[edge] - [native validator BOM]: retains original first-line byte columns" {
+test "[edge] - [validate diagnostics]: retains original first-line byte columns" {
     const cases = [_]struct { data: []const u8, offset: u64, column: u64 }{
         .{ .data = "\xef\xbb\xbf>na\x00me\nACGT\n", .offset = 6, .column = 7 },
         .{ .data = "\xef\xbb\xbf \tjunk\n>seq\nACGT\n", .offset = 5, .column = 6 },
@@ -1284,7 +1284,7 @@ test "[edge] - [native validator BOM]: retains original first-line byte columns"
     }
 }
 
-test "[cli] - [validate text]: escapes unsafe names and keeps v1 JSON escaping" {
+test "[cli] - [validate events]: escapes unsafe names and keeps v1 JSON escaping" {
     const allocator = std.testing.allocator;
     const input = try writeFastaArtifact(allocator, "validate-text-name", ">na\x1b\x7f\xffme\nA\n>na\x1b\x7f\xffme\nC\n");
     defer allocator.free(input);
@@ -1295,7 +1295,7 @@ test "[cli] - [validate text]: escapes unsafe names and keeps v1 JSON escaping" 
     try std.testing.expect(std.mem.indexOf(u8, json, "\\u00ff") != null);
 }
 
-test "[failure] - [native validator input]: retains stat and mapping causes before scanning" {
+test "[failure] - [validate diagnostics]: retains stat and mapping causes before scanning" {
     const diagnostics = main.index_format.diagnostics;
     const Fault = struct {
         fn stat(_: ?*anyopaque, _: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
@@ -1321,7 +1321,7 @@ test "[failure] - [native validator input]: retains stat and mapping causes befo
     try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);
 }
 
-test "[failure] - [native validator repair]: preserves published output after report flush failure" {
+test "[failure] - [validate diagnostics]: preserves published output after report flush failure" {
     const diagnostics = main.index_format.diagnostics;
     const Fault = struct {
         fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
@@ -1362,7 +1362,7 @@ test "[failure] - [native validator repair]: preserves published output after re
     try std.testing.expectEqualStrings(">seq\nACGT", original);
 }
 
-test "[failure] - [native validator stdout]: retains final flush cause and resets for reuse" {
+test "[failure] - [validate diagnostics]: retains final flush cause and resets for reuse" {
     const diagnostics = main.index_format.diagnostics;
     const Fault = struct {
         fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
@@ -1404,7 +1404,7 @@ test "[failure] - [native validator stdout]: retains final flush cause and reset
     try std.testing.expectEqual(.succeeded, failure.outputs.stdout.final_flush);
 }
 
-test "[cli] - [validate cap]: keeps complete counts and explains retained examples" {
+test "[cli] - [validate events]: keeps complete counts and explains retained examples" {
     const allocator = std.testing.allocator;
     var data: std.ArrayList(u8) = .empty;
     defer data.deinit(allocator);
@@ -1450,7 +1450,7 @@ test "[cli] - [validate cap]: keeps complete counts and explains retained exampl
     try std.testing.expectEqual(.not_attempted, failure.outputs.stdout.final_flush);
 }
 
-test "[edge] - [validate fix widths]: equal frequencies select the first seen width" {
+test "[edge] - [validate fix]: equal frequencies select the first seen width" {
     const cases = [_]struct { input: []const u8, width: u32, fixed: []const u8 }{
         .{ .input = ">seq\nAAA\nCC\nGGGG\n", .width = 3, .fixed = ">seq\nAAA\nCCG\nGGG\n" },
         .{ .input = ">seq\nCC\nAAA\nGGGG\n", .width = 2, .fixed = ">seq\nCC\nAA\nAG\nGG\nG\n" },

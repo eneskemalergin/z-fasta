@@ -198,7 +198,7 @@ fn buildComplementTable() [256]u8 {
 
 const IUPAC_COMPLEMENT_TABLE: [256]u8 = buildComplementTable();
 
-test "[property] - [portable scanner]: whitespace counts match scalar counts" {
+test "[property] - [fasta scanner]: whitespace counts match scalar counts" {
     var data: [12289]u8 = undefined;
     const lengths = [_]usize{ 0, 15, 16, 31, 32, 127, 128, 2047, 2048, 2049, 4095, 4096, 4097, 8191, 8192, 8193, data.len };
     for ([_]?u8{ null, ' ', 'X' }) |fill| {
@@ -213,7 +213,7 @@ test "[property] - [portable scanner]: whitespace counts match scalar counts" {
     }
 }
 
-test "[property] - [portable scanner]: name delimiters match scalar scanning" {
+test "[property] - [fasta scanner]: name delimiters match scalar scanning" {
     var data = [_]u8{'A'} ** 65;
     for ([_]u8{ ' ', '\t', '\r', '\n' }) |separator| {
         for ([_]usize{ 0, 1, 15, 16, 17, 31, 32, 63, 64 }) |at| {
@@ -253,7 +253,7 @@ test "[unit] - [complement]: maps IUPAC symbols and preserves other bytes" {
     }
 }
 
-test "[property] - [complementInto]: matches scalar mapping across chunk boundaries" {
+test "[property] - [complement]: matches scalar mapping across chunk boundaries" {
     const alphabet = "ACGTRYSWKMBDHVNacgtryswkmbdhvnUu-Xx";
     var src: [97]u8 = undefined;
     for (&src, 0..) |*byte, i| byte.* = alphabet[i % alphabet.len];

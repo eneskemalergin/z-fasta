@@ -744,7 +744,7 @@ fn recordStatsAllocationFailure(err: diagnostics.Error, failure: *const diagnost
     try std.testing.expectEqual(.not_started, failure.outputs.file.state);
 }
 
-test "[unit] - [stats scan order]: detects sorted and unsorted offsets" {
+test "[unit] - [stats composition]: detects sorted and unsorted offsets" {
     const sorted = [_]IndexRecord{
         testIndexRecord(10, 1, 1, 2),
         testIndexRecord(20, 1, 1, 2),
@@ -1017,7 +1017,7 @@ test "[edge] - [stats lengths]: accumulates and formats auN above u64" {
     try std.testing.expectEqualStrings("4294967296.00", writer.buffered());
 }
 
-test "[unit] - [stats formatting]: rounds fixed decimals exactly" {
+test "[unit] - [stats report]: rounds fixed decimals exactly" {
     var buffer: [64]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try writeFixedUnsigned(&writer, 100, 32, 2);
@@ -1098,7 +1098,7 @@ test "[failure] - [stats composition]: rejects categories above total symbols" {
     }
 }
 
-test "[failure] - [stats reader]: retains read causes, short counts and original record" {
+test "[failure] - [stats composition]: retains read causes, short counts and original record" {
     const Fault = struct {
         fn read(_: ?*anyopaque, _: std.Io.File, _: []const []u8, _: u64) std.Io.File.ReadPositionalError!usize {
             return error.InputOutput;
@@ -1138,7 +1138,7 @@ test "[failure] - [stats reader]: retains read causes, short counts and original
     }
 }
 
-test "[failure] - [stats counts]: guards slices and accepts whitespace near the limit" {
+test "[failure] - [stats composition]: guards slices and accepts whitespace near the limit" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.stats);
     var diag = Diagnostics{ .failure = &failure, .record = 3 };
@@ -1161,7 +1161,7 @@ test "[failure] - [stats counts]: guards slices and accepts whitespace near the 
     try std.testing.expectEqual(diagnostics.Check.composition_accounting, failure.primary().?.details.@"internal.consistency_failed".check);
 }
 
-test "[failure] - [stats names and aggregate]: distinguishes extrema and completed totals" {
+test "[failure] - [stats diagnostics]: distinguishes extrema and completed totals" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.stats);
     var idx = try index_format.loadIndex(std.testing.allocator, std.testing.io, "tests/data/simple.fasta", .automatic, .stats_scan, &failure);
@@ -1183,7 +1183,7 @@ test "[failure] - [stats names and aggregate]: distinguishes extrema and complet
     try std.testing.expect(failure.primary().?.at.record == null);
 }
 
-test "[failure] - [stats allocations]: releases required lengths and unsorted traversal storage" {
+test "[failure] - [stats diagnostics]: releases required lengths and unsorted traversal storage" {
     var seen: u64 = 0;
     try std.testing.checkAllAllocationFailures(std.testing.allocator, checkStatsAllocationFailure, .{ "tests/data/simple.fasta", &seen });
     var tmp = std.testing.tmpDir(.{});

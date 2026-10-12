@@ -2678,7 +2678,7 @@ fn checkCollectedIndexAllocations(allocator: std.mem.Allocator) !void {
     try std.testing.expect(failure.primary() == null);
 }
 
-test "[property] - [stride scanner]: matches scalar structural boundaries" {
+test "[property] - [fasta scanner]: matches scalar structural boundaries" {
     const line_bases: u32 = 4;
     const line_count = 520;
     const target_line = 256;
@@ -2737,7 +2737,7 @@ test "[property] - [stride scanner]: matches scalar structural boundaries" {
     }
 }
 
-test "[regression] - [stride scanner]: checks whitespace before a later structural stop" {
+test "[regression] - [fasta scanner]: checks whitespace before a later structural stop" {
     const cases = [_][]const u8{
         "AAAA\nAA A\n>b x\n",
         "AAAA\nAA A\nAAAAx",
@@ -2751,7 +2751,7 @@ test "[regression] - [stride scanner]: checks whitespace before a later structur
     }
 }
 
-test "[property] - [FAI formatter]: matches standard formatting at integer boundaries" {
+test "[property] - [fai output]: matches standard formatting at integer boundaries" {
     const cases = [_]IndexRecord{
         .{
             .name_offset = 0,
@@ -2801,7 +2801,7 @@ test "[property] - [FAI formatter]: matches standard formatting at integer bound
     }
 }
 
-test "[unit] - [FASTA scanner]: gates initial-header validation by option" {
+test "[unit] - [fasta scanner]: gates initial-header validation by option" {
     const data = "not-fasta\n";
     var read_buf: [4]u8 = undefined;
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -2834,7 +2834,7 @@ test "[unit] - [FASTA scanner]: gates initial-header validation by option" {
     );
 }
 
-test "[failure] - [FASTA scanner]: rejects sequence lines above u32 geometry" {
+test "[failure] - [fasta scanner]: rejects sequence lines above u32 geometry" {
     var state = ChunkParseState{
         .allocator = std.testing.allocator,
         .in_pending_line = true,
@@ -2860,7 +2860,7 @@ test "[failure] - [FASTA scanner]: rejects sequence lines above u32 geometry" {
     try std.testing.expectError(error.SequenceLineTooLong, state.commitPendingLine(false));
 }
 
-test "[edge] - [index count]: rejects excess records before emitting" {
+test "[edge] - [fasta scanner]: rejects excess records before emitting" {
     var state = ChunkParseState{ .allocator = std.testing.allocator };
     defer state.name.deinit(std.testing.allocator);
     defer state.side_table.deinit(std.testing.allocator);
@@ -2890,7 +2890,7 @@ test "[edge] - [index count]: rejects excess records before emitting" {
     try std.testing.expectEqual(std.math.maxInt(u32), count);
 }
 
-test "[edge] - [index count]: full source tables retain duplicate lookups" {
+test "[edge] - [name catalog]: full source tables retain duplicate lookups" {
     inline for (.{ u32, u64 }) |Offset| {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
         var source = SourceDedup.init(failing.allocator(), std.testing.io, undefined, if (Offset == u32) 0 else std.math.maxInt(u32));
@@ -2908,7 +2908,7 @@ test "[edge] - [index count]: full source tables retain duplicate lookups" {
     }
 }
 
-test "[property] - [name deduplication]: remains exact under hash collisions" {
+test "[property] - [name catalog]: remains exact under hash collisions" {
     const CollisionContext = struct {
         pub fn hash(_: @This(), _: []const u8) u64 {
             return 0;
@@ -2932,7 +2932,7 @@ test "[property] - [name deduplication]: remains exact under hash collisions" {
     try std.testing.expectEqual(@as(usize, 3), seen.map.count());
 }
 
-test "[failure] - [FASTA scanner]: maps reader failures to SourceReadFailed" {
+test "[failure] - [fasta scanner]: maps reader failures to SourceReadFailed" {
     var reader: std.Io.Reader = .failing;
     var read_buf: [4]u8 = undefined;
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -2951,7 +2951,7 @@ test "[failure] - [FASTA scanner]: maps reader failures to SourceReadFailed" {
     );
 }
 
-test "[failure] - [FAI scanner]: maps writer failures to FaiSpoolWriteFailed" {
+test "[failure] - [fai scanner]: maps writer failures to FaiSpoolWriteFailed" {
     var reader = std.Io.Reader.fixed(">seq\nA\n");
     var read_buf: [4]u8 = undefined;
     var writer: std.Io.Writer = .failing;
@@ -2969,7 +2969,7 @@ test "[failure] - [FAI scanner]: maps writer failures to FaiSpoolWriteFailed" {
     );
 }
 
-test "[integration] - [FAI spool]: uses exclusive files and cleans them" {
+test "[integration] - [fai output]: uses exclusive files and cleans them" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
@@ -2992,7 +2992,7 @@ test "[integration] - [FAI spool]: uses exclusive files and cleans them" {
     try std.testing.expectEqual(null, try entries.next(std.testing.io));
 }
 
-test "[integration] - [source identity]: detects path replacement" {
+test "[integration] - [index]: detects path replacement" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -3017,7 +3017,7 @@ test "[integration] - [source identity]: detects path replacement" {
     try std.testing.expect(!details.disappeared);
 }
 
-test "[property] - [source names]: complete names resolve fingerprint collisions" {
+test "[property] - [name catalog]: complete names resolve fingerprint collisions" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     const io = std.testing.io;
@@ -3038,7 +3038,7 @@ test "[property] - [source names]: complete names resolve fingerprint collisions
     try std.testing.expect(!try set.observeWithFingerprint(&source, long, 0, 0));
 }
 
-test "[unit] - [source names]: exact comparisons use the current input chunk" {
+test "[unit] - [name catalog]: exact comparisons use the current input chunk" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     const io = std.testing.io;
@@ -3055,7 +3055,7 @@ test "[unit] - [source names]: exact comparisons use the current input chunk" {
     try std.testing.expect(try set.observeWithFingerprint(&source, "alpha", 20, 0));
 }
 
-test "[edge] - [source names]: retain offsets above four GiB" {
+test "[edge] - [name catalog]: retain offsets above four GiB" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     const io = std.testing.io;
@@ -3075,7 +3075,7 @@ test "[edge] - [source names]: retain offsets above four GiB" {
     try std.testing.expectEqual(@as(u64, 0), (try file.stat(io)).size);
 }
 
-test "[property] - [source names]: cached names resolve fingerprint collisions" {
+test "[property] - [name catalog]: cached names resolve fingerprint collisions" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     const io = std.testing.io;
@@ -3092,7 +3092,7 @@ test "[property] - [source names]: cached names resolve fingerprint collisions" 
     try std.testing.expect(try set.observeWithFingerprint(&source, "alpha", 20, 0));
 }
 
-test "[failure] - [source names]: read errors leave the insertion unfinished" {
+test "[failure] - [name catalog]: read errors leave the insertion unfinished" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     const io = std.testing.io;
@@ -3109,11 +3109,11 @@ test "[failure] - [source names]: read errors leave the insertion unfinished" {
     try std.testing.expectEqual(@as(u32, 1), set.count());
 }
 
-test "[failure] - [packed names]: block growth cleans every allocation failure" {
+test "[failure] - [name catalog]: block growth cleans every allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, checkPackedNameAllocations, .{});
 }
 
-test "[failure] - [source names]: table and entry growth clean every allocation failure" {
+test "[failure] - [name catalog]: table and entry growth clean every allocation failure" {
     var data: std.ArrayList(u8) = .empty;
     defer data.deinit(std.testing.allocator);
     for (0..5000) |i| {
@@ -3123,7 +3123,7 @@ test "[failure] - [source names]: table and entry growth clean every allocation 
     try std.testing.checkAllAllocationFailures(std.testing.allocator, checkSourceNameAllocations, .{data.items});
 }
 
-test "[edge] - [source names]: maximum names cross copied and retained cache blocks" {
+test "[edge] - [name catalog]: maximum names cross copied and retained cache blocks" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     const io = std.testing.io;
@@ -3148,7 +3148,7 @@ test "[edge] - [source names]: maximum names cross copied and retained cache blo
     try std.testing.expect(names.hot_blocks.items.len >= 2);
 }
 
-test "[failure] - [source names]: short reads distinguish collisions from truncation" {
+test "[failure] - [name catalog]: short reads distinguish collisions from truncation" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     const io = std.testing.io;
@@ -3166,7 +3166,7 @@ test "[failure] - [source names]: short reads distinguish collisions from trunca
     try std.testing.expect(names.read_failed);
 }
 
-test "[integration] - [catalog staging]: spill replay preserves bytes and removes its file" {
+test "[integration] - [name catalog]: spill replay preserves bytes and removes its file" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const data = try allocator.alloc(u8, CatalogBytes.MEMORY_BYTES + 333);
@@ -3194,7 +3194,7 @@ test "[integration] - [catalog staging]: spill replay preserves bytes and remove
     try std.testing.expectError(error.FileNotFound, spool_dir.?.statFile(io, spool_name[0..spool_name_len], .{}));
 }
 
-test "[property] - [source names]: raw and compressed replay retain exact names" {
+test "[property] - [name catalog]: raw and compressed replay retain exact names" {
     const allocator = std.testing.allocator;
     for ([_]bool{ false, true }) |compressed| {
         var data: std.ArrayList(u8) = .empty;
@@ -3214,7 +3214,7 @@ test "[property] - [source names]: raw and compressed replay retain exact names"
     }
 }
 
-test "[failure] - [streamed ZFI]: parse errors precede record write failures" {
+test "[failure] - [zfi writer]: parse errors precede record write failures" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var data: std.ArrayList(u8) = .empty;
@@ -3249,7 +3249,7 @@ test "[failure] - [streamed ZFI]: parse errors precede record write failures" {
     try std.testing.expectError(error.ZfiWriteFailed, catalog.finish(2000, data.items.len, 0));
 }
 
-test "[failure] - [source names]: source offsets cannot overlap cache flags" {
+test "[failure] - [name catalog]: source offsets cannot overlap cache flags" {
     var narrow = SourceDedup.init(std.testing.allocator, std.testing.io, undefined, 0);
     defer narrow.deinit();
     try std.testing.expectError(error.SourceChanged, narrow.observe("name", Tables(u32).CACHE_FLAG));
@@ -3260,7 +3260,7 @@ test "[failure] - [source names]: source offsets cannot overlap cache flags" {
     try std.testing.expectEqual(@as(u32, 0), wide.uniqueCount());
 }
 
-test "[failure] - [packed names]: oversized offsets roll back the insertion" {
+test "[failure] - [name catalog]: oversized offsets roll back the insertion" {
     if (comptime @bitSizeOf(usize) <= 32) return error.SkipZigTest;
     var names = PackedNames.init(std.testing.allocator);
     defer names.deinit();
@@ -3367,7 +3367,7 @@ test "[failure] - [index diagnostics]: parser failure promotes over deferred cat
     try std.testing.expectEqual(error.FileNotFound, failure.secondaryItems()[0].cause.?.zig);
 }
 
-test "[failure] - [catalog diagnostics]: spill IO retains causes and exact short reads" {
+test "[failure] - [index diagnostics]: spill IO retains causes and exact short reads" {
     const Fault = struct {
         fn write(_: ?*anyopaque, _: std.Io.File, _: []const u8, _: []const []const u8, _: usize, _: u64) std.Io.File.WritePositionalError!usize {
             return error.NoSpaceLeft;
@@ -3429,7 +3429,7 @@ test "[failure] - [catalog diagnostics]: spill IO retains causes and exact short
     }
 }
 
-test "[regression] - [FAI replay diagnostics]: missing delimiters retain EOF without a field length" {
+test "[regression] - [index diagnostics]: missing delimiters retain EOF without a field length" {
     const io = std.testing.io;
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
@@ -3458,7 +3458,7 @@ test "[failure] - [index diagnostics]: collected catalog and serialization clean
     try std.testing.checkAllAllocationFailures(std.testing.allocator, checkCollectedIndexAllocations, .{});
 }
 
-test "[regression] - [index abort]: removed staging does not remain staged" {
+test "[regression] - [index diagnostics]: removed staging does not remain staged" {
     const io = std.testing.io;
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
@@ -3476,7 +3476,7 @@ test "[regression] - [index abort]: removed staging does not remain staged" {
     try std.testing.expectEqual(error.NoSpaceLeft, failure.primary().?.cause.?.zig);
 }
 
-test "[failure] - [index abort]: cleanup uncertainty preserves primary and published state" {
+test "[failure] - [index diagnostics]: cleanup uncertainty preserves primary and published state" {
     const Fault = struct {
         fn remove(_: ?*anyopaque, _: std.Io.Dir, _: []const u8) std.Io.Dir.DeleteFileError!void {
             return error.AccessDenied;
@@ -3514,7 +3514,7 @@ test "[failure] - [index abort]: cleanup uncertainty preserves primary and publi
     try std.testing.expectEqual(@as(u64, 5), (try temporary.dir.statFile(io, "published.zfi", .{})).size);
 }
 
-test "[edge] - [index preflight]: buffer width and ZFI count reject before narrowing" {
+test "[edge] - [index diagnostics]: buffer width and ZFI count reject before narrowing" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.index);
     var reader = std.Io.Reader.fixed(">name\nACGT\n");

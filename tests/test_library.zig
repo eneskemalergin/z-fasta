@@ -59,7 +59,7 @@ fn expectCode(code: diagnostics.Code, failure: *const diagnostics.Failure) !void
     try testing.expectEqual(code, failure.primary().?.code());
 }
 
-test "[integration] - [IndexedReader]: one open reader serves repeated fetches" {
+test "[integration] - [indexed reader]: one open reader serves repeated fetches" {
     const allocator = testing.allocator;
     var fixture = try Fixture.init(allocator);
     defer fixture.deinit(allocator);
@@ -84,7 +84,7 @@ test "[integration] - [IndexedReader]: one open reader serves repeated fetches" 
     try testing.expect(reader.record(2) == null);
 }
 
-test "[property] - [IndexedReader]: FAI, uniform ZFI and non-uniform ZFI agree" {
+test "[property] - [indexed reader]: FAI, uniform ZFI and non-uniform ZFI agree" {
     const allocator = testing.allocator;
     var fixture = try Fixture.init(allocator);
     defer fixture.deinit(allocator);
@@ -122,7 +122,7 @@ test "[property] - [IndexedReader]: FAI, uniform ZFI and non-uniform ZFI agree" 
     }
 }
 
-test "[edge] - [IndexedReader]: strict intervals fail before changing the destination" {
+test "[edge] - [indexed reader]: strict intervals fail before changing the destination" {
     const allocator = testing.allocator;
     var fixture = try Fixture.init(allocator);
     defer fixture.deinit(allocator);
@@ -149,7 +149,7 @@ test "[edge] - [IndexedReader]: strict intervals fail before changing the destin
     try testing.expectEqualStrings("xxxx", &buf);
 }
 
-test "[integration] - [IndexedReader]: lookup is first-wins while ordinals reach duplicates" {
+test "[integration] - [indexed reader]: lookup is first-wins while ordinals reach duplicates" {
     const allocator = testing.allocator;
     var fixture = try Fixture.init(allocator);
     defer fixture.deinit(allocator);
@@ -167,7 +167,7 @@ test "[integration] - [IndexedReader]: lookup is first-wins while ordinals reach
     try testing.expectEqualStrings("CCCC", try reader.fetchInto(1, .{ .start = 0, .end = 4 }, &buf, &failure));
 }
 
-test "[failure] - [IndexedReader]: explicit selection never falls back" {
+test "[failure] - [indexed reader]: explicit selection never falls back" {
     const allocator = testing.allocator;
     var fixture = try Fixture.init(allocator);
     defer fixture.deinit(allocator);
@@ -190,7 +190,7 @@ test "[failure] - [IndexedReader]: explicit selection never falls back" {
     try testing.expectEqual(diagnostics.SourceId.fai, failure.primary().?.at.source.?);
 }
 
-test "[failure] - [IndexedReader]: rejects gzip sources and whitespace in dense rows" {
+test "[failure] - [indexed reader]: rejects gzip sources and whitespace in dense rows" {
     const allocator = testing.allocator;
     var fixture = try Fixture.init(allocator);
     defer fixture.deinit(allocator);

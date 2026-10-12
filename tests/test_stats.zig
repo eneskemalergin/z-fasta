@@ -543,7 +543,7 @@ test "[cli] - [stats report]: counts the complete protein alphabet and exception
     try expectComposition(expected, output);
 }
 
-test "[failure] - [stats stdout]: retains final flush cause and resets operation facts" {
+test "[failure] - [stats diagnostics]: retains final flush cause and resets operation facts" {
     const diagnostics = main.index_format.diagnostics;
     const Fault = struct {
         fn discard(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {

@@ -25,7 +25,7 @@ pub fn adviseSequential(memory: MappedBytes) void {
     ) catch {};
 }
 
-test "[integration] - [read-only mapping]: exposes file contents" {
+test "[integration] - [file mapping]: exposes file contents" {
     const contents = "mapped bytes";
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

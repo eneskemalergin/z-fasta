@@ -468,7 +468,7 @@ fn writeGetSummary(writer: *std.Io.Writer, result: getter.Result) std.Io.Writer.
     try writer.print("summary: regions={d} total_bases={d} elapsed_s={d:.6} regions_per_s={d:.1}\n", .{ result.region_count, result.total_bases, seconds, regions_per_second });
 }
 
-test "[unit] - [get transform flags]: selects the requested orientation" {
+test "[unit] - [get orientation]: selects the requested orientation" {
     const rc = try parseTransformFlags(true, false, false, false);
     const complement_only = try parseTransformFlags(false, true, false, true);
     const reverse_only = try parseTransformFlags(false, false, true, false);
@@ -482,7 +482,7 @@ test "[unit] - [get transform flags]: selects the requested orientation" {
     try std.testing.expect(!reverse_only.orientation.complement);
 }
 
-test "[failure] - [get transform flags]: rejects conflicting modes" {
+test "[failure] - [get orientation]: rejects conflicting modes" {
     const conflicts = [_][3]bool{
         .{ true, true, false },
         .{ true, false, true },
@@ -547,13 +547,13 @@ test "[cli] - [dispatch]: writes help and rejects missing or unknown commands" {
     }
 }
 
-test "[failure] - [get summary]: propagates a full destination" {
+test "[failure] - [dispatch]: propagates a full destination" {
     var buffer: [1]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try std.testing.expectError(error.WriteFailed, writeGetSummary(&writer, .{ .region_count = 1, .total_bases = 1, .elapsed_ns = 1 }));
 }
 
-test "[cli] - [diagnostic format]: respects placement, values, repetition and help priority" {
+test "[cli] - [dispatch]: respects placement, values, repetition and help priority" {
     const binary = TEST_BINARY_PATH;
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -606,7 +606,7 @@ test "[cli] - [diagnostic format]: respects placement, values, repetition and he
     }
 }
 
-test "[failure] - [CLI delivery]: retains primary after failed stderr and observes stdout failures" {
+test "[failure] - [dispatch]: retains primary after failed stderr and observes stdout failures" {
     const Fault = struct {
         fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
             return switch (operation) {
@@ -641,7 +641,7 @@ test "[failure] - [CLI delivery]: retains primary after failed stderr and observ
     try std.testing.expect(failure.work_complete and !failure.complete);
 }
 
-test "[cli] - [Linux delivery]: help, version and required stderr failures return failure" {
+test "[cli] - [dispatch]: help, version and required stderr failures return failure" {
     if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
     const binary = TEST_BINARY_PATH;
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});

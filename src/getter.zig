@@ -1450,13 +1450,13 @@ fn checkGetRequestAllocations(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(u64, 4), result.total_bases);
 }
 
-test "[failure] - [get requested names]: releases partial collection" {
+test "[failure] - [get requests]: releases partial collection" {
     for ([_]bool{ false, true }) |stable_input| {
         try std.testing.checkAllAllocationFailures(std.testing.allocator, collectNamesForAllocationCheck, .{stable_input});
     }
 }
 
-test "[unit] - [get read grouping]: accepts overlap and adjacency in either order" {
+test "[unit] - [get extraction]: accepts overlap and adjacency in either order" {
     try std.testing.expect(spansOverlapOrTouch(10, 20, 20, 30));
     try std.testing.expect(spansOverlapOrTouch(20, 30, 10, 20));
     try std.testing.expect(spansOverlapOrTouch(10, 20, 15, 25));
@@ -1465,7 +1465,7 @@ test "[unit] - [get read grouping]: accepts overlap and adjacency in either orde
     try std.testing.expect(!spansOverlapOrTouch(21, 30, 10, 20));
 }
 
-test "[unit] - [get request workspace]: reuses consecutive names" {
+test "[unit] - [get requests]: reuses consecutive names" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.get);
     var context = Diagnostics{ .failure = &failure, .at = .{ .source = .names } };
@@ -1484,7 +1484,7 @@ test "[unit] - [get request workspace]: reuses consecutive names" {
     try std.testing.expectEqualStrings("seq2", workspace.requests.items[2].parsed(workspace.names.items).region.name);
 }
 
-test "[edge] - [get request workspace]: retains the name crossing its byte target" {
+test "[edge] - [get requests]: retains the name crossing its byte target" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.get);
     var context = Diagnostics{ .failure = &failure, .at = .{ .source = .names } };
@@ -1509,7 +1509,7 @@ test "[edge] - [get request workspace]: retains the name crossing its byte targe
     try std.testing.expect(workspace.names.capacity <= MAX_ACTIVE_NAME_BYTES);
 }
 
-test "[unit] - [get names reader]: handles line endings and a final unterminated line" {
+test "[unit] - [get names]: handles line endings and a final unterminated line" {
     const test_io = std.testing.io;
     var idx = try loadTestIndex(test_io, "tests/data/simple.fasta");
     defer idx.deinit();
@@ -1544,7 +1544,7 @@ test "[unit] - [get names reader]: handles line endings and a final unterminated
     );
 }
 
-test "[edge] - [get names reader]: resets storage at the request-count boundary" {
+test "[edge] - [get names]: resets storage at the request-count boundary" {
     const test_io = std.testing.io;
     var idx = try loadTestIndex(test_io, "tests/data/simple.fasta");
     defer idx.deinit();
@@ -1583,7 +1583,7 @@ test "[edge] - [get names reader]: resets storage at the request-count boundary"
     try std.testing.expectEqualStrings(one_output, writer.written()[writer.written().len - one_output.len ..]);
 }
 
-test "[unit] - [get BED reader]: streams rows in source order" {
+test "[unit] - [get bed]: streams rows in source order" {
     const test_io = std.testing.io;
     var idx = try loadTestIndex(test_io, "tests/data/simple.fasta");
     defer idx.deinit();
@@ -1625,7 +1625,7 @@ test "[unit] - [get BED reader]: streams rows in source order" {
     );
 }
 
-test "[edge] - [get BED reader]: preserves output across request-batch boundaries" {
+test "[edge] - [get bed]: preserves output across request-batch boundaries" {
     const test_io = std.testing.io;
     var idx = try loadTestIndex(test_io, "tests/data/simple.fasta");
     defer idx.deinit();
@@ -1680,7 +1680,7 @@ test "[edge] - [get BED reader]: preserves output across request-batch boundarie
     }
 }
 
-test "[failure] - [GET request facts]: keeps original rows and ordinals across skipped rows and batches" {
+test "[failure] - [get requests]: keeps original rows and ordinals across skipped rows and batches" {
     var idx = try loadTestIndex(std.testing.io, "tests/data/simple.fasta");
     defer idx.deinit();
     var rows = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -1708,7 +1708,7 @@ test "[failure] - [GET request facts]: keeps original rows and ordinals across s
     try std.testing.expectEqual(@sizeOf(PreviousRequest) + 8, @sizeOf(OwnedRequest));
 }
 
-test "[failure] - [GET totals]: rejects repeated-request overflow before writing another region" {
+test "[failure] - [get requests]: rejects repeated-request overflow before writing another region" {
     var idx = try loadTestIndex(std.testing.io, "tests/data/simple.fasta");
     defer idx.deinit();
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -1726,11 +1726,11 @@ test "[failure] - [GET totals]: rejects repeated-request overflow before writing
     try std.testing.expectEqual(@as(?u128, 2), detail.increment);
 }
 
-test "[failure] - [GET requests]: releases partial batches on allocation failure" {
+test "[failure] - [get requests]: releases partial batches on allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, checkGetRequestAllocations, .{});
 }
 
-test "[failure] - [GET request replay]: detects metadata changes and limits equal-metadata misses" {
+test "[failure] - [get requests]: detects metadata changes and limits equal-metadata misses" {
     const io = std.testing.io;
     var directory = std.testing.tmpDir(.{});
     defer directory.cleanup();
@@ -1764,7 +1764,7 @@ test "[failure] - [GET request replay]: detects metadata changes and limits equa
     try std.testing.expectEqual(@as(usize, 0), output.written().len);
 }
 
-test "[failure] - [GET request IO]: retains required read and comparison causes" {
+test "[failure] - [get requests]: retains required read and comparison causes" {
     const io = std.testing.io;
     const Fault = struct {
         fn read(_: ?*anyopaque, _: std.Io.File, _: []const []u8, _: u64) std.Io.File.ReadPositionalError!usize {
@@ -1815,7 +1815,7 @@ test "[failure] - [GET request IO]: retains required read and comparison causes"
     try std.testing.expectEqual(@as(usize, 0), writer.written().len);
 }
 
-test "[regression] - [GET discovery]: retries interrupted discovery with the full catalog" {
+test "[regression] - [get requests]: retries interrupted discovery with the full catalog" {
     const io = std.testing.io;
     const Fault = struct {
         var scenario: enum { first, partial, persistent } = .first;

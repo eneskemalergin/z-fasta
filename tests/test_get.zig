@@ -256,7 +256,7 @@ test "[cli] - [get]: selects the first empty identifier through zfi and fai" {
     try expectCliSuccess(allocator, &.{ ZFASTA_BIN, "get", fasta_path, "" }, ">\nAAAA\n");
 }
 
-test "[cli] - [get help]: describes the request source contract" {
+test "[cli] - [get]: describes the request source contract" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -446,7 +446,7 @@ test "[cli] - [get]: validates FASTA and sidecar before request input" {
     );
 }
 
-test "[cli] - [get index selection]: invalid zfi blocks a valid fai" {
+test "[cli] - [get]: invalid zfi blocks a valid fai" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -591,7 +591,7 @@ test "[cli] - [get]: rejects invalid requests, missing names, and transform conf
     try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", fasta, "--names", empty_names }, .@"request.no_regions");
 }
 
-test "[cli] - [get BED]: converts coordinates and skips metadata lines" {
+test "[cli] - [get bed]: converts coordinates and skips metadata lines" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -615,7 +615,7 @@ test "[cli] - [get BED]: converts coordinates and skips metadata lines" {
     );
 }
 
-test "[cli] - [get BED]: reports parser boundary errors" {
+test "[cli] - [get bed]: reports parser boundary errors" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -678,7 +678,7 @@ test "[cli] - [get BED]: reports parser boundary errors" {
     );
 }
 
-test "[cli] - [get BED]: annotations describe the composed orientation" {
+test "[cli] - [get bed]: annotations describe the composed orientation" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -707,7 +707,7 @@ test "[cli] - [get BED]: annotations describe the composed orientation" {
     );
 }
 
-test "[failure] - [BED parser]: retains field locations and distinguishes decimal overflow" {
+test "[failure] - [bed parser]: retains field locations and distinguishes decimal overflow" {
     const diagnostics = main.index_format.diagnostics;
     const cases = [_]struct {
         row: []const u8,
@@ -778,7 +778,7 @@ test "[failure] - [BED parser]: retains field locations and distinguishes decima
     }
 }
 
-test "[edge] - [BED parser]: preserves skips, leading zeros, maximum coordinates and optional strand" {
+test "[edge] - [bed parser]: preserves skips, leading zeros, maximum coordinates and optional strand" {
     const diagnostics = main.index_format.diagnostics;
     for ([_][]const u8{ "", "\r", "# comment", "track", "track name=x", "browser", "browser position chr1" }) |row| {
         var failure: diagnostics.Failure = undefined;
@@ -820,7 +820,7 @@ test "[edge] - [BED parser]: preserves skips, leading zeros, maximum coordinates
     try std.testing.expectEqual(@as(?u64, 9), primary.at.location.line);
 }
 
-test "[failure] - [BED parser]: owns bounded previews after the input is reused" {
+test "[failure] - [bed parser]: owns bounded previews after the input is reused" {
     const diagnostics = main.index_format.diagnostics;
     var row = [_]u8{'9'} ** 128;
     @memcpy(row[0..6], "seq\t0\t");
@@ -837,7 +837,7 @@ test "[failure] - [BED parser]: owns bounded previews after the input is reused"
     try std.testing.expectEqual(@as(?u64, 7), primary.at.location.column);
 }
 
-test "[failure] - [GET diagnostics]: returns exact request facts without exiting" {
+test "[failure] - [get diagnostics]: returns exact request facts without exiting" {
     const diagnostics = main.index_format.diagnostics;
     var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/simple.fasta", .lookup_full_map);
     defer idx.deinit();
@@ -884,7 +884,7 @@ test "[failure] - [GET diagnostics]: returns exact request facts without exiting
     try std.testing.expect(failure.complete);
 }
 
-test "[failure] - [GET diagnostics]: retains FASTA read causes and exact short reads" {
+test "[failure] - [get diagnostics]: retains FASTA read causes and exact short reads" {
     const diagnostics = main.index_format.diagnostics;
     const Fault = struct {
         fn read(_: ?*anyopaque, _: std.Io.File, _: []const []u8, _: u64) std.Io.File.ReadPositionalError!usize {
@@ -924,7 +924,7 @@ test "[failure] - [GET diagnostics]: retains FASTA read causes and exact short r
     }
 }
 
-test "[failure] - [GET diagnostics]: returns partial writer failure with no final flush" {
+test "[failure] - [get diagnostics]: returns partial writer failure with no final flush" {
     const diagnostics = main.index_format.diagnostics;
     var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/simple.fasta", .lookup_full_map);
     defer idx.deinit();
@@ -941,7 +941,7 @@ test "[failure] - [GET diagnostics]: returns partial writer failure with no fina
     try std.testing.expect(!failure.complete);
 }
 
-test "[failure] - [GET diagnostics]: captures the actual protein sample and source priority" {
+test "[failure] - [get diagnostics]: captures the actual protein sample and source priority" {
     const diagnostics = main.index_format.diagnostics;
     var failure: diagnostics.Failure = undefined;
     try std.testing.expectError(error.UnsupportedTransform, main.getter.runGet(std.testing.allocator, io, "tests/data/proteome.fasta", .{
@@ -962,7 +962,7 @@ test "[failure] - [GET diagnostics]: captures the actual protein sample and sour
     try std.testing.expectEqual(@as(?diagnostics.SourceId, .fasta), failure.primary().?.at.source);
 }
 
-test "[cli] - [GET abort]: discards pending stdout after a later malformed BED row" {
+test "[cli] - [get diagnostics]: discards pending stdout after a later malformed BED row" {
     const allocator = std.testing.allocator;
     const path = try uniqueArtifactPath(allocator, "get-abort-bed", "bed");
     defer allocator.free(path);
@@ -982,7 +982,7 @@ test "[cli] - [GET abort]: discards pending stdout after a later malformed BED r
     try utility.expectCliResult(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--bed", path, "--summary" }, 1, expected.written()[0..65537], expected_delivery);
 }
 
-test "[failure] - [GET operation]: releases allocation failures in positional and cached file modes" {
+test "[failure] - [get diagnostics]: releases allocation failures in positional and cached file modes" {
     const allocator = std.testing.allocator;
     const names = try uniqueArtifactPath(allocator, "get-oom-names", "txt");
     defer allocator.free(names);
@@ -1001,7 +1001,7 @@ test "[failure] - [GET operation]: releases allocation failures in positional an
         try std.testing.checkAllAllocationFailures(allocator, checkGetOperationAllocations, .{source});
 }
 
-test "[failure] - [GET stdout]: distinguishes writes from final flush and retains the backend cause" {
+test "[failure] - [get diagnostics]: distinguishes writes from final flush and retains the backend cause" {
     const diagnostics = main.index_format.diagnostics;
     const Fault = struct {
         fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
@@ -1043,7 +1043,7 @@ test "[failure] - [GET stdout]: distinguishes writes from final flush and retain
     try std.testing.expect(failure.outputs.stdout.records.? > 0);
 }
 
-test "[cli] - [GET missing identifiers]: reports original lengths and bounded prefixes" {
+test "[cli] - [get diagnostics]: reports original lengths and bounded prefixes" {
     const allocator = std.testing.allocator;
     const name = "absent" ** 10;
     const path = try uniqueArtifactPath(allocator, "get-long-miss", "txt");
@@ -1077,7 +1077,7 @@ test "[cli] - [GET missing identifiers]: reports original lengths and bounded pr
     }
 }
 
-test "[cli] - [get machine summary]: frames metrics without changing FASTA output" {
+test "[cli] - [get]: frames metrics without changing FASTA output" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -1099,7 +1099,7 @@ test "[cli] - [get machine summary]: frames metrics without changing FASTA outpu
     _ = try std.fmt.parseInt(u64, metrics.get("elapsed_ns").?.string, 10);
 }
 
-test "[cli] - [get machine failure]: preserves opaque identifier bytes" {
+test "[cli] - [get diagnostics]: preserves opaque identifier bytes" {
     const allocator = std.testing.allocator;
     const names = try writeFastaArtifact(allocator, "get-machine-opaque", "\xff\n");
     defer allocator.free(names);
@@ -1124,7 +1124,7 @@ test "[cli] - [get machine failure]: preserves opaque identifier bytes" {
     try std.testing.expect(!identifier.get("truncated").?.bool);
 }
 
-test "[failure] - [GET diagnostics]: classifies an overlong FASTA path" {
+test "[failure] - [get diagnostics]: classifies an overlong FASTA path" {
     const diagnostics = main.index_format.diagnostics;
     const path: [256]u8 = @splat('x');
     var failure: diagnostics.Failure = undefined;

@@ -1234,7 +1234,7 @@ fn firstKind(summary: *const Summary, kind: Kind) ?Event {
     return null;
 }
 
-test "[failure] - [rewrite safety]: keeps original preamble location and identity cause" {
+test "[failure] - [validate fix]: keeps original preamble location and identity cause" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.validate);
     const data = UTF8_BOM ++ "\t \n \r\n  junk\n>seq1\nACGT\n";
@@ -1273,7 +1273,7 @@ test "[failure] - [rewrite safety]: keeps original preamble location and identit
     try std.testing.expectEqual(error.AccessDenied, failure.primary().?.cause.?.zig);
 }
 
-test "[failure] - [rewrite safety]: observed source change prevents atomic publication" {
+test "[failure] - [validate fix]: observed source change prevents atomic publication" {
     const Fault = struct {
         fn stat(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
             var value = try std.testing.io.vtable.fileStat(userdata, file);
@@ -1307,7 +1307,7 @@ test "[failure] - [rewrite safety]: observed source change prevents atomic publi
     try std.testing.expectEqualStrings("previous destination\n", after);
 }
 
-test "[failure] - [validator counters]: captures limits before arithmetic and allocation" {
+test "[failure] - [validate scan]: captures limits before arithmetic and allocation" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.validate);
     var diag = Diagnostics{ .failure = &failure, .at = .{ .source = .fasta, .location = .{ .offset = 5, .line = 2, .column = 1 }, .record = 1 } };
@@ -1334,7 +1334,7 @@ test "[failure] - [validator counters]: captures limits before arithmetic and al
     }
 }
 
-test "[failure] - [validator output]: keeps failed publication unknown after staged cleanup" {
+test "[failure] - [validate fix]: keeps failed publication unknown after staged cleanup" {
     const Fault = struct {
         var scenario: enum { published, refused, cleanup_failed } = .published;
 
@@ -1384,7 +1384,7 @@ test "[failure] - [validator output]: keeps failed publication unknown after sta
     }
 }
 
-test "[failure] - [validator rewrite]: failed flush aborts staging and preserves the destination" {
+test "[failure] - [validate fix]: failed flush aborts staging and preserves the destination" {
     const Fault = struct {
         fn write(_: ?*anyopaque, _: std.Io.File, _: []const u8, _: []const []const u8, _: usize, _: u64) std.Io.File.WritePositionalError!usize {
             return error.InputOutput;
