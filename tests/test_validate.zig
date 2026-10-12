@@ -623,7 +623,7 @@ test "[integration] - [validate JSON]: reports invalid UTF-8 fixture names as va
 test "[property] - [validate alphabets]: accepts representative nucleotide and protein symbols" {
     const cases = [_]struct {
         sequence: []const u8,
-        sequence_type: main.stats.SequenceType,
+        sequence_type: main.fasta.SequenceType,
     }{
         .{ .sequence = "ACGTNRYWSMKHBVDacgtnrywsmkhbvd", .sequence_type = .nucleotide },
         .{ .sequence = "ACGUNRYWSMKHBVDacgunrywsmkhbvd", .sequence_type = .nucleotide },
@@ -672,7 +672,7 @@ test "[cli] - [validate JSON summary]: returns the complete stable schema" {
     const expected = try std.fmt.allocPrint(
         allocator,
         "{{\"schema_version\":\"v1\",\"truncated\":false,\"sequence_type\":\"nucleotide\",\"type_bases_sampled\":4,\"type_sample_cap\":{d},\"counts\":{{\"no_sequences\":0,\"duplicate_name\":0,\"invalid_character\":0,\"null_byte\":0,\"utf8_bom\":0,\"inconsistent_line_widths\":0,\"trailing_whitespace\":0,\"empty_sequence\":0,\"missing_terminal_newline\":0,\"mixed_line_endings\":0,\"long_header\":0,\"schema_violation\":0}},\"first_examples\":{{}}}}\n",
-        .{main.stats.VALIDATE_TYPE_SAMPLE_BASES},
+        .{main.validator.TYPE_SAMPLE_BASES},
     );
     try expectCliResult(
         allocator,
@@ -687,7 +687,7 @@ test "[edge] - [validate scan]: reports missing terminal newline and invalid nuc
     var summary = try validateBytes(std.testing.allocator, ">seq\nACGTACGTAC?", .{});
     defer summary.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(main.stats.SequenceType.nucleotide, summary.sequence_type);
+    try std.testing.expectEqual(main.fasta.SequenceType.nucleotide, summary.sequence_type);
     try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .missing_terminal_newline));
     try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .invalid_character));
 }

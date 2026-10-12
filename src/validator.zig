@@ -3,18 +3,20 @@
 //! At most `MAX_VALIDATE_EVENTS` events are kept, but counts and fix blockers continue past it.
 //! Reports are legacy v1: `invalid_character` counts distinct byte values, not occurrences, and
 //! invalid UTF-8 in names is escaped in a way that cannot be reversed.
-//! The alphabet is chosen from a 100,000-base sample through `stats.detectType`.
+//! The alphabet is chosen from a 100,000-base sample through `fasta.detectType`.
 //! `--fix` refuses content before the first header and an output that is the input, and writes
 //! through atomic replacement.
 
 const std = @import("std");
 
 const platform = @import("platform.zig");
-const stats = @import("stats.zig");
+const fasta = @import("fasta.zig");
 const diagnostics = @import("diagnostics");
 const reporting = @import("reporting.zig");
 
 pub const MAX_VALIDATE_EVENTS: usize = 10_000;
+
+pub const TYPE_SAMPLE_BASES: u64 = 100_000;
 
 pub const OutputMode = enum {
     text,
@@ -110,7 +112,7 @@ pub const Event = struct {
 pub const Summary = struct {
     events: std.ArrayList(Event),
     record_widths: std.ArrayList(u32),
-    sequence_type: stats.SequenceType = .nucleotide,
+    sequence_type: fasta.SequenceType = .nucleotide,
     type_bases_sampled: u64 = 0,
     sequence_count: usize = 0,
     header_count: usize = 0,
@@ -428,7 +430,7 @@ fn scanData(allocator: std.mem.Allocator, data: []const u8, options: Options, di
         });
     }
 
-    summary.sequence_type = stats.detectType(&type_counts, type_total);
+    summary.sequence_type = fasta.detectType(&type_counts, type_total);
     summary.type_bases_sampled = type_total;
     try appendInvalidCharacterEvents(allocator, &summary, options, summary.sequence_type, byte_counts, first_byte_at, diag);
     return summary;
@@ -672,7 +674,7 @@ fn scanSequenceLine(
         byte_counts[byte] += 1;
         if (first_byte_at[byte].location.line == null) first_byte_at[byte] = .{ .source = .fasta, .location = .{ .line = line_number, .offset = line_offset + column, .column = first_column + column }, .record = summary.header_count };
 
-        if (type_total.* < stats.VALIDATE_TYPE_SAMPLE_BASES) {
+        if (type_total.* < TYPE_SAMPLE_BASES) {
             type_counts[byte] += 1;
             type_total.* += 1;
         }
@@ -733,7 +735,7 @@ fn appendInvalidCharacterEvents(
     allocator: std.mem.Allocator,
     summary: *Summary,
     options: Options,
-    sequence_type: stats.SequenceType,
+    sequence_type: fasta.SequenceType,
     byte_counts: [256]u64,
     first_byte_at: [256]diagnostics.Reference,
     diag: *Diagnostics,
@@ -1142,7 +1144,7 @@ fn writeJsonSummary(writer: anytype, summary: *const Summary) !void {
             if (summary.truncated) "true" else "false",
             type_str,
             summary.type_bases_sampled,
-            stats.VALIDATE_TYPE_SAMPLE_BASES,
+            TYPE_SAMPLE_BASES,
         },
     );
     for (allKinds(), 0..) |kind, i| {

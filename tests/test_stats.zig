@@ -85,7 +85,7 @@ fn expectComposition(expected: []const u8, report: []const u8) !void {
 test "[unit] - [sequence type]: classifies representative alphabets" {
     const Case = struct {
         symbols: []const u8,
-        expected: stats.SequenceType,
+        expected: main.fasta.SequenceType,
     };
     const cases = [_]Case{
         .{ .symbols = "", .expected = .nucleotide },
@@ -98,7 +98,7 @@ test "[unit] - [sequence type]: classifies representative alphabets" {
     for (cases) |case| {
         const counts = countSymbols(case.symbols);
 
-        try std.testing.expectEqual(case.expected, stats.detectType(&counts, case.symbols.len));
+        try std.testing.expectEqual(case.expected, main.fasta.detectType(&counts, case.symbols.len));
     }
 }
 
@@ -106,7 +106,7 @@ test "[edge] - [sequence type]: uses a strict overflow-safe 90 percent boundary"
     const Case = struct {
         total: u64,
         nucleotide: u64,
-        expected: stats.SequenceType,
+        expected: main.fasta.SequenceType,
     };
     const cases = [_]Case{
         .{ .total = 10, .nucleotide = 9, .expected = .protein },
@@ -131,7 +131,7 @@ test "[edge] - [sequence type]: uses a strict overflow-safe 90 percent boundary"
         counts['A'] = case.nucleotide;
         counts['L'] = case.total - case.nucleotide;
 
-        try std.testing.expectEqual(case.expected, stats.detectType(&counts, case.total));
+        try std.testing.expectEqual(case.expected, main.fasta.detectType(&counts, case.total));
     }
 }
 
@@ -147,12 +147,12 @@ test "[property] - [sequence type]: matches the threshold across generated count
         var counts: [256]u64 = .{0} ** 256;
         counts[nucleotide_codes[i % nucleotide_codes.len]] = nucleotide;
         counts[protein_only_codes[i % protein_only_codes.len]] = total - nucleotide;
-        const expected: stats.SequenceType = if (@as(u128, nucleotide) * 10 > @as(u128, total) * 9)
+        const expected: main.fasta.SequenceType = if (@as(u128, nucleotide) * 10 > @as(u128, total) * 9)
             .nucleotide
         else
             .protein;
 
-        std.testing.expectEqual(expected, stats.detectType(&counts, total)) catch {
+        std.testing.expectEqual(expected, main.fasta.detectType(&counts, total)) catch {
             std.debug.print(
                 "sequence type mismatch: seed={d}, iteration={d}, total={d}, nucleotide={d}\n",
                 .{ std.testing.random_seed, i, total, nucleotide },

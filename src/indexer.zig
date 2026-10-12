@@ -1,7 +1,6 @@
 //! Builds `.zfi` and `.fai` indexes in one pass through a 256 KiB reader.
-//! A header starts with `>` at line start and its name ends at space or tab; a base is any byte
-//! above ASCII space. Empty records are skipped. Duplicate names are first-wins by exact string
-//! equality, even when hashes collide.
+//! A header starts with `>` at line start; names and bases follow `fasta.zig`. Empty records are
+//! skipped. Duplicate names are first-wins by exact string equality, even when hashes collide.
 //! A record is uniform when all lines share one width (a shorter last line is allowed); any other
 //! layout gets a side table, and `--emit-fai` rejects it. Dense runs of lines are checked in
 //! vector blocks; the first odd byte drops back to the line parser at that byte.
@@ -12,6 +11,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const index_format = @import("index_format.zig");
+const fasta = @import("fasta.zig");
 const diagnostics = @import("diagnostics");
 
 pub const INDEX_READ_BUFFER_SIZE = 256 * 1024;
@@ -272,8 +272,6 @@ const IndexRecord = index_format.IndexRecord;
 const ZfiHeader = index_format.ZfiHeader;
 const ZFI_MAGIC = index_format.ZFI_MAGIC;
 
-const SIMD_CHUNK_SIZE = 32;
-const SimdVec = @Vector(SIMD_CHUNK_SIZE, u8);
 const STRIDE_VECTOR_LEN = std.simd.suggestVectorLength(u8) orelse 1;
 const STRIDE_VALIDATION_BLOCK_LINES = 256;
 
@@ -503,22 +501,6 @@ const SequenceLengthInfo = struct {
     uses_uniform_formula: bool,
 };
 
-fn countBases(data: []const u8) u64 {
-    var count: u64 = 0;
-    var pos: usize = 0;
-    while (pos + SIMD_CHUNK_SIZE <= data.len) {
-        const chunk: SimdVec = data[pos..][0..SIMD_CHUNK_SIZE].*;
-        const space_char: SimdVec = @splat(' ');
-        count += std.simd.countTrues(chunk > space_char);
-        pos += SIMD_CHUNK_SIZE;
-    }
-    while (pos < data.len) {
-        if (data[pos] > ' ') count += 1;
-        pos += 1;
-    }
-    return count;
-}
-
 fn hasLineSeparatorAt(data: []const u8, pos: usize, sep_len: u32) bool {
     return switch (sep_len) {
         1 => pos < data.len and data[pos] == '\n',
@@ -527,75 +509,10 @@ fn hasLineSeparatorAt(data: []const u8, pos: usize, sep_len: u32) bool {
     };
 }
 
-fn lineSliceHasWhitespace(data: []const u8, start: usize, end: usize) bool {
-    var pos = start;
-    while (pos + SIMD_CHUNK_SIZE <= end) {
-        const chunk: SimdVec = data[pos..][0..SIMD_CHUNK_SIZE].*;
-        const space_char: SimdVec = @splat(' ');
-        const mask = chunk <= space_char;
-        if (@reduce(.Or, mask)) return true;
-        pos += SIMD_CHUNK_SIZE;
-    }
-    while (pos < end) : (pos += 1) {
-        if (data[pos] <= ' ') return true;
-    }
-    return false;
-}
-
-fn countBasesInLineSlice(data: []const u8, start: usize, end: usize) u32 {
-    if (start >= end) return 0;
-    if (!lineSliceHasWhitespace(data, start, end)) {
-        return @intCast(end - start);
-    }
-    return @intCast(countBases(data[start..end]));
-}
-
 fn firstLineIsDense(line_bases: u32, line_bytes: u32) bool {
     if (line_bases == 0 or line_bytes <= line_bases) return false;
     const sep_len = line_bytes - line_bases;
     return (sep_len == 1 or sep_len == 2) and line_bases + sep_len == line_bytes;
-}
-
-fn countWhitespaceDirect(comptime vector_len: usize, data: []const u8) usize {
-    const Vec = @Vector(vector_len, u8);
-    var count: usize = 0;
-    var pos: usize = 0;
-    while (pos + vector_len <= data.len) : (pos += vector_len) {
-        const chunk: Vec = data[pos..][0..vector_len].*;
-        count += std.simd.countTrues(chunk <= @as(Vec, @splat(' ')));
-    }
-    while (pos < data.len) : (pos += 1) {
-        count += @intFromBool(data[pos] <= ' ');
-    }
-    return count;
-}
-
-fn countWhitespace(comptime vector_len: usize, data: []const u8) usize {
-    if (data.len < 2048) return countWhitespaceDirect(vector_len, data);
-    const Vec = @Vector(vector_len, u8);
-    const Wide = @Vector(vector_len, u16);
-    const group = 128;
-    var count: usize = 0;
-    var pos: usize = 0;
-    while (data.len - pos >= vector_len * group) {
-        var lanes: Vec = @splat(0);
-        for (0..group) |_| {
-            const bytes: Vec = data[pos..][0..vector_len].*;
-            lanes += @select(u8, bytes <= @as(Vec, @splat(' ')), @as(Vec, @splat(1)), @as(Vec, @splat(0)));
-            pos += vector_len;
-        }
-        count += @reduce(.Add, @as(Wide, lanes));
-    }
-    var lanes: Vec = @splat(0);
-    while (data.len - pos >= vector_len) : (pos += vector_len) {
-        const bytes: Vec = data[pos..][0..vector_len].*;
-        lanes += @select(u8, bytes <= @as(Vec, @splat(' ')), @as(Vec, @splat(1)), @as(Vec, @splat(0)));
-    }
-    count += @reduce(.Add, @as(Wide, lanes));
-    while (pos < data.len) : (pos += 1) {
-        count += @intFromBool(data[pos] <= ' ');
-    }
-    return count;
 }
 
 fn validatedStrideBlock(
@@ -618,14 +535,14 @@ fn validatedStrideBlock(
     const candidate_lines = line_index;
     if (candidate_lines == 0) return 0;
     const block_end = start + candidate_lines * line_bytes;
-    if (countWhitespace(vector_len, data[start..block_end]) == candidate_lines * sep_len) {
+    if (fasta.countWhitespace(vector_len, data[start..block_end]) == candidate_lines * sep_len) {
         return candidate_lines;
     }
 
     line_index = 0;
     while (line_index < candidate_lines) : (line_index += 1) {
         const line_start = start + line_index * line_bytes;
-        if (countWhitespace(vector_len, data[line_start .. line_start + line_bases]) != 0) {
+        if (fasta.countWhitespace(vector_len, data[line_start .. line_start + line_bases]) != 0) {
             return line_index;
         }
     }
@@ -663,27 +580,6 @@ fn validatedStrideRun(
         cursor += block_lines * line_bytes;
     }
     return accepted_lines;
-}
-
-fn findNameDelimiter(data: []const u8, start: usize) usize {
-    const width = 16;
-    const Vec = @Vector(width, u8);
-    var position = start;
-    while (data.len - position >= width) : (position += width) {
-        const bytes: Vec = data[position..][0..width].*;
-        const separators = (bytes == @as(Vec, @splat(' '))) |
-            (bytes == @as(Vec, @splat('\t'))) |
-            (bytes == @as(Vec, @splat('\r'))) |
-            (bytes == @as(Vec, @splat('\n')));
-        if (std.simd.firstTrue(separators)) |offset| return position + offset;
-    }
-    while (position < data.len) : (position += 1) {
-        switch (data[position]) {
-            ' ', '\t', '\r', '\n' => return position,
-            else => {},
-        }
-    }
-    return position;
 }
 
 fn findNextNewline(data: []const u8, start: usize, end: usize) usize {
@@ -1052,7 +948,7 @@ const ChunkParseState = struct {
 
         const actual_bytes: u32 = @intCast((if (has_lf) line_end + 1 else line_end) - line_start);
         const content_len: u32 = @intCast(content_end - line_start);
-        const bases = countBasesInLineSlice(data, line_start, content_end);
+        const bases = fasta.countBasesInLineSlice(data, line_start, content_end);
         if (bases > 0) self.noteSeqOffset(line_file_offset);
 
         try self.recordSequenceLine(bases, actual_bytes, has_lf, content_len, line_file_offset);
@@ -1073,7 +969,7 @@ const ChunkParseState = struct {
             self.pending_pre_lf_ends_with_cr = false;
             self.pending_line_file_offset = fragment_file_offset;
         }
-        const fragment_bases = countBasesInLineSlice(fragment, 0, fragment.len);
+        const fragment_bases = fasta.countBasesInLineSlice(fragment, 0, fragment.len);
         var diag = self.recordDiagnostics();
         diag.at.location.offset = self.pending_line_file_offset;
         const next_bases = std.math.add(u32, self.pending_line_bases, fragment_bases) catch
@@ -1244,7 +1140,7 @@ fn processChunkBytes(
 
         if (state.in_header) {
             if (state.parsing_name) {
-                const name_end = findNameDelimiter(data, i);
+                const name_end = fasta.findNameDelimiter(data, i);
 
                 const fragment = data[i..name_end];
                 if (state.name.items.len > MAX_INDEX_NAME_LEN or
@@ -2053,10 +1949,7 @@ const SourceDedup = struct {
         };
         if (read != needed) {
             for (self.scratch.items[0..read]) |byte| {
-                switch (byte) {
-                    ' ', '\t', '\r', '\n' => return false,
-                    else => {},
-                }
+                if (fasta.isNameDelimiter(byte)) return false;
             }
             var diag = self.diag;
             diag.at.location.offset = offset;
@@ -2072,9 +1965,7 @@ const SourceDedup = struct {
     }
 
     fn sameBytes(name: []const u8, bytes: []const u8) bool {
-        const terminator = bytes[name.len];
-        return (terminator == ' ' or terminator == '\t' or terminator == '\r' or terminator == '\n') and
-            std.mem.eql(u8, name, bytes[0..name.len]);
+        return fasta.isNameDelimiter(bytes[name.len]) and std.mem.eql(u8, name, bytes[0..name.len]);
     }
 };
 
@@ -3216,34 +3107,6 @@ test "[failure] - [source names]: read errors leave the insertion unfinished" {
     try std.testing.expect(!try set.observeWithFingerprint(&source, "alpha", 0, 0));
     try std.testing.expectError(error.SourceReadFailed, set.observeWithFingerprint(&source, "beta", 6, 0));
     try std.testing.expectEqual(@as(u32, 1), set.count());
-}
-
-test "[property] - [portable scanner]: whitespace counts match scalar counts" {
-    var data: [12289]u8 = undefined;
-    const lengths = [_]usize{ 0, 15, 16, 31, 32, 127, 128, 2047, 2048, 2049, 4095, 4096, 4097, 8191, 8192, 8193, data.len };
-    for ([_]?u8{ null, ' ', 'X' }) |fill| {
-        for (&data, 0..) |*byte, i| byte.* = fill orelse @as(u8, @truncate(i * 17 + i / 31));
-        for (lengths) |len| {
-            var expected: usize = 0;
-            for (data[0..len]) |byte| expected += @intFromBool(byte <= ' ');
-            inline for (.{ 1, 8, 16, 32, 64 }) |width| {
-                try std.testing.expectEqual(expected, countWhitespace(width, data[0..len]));
-            }
-        }
-    }
-}
-
-test "[property] - [portable scanner]: name delimiters match scalar scanning" {
-    var data = [_]u8{'A'} ** 65;
-    for ([_]u8{ ' ', '\t', '\r', '\n' }) |separator| {
-        for ([_]usize{ 0, 1, 15, 16, 17, 31, 32, 63, 64 }) |at| {
-            data[at] = separator;
-            for ([_]usize{ 0, 1, 15, 16, 32, data.len }) |start| {
-                try std.testing.expectEqual(if (start <= at) at else data.len, findNameDelimiter(&data, start));
-            }
-            data[at] = 'A';
-        }
-    }
 }
 
 test "[failure] - [packed names]: block growth cleans every allocation failure" {

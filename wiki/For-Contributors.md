@@ -38,10 +38,10 @@ The filter applies to Zig tests. Separate native callers still run when selected
 - `src/indexer.zig`: bounded FASTA scanner and index output.
 - `src/index_format.zig`: `.zfi` or `.fai` loading, validation, lookup, and ownership.
 - `src/getter.zig`: requests, coordinates, transforms, and bounded output.
-- `src/stats.zig`: length and composition reports plus shared type detection.
+- `src/stats.zig`: length and composition reports.
 - `src/validator.zig`: events, JSON, fix policy, and normalized rewrite.
 - `src/bed_parser.zig`: BED row conversion and strand parsing.
-- `src/complement.zig`: IUPAC complement table.
+- `src/fasta.zig`: bases, identifier ends, alphabet detection, and the IUPAC complement.
 - `src/platform.zig`: portable read-only mapping and advice.
 
 The Wiki owns public behavior and workflow documentation. Source files and their tests own implementation details that are not part of the public contract.

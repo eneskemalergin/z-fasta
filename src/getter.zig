@@ -5,10 +5,9 @@
 //! Output is wrapped at 60 and written per record, so a later failure can leave a valid prefix.
 
 const std = @import("std");
-const complement = @import("complement.zig");
+const fasta = @import("fasta.zig");
 const bed_parser = @import("bed_parser.zig");
 const index_format = @import("index_format.zig");
-const stats = @import("stats.zig");
 const diagnostics = @import("diagnostics");
 
 pub const Region = struct {
@@ -167,8 +166,7 @@ pub fn fetchSymbols(idx: *const LoadedIndex, ordinal: usize, start: u64, end: u6
     var unused: std.Io.Writer = .failing;
     try copyRegion(resolved, span, source, input_buffer, &output, &unused, diag);
     if (side_table.len == 0) {
-        var dense: u64 = 0;
-        for (symbols) |byte| dense += @intFromBool(byte > ' ');
+        const dense = fasta.countBases(symbols);
         if (dense != count) return diag.mismatch(resolved, span, dense);
     }
     failure.succeed();
@@ -303,6 +301,7 @@ const ACTIVE_NAME_BYTES = 4 * 1024 * 1024;
 const MAX_ACTIVE_NAME_BYTES = ACTIVE_NAME_BYTES + MAX_REQUEST_NAME_BYTES;
 const NAMES_REQUEST_BATCH_SIZE = 65536;
 const BED_REQUEST_BATCH_SIZE = 4096;
+const TYPE_SAMPLE_BASES: u64 = 256;
 
 const ParsedRequest = struct {
     region: Region,
@@ -452,7 +451,7 @@ fn resolveParsedRequest(
     };
 }
 
-fn detectRegionType(source: FastaSource, resolved: ResolvedRegion, diag: *Diagnostics, buffers: *GetBuffers) diagnostics.Error!stats.SequenceType {
+fn detectRegionType(source: FastaSource, resolved: ResolvedRegion, diag: *Diagnostics, buffers: *GetBuffers) diagnostics.Error!fasta.SequenceType {
     const span = try diskSpanForRegion(resolved, diag);
     if (span.end > source.size) return diag.span(span.end, source.size);
     if (span.start >= span.end) return diag.consistency(.traversal_position);
@@ -468,7 +467,7 @@ fn detectRegionType(source: FastaSource, resolved: ResolvedRegion, diag: *Diagno
         const got = std.Io.File.readPositionalAll(source.file, source.io, input[0..wanted], offset) catch |err| return diag.read(offset, wanted, null, err);
         if (got != wanted) return diag.read(offset, wanted, got, null);
         for (input[0..got]) |byte| {
-            if (byte <= ' ') continue;
+            if (!fasta.isBase(byte)) continue;
             if (skip != 0) {
                 skip -= 1;
                 continue;
@@ -481,7 +480,7 @@ fn detectRegionType(source: FastaSource, resolved: ResolvedRegion, diag: *Diagno
     }
 
     if (total != resolved.num_bases) return diag.mismatch(resolved, span, total);
-    return stats.detectType(&counts, total);
+    return fasta.detectType(&counts, total);
 }
 
 const FastaSource = struct {
@@ -592,7 +591,7 @@ const RegionOutput = struct {
             if (self.bytes.len - self.len < chunk + @intFromBool(self.wrap)) try self.flush(writer);
             const dst = self.bytes[self.len .. self.len + chunk];
             if (do_complement) {
-                complement.complementInto(dst, src[start .. start + chunk]);
+                fasta.complementInto(dst, src[start .. start + chunk]);
             } else {
                 @memcpy(dst, src[start .. start + chunk]);
             }
@@ -616,7 +615,7 @@ const RegionOutput = struct {
             var j: usize = 0;
             while (j < chunk) : (j += 1) {
                 const byte = src[end - 1 - j];
-                self.bytes[self.len + j] = if (do_complement) complement.complement(byte) else byte;
+                self.bytes[self.len + j] = if (do_complement) fasta.complement(byte) else byte;
             }
             self.len += chunk;
             self.bases_written += chunk;
@@ -660,9 +659,9 @@ fn consumeForwardBytes(
 ) diagnostics.Error!void {
     var pos: usize = 0;
     while (pos < bytes.len and output.bases_written < resolved.num_bases) {
-        while (pos < bytes.len and bytes[pos] <= ' ') pos += 1;
+        while (pos < bytes.len and !fasta.isBase(bytes[pos])) pos += 1;
         const run_start = pos;
-        while (pos < bytes.len and bytes[pos] > ' ') pos += 1;
+        while (pos < bytes.len and fasta.isBase(bytes[pos])) pos += 1;
         var run = bytes[run_start..pos];
         if (skip.* != 0) {
             const skipped: usize = @intCast(@min(skip.*, @as(u64, run.len)));
@@ -684,9 +683,9 @@ fn consumeReverseBytes(
 ) diagnostics.Error!void {
     var i = bytes.len;
     while (i > 0 and output.bases_written < resolved.num_bases) {
-        while (i > 0 and bytes[i - 1] <= ' ') i -= 1;
+        while (i > 0 and !fasta.isBase(bytes[i - 1])) i -= 1;
         const run_end = i;
-        while (i > 0 and bytes[i - 1] > ' ') i -= 1;
+        while (i > 0 and fasta.isBase(bytes[i - 1])) i -= 1;
         var run = bytes[i..run_end];
         if (skip.* != 0) {
             const skipped: usize = @intCast(@min(skip.*, @as(u64, run.len)));
@@ -1092,7 +1091,7 @@ fn processParsedRequests(
     var last_name: ?[]const u8 = null;
     var last_rec_idx: usize = 0;
     var last_typed_rec_idx: ?usize = null;
-    var last_type: stats.SequenceType = undefined;
+    var last_type: fasta.SequenceType = undefined;
     var last_sample: diagnostics.Sample = undefined;
     const request_source = diag.at.source;
     for (request_entries, 0..) |entry, i| {
@@ -1108,7 +1107,7 @@ fn processParsedRequests(
         if (request.orientation.complement) {
             const rec_type = if (last_typed_rec_idx == rec_idx) last_type else blk: {
                 var sample = resolved[i];
-                sample.num_bases = @min(sample.num_bases, stats.GET_TYPE_SAMPLE_BASES);
+                sample.num_bases = @min(sample.num_bases, TYPE_SAMPLE_BASES);
                 const detected = try detectRegionType(source, sample, diag, buffers);
                 last_typed_rec_idx = rec_idx;
                 last_type = detected;

@@ -4,13 +4,8 @@
 const std = @import("std");
 
 const index_format = @import("index_format.zig");
+const fasta = @import("fasta.zig");
 const diagnostics = @import("diagnostics");
-
-pub const SequenceType = enum { nucleotide, protein };
-
-pub const GET_TYPE_SAMPLE_BASES: u64 = 256;
-
-pub const VALIDATE_TYPE_SAMPLE_BASES: u64 = 100_000;
 
 pub fn runStats(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, failure: *diagnostics.Failure) diagnostics.Error!void {
     failure.reset(.stats);
@@ -33,33 +28,6 @@ pub fn runStats(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8
     try writeComputedReport(&stdout_fw.interface, fasta_path, &idx, &computed, &diag);
     if (diagnostics.flushOutput(&stdout_fw, &failure.outputs.stdout)) |cause| return diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .stdout, null, cause);
     failure.succeed();
-}
-
-/// Nucleotide when IUPAC nucleotide letters are more than 90% of `total`; empty is nucleotide.
-pub fn detectType(counts: *const [256]u64, total: u64) SequenceType {
-    if (total == 0) return .nucleotide;
-
-    const nuc_count = counts['A'] + counts['a'] +
-        counts['C'] + counts['c'] +
-        counts['G'] + counts['g'] +
-        counts['T'] + counts['t'] +
-        counts['R'] + counts['r'] +
-        counts['Y'] + counts['y'] +
-        counts['S'] + counts['s'] +
-        counts['W'] + counts['w'] +
-        counts['K'] + counts['k'] +
-        counts['M'] + counts['m'] +
-        counts['B'] + counts['b'] +
-        counts['D'] + counts['d'] +
-        counts['H'] + counts['h'] +
-        counts['V'] + counts['v'] +
-        counts['N'] + counts['n'] +
-        counts['U'] + counts['u'];
-
-    if (@as(u128, nuc_count) * 10 > @as(u128, total) * 9) {
-        return .nucleotide;
-    }
-    return .protein;
 }
 
 const IndexRecord = index_format.IndexRecord;
@@ -135,7 +103,7 @@ const FinalVec = @Vector(FINAL_CHUNK_SIZE, u8);
 const CompositionStats = struct {
     counts: [256]u64 = .{0} ** 256,
     total_bases: u64 = 0,
-    seq_type: SequenceType = .nucleotide,
+    seq_type: fasta.SequenceType = .nucleotide,
     lowercase_count: u64 = 0,
 };
 
@@ -535,7 +503,7 @@ const BoundedFastaReader = struct {
 
 fn countCompositionFiltered(data: []const u8, comp: *CompositionStats) void {
     for (data) |byte| {
-        if (byte > ' ') {
+        if (fasta.isBase(byte)) {
             comp.counts[byte] += 1;
             comp.total_bases += 1;
             if (byte >= 'a' and byte <= 'z') {
@@ -658,7 +626,7 @@ fn scanComposition(allocator: std.mem.Allocator, idx: *const LoadedIndex, buffer
     }
 
     diag.record = null;
-    comp.seq_type = detectType(&comp.counts, comp.total_bases);
+    comp.seq_type = fasta.detectType(&comp.counts, comp.total_bases);
 }
 
 fn recordsInSeqOffsetOrder(records: []const IndexRecord) bool {
@@ -682,7 +650,7 @@ fn countFiltered(data: []const u8, comp: *CompositionStats, diag: *Diagnostics) 
         return;
     }
     for (data) |byte| {
-        if (byte <= ' ') continue;
+        if (!fasta.isBase(byte)) continue;
         if (comp.total_bases == std.math.maxInt(u64)) return diag.overflow(.total_symbols, comp.total_bases, 1, std.math.maxInt(u64), .fasta);
         comp.counts[byte] += 1;
         comp.total_bases += 1;
@@ -1118,7 +1086,7 @@ test "[failure] - [stats composition]: rejects categories above total symbols" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.stats);
     var diag = Diagnostics{ .failure = &failure };
-    const sequence_types = [_]SequenceType{ .nucleotide, .protein };
+    const sequence_types = [_]fasta.SequenceType{ .nucleotide, .protein };
     for (sequence_types) |sequence_type| {
         var comp: CompositionStats = .{
             .total_bases = 4,

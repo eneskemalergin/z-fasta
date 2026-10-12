@@ -7,6 +7,7 @@ pub const index_format = @import("index_format.zig");
 pub const indexer = @import("indexer.zig");
 pub const getter = @import("getter.zig");
 pub const bed_parser = @import("bed_parser.zig");
+pub const fasta = @import("fasta.zig");
 pub const stats = @import("stats.zig");
 pub const validator = @import("validator.zig");
 
@@ -322,9 +323,9 @@ fn runIndex(cli: *Cli, environ: std.process.Environ) diagnostics.Error!u8 {
             path = arg;
         }
     }
-    const fasta = path orelse return cli.fail(.{ .@"usage.missing_argument" = .{ .argument = .fasta_path } });
-    const result = try indexer.runIndex(std.heap.page_allocator, cli.io, environ, fasta, .{ .emit_fai = emit_fai, .enable_dedup = enable_dedup }, cli.failure);
-    if (!emit_fai and cli.format == .text) try writeNotice(cli, .{ .index = .{ .path = fasta, .count = result.record_count } });
+    const fasta_path = path orelse return cli.fail(.{ .@"usage.missing_argument" = .{ .argument = .fasta_path } });
+    const result = try indexer.runIndex(std.heap.page_allocator, cli.io, environ, fasta_path, .{ .emit_fai = emit_fai, .enable_dedup = enable_dedup }, cli.failure);
+    if (!emit_fai and cli.format == .text) try writeNotice(cli, .{ .index = .{ .path = fasta_path, .count = result.record_count } });
     return 0;
 }
 
@@ -390,8 +391,8 @@ fn runStatsCmd(cli: *Cli) diagnostics.Error!u8 {
         if (path != null) return cli.fail(.{ .@"usage.extra_argument" = .{ .argument = .fasta_path, .allowed_count = 1 } });
         path = arg;
     }
-    const fasta = path orelse return cli.fail(.{ .@"usage.missing_argument" = .{ .argument = .fasta_path } });
-    try stats.runStats(std.heap.page_allocator, cli.io, fasta, cli.failure);
+    const fasta_path = path orelse return cli.fail(.{ .@"usage.missing_argument" = .{ .argument = .fasta_path } });
+    try stats.runStats(std.heap.page_allocator, cli.io, fasta_path, cli.failure);
     return 0;
 }
 
@@ -425,8 +426,8 @@ fn runValidateCmd(cli: *Cli) diagnostics.Error!u8 {
     if (saw_summary and !saw_json) return cli.fail(.{ .@"usage.option_requires" = .{ .option = .summary, .required = .json } });
     if (options.fix_format_only and !options.fix) return cli.fail(.{ .@"usage.option_requires" = .{ .option = .fix_format_only, .required = .fix } });
     if (options.output_path != null and !options.fix) return cli.fail(.{ .@"usage.option_requires" = .{ .option = .output, .required = .fix } });
-    const fasta = path orelse return cli.fail(.{ .@"usage.missing_argument" = .{ .argument = .fasta_path } });
-    const result = try validator.runValidate(std.heap.page_allocator, cli.io, fasta, options, cli.failure);
+    const fasta_path = path orelse return cli.fail(.{ .@"usage.missing_argument" = .{ .argument = .fasta_path } });
+    const result = try validator.runValidate(std.heap.page_allocator, cli.io, fasta_path, options, cli.failure);
     if (result.truncated and cli.format == .text) try writeNotice(cli, .{ .cap = result.fix_written });
     return result.status;
 }
