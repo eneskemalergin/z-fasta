@@ -58,7 +58,6 @@ pub fn build(b: *std.Build) void {
     test_options.addOptionPath("binary_path", exe.getEmittedBin());
     test_options.addOption([]const u8, "build_root", b.pathFromRoot("."));
     const test_options_module = test_options.createModule();
-    main_module.addImport("test_options", test_options_module);
 
     const test_index_module = b.createModule(.{
         .root_source_file = b.path("tests/test_index.zig"),
@@ -185,6 +184,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "diagnostics", .module = diagnostics_module },
                 .{ .name = "reporting", .module = reporting_module },
+                .{ .name = "test_options", .module = test_options_module },
             },
         }),
     }));
@@ -250,9 +250,9 @@ pub fn build(b: *std.Build) void {
         prepare_fixtures.addFileArg(b.path(path));
     }
     for ([_]*std.Build.Step.Run{
-        run_test_index,      run_test_get,        run_test_main_unit, run_test_indexer_unit,
-        run_test_stats,      run_test_stats_unit, run_test_validate,  run_test_validator_unit,
-        run_commands_caller,
+        run_test_index,      run_test_get,         run_test_main_unit, run_test_indexer_unit,
+        run_test_stats,      run_test_stats_unit,  run_test_validate,  run_test_validator_unit,
+        run_commands_caller, run_test_diagnostics,
     }) |run| run.setCwd(fixture_root);
 
     const index_step = b.step("test-index", "Run index tests");

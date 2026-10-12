@@ -2,14 +2,13 @@
 
 const std = @import("std");
 
-const test_options = @import("test_options");
 const zfasta = @import("z-fasta");
 
 const diagnostics = zfasta.diagnostics;
 const testing = std.testing;
 const io = testing.io;
 
-const ZFASTA_BIN = if (std.fs.path.isAbsolute(test_options.binary_path)) test_options.binary_path else test_options.build_root ++ std.fs.path.sep_str ++ test_options.binary_path;
+const ZFASTA_BIN = @import("utility.zig").ZFASTA_BIN;
 
 const UNIFORM = ">a desc\nACGTA\nCGTAC\nGT\n>b\nTTTTT\nTT\n";
 const NONUNIFORM = ">a desc\nACG\nTACGT\nACGT\n>b\nTTT\nTTTT\n";

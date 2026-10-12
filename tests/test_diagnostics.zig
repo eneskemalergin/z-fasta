@@ -1,10 +1,76 @@
-//! Diagnostic facts, storage bounds, source lifetimes, and error-union cleanup.
+//! Diagnostic facts, storage bounds, source lifetimes, and error-union cleanup, and root dispatch
+//! run as a subprocess: help, version, `--error-format`, and output delivery.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const diagnostics = @import("diagnostics");
 const caller = @import("diagnostics_caller.zig");
+const utility = @import("utility.zig");
 
 const testing = std.testing;
+const ZFASTA_BIN = utility.ZFASTA_BIN;
+
+const HELP_STDOUT =
+    \\usage: z-fasta <command> [options]
+    \\
+    \\Commands:
+    \\  index    Build a FASTA index (.zfi binary or .fai text)
+    \\  get      Extract a sequence or region from a FASTA file
+    \\  stats    Show statistics for a FASTA file
+    \\  validate Check FASTA structure, alphabets, headers, and fix safe format issues
+    \\
+    \\General options:
+    \\  --help       Show this help message
+    \\  --version    Print version
+    \\  --error-format=text|json  Select stderr diagnostics (default: text)
+    \\
+    \\Index options:
+    \\  --emit-fai   Output FAI to stdout when every record has fixed line geometry;
+    \\               otherwise fails and directs you to default .zfi indexing
+    \\  --no-dedup   Keep duplicate sequence names in the index (default: first wins
+    \\               at index time). get resolves duplicate names to the first record.
+    \\
+    \\Get usage:
+    \\  z-fasta get <file.fasta> [options] <region> [region ...]
+    \\  z-fasta get <file.fasta> [options] --names file.txt|-
+    \\  z-fasta get <file.fasta> [options] --bed file.bed|- [--strand-aware]
+    \\  Choose exactly one request source: positional regions, --names, or --bed.
+    \\  Region formats: NAME, NAME:START-END, NAME:START-
+    \\  --strand-aware  With --bed, respect column 6; '-' emits reverse-complement output
+    \\                  (alias: --honor-strand)
+    \\  --rc            Reverse-complement extracted sequence output
+    \\  --complement-only  Complement extracted sequence output without reversing
+    \\  --reverse-only  Reverse extracted sequence output without complementing
+    \\  --annotate-rc   Annotate the final output orientation when it is transformed
+    \\  Positional regions: max 1024 per invocation. Names and BED input stream.
+    \\
+    \\Validate usage:
+    \\  z-fasta validate [options] <file.fasta>
+    \\  --strict                 Treat warnings as errors
+    \\  --json                   Emit JSON Lines instead of text
+    \\  --summary                With --json, emit one summary object
+    \\  --fix -o <file.fasta>    Write a fixed FASTA to a separate output path
+    \\  --fix-format-only        With --fix, proceed despite alphabet errors
+    \\  --schema NAME            Header schema: uniprot or refseq
+    \\  --custom-alphabet CHARS  Override nucleotide/protein alphabet checks
+    \\  --max-header-len N       Warn on headers longer than N bytes (default: 1024)
+    \\  Retain 10000 examples; scan/count all input (error without --fix).
+    \\
+    \\Examples:
+    \\  z-fasta index genome.fa                  Create .zfi binary index
+    \\  z-fasta index --emit-fai genome.fa       Output FAI to stdout
+    \\  z-fasta get genome.fa chr1:1000-2000     Extract region
+    \\  z-fasta get genome.fa chr1               Extract full sequence
+    \\  z-fasta get genome.fa chr1:1000-2000 --rc
+    \\  z-fasta get genome.fa --bed regions.bed  Extract BED regions
+    \\  z-fasta get genome.fa --names ids.txt    Extract whole sequences from a file
+    \\  z-fasta get genome.fa --bed regions.bed --strand-aware --summary
+    \\  z-fasta stats genome.fa                  Show stats with composition
+    \\  z-fasta validate genome.fa               Check FASTA validity
+    \\  z-fasta validate --json --summary genome.fa
+    \\
+;
+const VERSION_STDOUT = "z-fasta 0.3.5\n";
 
 fn retainTemporaryLabel(failure: *diagnostics.Failure) void {
     var local_path = [_]u8{ 't', 'e', 'm', 'p', '/', 'a', 0xff };
@@ -422,4 +488,141 @@ test "[unit] - [diagnostics]: maps open and read errors to their codes" {
     const eof = diagnostics.readFailure(10, 4).@"io.unexpected_eof".exact;
     try testing.expectEqual(@as(u64, 10), eof.requested_bytes);
     try testing.expectEqual(@as(u64, 4), eof.received_bytes);
+}
+
+// --- Root dispatch ---
+
+test "[cli] - [dispatch]: writes help and rejects missing or unknown commands" {
+    const zfasta_bin = ZFASTA_BIN;
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const help = try std.process.run(allocator, io, .{
+        .argv = &.{ zfasta_bin, "--help" },
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    });
+    defer allocator.free(help.stdout);
+    defer allocator.free(help.stderr);
+    switch (help.term) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        else => return error.ChildProcessFailed,
+    }
+    try std.testing.expectEqual(@as(usize, 0), help.stderr.len);
+    try std.testing.expectEqualStrings(HELP_STDOUT, help.stdout);
+
+    const cases = [_][]const []const u8{
+        &.{zfasta_bin},
+        &.{ zfasta_bin, "index" },
+        &.{ zfasta_bin, "not-a-command" },
+    };
+    const errors = [_][]const u8{
+        "error [usage.command_required] cli: A command is required.\nhint: Correct the command arguments; use --help for accepted options.\n",
+        "error [usage.missing_argument] index: A required argument is missing. argument=fasta_path\nhint: Correct the command arguments; use --help for accepted options.\n",
+        "error [usage.unknown_command] cli: Unknown command. command=\"not-a-command\"\nhint: Correct the command arguments; use --help for accepted options.\n",
+    };
+    for (cases, errors) |argv, expected| {
+        const result = try std.process.run(allocator, io, .{
+            .argv = argv,
+            .stdout_limit = .limited(64 * 1024),
+            .stderr_limit = .limited(64 * 1024),
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+
+        switch (result.term) {
+            .exited => |code| try std.testing.expectEqual(@as(u8, 1), code),
+            else => return error.ChildProcessFailed,
+        }
+        try std.testing.expectEqual(@as(usize, 0), result.stdout.len);
+        try std.testing.expectEqualStrings(expected, result.stderr);
+    }
+}
+
+test "[cli] - [dispatch]: respects placement, values, repetition and help priority" {
+    const binary = ZFASTA_BIN;
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const Case = struct { argv: []const []const u8, code: diagnostics.Code, json: bool = true };
+    const cases = [_]Case{
+        .{ .argv = &.{ binary, "--error-format=json" }, .code = .@"usage.command_required" },
+        .{ .argv = &.{ binary, "--error-format=json", "unknown" }, .code = .@"usage.unknown_command" },
+        .{ .argv = &.{ binary, "stats", "--bad", "--error-format=json" }, .code = .@"usage.unknown_option" },
+        .{ .argv = &.{ binary, "get", "--error-format=text", "--error-format=json" }, .code = .@"usage.missing_argument" },
+        .{ .argv = &.{ binary, "get", "--error-format=json", "--error-format=text" }, .code = .@"usage.missing_argument", .json = false },
+        .{ .argv = &.{ binary, "validate", "--custom-alphabet", "--error-format=json", "--schema", "bad" }, .code = .@"usage.invalid_option_value", .json = false },
+        .{ .argv = &.{ binary, "get", "tests/data/simple.fasta", "--names", "--error-format=json" }, .code = .@"io.file_not_found", .json = false },
+        .{ .argv = &.{ binary, "stats", "--error-format=json", "--error-format=bad" }, .code = .@"usage.invalid_option_value", .json = false },
+        .{ .argv = &.{ binary, "stats", "--error-format=json", "--error-formatting" }, .code = .@"usage.unknown_option" },
+    };
+    for (cases) |case| {
+        const result = try std.process.run(std.testing.allocator, threaded.io(), .{ .argv = case.argv });
+        defer std.testing.allocator.free(result.stdout);
+        defer std.testing.allocator.free(result.stderr);
+        try std.testing.expectEqual(@as(u8, 1), result.term.exited);
+        try std.testing.expectEqualStrings("", result.stdout);
+        if (case.json) {
+            const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.stderr, .{});
+            defer parsed.deinit();
+            try std.testing.expectEqualStrings(@tagName(case.code), parsed.value.object.get("failure").?.object.get("primary").?.object.get("code").?.string);
+            try std.testing.expect(!parsed.value.object.get("accepted").?.bool);
+        } else {
+            var prefix: [128]u8 = undefined;
+            try std.testing.expect(std.mem.startsWith(u8, result.stderr, try std.fmt.bufPrint(&prefix, "error [{s}]", .{@tagName(case.code)})));
+        }
+    }
+    const help = try std.process.run(std.testing.allocator, threaded.io(), .{ .argv = &.{ binary, "get", "--error-format=json", "--help", "--error-format=bad" } });
+    defer std.testing.allocator.free(help.stdout);
+    defer std.testing.allocator.free(help.stderr);
+    try std.testing.expectEqual(@as(u8, 0), help.term.exited);
+    try std.testing.expectEqualStrings(HELP_STDOUT, help.stdout);
+    try std.testing.expectEqualStrings("", help.stderr);
+    for ([_][]const u8{ "--error-format=text", "--error-format=json" }) |format| {
+        for ([_][]const u8{ "--help", "-h", "--version", "-V" }) |option| {
+            const result = try std.process.run(std.testing.allocator, threaded.io(), .{
+                .argv = &.{ binary, format, option, "--error-format=bad" },
+            });
+            defer std.testing.allocator.free(result.stdout);
+            defer std.testing.allocator.free(result.stderr);
+            try std.testing.expectEqual(@as(u8, 0), result.term.exited);
+            const expected = if (std.mem.eql(u8, option, "--help") or std.mem.eql(u8, option, "-h")) HELP_STDOUT else VERSION_STDOUT;
+            try std.testing.expectEqualStrings(expected, result.stdout);
+            try std.testing.expectEqualStrings("", result.stderr);
+        }
+    }
+}
+
+test "[cli] - [dispatch]: help, version and required stderr failures return failure" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    const binary = ZFASTA_BIN;
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    for ([_][]const u8{ "--help", "--version" }) |option| {
+        for ([_]bool{ false, true }) |json| {
+            const script = if (json) "exec \"$1\" --error-format=json \"$2\" --error-format=bad >/dev/full" else "exec \"$1\" \"$2\" --error-format=bad >/dev/full";
+            const result = try std.process.run(std.testing.allocator, threaded.io(), .{ .argv = &.{ "/bin/sh", "-c", script, "sh", binary, option } });
+            defer std.testing.allocator.free(result.stdout);
+            defer std.testing.allocator.free(result.stderr);
+            try std.testing.expectEqual(@as(u8, 1), result.term.exited);
+            try std.testing.expectEqualStrings("", result.stdout);
+            if (json) {
+                const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.stderr, .{});
+                defer parsed.deinit();
+                const primary = parsed.value.object.get("failure").?.object.get("primary").?.object;
+                try std.testing.expectEqualStrings("io.write_failed", primary.get("code").?.string);
+                try std.testing.expectEqualStrings("stdout", primary.get("source").?.string);
+            } else {
+                try std.testing.expect(std.mem.startsWith(u8, result.stderr, "error [io.write_failed]"));
+                try std.testing.expect(std.mem.indexOf(u8, result.stderr, "cause=posix_errno:28") != null);
+            }
+        }
+    }
+    const result = try std.process.run(std.testing.allocator, threaded.io(), .{ .argv = &.{ "/bin/sh", "-c", "exec \"$1\" get tests/data/simple.fasta seq1:1-4 --summary 2>/dev/full", "sh", binary } });
+    defer std.testing.allocator.free(result.stdout);
+    defer std.testing.allocator.free(result.stderr);
+    try std.testing.expectEqual(@as(u8, 1), result.term.exited);
+    try std.testing.expectEqualStrings(">seq1:1-4\nACGT\n", result.stdout);
+    try std.testing.expectEqualStrings("", result.stderr);
 }

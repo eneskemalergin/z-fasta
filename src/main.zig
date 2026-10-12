@@ -19,11 +19,6 @@ pub fn main(init: std.process.Init.Minimal) void {
     if (status != 0) std.process.exit(status);
 }
 
-const TEST_BINARY_PATH = if (builtin.is_test) blk: {
-    const options = @import("test_options");
-    break :blk if (std.fs.path.isAbsolute(options.binary_path)) options.binary_path else options.build_root ++ std.fs.path.sep_str ++ options.binary_path;
-} else "";
-
 const VERSION = "0.3.5";
 const STRAND_AWARE_FLAG = "--strand-aware";
 const STRAND_AWARE_ALIAS = "--honor-strand";
@@ -498,112 +493,10 @@ test "[failure] - [get orientation]: rejects conflicting modes" {
     }
 }
 
-test "[cli] - [dispatch]: writes help and rejects missing or unknown commands" {
-    const zfasta_bin = TEST_BINARY_PATH;
-    const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    const help = try std.process.run(allocator, io, .{
-        .argv = &.{ zfasta_bin, "--help" },
-        .stdout_limit = .limited(64 * 1024),
-        .stderr_limit = .limited(64 * 1024),
-    });
-    defer allocator.free(help.stdout);
-    defer allocator.free(help.stderr);
-    switch (help.term) {
-        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
-        else => return error.ChildProcessFailed,
-    }
-    try std.testing.expectEqual(@as(usize, 0), help.stderr.len);
-    try std.testing.expectEqualStrings(USAGE, help.stdout);
-
-    const cases = [_][]const []const u8{
-        &.{zfasta_bin},
-        &.{ zfasta_bin, "index" },
-        &.{ zfasta_bin, "not-a-command" },
-    };
-    const errors = [_][]const u8{
-        "error [usage.command_required] cli: A command is required.\nhint: Correct the command arguments; use --help for accepted options.\n",
-        "error [usage.missing_argument] index: A required argument is missing. argument=fasta_path\nhint: Correct the command arguments; use --help for accepted options.\n",
-        "error [usage.unknown_command] cli: Unknown command. command=\"not-a-command\"\nhint: Correct the command arguments; use --help for accepted options.\n",
-    };
-    for (cases, errors) |argv, expected| {
-        const result = try std.process.run(allocator, io, .{
-            .argv = argv,
-            .stdout_limit = .limited(64 * 1024),
-            .stderr_limit = .limited(64 * 1024),
-        });
-        defer allocator.free(result.stdout);
-        defer allocator.free(result.stderr);
-
-        switch (result.term) {
-            .exited => |code| try std.testing.expectEqual(@as(u8, 1), code),
-            else => return error.ChildProcessFailed,
-        }
-        try std.testing.expectEqual(@as(usize, 0), result.stdout.len);
-        try std.testing.expectEqualStrings(expected, result.stderr);
-    }
-}
-
 test "[failure] - [dispatch]: propagates a full destination" {
     var buffer: [1]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try std.testing.expectError(error.WriteFailed, writeGetSummary(&writer, .{ .region_count = 1, .total_bases = 1, .elapsed_ns = 1 }));
-}
-
-test "[cli] - [dispatch]: respects placement, values, repetition and help priority" {
-    const binary = TEST_BINARY_PATH;
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const Case = struct { argv: []const []const u8, code: diagnostics.Code, json: bool = true };
-    const cases = [_]Case{
-        .{ .argv = &.{ binary, "--error-format=json" }, .code = .@"usage.command_required" },
-        .{ .argv = &.{ binary, "--error-format=json", "unknown" }, .code = .@"usage.unknown_command" },
-        .{ .argv = &.{ binary, "stats", "--bad", "--error-format=json" }, .code = .@"usage.unknown_option" },
-        .{ .argv = &.{ binary, "get", "--error-format=text", "--error-format=json" }, .code = .@"usage.missing_argument" },
-        .{ .argv = &.{ binary, "get", "--error-format=json", "--error-format=text" }, .code = .@"usage.missing_argument", .json = false },
-        .{ .argv = &.{ binary, "validate", "--custom-alphabet", "--error-format=json", "--schema", "bad" }, .code = .@"usage.invalid_option_value", .json = false },
-        .{ .argv = &.{ binary, "get", "tests/data/simple.fasta", "--names", "--error-format=json" }, .code = .@"io.file_not_found", .json = false },
-        .{ .argv = &.{ binary, "stats", "--error-format=json", "--error-format=bad" }, .code = .@"usage.invalid_option_value", .json = false },
-        .{ .argv = &.{ binary, "stats", "--error-format=json", "--error-formatting" }, .code = .@"usage.unknown_option" },
-    };
-    for (cases) |case| {
-        const result = try std.process.run(std.testing.allocator, threaded.io(), .{ .argv = case.argv });
-        defer std.testing.allocator.free(result.stdout);
-        defer std.testing.allocator.free(result.stderr);
-        try std.testing.expectEqual(@as(u8, 1), result.term.exited);
-        try std.testing.expectEqualStrings("", result.stdout);
-        if (case.json) {
-            const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.stderr, .{});
-            defer parsed.deinit();
-            try std.testing.expectEqualStrings(@tagName(case.code), parsed.value.object.get("failure").?.object.get("primary").?.object.get("code").?.string);
-            try std.testing.expect(!parsed.value.object.get("accepted").?.bool);
-        } else {
-            var prefix: [128]u8 = undefined;
-            try std.testing.expect(std.mem.startsWith(u8, result.stderr, try std.fmt.bufPrint(&prefix, "error [{s}]", .{@tagName(case.code)})));
-        }
-    }
-    const help = try std.process.run(std.testing.allocator, threaded.io(), .{ .argv = &.{ binary, "get", "--error-format=json", "--help", "--error-format=bad" } });
-    defer std.testing.allocator.free(help.stdout);
-    defer std.testing.allocator.free(help.stderr);
-    try std.testing.expectEqual(@as(u8, 0), help.term.exited);
-    try std.testing.expectEqualStrings(USAGE, help.stdout);
-    try std.testing.expectEqualStrings("", help.stderr);
-    for ([_][]const u8{ "--error-format=text", "--error-format=json" }) |format| {
-        for ([_][]const u8{ "--help", "-h", "--version", "-V" }) |option| {
-            const result = try std.process.run(std.testing.allocator, threaded.io(), .{
-                .argv = &.{ binary, format, option, "--error-format=bad" },
-            });
-            defer std.testing.allocator.free(result.stdout);
-            defer std.testing.allocator.free(result.stderr);
-            try std.testing.expectEqual(@as(u8, 0), result.term.exited);
-            const expected = if (std.mem.eql(u8, option, "--help") or std.mem.eql(u8, option, "-h")) USAGE else "z-fasta " ++ VERSION ++ "\n";
-            try std.testing.expectEqualStrings(expected, result.stdout);
-            try std.testing.expectEqualStrings("", result.stderr);
-        }
-    }
 }
 
 test "[failure] - [dispatch]: retains primary after failed stderr and observes stdout failures" {
@@ -639,37 +532,4 @@ test "[failure] - [dispatch]: retains primary after failed stderr and observes s
     try std.testing.expectError(error.Io, writeNotice(&cli, .{ .index = .{ .path = "input.fa", .count = 1 } }));
     try std.testing.expectEqual(diagnostics.Code.@"io.flush_failed", failure.primary().?.code());
     try std.testing.expect(failure.work_complete and !failure.complete);
-}
-
-test "[cli] - [dispatch]: help, version and required stderr failures return failure" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
-    const binary = TEST_BINARY_PATH;
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    for ([_][]const u8{ "--help", "--version" }) |option| {
-        for ([_]bool{ false, true }) |json| {
-            const script = if (json) "exec \"$1\" --error-format=json \"$2\" --error-format=bad >/dev/full" else "exec \"$1\" \"$2\" --error-format=bad >/dev/full";
-            const result = try std.process.run(std.testing.allocator, threaded.io(), .{ .argv = &.{ "/bin/sh", "-c", script, "sh", binary, option } });
-            defer std.testing.allocator.free(result.stdout);
-            defer std.testing.allocator.free(result.stderr);
-            try std.testing.expectEqual(@as(u8, 1), result.term.exited);
-            try std.testing.expectEqualStrings("", result.stdout);
-            if (json) {
-                const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.stderr, .{});
-                defer parsed.deinit();
-                const primary = parsed.value.object.get("failure").?.object.get("primary").?.object;
-                try std.testing.expectEqualStrings("io.write_failed", primary.get("code").?.string);
-                try std.testing.expectEqualStrings("stdout", primary.get("source").?.string);
-            } else {
-                try std.testing.expect(std.mem.startsWith(u8, result.stderr, "error [io.write_failed]"));
-                try std.testing.expect(std.mem.indexOf(u8, result.stderr, "cause=posix_errno:28") != null);
-            }
-        }
-    }
-    const result = try std.process.run(std.testing.allocator, threaded.io(), .{ .argv = &.{ "/bin/sh", "-c", "exec \"$1\" get tests/data/simple.fasta seq1:1-4 --summary 2>/dev/full", "sh", binary } });
-    defer std.testing.allocator.free(result.stdout);
-    defer std.testing.allocator.free(result.stderr);
-    try std.testing.expectEqual(@as(u8, 1), result.term.exited);
-    try std.testing.expectEqualStrings(">seq1:1-4\nACGT\n", result.stdout);
-    try std.testing.expectEqualStrings("", result.stderr);
 }
