@@ -69,7 +69,7 @@ pub fn expectDiagnostic(allocator: std.mem.Allocator, bytes: []const u8, code: m
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
     defer parsed.deinit();
     const object = parsed.value.object;
-    try std.testing.expectEqualStrings("v2", object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.4.0-1", object.get("catalog_revision").?.string);
     try std.testing.expectEqualStrings("failure", object.get("kind").?.string);
     try std.testing.expect(!object.get("accepted").?.bool);
     try std.testing.expect(!object.get("operation").?.object.get("complete").?.bool);

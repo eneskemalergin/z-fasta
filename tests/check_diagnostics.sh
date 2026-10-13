@@ -14,7 +14,7 @@ for command in ("index", "get", "stats", "validate"):
     result = subprocess.run([binary, command, "--error-format=json"], capture_output=True, check=False)
     assert result.returncode == 1 and result.stdout == b""
     report = json.loads(result.stderr)
-    assert report["schema_version"] == "v2"
+    assert "schema_version" not in report and report["catalog_revision"] == "0.4.0-1"
     assert report["operation"]["name"] == command
     assert report["operation"]["complete"] is False
     assert report["accepted"] is False

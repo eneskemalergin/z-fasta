@@ -26,7 +26,6 @@ Running `z-fasta get --error-format=json` returns exit 1 and one newline-termina
 
 ```json
 {
-  "schema_version": "v2",
   "catalog_revision": "0.4.0-1",
   "producer": {
     "name": "z-fasta",
@@ -71,7 +70,7 @@ Read `failure.primary.code`, not the English message or the numeric Zig error ta
 
 ## Interpret the report
 
-`schema_version` identifies the envelope format. `catalog_revision` identifies the code definitions (`0.4.0-1` for this catalog), and `producer.version` identifies the executable. They are separate values. Preserve unknown codes and fields when forwarding a report; do not turn an unknown code into success or infer a retry policy from its category or suggested `action`.
+`catalog_revision` identifies the code definitions (`0.4.0-1` for this catalog), and `producer.version` identifies the executable. They are separate values. Preserve unknown codes and fields when forwarding a report; do not turn an unknown code into success or infer a retry policy from its category or suggested `action`.
 
 `operation.work_complete` records whether the command's work finished. `operation.complete` also requires its required side effects to finish. `accepted` cannot be true for incomplete work or a blocking failure. A failed notice can therefore return exit 1 after data has already reached stdout.
 

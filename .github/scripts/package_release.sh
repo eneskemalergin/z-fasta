@@ -72,6 +72,6 @@ tar -xf "release-out/${archive}" -C "$smoke"
     "./${exe}" stats --error-format=json > failure.out 2> failure.json || status=$?
     [[ "$status" -eq 1 ]]
     test ! -s failure.out
-    grep -F '"schema_version":"v2"' failure.json >/dev/null
+    grep -F '"kind":"failure"' failure.json >/dev/null
     grep -F '"code":"usage.missing_argument"' failure.json >/dev/null
 )

@@ -140,7 +140,6 @@ pub fn writeJson(writer: *std.Io.Writer, failure: *const diagnostics.Failure, op
     }
     var json: std.json.Stringify = .{ .writer = writer };
     try json.beginObject();
-    try field(&json, "schema_version", "v2");
     try field(&json, "catalog_revision", "0.4.0-1");
     try json.objectField("producer");
     try json.beginObject();

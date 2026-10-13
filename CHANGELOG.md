@@ -19,6 +19,7 @@ All notable changes to z-fasta will be documented in this file.
 
 ### Removed
 
+- The `schema_version` field of the JSON envelope (`--error-format=json`, `get --summary`, and `validate --json`). `catalog_revision` and `producer.version` identify a report.
 - `--summary`: `--json` always prints one object.
 - `--fix-format-only`: symbols outside the alphabet no longer block repair.
 - The 10,000-event list and its exit status.
