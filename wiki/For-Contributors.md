@@ -64,6 +64,7 @@ Borrowed source labels live through handling or reset. Retained preview views be
 bash bench/index/run.sh --skip-benchmarks --skip-messy --skip-report
 bash bench/get/run.sh --skip-benchmarks --skip-messy --skip-report
 bash bench/stats/run.sh --skip-benchmarks --skip-messy --skip-report
+bash bench/validate/run.sh --skip-benchmarks --skip-report
 ```
 
 Run every affected gate after code changes. Synthetic unit fixtures do not replace real-data and peer verification.

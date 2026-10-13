@@ -2,7 +2,7 @@
 
 # Benchmarking Framework
 
-This is the benchmarking framework for z-fasta. I use it to compare z-fasta with the reference tools across indexing, sequence extraction, and stats. Each suite checks correctness first, then uses [zebrac](https://github.com/eneskemalergin/zebrac) to measure wall time, peak RSS, and page faults.
+This is the benchmarking framework for z-fasta. I use it to compare z-fasta with the reference tools across indexing, sequence extraction, stats, and validation. Each suite checks correctness first, then uses [zebrac](https://github.com/eneskemalergin/zebrac) to measure wall time, peak RSS, and page faults.
 
 Zebrac is Linux-only. It is similar to `hyperfine`, but it also records process memory and page faults. It is the runner for the performance sections, not a dependency of z-fasta. The local runner is kept at `tools/zebrac`, separately from the peer-tool installer.
 
@@ -11,8 +11,9 @@ Zebrac is Linux-only. It is similar to `hyperfine`, but it also records process 
 - [Index benchmark report](index/REPORT.md)
 - [GET benchmark report](get/REPORT.md)
 - [Stats benchmark report](stats/REPORT.md)
+- [Validate benchmark report](validate/REPORT.md)
 
-The published reports and figures describe the measured 0.3.5 runs.
+The index, GET, and stats reports and figures describe the measured 0.3.5 runs. The validate report describes the run named in its provenance section.
 
 Each report describes its own methods, field coverage, correctness checks, measurements, and figures. The suites do not all compare the same operation: stats has complete wrapper lanes and partial SeqKit/Seqtk reference lanes, while GET and index have their own compatibility limits.
 
@@ -30,18 +31,20 @@ bash bench/shared/install_tools.sh   # verify the local toolchain
 bash bench/index/run.sh
 bash bench/get/run.sh
 bash bench/stats/run.sh
+bash bench/validate/run.sh
 
 # Correctness only
 bash bench/index/run.sh --skip-benchmarks --skip-messy --skip-report
 bash bench/get/run.sh --skip-benchmarks --skip-messy --skip-report
 bash bench/stats/run.sh --skip-benchmarks --skip-messy --skip-report
+bash bench/validate/run.sh --skip-benchmarks --skip-report
 ```
 
-Each suite has one entrypoint: `bash bench/<index|get|stats>/run.sh`. It runs correctness first, then optional zebrac measurements, then writes `REPORT.md`. The suites have different default sample counts and warmups, so check `--help` or the generated report when those details matter.
+Each suite has one entrypoint: `bash bench/<index|get|stats|validate>/run.sh`. It runs correctness first, then optional zebrac measurements, then writes `REPORT.md`. The suites have different default sample counts and warmups, so check `--help` or the generated report when those details matter.
 
 The benchmark scripts resolve commands from `tools/bin/` by default. Set `SAMTOOLS`, `BEDTOOLS`, `SEQKIT`, or another tool variable when you intentionally want to compare a different executable. `bench/shared/install_tools.sh` only verifies the local bundle and pinned versions; it does not silently fall back to a command found elsewhere on `PATH`.
 
-The v0.3.5 refresh uses Zig 0.16.0 and zebrac 0.6.2 from `PATH`, with `ZEBRAC="$(command -v zebrac)"` passed to each suite. Index, GET, and stats run in that order without overlapping measurements. Each main section uses five measured samples, three warmups, and a 5,000 ms budget per command. The suites' default warmups differ, so pass these settings explicitly. Messy sections retain their separately documented sampling settings.
+The v0.3.5 refresh uses Zig 0.16.0 and zebrac 0.6.2 from `PATH`, with `ZEBRAC="$(command -v zebrac)"` passed to each suite. Index, GET, and stats run in that order without overlapping measurements. Each main section uses five measured samples, three warmups, and a 5,000 ms budget per command. The suites' default warmups differ, so pass these settings explicitly. Messy sections retain their separately documented sampling settings. The validate suite runs after stats with the same settings.
 
 The common skips are `--skip-tests` (`--skip-verify`), `--skip-benchmarks` (`--skip-perf`), `--skip-report`, and `--skip-messy`. The last one skips messy performance work only. It does not skip messy correctness cases.
 
@@ -64,6 +67,7 @@ Run the full suites sequentially, with the verified zebrac executable:
 ZEBRAC=$(command -v zebrac) bash bench/index/run.sh --runs 5 --warmup 3 --duration 5000
 ZEBRAC=$(command -v zebrac) bash bench/get/run.sh --runs 5 --warmup 3 --duration 5000
 ZEBRAC=$(command -v zebrac) bash bench/stats/run.sh --runs 5 --warmup 3 --duration 5000
+ZEBRAC=$(command -v zebrac) bash bench/validate/run.sh --runs 5 --warmup 3 --duration 5000
 ```
 
 Check each command's exit status before starting the next suite. Review its manifest, output checks, complete workload set and report before updating README or Wiki summaries. Keep units and measured populations consistent between tables and figures. Do not relabel an older report as the new version. If executable code or the measurement method changes afterward, repeat the affected checks and measurements before regenerating its report.
