@@ -12,8 +12,9 @@
 # Correctness runs `z-fasta validate --json` on proteome copies with one injected defect each
 # and on the shared messy layouts, and compares the exit status and finding codes with values
 # derived from how each input is built. It checks that validate accepts the real
-# and messy files that `index` accepts, and compares verdicts with samtools faidx (line layout)
-# and SeqKit seq -v (alphabet) where their rules match validate's.
+# and messy files that `index` accepts and that `validate --index` matches each index built,
+# and compares verdicts with samtools faidx (line layout) and SeqKit seq -v (alphabet) where
+# their rules match validate's.
 #
 # Common invocations:
 #   bash bench/validate/run.sh
@@ -169,6 +170,14 @@ index_verdict() {
     if TMPDIR="$WORK_DIR" "$ZFASTA" index "$WORK_DIR/$name" > /dev/null 2>&1; then echo accept; else echo reject; fi
 }
 
+# The index_match state validate --index reports for a file index_verdict indexed in WORK_DIR.
+pair_verdict() {
+    "$ZFASTA" validate --json --index "$WORK_DIR/$1" 2>/dev/null | "$PYTHON" -c '
+import json, sys
+text = sys.stdin.read()
+print(json.loads(text)["validation"]["checks"].get("index_match", "absent") if text.strip() else "not loaded")'
+}
+
 samtools_verdict() {
     if "$SAMTOOLS" faidx --fai-idx "$WORK_DIR/$2.fai" "$1" > /dev/null 2>&1; then echo accept; else echo reject; fi
 }
@@ -294,19 +303,26 @@ run_tests() {
         record real "$ds" "stdin (validate -)" "exit $(summary_field "$from_file" 1); $(summary_field "$from_file" 3)" "exit $(summary_field "$from_stdin" 1); $(summary_field "$from_stdin" 3)"
     done
 
-    section_hdr index "validate accepts the files that index accepts"
+    section_hdr index "validate accepts the files that index accepts and matches each index"
+    local verdict
     for ds in "${DATASETS[@]}"; do
         file="${REAL_DATASETS[$ds]:-}"
         [[ -n "$file" ]] || continue
-        record real "$ds" "accepted (index, validate)" "$(index_verdict "$file" "real_$ds.fa")" "$(validate_verdict "$file")"
+        verdict="$(index_verdict "$file" "real_$ds.fa")"
+        record real "$ds" "accepted (index, validate)" "$verdict" "$(validate_verdict "$file")"
+        if [[ "$verdict" == accept ]]; then record real "$ds" "index pair (validate --index)" passed "$(pair_verdict "real_$ds.fa")"; fi
     done
     for name in "${FIXTURES[@]}"; do
         file="$FIXTURE_DIR/$name.fasta"
-        record fixture "$name" "accepted (index, validate)" "$(index_verdict "$file" "fixture_$name.fasta")" "$(validate_verdict "$file")"
+        verdict="$(index_verdict "$file" "fixture_$name.fasta")"
+        record fixture "$name" "accepted (index, validate)" "$verdict" "$(validate_verdict "$file")"
+        if [[ "$verdict" == accept ]]; then record fixture "$name" "index pair (validate --index)" passed "$(pair_verdict "fixture_$name.fasta")"; fi
     done
     for name in "${VARIANTS[@]}"; do
         file="$MESSY_DIR/$name.fasta"
-        record variant "$name" "accepted (index, validate)" "$(index_verdict "$file" "variant_$name.fasta")" "$(validate_verdict "$file")"
+        verdict="$(index_verdict "$file" "variant_$name.fasta")"
+        record variant "$name" "accepted (index, validate)" "$verdict" "$(validate_verdict "$file")"
+        if [[ "$verdict" == accept ]]; then record variant "$name" "index pair (validate --index)" passed "$(pair_verdict "variant_$name.fasta")"; fi
     done
 
     section_hdr samtools "samtools faidx rejects exactly the layouts validate warns about"
@@ -419,7 +435,7 @@ run_perf() {
     echo "  metadata: $METADATA_JSONL"
 
     ensure_real_data
-    local ds fa bytes type qf qz qk qs qw
+    local ds fa bytes type qf qz qk qs qw qp
     qz="$(quote_arg "$ZFASTA")"
     qk="$(quote_arg "$SEQKIT")"
     qs="$(quote_arg "$SAMTOOLS")"
@@ -431,8 +447,12 @@ run_perf() {
         [[ "$ds" == Proteome ]] && type=protein
         qf="$(quote_arg "$fa")"
         qw="$(quote_arg "$WORK_DIR/perf_$ds.fai")"
+        ln -sfn "$fa" "$WORK_DIR/pair_$ds.fa"
+        TMPDIR="$WORK_DIR" "$ZFASTA" index "$WORK_DIR/pair_$ds.fa" > /dev/null
+        qp="$(quote_arg "$WORK_DIR/pair_$ds.fa")"
         echo "  -- dataset $ds ($(du -h "$fa" | cut -f1)) --"
         run_zebrac_tool "$ds" z-fasta z-fasta "$out_dir/${ds}__z-fasta.json" "$qz validate --json $qf > /dev/null" "$bytes"
+        run_zebrac_tool "$ds" z-fasta-index z-fasta "$out_dir/${ds}__z-fasta-index.json" "$qz validate --json --index $qp > /dev/null" "$bytes"
         run_zebrac_tool "$ds" seqkit peer "$out_dir/${ds}__seqkit.json" "$qk seq -j 1 -v -t $type -o /dev/null $qf" "$bytes"
         run_zebrac_tool "$ds" samtools peer "$out_dir/${ds}__samtools.json" "$qs faidx --fai-idx $qw $qf" "$bytes"
     done

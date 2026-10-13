@@ -147,6 +147,17 @@ z-fasta validate --strict genome.fa
 
 `INTERRUPTED` (JSON `completion: interrupted`) means a read or memory failure stopped the scan. The report covers what was examined, whole-file findings such as a missing final newline are not decided, the failure is on stderr, and the exit status is 1. Fix the cause and rerun; a partial report is never a pass.
 
+## Validate --index reports differences
+
+`pair.*` findings mean the index no longer describes the FASTA: a record is missing from one side, or its length, offset, line layout, or side table differs. GET would return wrong bytes for those records. Rebuild the index:
+
+```bash
+z-fasta index genome.fa
+z-fasta validate --index genome.fa
+```
+
+A missing or stale index stops validate before the scan, with the loader's code on stderr, such as `index.not_found` or `index.source_size_mismatch`. A damaged entry stops it where the scan reaches that entry: the report is `INTERRUPTED`, and the entry's code is on stderr.
+
 ## Fix refuses the file
 
 `repair.blocked` names the first finding the copy could not keep: no records, content before the first header, or a control byte in a header or sequence line. The report on stdout lists every finding. Resolve those in the source; an existing destination is left unchanged.

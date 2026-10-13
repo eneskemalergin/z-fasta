@@ -1,6 +1,6 @@
 # Validation and Repair
 
-I recommend running validate before using an unfamiliar FASTA. It reads the file once, front to back, through a fixed 256 KiB buffer, and counts every problem it finds. It never changes the file and needs no index. It is a useful input gate, but it does not prove that every possible FASTA defect is absent. When the problems are layout only, validate can write a repaired copy in the same pass.
+I recommend running validate before using an unfamiliar FASTA. It reads the file once, front to back, through a fixed 256 KiB buffer, and counts every problem it finds. It never changes the file and needs no index; with `--index` it also checks the index `get` would use. It is a useful input gate, but it does not prove that every possible FASTA defect is absent. When the problems are layout only, validate can write a repaired copy in the same pass.
 
 ## Validate a file
 
@@ -24,7 +24,7 @@ error [sequence.invalid_symbol] 2 bytes in 2 records; first at line 2 column 5, 
 complete: examined 35 bytes, 6 lines, 3 records, 14 symbols; protein alphabet chosen from 14 symbols
 ```
 
-The report goes to stdout. Operational failures, such as a missing file or a failed read, go to stderr in the format `--error-format` selects; see [Error diagnostics](Error-Diagnostics).
+The report goes to stdout. Identifiers in the text report show printable ASCII as is and escape quotes, backslashes, and every other byte as `\xNN`, so a control byte in a header cannot drive the terminal. Operational failures, such as a missing file or a failed read, go to stderr in the format `--error-format` selects; see [Error diagnostics](Error-Diagnostics).
 
 Use `-` to read standard input:
 
@@ -46,24 +46,20 @@ Validate reads FASTA the way `index` does, so the two agree on what a symbol and
 
 ## What validate reports
 
-| Code                              | Severity | Counted per            |
-| --------------------------------- | -------- | ---------------------- |
-| `fasta.no_records`                | error    | file                   |
-| `fasta.content_before_header`     | error    | line                   |
-| `fasta.header_control_byte`       | error    | byte                   |
-| `fasta.sequence_control_byte`     | error    | byte                   |
-| `fasta.empty_record`              | warning  | record                 |
-| `fasta.empty_identifier`          | error    | record                 |
-| `fasta.duplicate_identifier`      | error    | record after the first |
-| `fasta.long_header`               | warning  | record                 |
-| `header.convention_mismatch`      | warning  | record (`--schema`)    |
-| `sequence.invalid_symbol`         | error    | byte                   |
-| `format.sequence_whitespace`      | warning  | line                   |
-| `format.blank_sequence_line`      | warning  | line                   |
-| `format.inconsistent_wrapping`    | warning  | record                 |
-| `format.leading_bom`              | warning  | file                   |
-| `format.missing_terminal_newline` | warning  | file                   |
-| `format.mixed_line_endings`       | warning  | file                   |
+- Errors:
+  - `fasta.no_records`, once per file;
+  - `fasta.content_before_header`, per line;
+  - `fasta.header_control_byte` and `fasta.sequence_control_byte`, per byte;
+  - `fasta.empty_identifier`, per record;
+  - `fasta.duplicate_identifier`, per record after the first;
+  - `sequence.invalid_symbol`, per byte.
+- Warnings:
+  - `fasta.empty_record` and `fasta.long_header`, per record;
+  - `header.convention_mismatch`, per record, with `--schema`;
+  - `format.sequence_whitespace` and `format.blank_sequence_line`, per line;
+  - `format.inconsistent_wrapping`, per record;
+  - `format.leading_bom`, `format.missing_terminal_newline`, and `format.mixed_line_endings`, once per file.
+- With `--index`, the six `pair.*` errors described under [Compare with the index](#compare-with-the-index).
 
 A line before the first header counts as content when it holds anything but spaces, tabs, or CR. An empty identifier (`>` or `> desc`) is an error and is not checked for duplicates. Duplicates are compared by exact bytes. Empty input reports `fasta.no_records` only.
 
@@ -128,6 +124,7 @@ z-fasta validate --json genome.fa
 - `completion` and the selected `policy`;
 - `checks`: `passed`, `warnings`, `failed`, or `incomplete` for structure, identifiers, alphabet, and format;
 - what was `examined`, finding totals, totals by category, and the records with errors and with warnings;
+- with `--index`, an `index_match` check and category, and `index`: the `format`, its `entries`, how many `matched`, and the `omitted_duplicates`;
 - one entry per code that occurred, and the occurrences of each byte outside the alphabet.
 
 <details>
@@ -163,6 +160,33 @@ z-fasta validate --json genome.fa
 Identifiers are `encoding` (`utf8` or `base64`), `value`, `truncated`, and `original_bytes`; decoding a value gives the original bytes, so two identifiers that differ by one byte stay different. A truncated value is a prefix of at most 256 bytes, never an identifier to compare.
 
 `completion` is `complete` when every check ran over the whole input. It is `incomplete` when the duplicate check reached its `--max-name-memory` budget: every other check still ran to the end, the identifiers check reads `incomplete`, `name_budget` names the record where it stopped, and the exit status is 1. It is `interrupted` when a read or memory failure stopped the scan: the report covers what was examined, whole-file findings are not decided, the failure goes to stderr, and the exit status is 1.
+
+## Compare with the index
+
+```bash
+z-fasta index genome.fa
+z-fasta validate --index genome.fa
+z-fasta validate --index=genome.fa.fai genome.fa
+z-fasta validate --index=backup/genome.fa.zfi genome.fa
+```
+
+`--index` loads the index `get` would use, `genome.fa.zfi` or else `genome.fa.fai`; `--index=PATH` loads the named file, whose `.zfi` or `.fai` suffix gives its format (any other suffix is refused). Validate then checks, in the same pass, that the index describes this FASTA. This catches an index whose recorded size and modification time still match but whose contents do not, such as one written by an older version with different rules. `index`'s own scanner runs over the same buffer, and each record it would write is matched with an index entry by exact identifier:
+
+- `pair.record_missing_from_index`: a record with symbols has no entry;
+- `pair.record_missing_from_fasta`: an entry matches no record;
+- `pair.sequence_length_mismatch`: the entry's length differs;
+- `pair.sequence_offset_mismatch`: the entry's offset of the first symbol differs;
+- `pair.line_geometry_mismatch`: the symbols or bytes per line differ, or one side uses the fixed-width formula and the other a side table;
+- `pair.side_table_mismatch`: both use a side table and the tables differ; `line` names the first line where they do.
+
+Each is an error, counted per record. A record without symbols is never indexed, and an index made with the default first-wins rule leaves out later duplicates; neither is missing. The closing line counts the matches and the duplicates left out:
+
+```text
+OK genome.fa: no findings
+complete: examined 3151425851 bytes, 51662809 lines, 194 records, 3099750718 symbols; nucleotide alphabet chosen from 100000 symbols; zfi index: 194 of 194 entries matched
+```
+
+Validate checks the index with `get`'s rules. A missing or stale index, or a damaged header or name table, fails before the scan, on stderr and without a report; its code says why, for example `index.not_found` or `index.source_size_mismatch`. Each entry is checked as the scan reaches it, so a damaged entry stops validation there: the report is `interrupted` and covers what was examined, and the entry's code goes to stderr. `--index` needs a file and cannot read standard input.
 
 ## Write a repaired copy
 
@@ -214,7 +238,7 @@ Bound the duplicate check when a file may hold more identifiers than memory allo
 z-fasta validate --max-name-memory 268435456 proteins.fa
 ```
 
-Past the budget the duplicate check stops and the report is `incomplete`; it never evicts names or guesses. On a file the check reserves about 1 MiB before its first name. Equally wrapped lines are checked in vector blocks; the first irregular byte drops to a per-byte check at that byte. The duplicate check is the only part that grows with the input: with the number of distinct identifiers, plus a copy of each identifier that repeats, never with sequence bytes.
+Past the budget the duplicate check stops and the report is `incomplete`; it never evicts names or guesses. `--index` reads the index in file order through three 64 KiB buffers, so it adds almost no memory. Only when the index lists records in a different order from the FASTA does validate load the whole index, as `get` does, to match the remaining records by name. On a file the check reserves about 1 MiB before its first name. Equally wrapped lines are checked in vector blocks; the first irregular byte drops to a per-byte check at that byte. The duplicate check is the only part that grows with the input: with the number of distinct identifiers, plus a copy of each identifier that repeats, never with sequence bytes.
 
 ## Related pages
 

@@ -204,12 +204,14 @@ pub const Argument = enum {
     max_header_len,
     max_name_memory,
     width,
+    index,
     error_format,
     read_buffer,
 };
 pub const Arguments = std.EnumSet(Argument);
-pub const Expected = enum { path, request_source, schema, alphabet, sequence_type, positive_usize, error_format, nonempty_buffer };
-pub const Requirement = enum { bed, transform_or_strand, fix, output };
+/// `index_path`: a path ending in `.zfi` or `.fai`, which names its format.
+pub const Expected = enum { path, request_source, schema, alphabet, sequence_type, positive_usize, error_format, nonempty_buffer, index_path };
+pub const Requirement = enum { bed, transform_or_strand, fix, output, fasta_file };
 pub const AllocationRole = enum {
     argv,
     arena,
@@ -450,6 +452,13 @@ pub const SourceSize = struct { stored_bytes: u64, actual_bytes: u64 };
 pub const SourceTime = struct { stored_mtime_ns: u64, actual_mtime_ns: i128 };
 pub const RegionMismatch = struct { requested_symbols: u64, observed_symbols: u64, interval: Interval, examined_span: ByteSpan };
 pub const TotalMismatch = struct { indexed_total: u64, observed_total: u64 };
+pub const SequenceLengthMismatch = struct { indexed_length: u64, observed_length: u64 };
+pub const OffsetMismatch = struct { indexed_offset: u64, observed_offset: u64 };
+/// `side_table`: line positions come from the record's side table rather than the formula.
+pub const LineLayout = enum { uniform, side_table };
+pub const GeometryMismatch = struct { indexed_line_bases: u64, indexed_line_bytes: u64, indexed_layout: LineLayout, observed_line_bases: u64, observed_line_bytes: u64, observed_layout: LineLayout };
+/// `line` is the first line, counted from 1, where the tables differ or one of them ends.
+pub const SideTableMismatch = struct { indexed_lines: u64, observed_lines: u64, line: u64 };
 pub const MissingSequence = struct { lookup_scope: LookupScope, index_source: SourceId, identifier: ?Preview = null };
 pub const StartAfter = struct { start: u64, sequence_length: u64 };
 pub const ReversedInterval = struct { start: u64, end: u64 };
@@ -573,6 +582,12 @@ pub const Details = union(enum(u8)) {
     @"index.source_mtime_mismatch": SourceTime,
     @"pair.region_length_mismatch": RegionMismatch,
     @"pair.total_length_mismatch": TotalMismatch,
+    @"pair.record_missing_from_index": void,
+    @"pair.record_missing_from_fasta": void,
+    @"pair.sequence_length_mismatch": SequenceLengthMismatch,
+    @"pair.sequence_offset_mismatch": OffsetMismatch,
+    @"pair.line_geometry_mismatch": GeometryMismatch,
+    @"pair.side_table_mismatch": SideTableMismatch,
     @"request.no_regions": struct { request_source: enum { positional, names, bed } },
     @"request.sequence_not_found": MissingSequence,
     @"request.start_before_one": struct { start: u64, coordinate_system: CoordinateSystem },
@@ -925,6 +940,12 @@ fn describeCode(code: Code) Metadata {
         .@"index.source_mtime_mismatch" => describe(code, .index_match, .finding, .file, .rebuild_index, error.InvalidIndex),
         .@"pair.region_length_mismatch" => describe(code, .index_match, .finding, .record, .rebuild_index, error.InvalidIndex),
         .@"pair.total_length_mismatch" => describe(code, .index_match, .finding, .file, .rebuild_index, error.InvalidIndex),
+        .@"pair.record_missing_from_index" => describe(code, .index_match, .finding, .record, .rebuild_index, error.InvalidIndex),
+        .@"pair.record_missing_from_fasta" => describe(code, .index_match, .finding, .record, .rebuild_index, error.InvalidIndex),
+        .@"pair.sequence_length_mismatch" => describe(code, .index_match, .finding, .record, .rebuild_index, error.InvalidIndex),
+        .@"pair.sequence_offset_mismatch" => describe(code, .index_match, .finding, .record, .rebuild_index, error.InvalidIndex),
+        .@"pair.line_geometry_mismatch" => describe(code, .index_match, .finding, .record, .rebuild_index, error.InvalidIndex),
+        .@"pair.side_table_mismatch" => describe(code, .index_match, .finding, .record, .rebuild_index, error.InvalidIndex),
         .@"request.no_regions" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
         .@"request.sequence_not_found" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),
         .@"request.start_before_one" => describe(code, .requests, .failure, .none, .correct_request, error.InvalidRequest),

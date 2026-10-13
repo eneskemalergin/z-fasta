@@ -79,6 +79,10 @@ z-fasta validate --custom-alphabet ACGTN- aligned.fa
 zcat genome.fa.gz | z-fasta validate -
 z-fasta validate --max-name-memory 268435456 proteins.fa
 
+# Check that the index get loads still describes the FASTA
+z-fasta validate --index genome.fa
+z-fasta validate --index=genome.fa.fai genome.fa
+
 # Name the alphabet instead of sampling it
 z-fasta validate --type dna genome.fa
 z-fasta validate --type protein proteins.fa

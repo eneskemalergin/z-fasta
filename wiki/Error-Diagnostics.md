@@ -116,7 +116,7 @@ See [For contributors](For-Contributors) for the source owners and checks.
 
 ## Active code catalog
 
-The registry contains 105 codes. This table lists the native detail fields from `diagnostics.Details`; shared `stage`, `source`, `location`, `record`, `request`, `related` and `cause` sit outside those fields. The FASTA, header, sequence and format findings are what the validation report counts, in the listed units; four of them also describe repair blockers. Every code has error severity except the warnings `fasta.empty_record`, `fasta.long_header`, `header.convention_mismatch` and the six `format.*` codes.
+The registry contains 111 codes. This list gives each code's kind, its unit when it is a finding, and its native detail fields from `diagnostics.Details`; shared `stage`, `source`, `location`, `record`, `request`, `related` and `cause` sit outside those fields. The FASTA, header, sequence and format findings are what the validation report counts, in the listed units; four of them also describe repair blockers. With `validate --index`, the report also counts the six `pair.*` codes that compare records with the index: for `pair.record_missing_from_fasta`, `record` is the entry's number in the index. Every code has error severity except the warnings `fasta.empty_record`, `fasta.long_header`, `header.convention_mismatch` and the six `format.*` codes.
 
 The machine renderer preserves the native fields with these explicit conversions:
 
@@ -128,110 +128,128 @@ The machine renderer preserves the native fields with these explicit conversions
 
 A field ending in `offset` or describing a byte extent refers to bytes in its named source. Lengths and start/end fields identify the sequence or coordinate system named in that code's data. Expected/found values retain the original check's values. Null fields mean unobserved facts, not zero. The typed definitions and renderer are the source of field types and nested shapes.
 
-| Code | Kind | Unit | Detail fields |
-| --- | --- | --- | --- |
-| `usage.command_required` | failure | none | none |
-| `usage.unknown_command` | failure | none | `command` |
-| `usage.unknown_option` | failure | none | `option` |
-| `usage.missing_argument` | failure | none | `argument` |
-| `usage.extra_argument` | failure | none | `argument`, `allowed_count` |
-| `usage.missing_option_value` | failure | none | `option`, `expected` |
-| `usage.repeated_option` | failure | none | `option` |
-| `usage.conflicting_options` | failure | none | `arguments` |
-| `usage.option_requires` | failure | none | `option`, `required` |
-| `usage.invalid_option_value` | failure | none | `option`, `expected`, `value` |
-| `io.file_not_found` | failure | none | none |
-| `io.access_denied` | failure | none | none |
-| `io.invalid_path` | failure | none | `reason`, `limit_bytes` |
-| `io.open_failed` | failure | none | none |
-| `io.stat_failed` | failure | none | none |
-| `io.seek_failed` | failure | none | `requested_offset` |
-| `io.read_failed` | failure | none | `requested_bytes` |
-| `io.unexpected_eof` | failure | none | `exact`, `delimiter` |
-| `io.map_failed` | failure | none | `map_bytes` |
-| `io.create_failed` | failure | none | none |
-| `io.write_failed` | failure | none | none |
-| `io.flush_failed` | failure | none | none |
-| `io.publish_failed` | failure | none | none |
-| `io.temp_unavailable` | failure | none | `purpose`, `attempts` |
-| `io.cleanup_failed` | failure | none | `resource_role` |
-| `resource.out_of_memory` | failure | none | `allocation_role`, `requested_bytes` |
-| `resource.capacity_limit_exceeded` | failure | none | `capacity_role`, `limit`, `required` |
-| `resource.count_overflow` | failure | none | `counter`, `max_value`, `current`, `increment` |
-| `resource.line_buffer_exceeded` | failure | none | `buffer_bytes`, `observed_bytes` |
-| `input.changed` | failure | none | `changed_fields`, `before`, `after`, `disappeared` |
-| `input.unsupported_format` | failure | none | `detected` |
-| `fasta.no_records` | finding | file | none |
-| `fasta.content_before_header` | finding | line | `content_bytes` |
-| `fasta.header_control_byte` | finding | byte | `byte`, `grammar` |
-| `fasta.sequence_control_byte` | finding | byte | `byte`, `grammar` |
-| `fasta.empty_record` | finding | record | none |
-| `fasta.empty_identifier` | finding | record | none |
-| `fasta.duplicate_identifier` | finding | record | `identifier` |
-| `fasta.long_header` | finding | record | `observed_bytes`, `limit_bytes` |
-| `header.convention_mismatch` | finding | record | `convention` |
-| `sequence.invalid_symbol` | finding | byte | `byte`, `policy` |
-| `format.sequence_whitespace` | finding | line | `whitespace_bytes` |
-| `format.blank_sequence_line` | finding | line | none |
-| `format.inconsistent_wrapping` | finding | record | `expected_width`, `actual_width` |
-| `format.leading_bom` | finding | file | none |
-| `format.missing_terminal_newline` | finding | file | none |
-| `format.mixed_line_endings` | finding | file | none |
-| `index.initial_header_required` | finding | file | `byte`, `required_offset` |
-| `index.no_indexable_records` | finding | file | `naming_policy`, `seen_records`, `empty_records`, `duplicate_records` |
-| `index.identifier_too_long` | finding | record | `observed_bytes`, `limit_bytes`, `format` |
-| `index.sequence_line_too_long` | finding | line | `field`, `observed`, `limit`, `width_role`, `format` |
-| `index.record_count_limit_exceeded` | finding | file | `record_count`, `max_records`, `format`, `limit_role` |
-| `index.side_table_offset_limit_exceeded` | finding | record | `offset`, `max_offset`, `offset_role` |
-| `index.source_timestamp_out_of_range` | finding | file | `timestamp_ns`, `min_ns`, `max_ns` |
-| `index.nonuniform_fai` | finding | record | `reason`, `expected`, `observed` |
-| `index.not_found` | failure | none | `zfi_source`, `fai_source` |
-| `index.no_records` | finding | file | `format` |
-| `index.invalid_magic` | finding | file | `expected_magic`, `actual` |
-| `index.unsupported_version` | finding | file | `found_version`, `supported_version` |
-| `index.truncated` | finding | file | `section`, `required_end`, `available_end` |
-| `index.name_not_embedded` | finding | record | `flags`, `required_flag` |
-| `index.name_footer_missing` | finding | file | `tight`, `legacy`, `reserved` |
-| `index.name_blob_out_of_bounds` | finding | file | `name_blob_bytes`, `payload_end`, `records_end` |
-| `index.name_out_of_bounds` | finding | record | `name_offset`, `name_bytes`, `blob_bytes` |
-| `index.zero_sequence_length` | finding | record | `sequence_length` |
-| `index.invalid_line_geometry` | finding | record | `geometry`, `constraint` |
-| `index.sequence_offset_out_of_bounds` | finding | record | `sequence_offset`, `source_bytes`, `bound_source` |
-| `index.sequence_span_out_of_bounds` | finding | record | `required_end`, `source_bytes`, `bound_source`, `entry` |
-| `index.arithmetic_overflow` | finding | field | `field`, `arithmetic`, `lhs`, `rhs`, `max_value` |
-| `index.fai.field_missing` | finding | field | `field`, `column_number` |
-| `index.fai.invalid_integer` | finding | field | `field`, `value` |
-| `index.fai.integer_out_of_range` | finding | field | `field`, `max_value`, `value` |
-| `index.side_table_offset_out_of_bounds` | finding | record | `offset`, `region_start`, `region_end` |
-| `index.side_table_misaligned` | finding | record | `offset`, `alignment_bytes`, `section` |
-| `index.side_table_empty` | finding | record | `line_count` |
-| `index.side_table_order_invalid` | finding | record | `table_start`, `minimum_start` |
-| `index.side_base_start_mismatch` | finding | record | `entry`, `base_start`, `expected_base_start` |
-| `index.side_line_geometry_invalid` | finding | record | `entry`, `geometry`, `constraint` |
-| `index.side_first_offset_mismatch` | finding | record | `first_byte_offset`, `sequence_offset` |
-| `index.side_line_order_invalid` | finding | record | `entry`, `byte_offset`, `minimum_offset` |
-| `index.side_sequence_length_mismatch` | finding | record | `indexed_length`, `side_table_bases` |
-| `index.older_than_source` | finding | file | `index_mtime_ns`, `source_mtime_ns` |
-| `index.source_size_mismatch` | finding | file | `stored_bytes`, `actual_bytes` |
-| `index.source_mtime_mismatch` | finding | file | `stored_mtime_ns`, `actual_mtime_ns` |
-| `pair.region_length_mismatch` | finding | record | `requested_symbols`, `observed_symbols`, `interval`, `examined_span` |
-| `pair.total_length_mismatch` | finding | file | `indexed_total`, `observed_total` |
-| `request.no_regions` | failure | none | `request_source` |
-| `request.sequence_not_found` | failure | none | `lookup_scope`, `index_source`, `identifier` |
-| `request.start_before_one` | failure | none | `start`, `coordinate_system` |
-| `request.start_after_sequence` | failure | none | `start`, `sequence_length` |
-| `request.end_before_start` | failure | none | `start`, `end` |
-| `request.end_after_sequence` | failure | none | `end`, `sequence_length` |
-| `request.ordinal_out_of_range` | failure | none | `ordinal`, `record_count` |
-| `request.output_buffer_too_small` | failure | none | `required_bytes`, `available_bytes` |
-| `request.identifier_too_long` | failure | none | `identifier_bytes`, `limit_bytes` |
-| `request.bed.field_missing` | failure | none | `field`, `column_number` |
-| `request.bed.invalid_coordinate` | failure | none | `field`, `coordinate_system`, `value` |
-| `request.bed.coordinate_out_of_range` | failure | none | `field`, `max_value`, `coordinate_system`, `value` |
-| `request.bed.invalid_interval` | failure | none | `start`, `end`, `coordinate_system` |
-| `request.bed.invalid_strand` | failure | none | `strand`, `accepted` |
-| `transform.complement_on_protein` | failure | none | `transform`, `classification`, `sample`, `identifier` |
-| `repair.output_is_input` | failure | none | `input`, `output`, `comparison` |
-| `repair.output_identity_unknown` | failure | none | `input`, `output` |
-| `repair.blocked` | failure | none | `blocker`, `repair_policy` |
-| `internal.consistency_failed` | failure | none | `component`, `check` |
+- `usage`
+  - `usage.command_required`: failure; no fields.
+  - `usage.unknown_command`: failure; fields `command`.
+  - `usage.unknown_option`: failure; fields `option`.
+  - `usage.missing_argument`: failure; fields `argument`.
+  - `usage.extra_argument`: failure; fields `argument`, `allowed_count`.
+  - `usage.missing_option_value`: failure; fields `option`, `expected`.
+  - `usage.repeated_option`: failure; fields `option`.
+  - `usage.conflicting_options`: failure; fields `arguments`.
+  - `usage.option_requires`: failure; fields `option`, `required`.
+  - `usage.invalid_option_value`: failure; fields `option`, `expected`, `value`.
+- `io`
+  - `io.file_not_found`: failure; no fields.
+  - `io.access_denied`: failure; no fields.
+  - `io.invalid_path`: failure; fields `reason`, `limit_bytes`.
+  - `io.open_failed`: failure; no fields.
+  - `io.stat_failed`: failure; no fields.
+  - `io.seek_failed`: failure; fields `requested_offset`.
+  - `io.read_failed`: failure; fields `requested_bytes`.
+  - `io.unexpected_eof`: failure; fields `exact`, `delimiter`.
+  - `io.map_failed`: failure; fields `map_bytes`.
+  - `io.create_failed`: failure; no fields.
+  - `io.write_failed`: failure; no fields.
+  - `io.flush_failed`: failure; no fields.
+  - `io.publish_failed`: failure; no fields.
+  - `io.temp_unavailable`: failure; fields `purpose`, `attempts`.
+  - `io.cleanup_failed`: failure; fields `resource_role`.
+- `resource`
+  - `resource.out_of_memory`: failure; fields `allocation_role`, `requested_bytes`.
+  - `resource.capacity_limit_exceeded`: failure; fields `capacity_role`, `limit`, `required`.
+  - `resource.count_overflow`: failure; fields `counter`, `max_value`, `current`, `increment`.
+  - `resource.line_buffer_exceeded`: failure; fields `buffer_bytes`, `observed_bytes`.
+- `input`
+  - `input.changed`: failure; fields `changed_fields`, `before`, `after`, `disappeared`.
+  - `input.unsupported_format`: failure; fields `detected`.
+- `fasta`
+  - `fasta.no_records`: finding per file; no fields.
+  - `fasta.content_before_header`: finding per line; fields `content_bytes`.
+  - `fasta.header_control_byte`: finding per byte; fields `byte`, `grammar`.
+  - `fasta.sequence_control_byte`: finding per byte; fields `byte`, `grammar`.
+  - `fasta.empty_record`: finding per record; no fields.
+  - `fasta.empty_identifier`: finding per record; no fields.
+  - `fasta.duplicate_identifier`: finding per record; fields `identifier`.
+  - `fasta.long_header`: finding per record; fields `observed_bytes`, `limit_bytes`.
+- `header`
+  - `header.convention_mismatch`: finding per record; fields `convention`.
+- `sequence`
+  - `sequence.invalid_symbol`: finding per byte; fields `byte`, `policy`.
+- `format`
+  - `format.sequence_whitespace`: finding per line; fields `whitespace_bytes`.
+  - `format.blank_sequence_line`: finding per line; no fields.
+  - `format.inconsistent_wrapping`: finding per record; fields `expected_width`, `actual_width`.
+  - `format.leading_bom`: finding per file; no fields.
+  - `format.missing_terminal_newline`: finding per file; no fields.
+  - `format.mixed_line_endings`: finding per file; no fields.
+- `index`
+  - `index.initial_header_required`: finding per file; fields `byte`, `required_offset`.
+  - `index.no_indexable_records`: finding per file; fields `naming_policy`, `seen_records`, `empty_records`, `duplicate_records`.
+  - `index.identifier_too_long`: finding per record; fields `observed_bytes`, `limit_bytes`, `format`.
+  - `index.sequence_line_too_long`: finding per line; fields `field`, `observed`, `limit`, `width_role`, `format`.
+  - `index.record_count_limit_exceeded`: finding per file; fields `record_count`, `max_records`, `format`, `limit_role`.
+  - `index.side_table_offset_limit_exceeded`: finding per record; fields `offset`, `max_offset`, `offset_role`.
+  - `index.source_timestamp_out_of_range`: finding per file; fields `timestamp_ns`, `min_ns`, `max_ns`.
+  - `index.nonuniform_fai`: finding per record; fields `reason`, `expected`, `observed`.
+  - `index.not_found`: failure; fields `zfi_source`, `fai_source`.
+  - `index.no_records`: finding per file; fields `format`.
+  - `index.invalid_magic`: finding per file; fields `expected_magic`, `actual`.
+  - `index.unsupported_version`: finding per file; fields `found_version`, `supported_version`.
+  - `index.truncated`: finding per file; fields `section`, `required_end`, `available_end`.
+  - `index.name_not_embedded`: finding per record; fields `flags`, `required_flag`.
+  - `index.name_footer_missing`: finding per file; fields `tight`, `legacy`, `reserved`.
+  - `index.name_blob_out_of_bounds`: finding per file; fields `name_blob_bytes`, `payload_end`, `records_end`.
+  - `index.name_out_of_bounds`: finding per record; fields `name_offset`, `name_bytes`, `blob_bytes`.
+  - `index.zero_sequence_length`: finding per record; fields `sequence_length`.
+  - `index.invalid_line_geometry`: finding per record; fields `geometry`, `constraint`.
+  - `index.sequence_offset_out_of_bounds`: finding per record; fields `sequence_offset`, `source_bytes`, `bound_source`.
+  - `index.sequence_span_out_of_bounds`: finding per record; fields `required_end`, `source_bytes`, `bound_source`, `entry`.
+  - `index.arithmetic_overflow`: finding per field; fields `field`, `arithmetic`, `lhs`, `rhs`, `max_value`.
+  - `index.fai.field_missing`: finding per field; fields `field`, `column_number`.
+  - `index.fai.invalid_integer`: finding per field; fields `field`, `value`.
+  - `index.fai.integer_out_of_range`: finding per field; fields `field`, `max_value`, `value`.
+  - `index.side_table_offset_out_of_bounds`: finding per record; fields `offset`, `region_start`, `region_end`.
+  - `index.side_table_misaligned`: finding per record; fields `offset`, `alignment_bytes`, `section`.
+  - `index.side_table_empty`: finding per record; fields `line_count`.
+  - `index.side_table_order_invalid`: finding per record; fields `table_start`, `minimum_start`.
+  - `index.side_base_start_mismatch`: finding per record; fields `entry`, `base_start`, `expected_base_start`.
+  - `index.side_line_geometry_invalid`: finding per record; fields `entry`, `geometry`, `constraint`.
+  - `index.side_first_offset_mismatch`: finding per record; fields `first_byte_offset`, `sequence_offset`.
+  - `index.side_line_order_invalid`: finding per record; fields `entry`, `byte_offset`, `minimum_offset`.
+  - `index.side_sequence_length_mismatch`: finding per record; fields `indexed_length`, `side_table_bases`.
+  - `index.older_than_source`: finding per file; fields `index_mtime_ns`, `source_mtime_ns`.
+  - `index.source_size_mismatch`: finding per file; fields `stored_bytes`, `actual_bytes`.
+  - `index.source_mtime_mismatch`: finding per file; fields `stored_mtime_ns`, `actual_mtime_ns`.
+- `pair`
+  - `pair.region_length_mismatch`: finding per record; fields `requested_symbols`, `observed_symbols`, `interval`, `examined_span`.
+  - `pair.total_length_mismatch`: finding per file; fields `indexed_total`, `observed_total`.
+  - `pair.record_missing_from_index`: finding per record; no fields.
+  - `pair.record_missing_from_fasta`: finding per record; no fields.
+  - `pair.sequence_length_mismatch`: finding per record; fields `indexed_length`, `observed_length`.
+  - `pair.sequence_offset_mismatch`: finding per record; fields `indexed_offset`, `observed_offset`.
+  - `pair.line_geometry_mismatch`: finding per record; fields `indexed_line_bases`, `indexed_line_bytes`, `indexed_layout`, `observed_line_bases`, `observed_line_bytes`, `observed_layout`.
+  - `pair.side_table_mismatch`: finding per record; fields `indexed_lines`, `observed_lines`, `line`.
+- `request`
+  - `request.no_regions`: failure; fields `request_source`.
+  - `request.sequence_not_found`: failure; fields `lookup_scope`, `index_source`, `identifier`.
+  - `request.start_before_one`: failure; fields `start`, `coordinate_system`.
+  - `request.start_after_sequence`: failure; fields `start`, `sequence_length`.
+  - `request.end_before_start`: failure; fields `start`, `end`.
+  - `request.end_after_sequence`: failure; fields `end`, `sequence_length`.
+  - `request.ordinal_out_of_range`: failure; fields `ordinal`, `record_count`.
+  - `request.output_buffer_too_small`: failure; fields `required_bytes`, `available_bytes`.
+  - `request.identifier_too_long`: failure; fields `identifier_bytes`, `limit_bytes`.
+  - `request.bed.field_missing`: failure; fields `field`, `column_number`.
+  - `request.bed.invalid_coordinate`: failure; fields `field`, `coordinate_system`, `value`.
+  - `request.bed.coordinate_out_of_range`: failure; fields `field`, `max_value`, `coordinate_system`, `value`.
+  - `request.bed.invalid_interval`: failure; fields `start`, `end`, `coordinate_system`.
+  - `request.bed.invalid_strand`: failure; fields `strand`, `accepted`.
+- `transform`
+  - `transform.complement_on_protein`: failure; fields `transform`, `classification`, `sample`, `identifier`.
+- `repair`
+  - `repair.output_is_input`: failure; fields `input`, `output`, `comparison`.
+  - `repair.output_identity_unknown`: failure; fields `input`, `output`.
+  - `repair.blocked`: failure; fields `blocker`, `repair_policy`.
+- `internal`
+  - `internal.consistency_failed`: failure; fields `component`, `check`.

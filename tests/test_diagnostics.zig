@@ -55,6 +55,7 @@ const HELP_STDOUT =
     \\  --custom-alphabet CHARS  Check against exactly these bytes instead
     \\  --max-header-len N       Warn on headers longer than N bytes (default: 1024)
     \\  --max-name-memory BYTES  Stop the duplicate check past BYTES; the report is incomplete
+    \\  --index[=PATH]           Compare with PATH (.zfi or .fai), or the index get would load
     \\  Counts every finding exactly and reports each code's first occurrence.
     \\
     \\Examples:

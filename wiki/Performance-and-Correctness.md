@@ -34,6 +34,7 @@ I care about correct output before timing. The benchmark harness keeps correctne
 - Repair idempotence, refusals, and output-path safety.
 - Biological retrieval preservation after repair.
 - Validator and indexer agreement fixtures.
+- Index comparison: every `pair.*` code from same-size rewrites, through `.zfi` and `.fai`.
 
 ## Why the hot paths are bounded
 
@@ -41,7 +42,7 @@ I care about correct output before timing. The benchmark harness keeps correctne
 - GET uses positional reads and fixed input/output buffers. Names and BED requests stream through bounded reusable workspaces.
 - Seekable names and BED files retain only requested index entries after validating the complete sidecar. Lookup memory grows with unique requested identifiers and their required side tables. Stdin and named FIFOs retain the full index lookup.
 - Stats uses one 256 KiB descriptor-backed read window over indexed sequence spans.
-- Validate reads through one 256 KiB buffer. Its duplicate check keeps a fingerprint and a file offset per distinct identifier and re-reads an earlier identifier only on a fingerprint match.
+- Validate reads through one 256 KiB buffer. Its duplicate check keeps a fingerprint and a file offset per distinct identifier and re-reads an earlier identifier only on a fingerprint match. With `--index` it reads the index in file order through fixed buffers.
 
 ## Representative published results
 

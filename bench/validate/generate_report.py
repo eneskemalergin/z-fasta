@@ -9,20 +9,22 @@ from __future__ import annotations
 
 import csv
 import importlib.util
+import re
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 RESULTS_DIR = SCRIPT_DIR / "results"
 REPORT_PATH = SCRIPT_DIR / "REPORT.md"
 DATASETS = ["Genome", "Transcriptome", "Proteome"]
-TOOLS = ["z-fasta", "seqkit", "samtools"]
+TOOLS = ["z-fasta", "z-fasta-index", "seqkit", "samtools"]
 TOOL_LABELS = {
     "z-fasta": "z-fasta validate",
+    "z-fasta-index": "z-fasta validate --index",
     "seqkit": "SeqKit seq -v (partial)",
     "samtools": "samtools faidx (partial)",
 }
 GROUP_LABELS = {
-    "crafted": "Proteome copies with one injected defect",
+    "crafted": "Crafted proteome copies",
     "fixture": "Messy fixtures",
     "variant": "Messy proteome variants",
     "real": "REAL datasets",
@@ -54,6 +56,16 @@ def table(header: list[str], rows: list[list[str]]) -> str:
     return "\n".join(lines)
 
 
+def describe(value: str) -> str:
+    """Spells out an `exit N; code,code` verdict for a list item."""
+    match = re.fullmatch(r"exit (\d+); (.*)", value)
+    if not match:
+        return value
+    codes = match.group(2)
+    found = "no findings" if codes == "none" else ", ".join(f"`{code}`" for code in codes.split(","))
+    return f"exit {match.group(1)} with {found}"
+
+
 def md_overview(manifest: dict, tests: list[dict]) -> str:
     passed = sum(row["status"] == "pass" for row in tests)
     failed = sum(row["status"] == "fail" for row in tests)
@@ -69,6 +81,7 @@ def md_overview(manifest: dict, tests: list[dict]) -> str:
         "**What each tool checks**",
         "",
         "- **z-fasta validate:** structure, identifiers, alphabet, and line layout in one streaming pass through a 256 KiB buffer, with every occurrence counted. Timed as `validate --json`, which prints one report object; the alphabet is chosen automatically from the first 100,000 symbols.",
+        "- **z-fasta validate --index:** the same report, plus a record-by-record comparison with the `.zfi` built beforehand, made in the same pass by `index`'s scanner.",
         "- **SeqKit `seq -v`** (partial): checks every sequence against an explicit alphabet (`-t dna` or `-t protein`) on one thread (`-j 1`) and writes the records back out (`-o /dev/null`), so its time includes that rewrite. It does not check layout or headers.",
         "- **samtools `faidx`** (partial): builds a `.fai`, which needs fixed line geometry. It checks layout, not the alphabet.",
         "",
@@ -94,25 +107,31 @@ def md_correctness(tests: list[dict]) -> str:
     by_case: dict[tuple[str, str], dict[str, dict]] = {}
     for row in checked:
         by_case.setdefault((row["group"], row["case"]), {})[row["check"]] = row
-    verdicts = []
+    verdicts: dict[str, list[str]] = {}
     for (group, case), checks in by_case.items():
         if group not in ("real", "fixture", "variant"):
             continue
         findings = checks.get("findings", {}).get("observed", "")
         accepted = checks.get("accepted (index, validate)", {}).get("observed", "")
-        verdicts.append([
-            GROUP_LABELS[group],
-            f"`{case}`",
-            findings or (f"{accepted}; findings not asserted" if accepted else "not checked"),
-            checks.get("accepted (index, validate)", {}).get("expected", ""),
-            checks.get("layout (samtools, validate)", {}).get("expected", ""),
-            checks.get("alphabet (seqkit, validate)", {}).get("expected", ""),
-        ])
-    crafted = [
-        [f"`{row['case']}`", row["expected"], row["observed"], row["status"]]
-        for row in checked
-        if row["group"] == "crafted" and row["check"] == "findings"
-    ]
+        parts = [f"validate {describe(findings)}" if findings else (f"validate {accepted}, findings not asserted" if accepted else "validate not checked")]
+        for check, label in (("accepted (index, validate)", "index"), ("index pair (validate --index)", "validate --index"), ("layout (samtools, validate)", "samtools faidx"), ("alphabet (seqkit, validate)", "SeqKit seq -v")):
+            row = checks.get(check)
+            if row:
+                verdict = row["observed"] if check == "index pair (validate --index)" else row["expected"]
+                parts.append(f"{label} {verdict}")
+        verdicts.setdefault(GROUP_LABELS[group], []).append(f"  - `{case}`: " + "; ".join(parts) + ".")
+    crafted = []
+    for row in checked:
+        if row["group"] != "crafted" or row["check"] != "findings":
+            continue
+        if row["status"] == "pass":
+            crafted.append(f"- `{row['case']}`: {describe(row['observed'])}, as expected.")
+        else:
+            crafted.append(f"- `{row['case']}`: expected {describe(row['expected'])}, observed {describe(row['observed'])}; **failed**.")
+    verdict_lines = []
+    for label, items in verdicts.items():
+        verdict_lines.append(f"- {label}:")
+        verdict_lines += items
     differences = [
         [f"`{row['case']}`", row["expected"], row["observed"]]
         for row in tests
@@ -127,13 +146,13 @@ def md_correctness(tests: list[dict]) -> str:
         "",
         "### Proteome copies with one injected defect",
         "",
-        table(["Case", "Expected", "Observed", "Status"], crafted),
+        "\n".join(crafted),
         "",
         "### Verdicts on real and messy files",
         "",
-        "validate's findings, with the verdict each other tool gives the same file. `index` accepts every one, and validate accepts the same files. samtools rejects exactly the files where validate reports a wrapping, whitespace, blank-line, or line-ending finding.",
+        "validate's findings, with the verdict each other tool gives the same file. `index` accepts every one, and validate accepts the same files; `validate --index` then matches every index built. samtools rejects exactly the files where validate reports a wrapping, whitespace, blank-line, or line-ending finding.",
         "",
-        table(["Inputs", "File", "validate exit; findings", "index", "samtools faidx", "SeqKit seq -v"], verdicts),
+        "\n".join(verdict_lines),
     ]
     if differences:
         parts += [
@@ -184,7 +203,7 @@ def md_performance(perf) -> str:
         "",
         "### Peak memory (mean resident set)",
         "",
-        "validate reads through a fixed buffer, so its peak memory does not grow with sequence bytes; its duplicate check keeps a fingerprint and an offset per identifier.",
+        "validate reads through a fixed buffer, so its peak memory does not grow with sequence bytes; its duplicate check keeps a fingerprint and an offset per identifier. With `--index` it reads the index in file order through fixed buffers.",
         "",
         table(header, rows_rss),
         "",

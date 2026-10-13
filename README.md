@@ -25,9 +25,7 @@ I built z-fasta around the four FASTA jobs I use most. One CLI, no runtime depen
 
 - `index`: Build the default `.zfi` index or emit a samtools-compatible `.fai` for representable FASTA.
 - `get`: Extract records, regions, names files, or BED intervals with optional strand and orientation transforms.
-- `validate`: Report structure, identifier, alphabet, and layout problems in one streaming pass, and write a repaired copy to a separate file. `--fix` refuses content it cannot keep and refuses output when required identity checks fail.
-
-Validation reads through a fixed 256 KiB buffer and counts every finding exactly; each finding code keeps its first occurrence. Text reports escape unsafe identifier bytes, and JSON reports encode identifiers reversibly as UTF-8 or base64.
+- `validate`: Check structure, identifiers, alphabet, and layout in one streaming pass, compare with an index, or write a repaired copy.
 - `stats`: Report indexed length, Nx, DNA, RNA, or protein statistics through a bounded sequence scan.
 
 z-fasta accepts uncompressed FASTA and writes FASTA or reports. It does not currently handle FASTQ, gzip, or BGZF.
@@ -106,8 +104,8 @@ One 1 kbp positional region through each indexed implementation:
 
 Complete z-fasta and noodles reports, with SeqKit `stats -a` as a partial ecosystem reference:
 
-| Dataset       | z-fasta `.zfi` | z-fasta `.fai` | noodles | SeqKit `stats -a` |
-| ------------- | -------------: | -------------: | ------: | ----------------: |
+| Dataset       | z-fasta `.zfi` | z-fasta `.fai` |  noodles | SeqKit `stats -a` |
+| ------------- | -------------: | -------------: | -------: | ----------------: |
 | Human genome  |        2.840 s |    **2.838 s** | 10.173 s |          17.726 s |
 | Transcriptome |    **0.396 s** |        0.431 s |  1.172 s |           2.420 s |
 | Proteome      |    **13.2 ms** |        15.1 ms |  36.8 ms |           60.3 ms |

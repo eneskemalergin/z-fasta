@@ -4134,3 +4134,62 @@ test "[regression] - [index diagnostics]: leaves OS path limits unknown before o
         try std.testing.expectEqual(@as(usize, 0), failure.secondaryItems().len);
     }
 }
+
+fn expectStreamMatchesCatalog(allocator: std.mem.Allocator, fasta_path: []const u8, selection: main.index_format.IndexSelection) !void {
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.validate);
+    var catalog = try main.index_format.loadIndex(allocator, io, fasta_path, selection, .catalog, &failure);
+    defer catalog.deinit();
+    const stream = try allocator.create(main.index_format.EntryStream);
+    defer allocator.destroy(stream);
+    try stream.open(allocator, io, fasta_path, selection, &failure);
+    defer stream.close();
+    for (catalog.records, 0..) |record, i| {
+        const entry = (try stream.next()).?;
+        try std.testing.expectEqual(@as(u64, i + 1), entry.ordinal);
+        try std.testing.expectEqualStrings(catalog.recordName(i).?, entry.name);
+        try std.testing.expectEqualSlices(u8, std.mem.asBytes(&record), std.mem.asBytes(&entry.record));
+        if (record.isUniformWidth()) continue;
+        const lines = catalog.sideTableLines(record);
+        try std.testing.expectEqual(@as(u64, lines.len), try stream.sideLineCount(entry.record));
+        for (lines, 0..) |line, k| try std.testing.expectEqual(line, try stream.sideLine(entry.record, k));
+    }
+    try std.testing.expectEqual(@as(?main.index_format.EntryStream.Entry, null), try stream.next());
+}
+
+test "[property] - [index loader]: an entry stream yields the catalog's entries in order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var prng = std.Random.DefaultPrng.init(0x1d5e_57ea);
+    const random = prng.random();
+    for (0..40) |_| {
+        var data: std.ArrayList(u8) = .empty;
+        const uniform = random.boolean();
+        for (0..random.intRangeAtMost(usize, 1, 8)) |_| {
+            try data.print(allocator, ">{s} d\n", .{([_][]const u8{ "a", "b", "chr1", "x" ** 65_000 })[random.uintLessThan(usize, if (random.uintLessThan(u8, 20) == 0) 4 else 3)]});
+            const width = random.intRangeAtMost(usize, 1, 9);
+            for (0..random.intRangeAtMost(usize, 1, 6)) |_| {
+                const n = if (uniform) width else random.intRangeAtMost(usize, 1, 9);
+                try data.appendNTimes(allocator, 'A', n);
+                try data.appendSlice(allocator, if (random.uintLessThan(u8, 8) == 0 and !uniform) "\r\n" else "\n");
+            }
+        }
+        const path = try writeFastaArtifact(allocator, "entry-stream", data.items);
+        defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+        const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{path});
+        defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+        try utility.writeZfi(allocator, path, data.items, random.boolean());
+        try expectStreamMatchesCatalog(allocator, path, .{ .zfi = zfi_path });
+        var fai: std.Io.Writer.Allocating = .init(allocator);
+        _ = scanFaiData(allocator, data.items, &fai.writer, true) catch continue;
+        const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{path});
+        defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+        {
+            const file = try std.Io.Dir.cwd().createFile(io, fai_path, .{});
+            defer file.close(io);
+            try std.Io.File.writeStreamingAll(file, io, fai.written());
+        }
+        try expectStreamMatchesCatalog(allocator, path, .{ .fai = fai_path });
+    }
+}

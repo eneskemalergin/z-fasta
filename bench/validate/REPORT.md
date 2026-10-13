@@ -11,10 +11,11 @@ This report checks `z-fasta validate` on crafted, messy, and REAL inputs, then t
 **What each tool checks**
 
 - **z-fasta validate:** structure, identifiers, alphabet, and line layout in one streaming pass through a 256 KiB buffer, with every occurrence counted. Timed as `validate --json`, which prints one report object; the alphabet is chosen automatically from the first 100,000 symbols.
+- **z-fasta validate --index:** the same report, plus a record-by-record comparison with the `.zfi` built beforehand, made in the same pass by `index`'s scanner.
 - **SeqKit `seq -v`** (partial): checks every sequence against an explicit alphabet (`-t dna` or `-t protein`) on one thread (`-j 1`) and writes the records back out (`-o /dev/null`), so its time includes that rewrite. It does not check layout or headers.
 - **samtools `faidx`** (partial): builds a `.fai`, which needs fixed line geometry. It checks layout, not the alphabet.
 
-Correctness reported **46** passing and **0** failing checks before performance (see `bench/validate/run.sh`).
+Correctness reported **61** passing and **0** failing checks before performance (see `bench/validate/run.sh`).
 
 ## Correctness
 
@@ -22,50 +23,53 @@ Expected findings come from how each input is built and from the documented exit
 
 | Inputs | Check | Passed |
 | --- | --- | --- |
-| Proteome copies with one injected defect | findings | 9 of 9 |
+| Crafted proteome copies | findings | 9 of 9 |
 | Messy fixtures | findings | 5 of 5 |
 | Messy proteome variants | findings | 4 of 4 |
+| REAL datasets | stdin (validate -) | 3 of 3 |
 | REAL datasets | accepted (index, validate) | 3 of 3 |
+| REAL datasets | index pair (validate --index) | 3 of 3 |
 | Messy fixtures | accepted (index, validate) | 5 of 5 |
+| Messy fixtures | index pair (validate --index) | 5 of 5 |
 | Messy proteome variants | accepted (index, validate) | 4 of 4 |
+| Messy proteome variants | index pair (validate --index) | 4 of 4 |
 | REAL datasets | layout (samtools, validate) | 3 of 3 |
 | Messy fixtures | layout (samtools, validate) | 5 of 5 |
 | Messy proteome variants | layout (samtools, validate) | 4 of 4 |
 | REAL datasets | alphabet (seqkit, validate) | 3 of 3 |
-| Proteome copies with one injected defect | alphabet (seqkit, validate) | 1 of 1 |
+| Crafted proteome copies | alphabet (seqkit, validate) | 1 of 1 |
 
 ### Proteome copies with one injected defect
 
-| Case | Expected | Observed | Status |
-| --- | --- | --- | --- |
-| `duplicate_identifier` | exit 1; fasta.duplicate_identifier | exit 1; fasta.duplicate_identifier | pass |
-| `invalid_symbol` | exit 1; sequence.invalid_symbol | exit 1; sequence.invalid_symbol | pass |
-| `header_nul` | exit 1; fasta.header_control_byte | exit 1; fasta.header_control_byte | pass |
-| `leading_bom` | exit 2; format.leading_bom | exit 2; format.leading_bom | pass |
-| `empty_record` | exit 2; fasta.empty_record | exit 2; fasta.empty_record | pass |
-| `missing_terminal_newline` | exit 2; format.missing_terminal_newline | exit 2; format.missing_terminal_newline | pass |
-| `interior_space` | exit 2; format.sequence_whitespace | exit 2; format.sequence_whitespace | pass |
-| `long_header` | exit 2; fasta.long_header | exit 2; fasta.long_header | pass |
-| `strict` | exit 1; fasta.empty_record | exit 1; fasta.empty_record | pass |
+- `duplicate_identifier`: exit 1 with `fasta.duplicate_identifier`, as expected.
+- `invalid_symbol`: exit 1 with `sequence.invalid_symbol`, as expected.
+- `header_nul`: exit 1 with `fasta.header_control_byte`, as expected.
+- `leading_bom`: exit 2 with `format.leading_bom`, as expected.
+- `empty_record`: exit 2 with `fasta.empty_record`, as expected.
+- `missing_terminal_newline`: exit 2 with `format.missing_terminal_newline`, as expected.
+- `interior_space`: exit 2 with `format.sequence_whitespace`, as expected.
+- `long_header`: exit 2 with `fasta.long_header`, as expected.
+- `strict`: exit 1 with `fasta.empty_record`, as expected.
 
 ### Verdicts on real and messy files
 
-validate's findings, with the verdict each other tool gives the same file. `index` accepts every one, and validate accepts the same files. samtools rejects exactly the files where validate reports a wrapping, whitespace, blank-line, or line-ending finding.
+validate's findings, with the verdict each other tool gives the same file. `index` accepts every one, and validate accepts the same files; `validate --index` then matches every index built. samtools rejects exactly the files where validate reports a wrapping, whitespace, blank-line, or line-ending finding.
 
-| Inputs | File | validate exit; findings | index | samtools faidx | SeqKit seq -v |
-| --- | --- | --- | --- | --- | --- |
-| Messy fixtures | `uniform` | exit 0; none | accept | accept |  |
-| Messy fixtures | `mixed_widths` | exit 2; format.inconsistent_wrapping | accept | reject |  |
-| Messy fixtures | `trailing_whitespace` | exit 2; format.sequence_whitespace | accept | reject |  |
-| Messy fixtures | `blank_lines` | exit 2; format.blank_sequence_line,format.inconsistent_wrapping | accept | reject |  |
-| Messy fixtures | `mixed_crlf` | exit 2; format.inconsistent_wrapping,format.mixed_line_endings | accept | reject |  |
-| Messy proteome variants | `mixed_widths` | exit 2; format.inconsistent_wrapping | accept | reject |  |
-| Messy proteome variants | `trailing_whitespace` | exit 2; format.sequence_whitespace | accept | reject |  |
-| Messy proteome variants | `mixed_crlf` | exit 2; format.mixed_line_endings | accept | reject |  |
-| Messy proteome variants | `all_messy` | exit 2; format.inconsistent_wrapping,format.mixed_line_endings,format.sequence_whitespace | accept | reject |  |
-| REAL datasets | `Genome` | accept; findings not asserted | accept | accept | accept |
-| REAL datasets | `Transcriptome` | accept; findings not asserted | accept | accept | accept |
-| REAL datasets | `Proteome` | accept; findings not asserted | accept | accept | accept |
+- Messy fixtures:
+  - `uniform`: validate exit 0 with no findings; index accept; validate --index passed; samtools faidx accept.
+  - `mixed_widths`: validate exit 2 with `format.inconsistent_wrapping`; index accept; validate --index passed; samtools faidx reject.
+  - `trailing_whitespace`: validate exit 2 with `format.sequence_whitespace`; index accept; validate --index passed; samtools faidx reject.
+  - `blank_lines`: validate exit 2 with `format.blank_sequence_line`, `format.inconsistent_wrapping`; index accept; validate --index passed; samtools faidx reject.
+  - `mixed_crlf`: validate exit 2 with `format.inconsistent_wrapping`, `format.mixed_line_endings`; index accept; validate --index passed; samtools faidx reject.
+- Messy proteome variants:
+  - `mixed_widths`: validate exit 2 with `format.inconsistent_wrapping`; index accept; validate --index passed; samtools faidx reject.
+  - `trailing_whitespace`: validate exit 2 with `format.sequence_whitespace`; index accept; validate --index passed; samtools faidx reject.
+  - `mixed_crlf`: validate exit 2 with `format.mixed_line_endings`; index accept; validate --index passed; samtools faidx reject.
+  - `all_messy`: validate exit 2 with `format.inconsistent_wrapping`, `format.mixed_line_endings`, `format.sequence_whitespace`; index accept; validate --index passed; samtools faidx reject.
+- REAL datasets:
+  - `Genome`: validate accept, findings not asserted; index accept; validate --index passed; samtools faidx accept; SeqKit seq -v accept.
+  - `Transcriptome`: validate accept, findings not asserted; index accept; validate --index passed; samtools faidx accept; SeqKit seq -v accept.
+  - `Proteome`: validate accept, findings not asserted; index accept; validate --index passed; samtools faidx accept; SeqKit seq -v accept.
 
 ### Rules that differ (not asserted)
 
@@ -84,41 +88,41 @@ zebrac times each command in turn, in one batch, on a warm page cache. The peers
 
 ### Wall time (mean +/- standard deviation)
 
-| Dataset | z-fasta validate | SeqKit seq -v (partial) | samtools faidx (partial) |
-| --- | --- | --- | --- |
-| Genome | 0.462 +/- 0.026 s | 7.203 +/- 0.861 s | 8.162 +/- 0.049 s |
-| Transcriptome | 0.192 +/- 0.005 s | 0.642 +/- 0.021 s | 1.764 +/- 0.041 s |
-| Proteome | 0.015 +/- 0.000 s | 0.094 +/- 0.006 s | 0.063 +/- 0.002 s |
+| Dataset | z-fasta validate | z-fasta validate --index | SeqKit seq -v (partial) | samtools faidx (partial) |
+| --- | --- | --- | --- | --- |
+| Genome | 0.376 +/- 0.012 s | 0.452 +/- 0.003 s | 5.480 +/- 0.018 s | 8.077 +/- 0.008 s |
+| Transcriptome | 0.176 +/- 0.001 s | 0.263 +/- 0.005 s | 0.616 +/- 0.009 s | 1.691 +/- 0.013 s |
+| Proteome | 0.013 +/- 0.000 s | 0.019 +/- 0.000 s | 0.082 +/- 0.006 s | 0.059 +/- 0.001 s |
 
 ### Peak memory (mean resident set)
 
-validate reads through a fixed buffer, so its peak memory does not grow with sequence bytes; its duplicate check keeps a fingerprint and an offset per identifier.
+validate reads through a fixed buffer, so its peak memory does not grow with sequence bytes; its duplicate check keeps a fingerprint and an offset per identifier. With `--index` it reads the index in file order through fixed buffers.
 
-| Dataset | z-fasta validate | SeqKit seq -v (partial) | samtools faidx (partial) |
-| --- | --- | --- | --- |
-| Genome | 3.6 MiB | 1,191.7 MiB | 9.2 MiB |
-| Transcriptome | 5.5 MiB | 72.0 MiB | 65.6 MiB |
-| Proteome | 3.6 MiB | 70.3 MiB | 10.9 MiB |
+| Dataset | z-fasta validate | z-fasta validate --index | SeqKit seq -v (partial) | samtools faidx (partial) |
+| --- | --- | --- | --- | --- |
+| Genome | 3.6 MiB | 3.6 MiB | 1,192.4 MiB | 9.3 MiB |
+| Transcriptome | 5.6 MiB | 5.8 MiB | 71.9 MiB | 65.2 MiB |
+| Proteome | 3.6 MiB | 3.7 MiB | 70.3 MiB | 11.0 MiB |
 
 ### Minor page faults (mean)
 
-| Dataset | z-fasta validate | SeqKit seq -v (partial) | samtools faidx (partial) |
-| --- | --- | --- | --- |
-| Genome | 394 | 304,055 | 723 |
-| Transcriptome | 2,296 | 17,370 | 15,454 |
-| Proteome | 588 | 16,888 | 1,315 |
+| Dataset | z-fasta validate | z-fasta validate --index | SeqKit seq -v (partial) | samtools faidx (partial) |
+| --- | --- | --- | --- | --- |
+| Genome | 398 | 407 | 304,049 | 724 |
+| Transcriptome | 2,302 | 2,340 | 17,471 | 15,455 |
+| Proteome | 593 | 631 | 16,978 | 1,315 |
 
 ### Throughput (input MiB per second of wall time)
 
-| Dataset | z-fasta validate | SeqKit seq -v (partial) | samtools faidx (partial) |
-| --- | --- | --- | --- |
-| Genome | 6,511 MiB/s | 417 MiB/s | 368 MiB/s |
-| Transcriptome | 2,395 MiB/s | 714 MiB/s | 260 MiB/s |
-| Proteome | 852 MiB/s | 139 MiB/s | 208 MiB/s |
+| Dataset | z-fasta validate | z-fasta validate --index | SeqKit seq -v (partial) | samtools faidx (partial) |
+| --- | --- | --- | --- | --- |
+| Genome | 7,990 MiB/s | 6,648 MiB/s | 548 MiB/s | 372 MiB/s |
+| Transcriptome | 2,608 MiB/s | 1,742 MiB/s | 744 MiB/s | 271 MiB/s |
+| Proteome | 1,013 MiB/s | 701 MiB/s | 161 MiB/s | 221 MiB/s |
 
 ## Run Provenance
 
-- Run: `20261013_064940`, zebrac `zebrac 0.6.2`, 5 measured samples, 3 warmups, 5000 ms budget per command.
+- Run: `20261013_085424`, zebrac `zebrac 0.6.2`, 5 measured samples, 3 warmups, 5000 ms budget per command.
 - z-fasta: `z-fasta 0.3.5`.
 - samtools: `samtools 1.24`; SeqKit: `seqkit v2.13.0`.
 
@@ -126,15 +130,15 @@ validate reads through a fixed buffer, so its peak memory does not grow with seq
 
 ```json
 {
-  "checkout_revision": "2a8049b8c088969ffdfa87766b2f79b641a670c3",
+  "checkout_revision": "b117f03014ac183c54c001fabcb992f196229549",
   "checkout_dirty": true,
   "executable": {
     "path": "zig-out/bin/z-fasta",
-    "size": 869528,
-    "mtime_ns": 1791899290055441367,
-    "ctime_ns": 1791899346416676763,
+    "size": 925672,
+    "mtime_ns": 1791906864804431381,
+    "ctime_ns": 1791906864896431771,
     "device": 52,
-    "inode": 36410242
+    "inode": 37376392
   },
   "declared_build": {
     "revision": null,

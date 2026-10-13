@@ -76,7 +76,7 @@ The requested sample classified as protein. Complement-based transforms are nucl
 
 ## How is sequence type detected?
 
-Case-insensitive IUPAC nucleotide symbols must be strictly more than 90 percent of counted symbols. Stats uses the full indexed population, validate samples the first 100000 symbols, and GET samples up to 256 requested bases per record for complement eligibility.
+Case-insensitive IUPAC nucleotide symbols must be strictly more than 90 percent of counted symbols. Stats uses the full indexed population, validate samples the first 100000 symbols unless `--type` names the alphabet, and GET samples up to 256 requested bases per record for complement eligibility.
 
 ## Can names or BED come from stdin?
 

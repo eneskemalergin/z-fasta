@@ -1134,3 +1134,189 @@ test "[cli] - [validate]: reads standard input" {
     }
     try std.testing.expectEqualStrings(">a\nACGT\n>a\nAC\n", try readTestFile(allocator, output));
 }
+
+// Writes `fasta`, then a `.zfi` built from `indexed`, which has the same size, with the file's identity.
+fn writeIndexedPair(allocator: std.mem.Allocator, stem: []const u8, fasta: []const u8, indexed: []const u8, dedup: bool) ![]u8 {
+    try std.testing.expectEqual(fasta.len, indexed.len);
+    const path = try writeFastaArtifact(allocator, stem, fasta);
+    try writeZfi(allocator, path, indexed, dedup);
+    return path;
+}
+
+fn deletePair(allocator: std.mem.Allocator, path: []const u8, suffix: []const u8) void {
+    const sidecar = std.fmt.allocPrint(allocator, "{s}{s}", .{ path, suffix }) catch return;
+    std.Io.Dir.cwd().deleteFile(io, sidecar) catch {};
+    std.Io.Dir.cwd().deleteFile(io, path) catch {};
+}
+
+test "[cli] - [validate index]: matches the records index writes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const data = ">e\n>b desc\nACGT\nAC\n>b\nAAAA\n>c\nGG\nG\nGGG\n";
+    for ([_]struct { dedup: bool, summary: []const u8 }{
+        .{ .dedup = true, .summary = "zfi index: 2 of 2 entries matched, 1 later duplicate not indexed" },
+        .{ .dedup = false, .summary = "zfi index: 3 of 3 entries matched" },
+    }) |case| {
+        const path = try writeIndexedPair(allocator, "validate-index-clean", data, data, case.dedup);
+        defer deletePair(allocator, path, ".zfi");
+        const expected = try std.fmt.allocPrint(allocator,
+            \\INVALID {s}: 1 error in 1 code, 2 warnings in 2 codes; 1 of 4 records with errors, 2 with warnings
+            \\warning [fasta.empty_record] 1 record; first at line 1 column 1, record 1 "e": FASTA record contains no sequence symbols.
+            \\error [fasta.duplicate_identifier] 1 record; first at line 5 column 2, record 3 "b": Identifier duplicates an earlier record. First defined at line 2 column 2.
+            \\warning [format.inconsistent_wrapping] 1 record; first at line 9 column 1, record 4 "c": Sequence line width differs from the record's wrap width. expected_width=2 actual_width=1
+            \\complete: examined 39 bytes, 10 lines, 4 records, 16 symbols; nucleotide alphabet chosen from 16 symbols; {s}
+            \\
+        , .{ path, case.summary });
+        try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", "--index", path }, 1, expected, "");
+    }
+
+    const uniform = try writeFastaArtifact(allocator, "validate-index-fai", ">a\nACGT\nAC\n>b\nGG\n");
+    defer deletePair(allocator, uniform, ".fai");
+    {
+        const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{uniform});
+        const fai = try std.Io.Dir.cwd().createFile(io, fai_path, .{});
+        defer fai.close(io);
+        try std.Io.File.writeStreamingAll(fai, io, "a\t6\t3\t4\t5\nb\t2\t14\t2\t3\n");
+    }
+    try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", "--index", uniform }, 0, try std.fmt.allocPrint(allocator,
+        \\OK {s}: no findings
+        \\complete: examined 17 bytes, 5 lines, 2 records, 8 symbols; nucleotide alphabet chosen from 8 symbols; fai index: 2 of 2 entries matched
+        \\
+    , .{uniform}), "");
+
+    // With both sidecars, `--index` takes the `.zfi` as `get` does, and `--index=PATH` the named one.
+    try writeZfi(allocator, uniform, ">a\nACGT\nAC\n>b\nGG\n", true);
+    defer deletePair(allocator, uniform, ".zfi");
+    const explicit = try std.fmt.allocPrint(allocator, "--index={s}.fai", .{uniform});
+    for ([_]struct { option: []const u8, format: []const u8 }{ .{ .option = "--index", .format = "zfi" }, .{ .option = explicit, .format = "fai" } }) |case| {
+        try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", case.option, uniform }, 0, try std.fmt.allocPrint(allocator,
+            \\OK {s}: no findings
+            \\complete: examined 17 bytes, 5 lines, 2 records, 8 symbols; nucleotide alphabet chosen from 8 symbols; {s} index: 2 of 2 entries matched
+            \\
+        , .{ uniform, case.format }), "");
+    }
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const result = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "validate", "--json", explicit, uniform } });
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, result.stdout, .{});
+    const validation = parsed.value.object.get("validation").?.object;
+    try std.testing.expectEqualStrings("passed", validation.get("checks").?.object.get("index_match").?.string);
+    const index = validation.get("index").?.object;
+    try std.testing.expectEqualStrings("fai", index.get("format").?.string);
+    try std.testing.expectEqualStrings("2", index.get("entries").?.string);
+    try std.testing.expectEqualStrings("2", index.get("matched").?.string);
+    try std.testing.expectEqualStrings("0", index.get("omitted_duplicates").?.string);
+}
+
+test "[cli] - [validate index]: reports each difference from the index" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const cases = [_]struct { indexed: []const u8, fasta: []const u8, findings: []const u8, summary: []const u8 }{
+        .{
+            .indexed = ">a\nAC\n>b\nGT\n>a\nTT\n",
+            .fasta = ">b\nAC\n>a\nGT\n>a\nTT\n",
+            .findings =
+            \\INVALID {s}: 3 errors in 2 codes, 0 warnings in 0 codes; 3 of 3 records with errors, 0 with warnings
+            \\error [fasta.duplicate_identifier] 1 record; first at line 5 column 2, record 3 "a": Identifier duplicates an earlier record. First defined at line 3 column 2.
+            \\error [pair.sequence_offset_mismatch] 2 records; first at line 1 column 1, record 1 "b": Indexed sequence offset differs from the FASTA. indexed_offset=9 observed_offset=3
+            \\
+            ,
+            .summary = "examined 18 bytes, 6 lines, 3 records, 6 symbols; nucleotide alphabet chosen from 6 symbols; zfi index: 2 of 2 entries matched, 1 later duplicate not indexed",
+        },
+        .{
+            .indexed = ">a\nAC\n>b\nGT\n",
+            .fasta = ">a\nAC\n>c\nGT\n",
+            .findings =
+            \\INVALID {s}: 2 errors in 2 codes, 0 warnings in 0 codes; 1 of 2 records with errors, 0 with warnings
+            \\error [pair.record_missing_from_index] 1 record; first at line 3 column 1, record 2 "c": FASTA record has no index entry.
+            \\error [pair.record_missing_from_fasta] 1 record; first at zfi entry 2 "b": Index entry has no FASTA record.
+            \\
+            ,
+            .summary = "examined 12 bytes, 4 lines, 2 records, 4 symbols; nucleotide alphabet chosen from 4 symbols; zfi index: 1 of 2 entries matched",
+        },
+        .{
+            .indexed = ">a\nACGT\n>b\nG\n",
+            .fasta = ">a\nACG\n>b\nGT\n",
+            .findings =
+            \\INVALID {s}: 5 errors in 3 codes, 0 warnings in 0 codes; 2 of 2 records with errors, 0 with warnings
+            \\error [pair.sequence_length_mismatch] 2 records; first at line 1 column 1, record 1 "a": Indexed sequence length differs from the FASTA. indexed_length=4 observed_length=3
+            \\error [pair.sequence_offset_mismatch] 1 record; first at line 3 column 1, record 2 "b": Indexed sequence offset differs from the FASTA. indexed_offset=11 observed_offset=10
+            \\error [pair.line_geometry_mismatch] 2 records; first at line 1 column 1, record 1 "a": Indexed line layout differs from the FASTA. indexed_line_bases=4 indexed_line_bytes=5 indexed_layout=uniform observed_line_bases=3 observed_line_bytes=4 observed_layout=uniform
+            \\
+            ,
+            .summary = "examined 13 bytes, 4 lines, 2 records, 5 symbols; nucleotide alphabet chosen from 5 symbols; zfi index: 2 of 2 entries matched",
+        },
+        .{
+            .indexed = ">a\nACGT\nAC\n",
+            .fasta = ">a\nAC\nACGT\n",
+            .findings =
+            \\INVALID {s}: 1 error in 1 code, 1 warning in 1 code; 1 of 1 record with errors, 1 with warnings
+            \\warning [format.inconsistent_wrapping] 1 record; first at line 3 column 1, record 1 "a": Sequence line width differs from the record's wrap width. expected_width=2 actual_width=4
+            \\error [pair.line_geometry_mismatch] 1 record; first at line 1 column 1, record 1 "a": Indexed line layout differs from the FASTA. indexed_line_bases=4 indexed_line_bytes=5 indexed_layout=uniform observed_line_bases=2 observed_line_bytes=3 observed_layout=side_table
+            \\
+            ,
+            .summary = "examined 11 bytes, 3 lines, 1 record, 6 symbols; nucleotide alphabet chosen from 6 symbols; zfi index: 1 of 1 entry matched",
+        },
+        .{
+            .indexed = ">a\nAC\nACGT\nA\n",
+            .fasta = ">a\nAC\nACG\nAA\n",
+            .findings =
+            \\INVALID {s}: 1 error in 1 code, 1 warning in 1 code; 1 of 1 record with errors, 1 with warnings
+            \\warning [format.inconsistent_wrapping] 1 record; first at line 3 column 1, record 1 "a": Sequence line width differs from the record's wrap width. expected_width=2 actual_width=3
+            \\error [pair.side_table_mismatch] 1 record; first at line 1 column 1, record 1 "a": Indexed side table differs from the FASTA lines. indexed_lines=3 observed_lines=3 line=2
+            \\
+            ,
+            .summary = "examined 13 bytes, 4 lines, 1 record, 7 symbols; nucleotide alphabet chosen from 7 symbols; zfi index: 1 of 1 entry matched",
+        },
+    };
+    for (cases) |case| {
+        const path = try writeIndexedPair(allocator, "validate-index-mismatch", case.fasta, case.indexed, true);
+        defer deletePair(allocator, path, ".zfi");
+        const expected = try std.fmt.allocPrint(allocator, "{s}complete: {s}\n", .{ try std.mem.replaceOwned(u8, allocator, case.findings, "{s}", path), case.summary });
+        try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", "--index", path }, 1, expected, "");
+        try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", try std.fmt.allocPrint(allocator, "--index={s}.zfi", .{path}), path }, 1, expected, "");
+    }
+}
+
+test "[cli] - [validate index]: needs a file and a loadable index" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", "--index", "-" }, 1, "", "error [usage.option_requires] validate: An option prerequisite is missing. option=index required=fasta_file\nhint: Correct the command arguments; use --help for accepted options.\n");
+
+    const unindexed = try writeFastaArtifact(allocator, "validate-index-none", ">a\nAC\n");
+    defer std.Io.Dir.cwd().deleteFile(io, unindexed) catch {};
+    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "validate", "--index", unindexed }, .@"index.not_found");
+
+    const stale = try writeFastaArtifact(allocator, "validate-index-stale", ">a\nACGT\n");
+    defer deletePair(allocator, stale, ".zfi");
+    try writeZfi(allocator, stale, ">a\nAC\n", true);
+    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "validate", "--index", stale }, .@"index.source_size_mismatch");
+
+    // A damaged entry stops the scan where the index stream reaches it.
+    const damaged = try writeFastaArtifact(allocator, "validate-index-damaged", ">a\nACGT\n>b\nGG\n");
+    defer deletePair(allocator, damaged, ".zfi");
+    try writeZfi(allocator, damaged, ">a\nACGT\n>b\nGG\n", true);
+    {
+        const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{damaged});
+        const file = try std.Io.Dir.cwd().openFile(io, zfi_path, .{ .mode = .read_write });
+        defer file.close(io);
+        try file.writePositionalAll(io, &std.mem.toBytes(@as(u32, 0)), @sizeOf(main.index_format.ZfiHeader) + @sizeOf(main.index_format.IndexRecord) + 32);
+    }
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const result = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "validate", "--index", "--error-format=json", damaged } });
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+    try std.testing.expect(std.mem.startsWith(u8, result.stdout, "INTERRUPTED "));
+    try utility.expectDiagnostic(allocator, result.stderr, .@"index.invalid_line_geometry");
+    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "validate", "--index=zig-cache/test-artifacts/definitely-missing.zfi", stale }, .@"io.file_not_found");
+
+    const hint = "\nhint: Correct the command arguments; use --help for accepted options.\n";
+    try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", "--index=sample.idx", stale }, 1, "", "error [usage.invalid_option_value] validate: Invalid option value. option=index expected=index_path value=\"sample.idx\"" ++ hint);
+    try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", "--index=", stale }, 1, "", "error [usage.invalid_option_value] validate: Invalid option value. option=index expected=index_path value=\"\"" ++ hint);
+    try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", "--index", "--index=sample.fai", stale }, 1, "", "error [usage.repeated_option] validate: This option cannot be repeated. option=index" ++ hint);
+}

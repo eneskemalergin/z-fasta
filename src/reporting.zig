@@ -34,17 +34,22 @@ pub const Validation = struct {
     invalid_symbols: *const [256]u64,
     /// Set when the duplicate check reached its memory budget and stopped.
     name_budget_stop: ?BudgetStop = null,
+    /// Set when the FASTA was compared with its index.
+    index: ?IndexComparison = null,
 
     pub const Completion = enum { complete, incomplete, interrupted };
     pub const Outcome = enum { clean, warnings, invalid, incomplete };
     /// `failed` when the check found an error, `warnings` when it found only warnings.
     pub const CheckState = enum { passed, warnings, failed, incomplete };
-    /// The four checks, by the category of the codes each reports.
+    /// The four checks every report has, by the category of the codes each reports; `index_match`
+    /// joins them when the FASTA was compared with its index.
     pub const CHECKS = [_]diagnostics.Category{ .structure, .identifiers, .alphabet, .format };
     /// `records` counts headers seen; `records_completed`, records whose end was reached.
     pub const Examined = struct { bytes: u64 = 0, lines: u64 = 0, records: u64 = 0, records_completed: u64 = 0, symbols: u64 = 0 };
     pub const Totals = struct { errors: u64 = 0, warnings: u64 = 0 };
     pub const BudgetStop = struct { budget_bytes: u64, stopped_at_record: u64 };
+    /// `omitted_duplicates`: records the index leaves out because an earlier record has the name.
+    pub const IndexComparison = struct { format: diagnostics.Format, entries: u64, matched: u64, omitted_duplicates: u64 };
 
     pub fn codes(self: *const Validation, severity: diagnostics.Severity) u64 {
         var count: u64 = 0;
@@ -245,6 +250,10 @@ pub fn writeValidationText(writer: *std.Io.Writer, failure: *const diagnostics.F
         try writer.print("{s} alphabet chosen from {d} symbol{s}", .{ @tagName(validation.alphabet.alphabet), sample.symbols, plural(sample.symbols) });
     } else try writer.print("{s} alphabet", .{@tagName(validation.alphabet.alphabet)});
     if (validation.name_budget_stop) |stop| try writer.print("; duplicate check stopped at record {d} at its {d}-byte name budget", .{ stop.stopped_at_record, stop.budget_bytes });
+    if (validation.index) |index| {
+        try writer.print("; {s} index: {d} of {d} entr{s} matched", .{ @tagName(index.format), index.matched, index.entries, if (index.entries == 1) "y" else "ies" });
+        if (index.omitted_duplicates != 0) try writer.print(", {d} later duplicate{s} not indexed", .{ index.omitted_duplicates, plural(index.omitted_duplicates) });
+    }
     try writer.writeByte('\n');
 }
 
@@ -429,6 +438,7 @@ fn jsonValidation(json: *std.json.Stringify, failure: *const diagnostics.Failure
     try json.objectField("checks");
     try json.beginObject();
     inline for (Validation.CHECKS) |category| try field(json, @tagName(category), @tagName(validation.check(category)));
+    if (validation.index != null) try field(json, "index_match", @tagName(validation.check(.index_match)));
     try json.endObject();
     try jsonNamedValue(json, failure, "examined", validation.examined);
     const all = validation.totals(null);
@@ -442,8 +452,10 @@ fn jsonValidation(json: *std.json.Stringify, failure: *const diagnostics.Failure
     try json.objectField("categories");
     try json.beginObject();
     inline for (Validation.CHECKS) |category| try jsonNamedValue(json, failure, @tagName(category), validation.totals(category));
+    if (validation.index != null) try jsonNamedValue(json, failure, "index_match", validation.totals(.index_match));
     try json.endObject();
     try jsonNamedValue(json, failure, "name_budget", validation.name_budget_stop);
+    try jsonNamedValue(json, failure, "index", validation.index);
     try jsonNamedValue(json, failure, "records_with_errors", validation.records_with_errors);
     try jsonNamedValue(json, failure, "records_with_warnings", validation.records_with_warnings);
     try json.objectField("codes");
@@ -739,7 +751,9 @@ fn textFinding(writer: *std.Io.Writer, failure: *const diagnostics.Failure, find
         try writer.writeAll(if (metadata.unit == .file) " at " else "; first at ");
         try textLocation(writer, first.at);
     }
-    if (first.at.record) |record| try writer.print(", record {d}", .{record});
+    if (first.at.source == .zfi or first.at.source == .fai) {
+        try writer.print("; first at {s} entry {d}", .{ @tagName(first.at.source.?), first.at.record.? });
+    } else if (first.at.record) |record| try writer.print(", record {d}", .{record});
     if (first.identifier) |identifier| {
         try writer.writeByte(' ');
         const shown = identifier.slice()[0..@min(identifier.len, 32)];
@@ -877,6 +891,12 @@ fn message(code: diagnostics.Code) []const u8 {
         .@"index.source_mtime_mismatch" => "Index source timestamp differs from the FASTA time.",
         .@"pair.region_length_mismatch" => "Selected region yielded fewer symbols than requested.",
         .@"pair.total_length_mismatch" => "Observed composition total differs from the indexed total.",
+        .@"pair.record_missing_from_index" => "FASTA record has no index entry.",
+        .@"pair.record_missing_from_fasta" => "Index entry has no FASTA record.",
+        .@"pair.sequence_length_mismatch" => "Indexed sequence length differs from the FASTA.",
+        .@"pair.sequence_offset_mismatch" => "Indexed sequence offset differs from the FASTA.",
+        .@"pair.line_geometry_mismatch" => "Indexed line layout differs from the FASTA.",
+        .@"pair.side_table_mismatch" => "Indexed side table differs from the FASTA lines.",
         .@"request.no_regions" => "No executable requests were found.",
         .@"request.sequence_not_found" => "Sequence was not found in the selected lookup.",
         .@"request.start_before_one" => "Inclusive request start must be at least one.",

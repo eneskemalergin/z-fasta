@@ -1,6 +1,6 @@
 # Indexing
 
-Index once, then GET and stats can jump to the sequence bytes they need. I recommend the default `.zfi` when z-fasta is the only consumer. Validate does not need an index.
+Index once, then GET and stats can jump to the sequence bytes they need. I recommend the default `.zfi` when z-fasta is the only consumer. Validate does not need an index; `validate --index` checks that an existing one still describes its FASTA.
 
 ## Build the default `.zfi`
 

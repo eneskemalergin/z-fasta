@@ -2,17 +2,18 @@
 //! writes the repaired copy during the same pass. Rules follow `fasta.zig`: a symbol is a byte
 //! above space, an identifier ends at space, tab, CR, or LF, and a line ends at LF or CRLF.
 //! Each finding code keeps an exact count, its affected records, and its first occurrence only.
-//! Memory is the buffer, one identifier, and the duplicate-name set (on a file, a fingerprint and
-//! an offset per name; names are re-read on a fingerprint match).
-//! The alphabet comes from the first 100,000 symbols unless set. Equally wrapped lines are checked
-//! in vector blocks; the first irregular byte drops to the per-line path at that byte.
+//! Memory is the buffer, one identifier, and the duplicate-name set: on a file, a fingerprint and
+//! an offset per name. The alphabet comes from the first 100,000 symbols unless set. Equally
+//! wrapped lines are checked in vector blocks; the first irregular byte drops to the per-line path.
 //! `--fix` wraps symbols at a fixed width, refuses content it cannot keep, and publishes through
-//! atomic replacement only when the source is unchanged.
+//! atomic replacement only when the source is unchanged. `--index` runs `index`'s scanner on the
+//! same windows and compares each record it would write with the loaded index.
 
 const std = @import("std");
 
 const fasta = @import("fasta.zig");
 const diagnostics = @import("diagnostics");
+const index_format = @import("index_format.zig");
 const reporting = @import("reporting.zig");
 
 pub const TYPE_SAMPLE_SYMBOLS: u64 = 100_000;
@@ -44,6 +45,9 @@ pub const Options = struct {
     fix: bool = false,
     output_path: ?[]const u8 = null,
     width: u64 = DEFAULT_FIX_WIDTH,
+    /// The index to compare the FASTA with: `.automatic` is the one `get` would load. Needs a
+    /// file, not stdin.
+    index: ?index_format.IndexSelection = null,
     /// Producer version in a JSON report: trusted UTF-8 of at most 32 bytes.
     producer_version: ?[]const u8 = null,
 };
@@ -67,6 +71,7 @@ pub const Report = struct {
     records_with_warnings: u64 = 0,
     invalid_symbols: [256]u64 = @splat(0),
     name_budget_stop: ?reporting.Validation.BudgetStop = null,
+    index: ?reporting.Validation.IndexComparison = null,
 
     pub fn validation(self: *const Report, rules: Rules, strict: bool) reporting.Validation {
         return .{
@@ -81,6 +86,7 @@ pub const Report = struct {
             .findings = &self.findings,
             .invalid_symbols = &self.invalid_symbols,
             .name_budget_stop = self.name_budget_stop,
+            .index = self.index,
         };
     }
 
@@ -114,6 +120,13 @@ pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const
     defer if (!from_stdin) file.close(io);
     const before: ?std.Io.File.Stat = if (from_stdin) null else file.stat(io) catch |err| return failure.fail(.{ .details = .{ .@"io.stat_failed" = {} }, .stage = .stat, .at = .{ .source = .fasta }, .cause = .{ .zig = err } });
 
+    var pair: Pair = undefined;
+    if (options.index) |selection| {
+        if (from_stdin) return failure.fail(.{ .details = .{ .@"usage.option_requires" = .{ .option = .index, .required = .fasta_file } }, .stage = .arguments, .at = .{ .source = .fasta } });
+        try pair.open(allocator, io, fasta_path, selection, failure);
+    }
+    defer if (options.index != null) pair.deinit();
+
     var staged: Staged = undefined;
     var staged_open = false;
     defer if (staged_open) staged.cleanup(io, failure);
@@ -133,10 +146,11 @@ pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const
     var io_buf: [FILE_IO_BUFFER_BYTES]u8 = undefined;
     var reader = if (from_stdin) file.readerStreaming(io, &io_buf) else file.reader(io, &io_buf);
     const names: ?NameSource = if (before) |stat| .{ .io = io, .file = file, .size = stat.size } else null;
+    const compared: ?*Pair = if (options.index != null) &pair else null;
     const scanned = if (rewrite) |*sink|
-        repairInto(allocator, &reader.interface, read_buf, names, options.rules, sink, report, failure)
+        repairInto(allocator, &reader.interface, read_buf, names, options.rules, sink, compared, report, failure)
     else
-        scan(allocator, &reader.interface, read_buf, names, options.rules, null, report, failure);
+        scan(allocator, &reader.interface, read_buf, names, options.rules, null, compared, report, failure);
     scanned catch |err| {
         diagnostics.retainReaderCause(failure, &reader);
         writeReportOutput(io, report, options, false, failure) catch {};
@@ -153,7 +167,7 @@ pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const
 pub fn validate(allocator: std.mem.Allocator, source: *std.Io.Reader, buffer: []u8, names: ?NameSource, rules: Rules, report: *Report, failure: *diagnostics.Failure) diagnostics.Error!void {
     failure.reset(.validate);
     failure.sources.set(.fasta, .{ .label = .{ .borrowed = "validated input" }, .kind = .stream });
-    try scan(allocator, source, buffer, names, rules, null, report, failure);
+    try scan(allocator, source, buffer, names, rules, null, null, report, failure);
     failure.succeed();
 }
 
@@ -166,7 +180,7 @@ pub fn repair(allocator: std.mem.Allocator, source: *std.Io.Reader, buffer: []u8
     failure.sources.set(.output, .{ .label = .{ .borrowed = "repaired output" }, .kind = .stream });
     if (width == 0) return failure.fail(.{ .details = .{ .@"usage.invalid_option_value" = .{ .option = .width, .expected = .positive_usize } }, .stage = .arguments });
     var sink = Rewrite{ .writer = output, .width = width };
-    try repairInto(allocator, source, buffer, names, rules, &sink, report, failure);
+    try repairInto(allocator, source, buffer, names, rules, &sink, null, report, failure);
     failure.succeed();
 }
 
@@ -192,6 +206,12 @@ const REPORT_CODES = [_]diagnostics.Code{
     .@"format.leading_bom",
     .@"format.missing_terminal_newline",
     .@"format.mixed_line_endings",
+    .@"pair.record_missing_from_index",
+    .@"pair.record_missing_from_fasta",
+    .@"pair.sequence_length_mismatch",
+    .@"pair.sequence_offset_mismatch",
+    .@"pair.line_geometry_mismatch",
+    .@"pair.side_table_mismatch",
 };
 
 const REPORT_SLOTS = blk: {
@@ -349,13 +369,13 @@ const Rewrite = struct {
     }
 };
 
-fn repairInto(allocator: std.mem.Allocator, source: *std.Io.Reader, buffer: []u8, names: ?NameSource, rules: Rules, sink: *Rewrite, report: *Report, failure: *diagnostics.Failure) diagnostics.Error!void {
-    try scan(allocator, source, buffer, names, rules, sink, report, failure);
+fn repairInto(allocator: std.mem.Allocator, source: *std.Io.Reader, buffer: []u8, names: ?NameSource, rules: Rules, sink: *Rewrite, pair: ?*Pair, report: *Report, failure: *diagnostics.Failure) diagnostics.Error!void {
+    try scan(allocator, source, buffer, names, rules, sink, pair, report, failure);
     if (fixBlocker(report)) |blocker| return failure.fail(.{ .details = .{ .@"repair.blocked" = .{ .blocker = blocker.blocker, .repair_policy = .preserve_symbols } }, .stage = .scan, .at = blocker.at });
     sink.finish() catch |err| return failure.fail(.{ .details = .{ .@"io.write_failed" = {} }, .stage = .write, .at = .{ .source = .output }, .cause = .{ .zig = if (sink.file) |file| file.err orelse err else err } });
 }
 
-fn scan(allocator: std.mem.Allocator, source: *std.Io.Reader, buffer: []u8, names: ?NameSource, rules: Rules, rewrite: ?*Rewrite, report: *Report, failure: *diagnostics.Failure) diagnostics.Error!void {
+fn scan(allocator: std.mem.Allocator, source: *std.Io.Reader, buffer: []u8, names: ?NameSource, rules: Rules, rewrite: ?*Rewrite, pair: ?*Pair, report: *Report, failure: *diagnostics.Failure) diagnostics.Error!void {
     report.* = .{ .alphabet = alphabetPolicy(rules, 0, 0) };
     if (buffer.len == 0) return failure.fail(.{ .details = .{ .@"usage.invalid_option_value" = .{ .option = .read_buffer, .expected = .nonempty_buffer } }, .stage = .scan, .at = .{ .source = .fasta } });
     if (rules.custom_alphabet != null and rules.alphabet != .auto) {
@@ -367,6 +387,7 @@ fn scan(allocator: std.mem.Allocator, source: *std.Io.Reader, buffer: []u8, name
     const state = allocator.create(Scan) catch return failure.fail(.{ .details = .{ .@"resource.out_of_memory" = .{ .allocation_role = .validation_report, .requested_bytes = @sizeOf(Scan) } }, .stage = .allocate, .at = .{ .source = .fasta }, .cause = .{ .zig = error.OutOfMemory } });
     defer allocator.destroy(state);
     state.* = .init(allocator, rules, report, rewrite, failure, names);
+    state.pair = pair;
     state.startNames();
     defer state.deinit();
     while (true) {
@@ -415,6 +436,7 @@ const Record = struct {
     classes: u8 = 0,
     has_error: bool = false,
     has_warning: bool = false,
+    duplicate: bool = false,
 };
 
 const Line = struct {
@@ -433,10 +455,11 @@ const Line = struct {
 
 const FastSet = enum { none, plain_nucleotides, plain_dna, plain_rna, protein, any };
 
-const NameDiag = struct {
+const ScanDiag = struct {
     failure: ?*diagnostics.Failure = null,
     at: diagnostics.Reference = .{ .source = .fasta },
     budget: ?*const NameBudget = null,
+    format: diagnostics.Format = .zfi,
 
     pub fn fail(self: @This(), details: diagnostics.Details, stage: diagnostics.Stage, source: diagnostics.SourceId, cause: ?anyerror, legacy: anyerror) anyerror {
         @branchHint(.cold);
@@ -465,6 +488,14 @@ const NameDiag = struct {
 
     pub fn recordLimit(self: @This(), count: u64) anyerror {
         return self.capacity(.records, std.math.maxInt(u32), count, error.OutOfMemory);
+    }
+
+    pub fn lineLimit(self: @This(), field: diagnostics.IndexField, observed: u64, width_role: diagnostics.LineWidthRole) anyerror {
+        return self.fail(.{ .@"index.sequence_line_too_long" = .{ .field = field, .observed = .{ .exact = observed }, .limit = std.math.maxInt(u32), .width_role = width_role, .format = self.format } }, .scan, .fasta, null, error.SequenceLineTooLong);
+    }
+
+    pub fn identifierTooLong(self: @This(), observed: u128, limit: usize) anyerror {
+        return self.fail(.{ .@"index.identifier_too_long" = .{ .observed_bytes = .{ .at_least = observed }, .limit_bytes = limit, .format = self.format } }, .scan, .fasta, null, error.HeaderTooLong);
     }
 };
 
@@ -516,8 +547,139 @@ const NameBudget = struct {
     }
 };
 
-const SourceNames = fasta.SourceDedupWith(NameDiag);
-const PackedNames = fasta.PackedNamesWith(NameDiag);
+const SourceNames = fasta.SourceDedupWith(ScanDiag);
+const PackedNames = fasta.PackedNamesWith(ScanDiag);
+
+const MAX_INDEX_NAME_BYTES = std.math.maxInt(@FieldType(index_format.IndexRecord, "name_len"));
+const NO_ENTRY = std.math.maxInt(u32);
+
+// The `--index` comparison: `index`'s scanner runs on the same windows, and each record it would
+// write is matched with an index entry. Entries stream in file order through fixed buffers while
+// names agree; the first record out of order loads the index's catalog and a name lookup over it.
+const Pair = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    failure: *diagnostics.Failure,
+    fasta_path: []const u8,
+    selection: index_format.IndexSelection,
+    stream: *index_format.EntryStream,
+    // The next entry in file order, read but not yet taken.
+    head: ?index_format.EntryStream.Entry = null,
+    catalog: ?index_format.LoadedIndex = null,
+    lookup: ?Lookup = null,
+    scanner: fasta.RecordScannerWith(ScanDiag),
+    fed: u64 = 0,
+    taken_in_order: usize = 0,
+    entries: u64 = 0,
+    matched: u64 = 0,
+    omitted: u64 = 0,
+
+    // `heads` maps a name to its first entry not yet taken; `next` chains entries by name.
+    const Lookup = struct {
+        heads: std.StringHashMapUnmanaged(u32),
+        next: []u32,
+        taken: std.DynamicBitSetUnmanaged,
+    };
+
+    const Association = union(enum) { entry: index_format.IndexRecord, omitted, missing };
+
+    // `self` must not move afterwards: the scanner's diagnostics and the stream stay in place.
+    fn open(self: *Pair, allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, selection: index_format.IndexSelection, failure: *diagnostics.Failure) diagnostics.Error!void {
+        const stream = allocator.create(index_format.EntryStream) catch return failure.fail(.{ .details = .{ .@"resource.out_of_memory" = .{ .allocation_role = .reader_buffer, .requested_bytes = @sizeOf(index_format.EntryStream) } }, .stage = .allocate, .cause = .{ .zig = error.OutOfMemory } });
+        errdefer allocator.destroy(stream);
+        try stream.open(allocator, io, fasta_path, selection, failure);
+        const format: diagnostics.Format = if (stream.source == .zfi) .zfi else .fai;
+        self.* = .{
+            .allocator = allocator,
+            .io = io,
+            .failure = failure,
+            .fasta_path = fasta_path,
+            .selection = selection,
+            .stream = stream,
+            .scanner = .{ .allocator = allocator, .collect_side_tables = format == .zfi, .diag = .{ .failure = failure, .format = format } },
+        };
+    }
+
+    fn deinit(self: *Pair) void {
+        self.stream.close();
+        self.allocator.destroy(self.stream);
+        self.scanner.name.deinit(self.allocator);
+        self.scanner.side_table.deinit(self.allocator);
+        if (self.lookup) |*lookup| {
+            lookup.heads.deinit(self.allocator);
+            self.allocator.free(lookup.next);
+            lookup.taken.deinit(self.allocator);
+        }
+        if (self.catalog) |*catalog| catalog.deinit();
+    }
+
+    fn source(self: *const Pair) diagnostics.SourceId {
+        return if (self.stream.source == .zfi) .zfi else .fai;
+    }
+
+    // A later duplicate the index left out is `omitted`; so is any name whose entries are taken.
+    fn associate(self: *Pair, name: []const u8, duplicate: bool) diagnostics.Error!Association {
+        if (self.lookup == null) {
+            if (self.head == null) self.head = try self.stream.next();
+            if (self.head) |head| {
+                if (std.mem.eql(u8, head.name, name)) {
+                    self.head = null;
+                    self.taken_in_order += 1;
+                    return .{ .entry = head.record };
+                }
+            }
+            if (duplicate) return .omitted;
+            try self.buildLookup();
+        }
+        const catalog = &self.catalog.?;
+        const lookup = &self.lookup.?;
+        const head = lookup.heads.getPtr(name) orelse return .missing;
+        while (head.* != NO_ENTRY and lookup.taken.isSet(head.*)) head.* = lookup.next[head.*];
+        if (head.* == NO_ENTRY) return .omitted;
+        const entry = head.*;
+        lookup.taken.set(entry);
+        head.* = lookup.next[entry];
+        return .{ .entry = catalog.records[entry] };
+    }
+
+    fn buildLookup(self: *Pair) diagnostics.Error!void {
+        self.catalog = try index_format.loadIndex(self.allocator, self.io, self.fasta_path, self.selection, .catalog, self.failure);
+        const catalog = &self.catalog.?;
+        const entries = catalog.records.len;
+        if (entries >= NO_ENTRY) return self.failure.fail(.{ .details = .{ .@"resource.capacity_limit_exceeded" = .{ .capacity_role = .name_map, .limit = NO_ENTRY - 1, .required = .{ .exact = entries } } }, .stage = .allocate, .at = .{ .source = self.source() } });
+        const oom = diagnostics.Diagnostic{ .details = .{ .@"resource.out_of_memory" = .{ .allocation_role = .name_map } }, .stage = .allocate, .at = .{ .source = self.source() }, .cause = .{ .zig = error.OutOfMemory } };
+        var lookup: Lookup = .{ .heads = .empty, .next = self.allocator.alloc(u32, entries) catch return self.failure.fail(oom), .taken = undefined };
+        errdefer self.allocator.free(lookup.next);
+        lookup.taken = std.DynamicBitSetUnmanaged.initEmpty(self.allocator, entries) catch return self.failure.fail(oom);
+        errdefer lookup.taken.deinit(self.allocator);
+        lookup.heads.ensureTotalCapacity(self.allocator, @intCast(entries)) catch return self.failure.fail(oom);
+        var entry = entries;
+        while (entry > 0) {
+            entry -= 1;
+            const slot = lookup.heads.getOrPutAssumeCapacity(catalog.recordName(entry).?);
+            lookup.next[entry] = if (slot.found_existing) slot.value_ptr.* else NO_ENTRY;
+            slot.value_ptr.* = @intCast(entry);
+        }
+        lookup.taken.setRangeValue(.{ .start = 0, .end = self.taken_in_order }, true);
+        self.lookup = lookup;
+    }
+
+    // The first difference between the indexed side table of `record` and the scanned one.
+    fn sideTableDifference(self: *Pair, record: index_format.IndexRecord, observed: []const u8) diagnostics.Error!?diagnostics.SideTableMismatch {
+        const lines = (observed.len - @sizeOf(u64)) / @sizeOf(fasta.LineEntry);
+        const mapped: ?[]const index_format.SideTableLine = if (self.catalog) |*catalog| catalog.sideTableLines(record) else null;
+        const indexed: u64 = if (mapped) |table| table.len else try self.stream.sideLineCount(record);
+        for (0..@min(lines, indexed)) |k| {
+            const line = std.mem.bytesToValue(fasta.LineEntry, observed[@sizeOf(u64) + k * @sizeOf(fasta.LineEntry) ..][0..@sizeOf(fasta.LineEntry)]);
+            const entry = if (mapped) |table| table[k] else try self.stream.sideLine(record, k);
+            if (line.base_start != entry.base_start or line.byte_offset != entry.byte_offset or line.line_bytes != entry.line_bytes or line.line_bases != entry.line_bases) {
+                return .{ .indexed_lines = indexed, .observed_lines = lines, .line = k + 1 };
+            }
+        }
+        if (lines == indexed) return null;
+        return .{ .indexed_lines = indexed, .observed_lines = lines, .line = @min(lines, indexed) + 1 };
+    }
+};
 
 const Scan = struct {
     allocator: std.mem.Allocator,
@@ -550,6 +712,9 @@ const Scan = struct {
     pending_cr: bool = false,
     bom_matched: u2 = 0,
     bom_open: bool = true,
+    pair: ?*Pair = null,
+    window: []const u8 = &.{},
+    window_base: u64 = 0,
 
     fn init(allocator: std.mem.Allocator, rules: Rules, report: *Report, rewrite: ?*Rewrite, failure: *diagnostics.Failure, file: ?NameSource) Scan {
         const alphabets: [2][256]bool = if (rules.custom_alphabet) |custom|
@@ -592,7 +757,7 @@ const Scan = struct {
     fn startNames(self: *Scan) void {
         const names_allocator = if (self.budget) |*budget| budget.allocator() else self.allocator;
         self.names = if (self.file) |source| .{ .source = SourceNames.init(names_allocator, source.io, source.file, source.size) } else .{ .copied = PackedNames.init(names_allocator) };
-        const diag = NameDiag{ .failure = self.failure, .budget = if (self.budget) |*budget| budget else null };
+        const diag = ScanDiag{ .failure = self.failure, .budget = if (self.budget) |*budget| budget else null };
         switch (self.names) {
             .stopped => unreachable,
             inline else => |*set| set.diag = diag,
@@ -608,6 +773,8 @@ const Scan = struct {
     fn feed(self: *Scan, data: []const u8) diagnostics.Error!void {
         const base = self.offset;
         self.offset = std.math.add(u64, base, data.len) catch return self.failure.fail(.{ .details = .{ .@"resource.count_overflow" = .{ .counter = .source_bytes, .max_value = std.math.maxInt(u64), .current = base, .increment = data.len } }, .stage = .scan, .at = .{ .source = .fasta } });
+        self.window = data;
+        self.window_base = base;
         var rest = data;
         var at = base;
         while (self.bom_open and rest.len != 0) {
@@ -624,6 +791,7 @@ const Scan = struct {
             }
         }
         if (rest.len != 0) try self.process(rest, at);
+        try self.advancePair(self.offset);
         self.last_byte = data[data.len - 1];
         self.report.examined.bytes = self.offset;
     }
@@ -638,6 +806,7 @@ const Scan = struct {
             try self.content("\r", self.offset - 1);
         }
         if (self.line.kind != .start) try self.endLine(null, self.offset);
+        try self.finishPair();
         self.finishRecord();
         if (self.report.examined.records == 0) self.count(.{ .@"fasta.no_records" = {} }, .{ .source = .fasta });
         if (self.last_byte) |byte| {
@@ -663,6 +832,7 @@ const Scan = struct {
         invalid.first = self.candidates[chosen].first;
         if (invalid.first) |*first| first.details.@"sequence.invalid_symbol".policy = report.alphabet;
         report.records_with_errors = self.candidates[chosen].records_with_errors;
+        if (self.pair) |pair| report.index = .{ .format = pair.scanner.diag.format, .entries = pair.entries, .matched = pair.matched, .omitted_duplicates = pair.omitted };
     }
 
     fn choose(self: *Scan, candidate: u1) void {
@@ -772,6 +942,7 @@ const Scan = struct {
     }
 
     fn startHeader(self: *Scan, at: u64) diagnostics.Error!void {
+        try self.advancePair(at + 1);
         self.finishRecord();
         self.report.examined.records += 1;
         self.record = .{ .ordinal = self.report.examined.records };
@@ -935,6 +1106,7 @@ const Scan = struct {
         if (identifier.len == 0) {
             self.count(.{ .@"fasta.empty_identifier" = {} }, self.reference(start + 1));
         } else if (try self.seenBefore(identifier, start + 1)) {
+            self.record.duplicate = true;
             if (self.first_duplicate == null) self.first_duplicate = self.allocator.dupe(u8, identifier) catch return self.outOfMemory(.validation_identifiers, start);
             self.count(.{ .@"fasta.duplicate_identifier" = .{} }, self.reference(start + 1));
         }
@@ -1081,6 +1253,73 @@ const Scan = struct {
             if (!full) return;
             offset += i;
         }
+    }
+
+    // Feeds `index`'s scanner the current window up to `to`. Fed through a header's `>`, it emits
+    // the record before that header while `record` still holds it.
+    fn advancePair(self: *Scan, to: u64) diagnostics.Error!void {
+        const pair = self.pair orelse return;
+        if (to <= pair.fed) return;
+        const bytes = self.window[@intCast(pair.fed - self.window_base)..@intCast(to - self.window_base)];
+        const from = pair.fed;
+        pair.fed = to;
+        pair.scanner.processChunk(bytes, from, MAX_INDEX_NAME_BYTES, self, compareRecord) catch |err| return self.pairFailed(err);
+    }
+
+    fn finishPair(self: *Scan) diagnostics.Error!void {
+        const pair = self.pair orelse return;
+        if (pair.scanner.active) pair.scanner.emitRecord(self, compareRecord) catch |err| return self.pairFailed(err);
+        if (pair.catalog) |*catalog| {
+            const lookup = &pair.lookup.?;
+            for (0..catalog.records.len) |entry| {
+                if (lookup.taken.isSet(entry)) continue;
+                const offset = if (pair.source() == .zfi) @sizeOf(index_format.ZfiHeader) + entry * @sizeOf(index_format.IndexRecord) else catalog.records[entry].name_offset;
+                self.countMissingEntry(offset, entry + 1, catalog.recordName(entry).?);
+            }
+            pair.entries = catalog.records.len;
+            return;
+        }
+        if (pair.head) |head| self.countMissingEntry(head.offset, head.ordinal, head.name);
+        pair.head = null;
+        while (try pair.stream.next()) |entry| self.countMissingEntry(entry.offset, entry.ordinal, entry.name);
+        pair.entries = pair.stream.ordinal;
+    }
+
+    fn countMissingEntry(self: *Scan, offset: u64, ordinal: u64, name: []const u8) void {
+        const finding = &self.report.findings[comptime reportSlot(.@"pair.record_missing_from_fasta")];
+        finding.occurrences += 1;
+        finding.records += 1;
+        if (finding.first == null) finding.first = .{ .details = .{ .@"pair.record_missing_from_fasta" = {} }, .at = .{ .source = self.pair.?.source(), .location = .{ .offset = offset }, .record = ordinal }, .identifier = .init(name) };
+    }
+
+    fn compareRecord(self: *Scan, record: fasta.ScannedRecord) anyerror!void {
+        const pair = self.pair.?;
+        const current = self.record.ordinal != 0 and self.record.header.location.offset == record.header_offset;
+        const at: diagnostics.Reference = if (current) self.record.header else .{ .source = .fasta, .location = .{ .offset = record.header_offset } };
+        const entry = switch (try pair.associate(record.name, current and self.record.duplicate)) {
+            .entry => |entry| entry,
+            .omitted => {
+                pair.omitted += 1;
+                return;
+            },
+            .missing => return self.count(.{ .@"pair.record_missing_from_index" = {} }, at),
+        };
+        pair.matched += 1;
+        if (entry.seq_len != record.seq_len) self.count(.{ .@"pair.sequence_length_mismatch" = .{ .indexed_length = entry.seq_len, .observed_length = record.seq_len } }, at);
+        if (entry.seq_offset != record.seq_offset) self.count(.{ .@"pair.sequence_offset_mismatch" = .{ .indexed_offset = entry.seq_offset, .observed_offset = record.seq_offset } }, at);
+        const indexed_layout: diagnostics.LineLayout = if (entry.isUniformWidth()) .uniform else .side_table;
+        const observed_layout: diagnostics.LineLayout = if (record.uses_uniform_formula) .uniform else .side_table;
+        if (indexed_layout != observed_layout or entry.line_bases != record.line_bases or entry.line_bytes != record.line_bytes) {
+            self.count(.{ .@"pair.line_geometry_mismatch" = .{ .indexed_line_bases = entry.line_bases, .indexed_line_bytes = entry.line_bytes, .indexed_layout = indexed_layout, .observed_line_bases = record.line_bases, .observed_line_bytes = record.line_bytes, .observed_layout = observed_layout } }, at);
+        } else if (indexed_layout == .side_table) {
+            if (try pair.sideTableDifference(entry, record.side_table)) |mismatch| self.count(.{ .@"pair.side_table_mismatch" = mismatch }, at);
+        }
+    }
+
+    fn pairFailed(self: *Scan, err: anyerror) diagnostics.Error {
+        @branchHint(.cold);
+        if (self.failure.primary()) |primary| return diagnostics.metadata(primary.code()).returned_error;
+        return self.failure.fail(.{ .details = .{ .@"internal.consistency_failed" = .{ .component = .validator, .check = .side_table_state } }, .stage = .scan, .at = .{ .source = .fasta, .location = .{ .offset = self.offset } }, .cause = .{ .zig = err } });
     }
 
     fn reference(self: *const Scan, offset: u64) diagnostics.Reference {
