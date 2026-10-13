@@ -456,3 +456,32 @@ test "[failure] - [record reader]: a failing source reports the record and offse
         try testing.expectEqual(@as(?u64, 5), failure.primary().?.at.location.offset);
     }
 }
+
+// --- Validation ---
+
+test "[unit] - [validation]: validates and repairs a stream through the package" {
+    const data = ">a desc\r\nAC GT\r\nACG\n>a\nAC?\n";
+    const report = try testing.allocator.create(zfasta.validation.Report);
+    defer testing.allocator.destroy(report);
+    var buffer: [16]u8 = undefined;
+    var failure: diagnostics.Failure = undefined;
+
+    var reader = std.Io.Reader.fixed(data);
+    try zfasta.validation.validate(testing.allocator, &reader, &buffer, null, .{}, report, &failure);
+    try testing.expect(failure.complete);
+    try testing.expectEqual(@as(u64, 2), report.examined.records);
+    try testing.expectEqual(@as(u64, 1), report.finding(.@"fasta.duplicate_identifier").occurrences);
+    try testing.expectEqual(@as(u64, 1), report.finding(.@"sequence.invalid_symbol").occurrences);
+    try testing.expectEqual(@as(u8, 1), report.status(false, false));
+
+    reader = std.Io.Reader.fixed(data);
+    var output: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer output.deinit();
+    try zfasta.validation.repair(testing.allocator, &reader, &buffer, null, .{}, 4, &output.writer, report, &failure);
+    try testing.expectEqualStrings(">a desc\nACGT\nACG\n>a\nAC?\n", output.written());
+
+    reader = std.Io.Reader.fixed(">a\x01\nAC\n");
+    output.clearRetainingCapacity();
+    try testing.expectError(error.RepairRefused, zfasta.validation.repair(testing.allocator, &reader, &buffer, null, .{}, 60, &output.writer, report, &failure));
+    try expectCode(.@"repair.blocked", &failure);
+}

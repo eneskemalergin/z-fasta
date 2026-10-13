@@ -28,10 +28,10 @@ I care about correct output before timing. The benchmark harness keeps correctne
 
 ### Validate
 
-- Every currently defined issue family.
-- JSON escaping, including invalid UTF-8.
-- Fix idempotence and output-path safety.
-- Event-cap behavior and late blockers.
+- Every finding code, with hand-counted occurrences, records, and first locations.
+- Identical reports across read-buffer sizes, and vector checks that agree with the per-byte path.
+- Reversible identifier bytes in JSON.
+- Repair idempotence, refusals, and output-path safety.
 - Biological retrieval preservation after repair.
 - Validator and indexer agreement fixtures.
 
@@ -41,7 +41,7 @@ I care about correct output before timing. The benchmark harness keeps correctne
 - GET uses positional reads and fixed input/output buffers. Names and BED requests stream through bounded reusable workspaces.
 - Seekable names and BED files retain only requested index entries after validating the complete sidecar. Lookup memory grows with unique requested identifiers and their required side tables. Stdin and named FIFOs retain the full index lookup.
 - Stats uses one 256 KiB descriptor-backed read window over indexed sequence spans.
-- Validate currently maps the complete FASTA, so its peak RSS can approach input size.
+- Validate reads through one 256 KiB buffer. Its duplicate check keeps a fingerprint and a file offset per distinct identifier and re-reads an earlier identifier only on a fingerprint match.
 
 ## Representative published results
 
@@ -107,10 +107,9 @@ The repository reports own the complete tables, peer definitions, dataset detail
 - [Index report](https://github.com/eneskemalergin/z-fasta/blob/main/bench/index/REPORT.md)
 - [GET report](https://github.com/eneskemalergin/z-fasta/blob/main/bench/get/REPORT.md)
 - [Stats report](https://github.com/eneskemalergin/z-fasta/blob/main/bench/stats/REPORT.md)
+- [Validate report](https://github.com/eneskemalergin/z-fasta/blob/main/bench/validate/REPORT.md)
 
 The Wiki intentionally keeps only representative tables and figures. The benchmark harness and its external tool setup will continue to evolve, so these pages do not promise a turnkey reproduction environment.
-
-Validate does not yet have a published performance report.
 
 ## Related pages
 

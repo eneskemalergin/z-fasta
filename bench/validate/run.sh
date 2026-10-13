@@ -9,9 +9,9 @@
 #   --warmup 3            unmeasured warmups before sampling
 #   --duration 5000       sampling budget per command, capped by --runs
 #
-# Correctness runs `z-fasta validate --json --summary` on proteome copies with one injected
-# defect each and on the shared messy layouts, and compares the exit status and finding kinds
-# with values derived from how each input is built. It checks that validate accepts the real
+# Correctness runs `z-fasta validate --json` on proteome copies with one injected defect each
+# and on the shared messy layouts, and compares the exit status and finding codes with values
+# derived from how each input is built. It checks that validate accepts the real
 # and messy files that `index` accepts, and compares verdicts with samtools faidx (line layout)
 # and SeqKit seq -v (alphabet) where their rules match validate's.
 #
@@ -76,8 +76,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 PYTHON="$(report_python)"
-LAYOUT_KINDS=",inconsistent_line_widths,trailing_whitespace,mixed_line_endings,"
-ERROR_KINDS=",no_sequences,duplicate_name,invalid_character,null_byte,"
+LAYOUT_CODES=",format.inconsistent_wrapping,format.sequence_whitespace,format.blank_sequence_line,format.mixed_line_endings,"
 FIXTURES=(uniform mixed_widths trailing_whitespace blank_lines mixed_crlf)
 VARIANTS=(mixed_widths trailing_whitespace mixed_crlf all_messy)
 DATASETS=(Genome Transcriptome Proteome)
@@ -108,11 +107,12 @@ observe() {
 
 section_hdr() { echo ""; echo "--- [$1] $2 ---"; }
 
-# Prints "<exit>\t<truncated>\t<kinds>" for one validate run; kinds are sorted, or "none".
+# Prints "<exit>\t<errors>\t<codes>" for one validate run: whether any error-level code
+# occurred ("yes" or "no"), and the codes that occurred, sorted, or "none".
 validate_summary() {
     local file="$1"; shift
     local json status=0
-    json="$("$ZFASTA" validate --json --summary "$@" "$file" 2>/dev/null)" || status=$?
+    json="$("$ZFASTA" validate --json "$@" "$file" 2>/dev/null)" || status=$?
     printf '%s' "$json" | "$PYTHON" -c '
 import json, sys
 text = sys.stdin.read()
@@ -120,8 +120,10 @@ data = json.loads(text) if text.strip() else None
 if data is None:
     print(sys.argv[1], "unknown", "no-report", sep="\t")
 else:
-    kinds = sorted(kind for kind, count in data["counts"].items() if count)
-    print(sys.argv[1], str(data["truncated"]).lower(), ",".join(kinds) or "none", sep="\t")
+    codes = data["validation"]["codes"]
+    errors = any(code["severity"] == "error" for code in codes)
+    names = sorted(code["code"] for code in codes)
+    print(sys.argv[1], "yes" if errors else "no", ",".join(names) or "none", sep="\t")
 ' "$status"
 }
 
@@ -151,23 +153,14 @@ has_kind() {
 }
 
 check_findings() {
-    local group="$1" case="$2" file="$3" exit_code="$4" kinds="$5"; shift 5
+    local group="$1" case="$2" file="$3" exit_code="$4" codes="$5"; shift 5
     local line
     if [[ $# -eq 0 ]]; then line="$(cached_summary "$file")"; else line="$(validate_summary "$file" "$@")"; fi
-    record "$group" "$case" findings "exit $exit_code; $kinds" "exit $(summary_field "$line" 1); $(summary_field "$line" 3)"
-}
-
-check_capped_findings() {
-    local group="$1" case="$2" file="$3" kinds="$4"
-    local line truncated exit_code=2
-    line="$(cached_summary "$file")"
-    truncated="$(summary_field "$line" 2)"
-    [[ "$truncated" == true ]] && exit_code=1
-    record "$group" "$case" findings "exit $exit_code; $kinds" "exit $(summary_field "$line" 1); $(summary_field "$line" 3)"
+    record "$group" "$case" findings "exit $exit_code; $codes" "exit $(summary_field "$line" 1); $(summary_field "$line" 3)"
 }
 
 validate_verdict() {
-    if has_kind "$(summary_field "$(cached_summary "$1")" 3)" "$ERROR_KINDS"; then echo reject; else echo accept; fi
+    if [[ "$(summary_field "$(cached_summary "$1")" 2)" == yes ]]; then echo reject; else echo accept; fi
 }
 
 index_verdict() {
@@ -185,11 +178,11 @@ seqkit_verdict() {
 }
 
 layout_verdict() {
-    if has_kind "$(summary_field "$(cached_summary "$1")" 3)" "$LAYOUT_KINDS"; then echo reject; else echo accept; fi
+    if has_kind "$(summary_field "$(cached_summary "$1")" 3)" "$LAYOUT_CODES"; then echo reject; else echo accept; fi
 }
 
 alphabet_verdict() {
-    if has_kind "$(summary_field "$(cached_summary "$1")" 3)" ",invalid_character,"; then echo reject; else echo accept; fi
+    if has_kind "$(summary_field "$(cached_summary "$1")" 3)" ",sequence.invalid_symbol,"; then echo reject; else echo accept; fi
 }
 
 write_crafted() {
@@ -220,11 +213,11 @@ def replace(index: int, record: bytes) -> bytes:
 
 
 cases = {
-    "duplicate_name": source + records[0],
-    "invalid_character": replace(100, edit_line(records[100], 1, lambda line: line[:5] + b"1" + line[6:])),
-    "null_byte": replace(200, edit_line(records[200], 0, lambda line: line[:4] + b"\x00" + line[4:])),
-    "utf8_bom": b"\xef\xbb\xbf" + source,
-    "empty_sequence": b"".join(records[:300] + [b">empty_record no bases\n"] + records[300:]),
+    "duplicate_identifier": source + records[0],
+    "invalid_symbol": replace(100, edit_line(records[100], 1, lambda line: line[:5] + b"1" + line[6:])),
+    "header_nul": replace(200, edit_line(records[200], 0, lambda line: line[:4] + b"\x00" + line[4:])),
+    "leading_bom": b"\xef\xbb\xbf" + source,
+    "empty_record": b"".join(records[:300] + [b">empty_record no bases\n"] + records[300:]),
     "missing_terminal_newline": source[:-1],
     "interior_space": replace(400, edit_line(records[400], 1, lambda line: line[:10] + b" " + line[10:])),
     "long_header": replace(500, edit_line(records[500], 0, lambda line: line + b" " + b"x" * (2000 - len(line) - 1))),
@@ -257,7 +250,7 @@ run_tests() {
     write_crafted
 
     local c="$CRAFTED_DIR" ds name file
-    for name in duplicate_name invalid_character null_byte utf8_bom empty_sequence \
+    for name in duplicate_identifier invalid_symbol header_nul leading_bom empty_record \
         missing_terminal_newline interior_space long_header difference_rna_u difference_dot_gap \
         difference_space_inside difference_tab_at_end; do
         load_summary "$c/$name.fasta"
@@ -270,26 +263,36 @@ run_tests() {
     done
 
     section_hdr crafted "proteome copies with one injected defect each"
-    check_findings crafted duplicate_name "$c/duplicate_name.fasta" 1 duplicate_name
-    check_findings crafted invalid_character "$c/invalid_character.fasta" 1 invalid_character
-    check_findings crafted null_byte "$c/null_byte.fasta" 1 null_byte
-    check_findings crafted utf8_bom "$c/utf8_bom.fasta" 2 utf8_bom
-    check_findings crafted empty_sequence "$c/empty_sequence.fasta" 2 empty_sequence
-    check_findings crafted missing_terminal_newline "$c/missing_terminal_newline.fasta" 2 missing_terminal_newline
-    check_findings crafted interior_space "$c/interior_space.fasta" 1 invalid_character
-    check_findings crafted long_header "$c/long_header.fasta" 2 long_header
-    check_findings crafted strict "$c/empty_sequence.fasta" 1 empty_sequence --strict
+    check_findings crafted duplicate_identifier "$c/duplicate_identifier.fasta" 1 fasta.duplicate_identifier
+    check_findings crafted invalid_symbol "$c/invalid_symbol.fasta" 1 sequence.invalid_symbol
+    check_findings crafted header_nul "$c/header_nul.fasta" 1 fasta.header_control_byte
+    check_findings crafted leading_bom "$c/leading_bom.fasta" 2 format.leading_bom
+    check_findings crafted empty_record "$c/empty_record.fasta" 2 fasta.empty_record
+    check_findings crafted missing_terminal_newline "$c/missing_terminal_newline.fasta" 2 format.missing_terminal_newline
+    check_findings crafted interior_space "$c/interior_space.fasta" 2 format.sequence_whitespace
+    check_findings crafted long_header "$c/long_header.fasta" 2 fasta.long_header
+    check_findings crafted strict "$c/empty_record.fasta" 1 fasta.empty_record --strict
 
-    section_hdr messy "shared messy fixtures and proteome variants"
+    section_hdr messy "shared messy layouts"
     check_findings fixture uniform "$FIXTURE_DIR/uniform.fasta" 0 none
-    check_findings fixture mixed_widths "$FIXTURE_DIR/mixed_widths.fasta" 2 inconsistent_line_widths
-    check_findings fixture trailing_whitespace "$FIXTURE_DIR/trailing_whitespace.fasta" 2 trailing_whitespace
-    check_findings fixture blank_lines "$FIXTURE_DIR/blank_lines.fasta" 2 inconsistent_line_widths
-    check_findings fixture mixed_crlf "$FIXTURE_DIR/mixed_crlf.fasta" 2 inconsistent_line_widths,mixed_line_endings
-    check_capped_findings variant mixed_widths "$MESSY_DIR/mixed_widths.fasta" inconsistent_line_widths
-    check_capped_findings variant trailing_whitespace "$MESSY_DIR/trailing_whitespace.fasta" trailing_whitespace
-    check_capped_findings variant mixed_crlf "$MESSY_DIR/mixed_crlf.fasta" mixed_line_endings
-    check_capped_findings variant all_messy "$MESSY_DIR/all_messy.fasta" inconsistent_line_widths,mixed_line_endings,trailing_whitespace
+    check_findings fixture mixed_widths "$FIXTURE_DIR/mixed_widths.fasta" 2 format.inconsistent_wrapping
+    check_findings fixture trailing_whitespace "$FIXTURE_DIR/trailing_whitespace.fasta" 2 format.sequence_whitespace
+    check_findings fixture blank_lines "$FIXTURE_DIR/blank_lines.fasta" 2 format.blank_sequence_line,format.inconsistent_wrapping
+    check_findings fixture mixed_crlf "$FIXTURE_DIR/mixed_crlf.fasta" 2 format.inconsistent_wrapping,format.mixed_line_endings
+    check_findings variant mixed_widths "$MESSY_DIR/mixed_widths.fasta" 2 format.inconsistent_wrapping
+    check_findings variant trailing_whitespace "$MESSY_DIR/trailing_whitespace.fasta" 2 format.sequence_whitespace
+    check_findings variant mixed_crlf "$MESSY_DIR/mixed_crlf.fasta" 2 format.mixed_line_endings
+    check_findings variant all_messy "$MESSY_DIR/all_messy.fasta" 2 format.inconsistent_wrapping,format.mixed_line_endings,format.sequence_whitespace
+
+    section_hdr stdin "validate - reads standard input like a file"
+    for ds in "${DATASETS[@]}"; do
+        file="${REAL_DATASETS[$ds]:-}"
+        [[ -n "$file" ]] || continue
+        local from_file from_stdin
+        from_file="$(cached_summary "$file")"
+        from_stdin="$(validate_summary - < "$file")"
+        record real "$ds" "stdin (validate -)" "exit $(summary_field "$from_file" 1); $(summary_field "$from_file" 3)" "exit $(summary_field "$from_stdin" 1); $(summary_field "$from_stdin" 3)"
+    done
 
     section_hdr index "validate accepts the files that index accepts"
     for ds in "${DATASETS[@]}"; do
@@ -330,7 +333,7 @@ run_tests() {
         [[ "$ds" == Proteome ]] && type=protein
         record real "$ds" "alphabet (seqkit, validate)" "$(seqkit_verdict "$file" "$type")" "$(alphabet_verdict "$file")"
     done
-    record crafted invalid_character "alphabet (seqkit, validate)" "$(seqkit_verdict "$c/invalid_character.fasta" protein)" "$(alphabet_verdict "$c/invalid_character.fasta")"
+    record crafted invalid_symbol "alphabet (seqkit, validate)" "$(seqkit_verdict "$c/invalid_symbol.fasta" protein)" "$(alphabet_verdict "$c/invalid_symbol.fasta")"
     for name in rna_u dot_gap space_inside tab_at_end; do
         file="$c/difference_$name.fasta"
         observe "$name" "alphabet (seqkit, validate)" "$(seqkit_verdict "$file" dna)" "$(alphabet_verdict "$file")"
@@ -429,7 +432,7 @@ run_perf() {
         qf="$(quote_arg "$fa")"
         qw="$(quote_arg "$WORK_DIR/perf_$ds.fai")"
         echo "  -- dataset $ds ($(du -h "$fa" | cut -f1)) --"
-        run_zebrac_tool "$ds" z-fasta z-fasta "$out_dir/${ds}__z-fasta.json" "$qz validate --json --summary $qf > /dev/null" "$bytes"
+        run_zebrac_tool "$ds" z-fasta z-fasta "$out_dir/${ds}__z-fasta.json" "$qz validate --json $qf > /dev/null" "$bytes"
         run_zebrac_tool "$ds" seqkit peer "$out_dir/${ds}__seqkit.json" "$qk seq -j 1 -v -t $type -o /dev/null $qf" "$bytes"
         run_zebrac_tool "$ds" samtools peer "$out_dir/${ds}__samtools.json" "$qs faidx --fai-idx $qw $qf" "$bytes"
     done

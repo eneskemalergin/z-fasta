@@ -1,6 +1,6 @@
 # Error Diagnostics
 
-z-fasta reports command failures on stderr with stable symbolic codes and observed facts. Successful FASTA, FAI and statistics output stays on stdout. Validation findings keep their existing stdout format, including JSON v1, unless `--report v2` selects the v2 report, which uses the envelope described here.
+z-fasta reports command failures on stderr with stable symbolic codes and observed facts. Successful FASTA, FAI and statistics output stays on stdout. Validation findings go to stdout; with `--json` they use the envelope described here, with its `validation` field filled.
 
 ## Choose a renderer
 
@@ -101,7 +101,7 @@ rm -r "$work"
 
 GET can write earlier valid records before a later request fails. Do not publish its temporary stdout file merely because it is non-empty. Ordinary successful machine-mode commands need not emit a stderr report. `get --summary --error-format=json` requests a summary envelope with decimal-string `region_count`, `total_bases` and `elapsed_ns`; its successful FASTA still goes to stdout.
 
-Validate needs a separate policy: exit 0 means no remaining issues, exit 2 means warnings only, and exit 1 means errors, strict warning rejection, an incomplete retained report without fix, or an operational failure. With `--json --summary`, parse its v1 stdout report and the actual status. Allow exit 2 only if your job explicitly permits warnings. `--error-format=json` selects operational stderr diagnostics; it does not convert v1 findings into v2. With `--report v2 --json`, stdout is one envelope whose `validation` holds the findings: read `validation.completion` and `accepted` together with the status. A report whose completion is `interrupted` also fills `failure`, and the same failure goes to stderr. Machine mode omits the prose event-cap notice, while v1 `truncated` and the existing status still report the cap. See [Validation and repair](Validation-and-Repair) for counting and repair limits.
+Validate needs a separate policy: exit 0 means no findings, exit 2 means warnings only, and exit 1 means errors, strict warning rejection, an unfinished report, or an operational failure. With `--json`, stdout is one envelope whose `validation` holds the findings: read `validation.outcome`, `validation.completion` and `accepted` together with the status. Allow exit 2 only if your job explicitly permits warnings. A report whose completion is `interrupted` also fills `failure`, and the same failure goes to stderr in the format `--error-format` selects. See [Validation and repair](Validation-and-Repair) for counting and repair rules.
 
 A local consumer example in `tests/check_diagnostics.sh` exercises these policies, including missing and truncated JSON. It does not establish integration with a workflow scheduler, HTTP service or telemetry system.
 
@@ -111,13 +111,13 @@ Core command functions return a finite `diagnostics.Error!T` and fill an explici
 
 `tests/diagnostics_commands_caller.zig` is a compiled example using the existing command exports. It handles a missing-file failure from each of index, GET, stats and validate, then successfully calls each again without running the CLI dispatcher. Run it with `zig build test-diagnostics`. These are internal command APIs, not a newly published stable FASTA library.
 
-Failure construction allocates no message or growing chain. It retains previews in a shared 256-byte pool, up to two secondary diagnostics, and 16 source roles. Borrowed labels must live through handling or the next reset. Preview views borrow the owning `Failure` until reset or overwrite. A validator `Summary` owns its event and width arrays but borrows event names from input bytes; retain the input until you finish using those names and call `Summary.deinit` with the original allocator. A v2 `Report` copies its first-occurrence identifiers; `Report.validation` returns a view that borrows the report. These storage limits do not bound validator memory use: its mapping, names and per-record rewrite data still grow with input.
+Failure construction allocates no message or growing chain. It retains previews in a shared 256-byte pool, up to two secondary diagnostics, and 16 source roles. Borrowed labels must live through handling or the next reset. Preview views borrow the owning `Failure` until reset or overwrite. A validator `Report` is a fixed-size value that copies its first-occurrence identifiers; `Report.validation` returns a view that borrows the report. These storage limits do not bound the validator's duplicate check, which grows with the number of distinct identifiers.
 
 See [For contributors](For-Contributors) for the source owners and checks.
 
 ## Active code catalog
 
-The registry contains 105 codes. This table lists the native detail fields from `diagnostics.Details`; shared `stage`, `source`, `location`, `record`, `request`, `related` and `cause` sit outside those fields. The FASTA, header, sequence and format findings are what the v2 validation report counts, in the listed units; some also describe retained repair blockers. v1 validation output keeps its own event kinds. Every code has error severity except the warnings `fasta.empty_record`, `fasta.long_header`, `header.convention_mismatch` and the six `format.*` codes.
+The registry contains 105 codes. This table lists the native detail fields from `diagnostics.Details`; shared `stage`, `source`, `location`, `record`, `request`, `related` and `cause` sit outside those fields. The FASTA, header, sequence and format findings are what the validation report counts, in the listed units; four of them also describe repair blockers. Every code has error severity except the warnings `fasta.empty_record`, `fasta.long_header`, `header.convention_mismatch` and the six `format.*` codes.
 
 The machine renderer preserves the native fields with these explicit conversions:
 

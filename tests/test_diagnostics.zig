@@ -45,17 +45,17 @@ const HELP_STDOUT =
     \\  Positional regions: max 1024 per invocation. Names and BED input stream.
     \\
     \\Validate usage:
-    \\  z-fasta validate [options] <file.fasta>
+    \\  z-fasta validate [options] <file.fasta|->
     \\  --strict                 Treat warnings as errors
-    \\  --json                   Emit JSON Lines instead of text
-    \\  --summary                With --json, emit one summary object
-    \\  --fix -o <file.fasta>    Write a fixed FASTA to a separate output path
-    \\  --fix-format-only        With --fix, proceed despite alphabet errors
+    \\  --json                   Emit one JSON report instead of text
+    \\  --fix -o <file.fasta>    Write a repaired FASTA to a separate output path
+    \\  --width N                With --fix, wrap sequence lines at N symbols (default: 60)
     \\  --schema NAME            Header schema: uniprot or refseq
-    \\  --custom-alphabet CHARS  Override nucleotide/protein alphabet checks
+    \\  --type NAME              Alphabet: auto, dna, rna, protein, or any (default: auto)
+    \\  --custom-alphabet CHARS  Check against exactly these bytes instead
     \\  --max-header-len N       Warn on headers longer than N bytes (default: 1024)
-    \\  --report v1|v2           Report version (default: v1); v2 counts every occurrence
-    \\  v1 retains 10000 examples; scan/count all input (error without --fix).
+    \\  --max-name-memory BYTES  Stop the duplicate check past BYTES; the report is incomplete
+    \\  Counts every finding exactly and reports each code's first occurrence.
     \\
     \\Examples:
     \\  z-fasta index genome.fa                  Create .zfi binary index
@@ -68,7 +68,7 @@ const HELP_STDOUT =
     \\  z-fasta get genome.fa --bed regions.bed --strand-aware --summary
     \\  z-fasta stats genome.fa                  Show stats with composition
     \\  z-fasta validate genome.fa               Check FASTA validity
-    \\  z-fasta validate --json --summary genome.fa
+    \\  z-fasta validate --json genome.fa
     \\
 ;
 const VERSION_STDOUT = "z-fasta 0.3.5\n";
@@ -439,15 +439,15 @@ test "[unit] - [diagnostics]: replay scope and cached sample origin remain expli
 test "[unit] - [diagnostics]: rewrite refusal retains the precise blocking byte" {
     const diagnostic = diagnostics.Diagnostic{
         .details = .{ .@"repair.blocked" = .{
-            .blocker = .{ .invalid_symbol = .{ .byte = '?', .policy = .{ .alphabet = .dna, .selection = .explicit } } },
-            .repair_policy = .legacy_safe,
+            .blocker = .{ .sequence_control_byte = .{ .byte = 0x01, .grammar = .controls_except_tab } },
+            .repair_policy = .preserve_symbols,
         } },
         .stage = .scan,
         .at = .{ .source = .fasta, .location = .{ .offset = 18, .line = 3, .column = 5 }, .record = 2 },
     };
     const blocker = &diagnostic.details.@"repair.blocked".blocker;
-    try testing.expect(blocker.code() == .@"sequence.invalid_symbol");
-    try testing.expectEqual(@as(u8, '?'), blocker.invalid_symbol.byte);
+    try testing.expect(blocker.code() == .@"fasta.sequence_control_byte");
+    try testing.expectEqual(@as(u8, 0x01), blocker.sequence_control_byte.byte);
     try testing.expect(diagnostics.metadata(diagnostic.code()).kind == .failure);
     try testing.expect(diagnostics.metadata(blocker.code()).kind == .finding);
 }

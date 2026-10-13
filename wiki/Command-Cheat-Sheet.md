@@ -67,24 +67,25 @@ z-fasta validate genome.fa
 # Fail a warnings-only quality gate
 z-fasta validate --strict genome.fa
 
-# JSON Lines or one JSON summary
+# One JSON report
 z-fasta validate --json genome.fa
-z-fasta validate --json --summary genome.fa
-
-# Report v2: exact counts per code, reversible identifiers
-z-fasta validate --report v2 genome.fa
-z-fasta validate --report v2 --json genome.fa
 
 # Header policies
 z-fasta validate --schema refseq genome.fa
 z-fasta validate --max-header-len 200 genome.fa
 z-fasta validate --custom-alphabet ACGTN- aligned.fa
 
-# Write a normalized copy
-z-fasta validate --fix -o genome.clean.fa genome.fa
+# Read standard input; bound the duplicate check's memory
+zcat genome.fa.gz | z-fasta validate -
+z-fasta validate --max-name-memory 268435456 proteins.fa
 
-# Keep invalid alphabet bytes while fixing format
-z-fasta validate --fix --fix-format-only -o genome.clean.fa genome.fa
+# Name the alphabet instead of sampling it
+z-fasta validate --type dna genome.fa
+z-fasta validate --type protein proteins.fa
+
+# Write a repaired copy, wrapped at 60 or at a chosen width
+z-fasta validate --fix -o genome.clean.fa genome.fa
+z-fasta validate --fix --width 80 -o genome.clean.fa genome.fa
 ```
 
 ## Stats

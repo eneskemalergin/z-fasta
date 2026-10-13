@@ -51,7 +51,7 @@ Records with no sequence symbols are skipped:
 ACGT
 ```
 
-The index contains only `kept`. Validate still reports `empty` as an empty-sequence warning.
+The index contains only `kept`. Validate still reports `empty` as a `fasta.empty_record` warning.
 
 ## Duplicate identifiers
 

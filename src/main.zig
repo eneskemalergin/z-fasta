@@ -62,17 +62,17 @@ const USAGE =
     \\  Positional regions: max 1024 per invocation. Names and BED input stream.
     \\
     \\Validate usage:
-    \\  z-fasta validate [options] <file.fasta>
+    \\  z-fasta validate [options] <file.fasta|->
     \\  --strict                 Treat warnings as errors
-    \\  --json                   Emit JSON Lines instead of text
-    \\  --summary                With --json, emit one summary object
-    \\  --fix -o <file.fasta>    Write a fixed FASTA to a separate output path
-    \\  --fix-format-only        With --fix, proceed despite alphabet errors
+    \\  --json                   Emit one JSON report instead of text
+    \\  --fix -o <file.fasta>    Write a repaired FASTA to a separate output path
+    \\  --width N                With --fix, wrap sequence lines at N symbols (default: 60)
     \\  --schema NAME            Header schema: uniprot or refseq
-    \\  --custom-alphabet CHARS  Override nucleotide/protein alphabet checks
+    \\  --type NAME              Alphabet: auto, dna, rna, protein, or any (default: auto)
+    \\  --custom-alphabet CHARS  Check against exactly these bytes instead
     \\  --max-header-len N       Warn on headers longer than N bytes (default: 1024)
-    \\  --report v1|v2           Report version (default: v1); v2 counts every occurrence
-    \\  v1 retains 10000 examples; scan/count all input (error without --fix).
+    \\  --max-name-memory BYTES  Stop the duplicate check past BYTES; the report is incomplete
+    \\  Counts every finding exactly and reports each code's first occurrence.
     \\
     \\Examples:
     \\  z-fasta index genome.fa                  Create .zfi binary index
@@ -85,7 +85,7 @@ const USAGE =
     \\  z-fasta get genome.fa --bed regions.bed --strand-aware --summary
     \\  z-fasta stats genome.fa                  Show stats with composition
     \\  z-fasta validate genome.fa               Check FASTA validity
-    \\  z-fasta validate --json --summary genome.fa
+    \\  z-fasta validate --json genome.fa
     \\
 ;
 
@@ -142,7 +142,7 @@ fn selectErrorFormat(args: std.process.Args.Iterator, operation: diagnostics.Ope
 fn takesValue(operation: diagnostics.Operation, arg: []const u8) bool {
     return switch (operation) {
         .get => std.mem.eql(u8, arg, "--bed") or std.mem.eql(u8, arg, "--names"),
-        .validate => std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--schema") or std.mem.eql(u8, arg, "--custom-alphabet") or std.mem.eql(u8, arg, "--max-header-len") or std.mem.eql(u8, arg, "--report"),
+        .validate => std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--schema") or std.mem.eql(u8, arg, "--custom-alphabet") or std.mem.eql(u8, arg, "--max-header-len") or std.mem.eql(u8, arg, "--width") or std.mem.eql(u8, arg, "--type") or std.mem.eql(u8, arg, "--max-name-memory"),
         else => false,
     };
 }
@@ -395,53 +395,49 @@ fn runStatsCmd(cli: *Cli) diagnostics.Error!u8 {
 fn runValidateCmd(cli: *Cli) diagnostics.Error!u8 {
     var path: ?[]const u8 = null;
     var options = validator.Options{ .producer_version = VERSION };
-    var saw_json = false;
-    var saw_summary = false;
+    var saw_width = false;
     while (cli.next()) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) return cli.stdout(USAGE);
-        if (std.mem.eql(u8, arg, "--strict")) options.strict = true else if (std.mem.eql(u8, arg, "--json")) {
-            saw_json = true;
-            options.output_mode = if (saw_summary) .json_summary else .json_lines;
-        } else if (std.mem.eql(u8, arg, "--summary")) {
-            saw_summary = true;
-            options.output_mode = .json_summary;
-        } else if (std.mem.eql(u8, arg, "--fix")) options.fix = true else if (std.mem.eql(u8, arg, "--fix-format-only")) options.fix_format_only = true else if (std.mem.eql(u8, arg, "-o")) options.output_path = try cli.value(.output, .path) else if (std.mem.eql(u8, arg, "--custom-alphabet")) options.custom_alphabet = try cli.value(.custom_alphabet, .alphabet) else if (std.mem.eql(u8, arg, "--schema")) {
+        if (std.mem.eql(u8, arg, "--strict")) options.strict = true else if (std.mem.eql(u8, arg, "--json")) options.json = true else if (std.mem.eql(u8, arg, "--fix")) options.fix = true else if (std.mem.eql(u8, arg, "-o")) options.output_path = try cli.value(.output, .path) else if (std.mem.eql(u8, arg, "--custom-alphabet")) options.rules.custom_alphabet = try cli.value(.custom_alphabet, .alphabet) else if (std.mem.eql(u8, arg, "--schema")) {
             const raw = try cli.value(.schema, .schema);
-            options.schema = if (std.mem.eql(u8, raw, "uniprot")) .uniprot else if (std.mem.eql(u8, raw, "refseq")) .refseq else return cli.fail(.{ .@"usage.invalid_option_value" = .{ .option = .schema, .expected = .schema, .value = cli.failure.retain(raw, 32) } });
+            options.rules.schema = if (std.mem.eql(u8, raw, "uniprot")) .uniprot else if (std.mem.eql(u8, raw, "refseq")) .refseq else return cli.fail(.{ .@"usage.invalid_option_value" = .{ .option = .schema, .expected = .schema, .value = cli.failure.retain(raw, 32) } });
+        } else if (std.mem.eql(u8, arg, "--type")) {
+            const raw = try cli.value(.sequence_type, .sequence_type);
+            options.rules.alphabet = std.meta.stringToEnum(validator.Alphabet, raw) orelse return cli.fail(.{ .@"usage.invalid_option_value" = .{ .option = .sequence_type, .expected = .sequence_type, .value = cli.failure.retain(raw, 32) } });
         } else if (std.mem.eql(u8, arg, "--max-header-len")) {
-            const raw = try cli.value(.max_header_len, .positive_usize);
-            const width = std.fmt.parseInt(usize, raw, 10) catch return invalidWidth(cli, raw);
-            if (width == 0) return invalidWidth(cli, raw);
-            options.max_header_len = width;
-        } else if (std.mem.eql(u8, arg, "--report")) {
-            const raw = try cli.value(.report, .report_version);
-            options.report = std.meta.stringToEnum(validator.ReportVersion, raw) orelse return cli.fail(.{ .@"usage.invalid_option_value" = .{ .option = .report, .expected = .report_version, .value = cli.failure.retain(raw, 32) } });
+            options.rules.max_header_bytes = try positiveValue(cli, .max_header_len);
+        } else if (std.mem.eql(u8, arg, "--max-name-memory")) {
+            options.rules.max_name_bytes = try positiveValue(cli, .max_name_memory);
+        } else if (std.mem.eql(u8, arg, "--width")) {
+            saw_width = true;
+            options.width = try positiveValue(cli, .width);
         } else {
-            try cli.positional(arg);
+            if (!std.mem.eql(u8, arg, "-")) try cli.positional(arg);
             if (path != null) return cli.fail(.{ .@"usage.extra_argument" = .{ .argument = .fasta_path, .allowed_count = 1 } });
             path = arg;
         }
     }
-    if (saw_summary and !saw_json) return cli.fail(.{ .@"usage.option_requires" = .{ .option = .summary, .required = .json } });
-    if (options.fix_format_only and !options.fix) return cli.fail(.{ .@"usage.option_requires" = .{ .option = .fix_format_only, .required = .fix } });
     if (options.output_path != null and !options.fix) return cli.fail(.{ .@"usage.option_requires" = .{ .option = .output, .required = .fix } });
-    if (options.report == .v2 and options.fix) {
+    if (saw_width and !options.fix) return cli.fail(.{ .@"usage.option_requires" = .{ .option = .width, .required = .fix } });
+    if (options.rules.custom_alphabet != null and options.rules.alphabet != .auto) {
         var arguments = diagnostics.Arguments.initEmpty();
-        arguments.insert(.fix);
-        arguments.insert(.report);
+        arguments.insert(.custom_alphabet);
+        arguments.insert(.sequence_type);
         return cli.fail(.{ .@"usage.conflicting_options" = .{ .arguments = arguments } });
     }
     const fasta_path = path orelse return cli.fail(.{ .@"usage.missing_argument" = .{ .argument = .fasta_path } });
     const result = try validator.runValidate(std.heap.page_allocator, cli.io, fasta_path, options, cli.failure);
-    if (result.truncated and cli.format == .text) try writeNotice(cli, .{ .cap = result.fix_written });
     return result.status;
 }
 
-fn invalidWidth(cli: *Cli, raw: []const u8) diagnostics.Error {
-    return cli.fail(.{ .@"usage.invalid_option_value" = .{ .option = .max_header_len, .expected = .positive_usize, .value = cli.failure.retain(raw, 32) } });
+fn positiveValue(cli: *Cli, option: diagnostics.Argument) diagnostics.Error!u64 {
+    const raw = try cli.value(option, .positive_usize);
+    const value = std.fmt.parseInt(u64, raw, 10) catch 0;
+    if (value == 0) return cli.fail(.{ .@"usage.invalid_option_value" = .{ .option = option, .expected = .positive_usize, .value = cli.failure.retain(raw, 32) } });
+    return value;
 }
 
-const Notice = union(enum) { index: struct { path: []const u8, count: u64 }, get: getter.Result, cap: bool };
+const Notice = union(enum) { index: struct { path: []const u8, count: u64 }, get: getter.Result };
 
 fn writeNotice(cli: *Cli, notice: Notice) diagnostics.Error!void {
     const failure = cli.failure;
@@ -463,7 +459,6 @@ fn writeNoticeBytes(writer: *std.Io.Writer, format: ErrorFormat, failure: *const
             try writer.print(".zfi ({d} sequences)\n", .{value.count});
         },
         .get => |value| if (format == .json) try reporting.writeJson(writer, failure, .{ .version = VERSION, .accepted = true, .metrics = .{ .region_count = value.region_count, .total_bases = value.total_bases, .elapsed_ns = value.elapsed_ns } }) else try writeGetSummary(writer, value),
-        .cap => |fixed| if (fixed) try writer.print("warning: validate event list truncated at {d}; --fix output was still written\n", .{validator.MAX_VALIDATE_EVENTS}) else try writer.print("error: validate retained {d} events; scanning and counting completed; fix reported issues and re-run\n", .{validator.MAX_VALIDATE_EVENTS}),
     }
 }
 

@@ -1,4 +1,4 @@
-//! Renders a `Failure` as text or as one NDJSON object, and a v2 validation report inside that
+//! Renders a `Failure` as text or as one NDJSON object, and a validation report inside that
 //! object or as text. Never allocates or flushes; a failed write is returned and the original
 //! failure is left unchanged.
 
@@ -18,7 +18,7 @@ pub const Options = struct {
     validation: ?*const Validation = null,
 };
 
-/// What `validate --report v2` found. Counts are exact; each code keeps only its first occurrence.
+/// What `validate` found. Counts are exact; each code keeps only its first occurrence.
 pub const Validation = struct {
     completion: Completion,
     strict: bool,
@@ -32,9 +32,19 @@ pub const Validation = struct {
     findings: []const Finding,
     /// Occurrences of each byte value outside the selected alphabet.
     invalid_symbols: *const [256]u64,
+    /// Set when the duplicate check reached its memory budget and stopped.
+    name_budget_stop: ?BudgetStop = null,
 
     pub const Completion = enum { complete, incomplete, interrupted };
-    pub const Examined = struct { bytes: u64 = 0, lines: u64 = 0, records: u64 = 0, symbols: u64 = 0 };
+    pub const Outcome = enum { clean, warnings, invalid, incomplete };
+    /// `failed` when the check found an error, `warnings` when it found only warnings.
+    pub const CheckState = enum { passed, warnings, failed, incomplete };
+    /// The four checks, by the category of the codes each reports.
+    pub const CHECKS = [_]diagnostics.Category{ .structure, .identifiers, .alphabet, .format };
+    /// `records` counts headers seen; `records_completed`, records whose end was reached.
+    pub const Examined = struct { bytes: u64 = 0, lines: u64 = 0, records: u64 = 0, records_completed: u64 = 0, symbols: u64 = 0 };
+    pub const Totals = struct { errors: u64 = 0, warnings: u64 = 0 };
+    pub const BudgetStop = struct { budget_bytes: u64, stopped_at_record: u64 };
 
     pub fn codes(self: *const Validation, severity: diagnostics.Severity) u64 {
         var count: u64 = 0;
@@ -42,6 +52,35 @@ pub const Validation = struct {
             if (finding.occurrences != 0 and diagnostics.metadata(finding.code).severity == severity) count += 1;
         }
         return count;
+    }
+
+    /// Occurrences by severity, over every code or over one category.
+    pub fn totals(self: *const Validation, category: ?diagnostics.Category) Totals {
+        var result: Totals = .{};
+        for (self.findings) |finding| {
+            const metadata = diagnostics.metadata(finding.code);
+            if (category != null and metadata.category != category.?) continue;
+            switch (metadata.severity) {
+                .@"error" => result.errors += finding.occurrences,
+                .warning => result.warnings += finding.occurrences,
+            }
+        }
+        return result;
+    }
+
+    pub fn outcome(self: *const Validation) Outcome {
+        if (self.completion != .complete) return .incomplete;
+        const all = self.totals(null);
+        if (all.errors != 0) return .invalid;
+        return if (all.warnings != 0) .warnings else .clean;
+    }
+
+    pub fn check(self: *const Validation, category: diagnostics.Category) CheckState {
+        if (self.completion == .interrupted) return .incomplete;
+        if (category == .identifiers and self.name_budget_stop != null) return .incomplete;
+        const found = self.totals(category);
+        if (found.errors != 0) return .failed;
+        return if (found.warnings != 0) .warnings else .passed;
     }
 };
 
@@ -181,27 +220,33 @@ pub fn writeText(writer: *std.Io.Writer, failure: *const diagnostics.Failure) st
 }
 
 pub fn writeValidationText(writer: *std.Io.Writer, failure: *const diagnostics.Failure, validation: *const Validation) std.Io.Writer.Error!void {
-    const errors = validation.codes(.@"error");
-    const warnings = validation.codes(.warning);
-    try writer.writeAll(switch (validation.completion) {
-        .interrupted => "INTERRUPTED ",
-        .incomplete => "INCOMPLETE ",
-        .complete => if (errors != 0) "INVALID " else if (warnings != 0) "WARNINGS " else "OK ",
+    const all = validation.totals(null);
+    try writer.writeAll(switch (validation.outcome()) {
+        .incomplete => if (validation.completion == .interrupted) "INTERRUPTED " else "INCOMPLETE ",
+        .invalid => "INVALID ",
+        .warnings => "WARNINGS ",
+        .clean => "OK ",
     });
     try writeEscapedBytes(writer, failure.sourceLabel(.fasta) orelse "input");
-    if (errors + warnings == 0) {
+    if (all.errors + all.warnings == 0) {
         try writer.writeAll(": no findings\n");
     } else {
-        try writer.print(": {d} error code{s}, {d} warning code{s}; {d} of {d} record{s} with errors, {d} with warnings\n", .{ errors, plural(errors), warnings, plural(warnings), validation.records_with_errors, validation.examined.records, plural(validation.examined.records), validation.records_with_warnings });
+        const error_codes = validation.codes(.@"error");
+        const warning_codes = validation.codes(.warning);
+        try writer.print(": {d} error{s} in {d} code{s}, {d} warning{s} in {d} code{s}; {d} of {d} record{s} with errors, {d} with warnings\n", .{ all.errors, plural(all.errors), error_codes, plural(error_codes), all.warnings, plural(all.warnings), warning_codes, plural(warning_codes), validation.records_with_errors, validation.examined.records, plural(validation.examined.records), validation.records_with_warnings });
     }
     for (validation.findings) |finding| {
         if (finding.occurrences != 0) try textFinding(writer, failure, finding);
     }
     const examined = validation.examined;
-    try writer.print("{s}: examined {d} byte{s}, {d} line{s}, {d} record{s}, {d} symbol{s}; ", .{ @tagName(validation.completion), examined.bytes, plural(examined.bytes), examined.lines, plural(examined.lines), examined.records, plural(examined.records), examined.symbols, plural(examined.symbols) });
+    try writer.print("{s}: examined {d} byte{s}, {d} line{s}, {d} record{s}", .{ @tagName(validation.completion), examined.bytes, plural(examined.bytes), examined.lines, plural(examined.lines), examined.records, plural(examined.records) });
+    if (examined.records_completed != examined.records) try writer.print(" ({d} completed)", .{examined.records_completed});
+    try writer.print(", {d} symbol{s}; ", .{ examined.symbols, plural(examined.symbols) });
     if (validation.alphabet.sample) |sample| {
-        try writer.print("{s} alphabet chosen from {d} symbol{s}\n", .{ @tagName(validation.alphabet.alphabet), sample.symbols, plural(sample.symbols) });
-    } else try writer.print("{s} alphabet\n", .{@tagName(validation.alphabet.alphabet)});
+        try writer.print("{s} alphabet chosen from {d} symbol{s}", .{ @tagName(validation.alphabet.alphabet), sample.symbols, plural(sample.symbols) });
+    } else try writer.print("{s} alphabet", .{@tagName(validation.alphabet.alphabet)});
+    if (validation.name_budget_stop) |stop| try writer.print("; duplicate check stopped at record {d} at its {d}-byte name budget", .{ stop.stopped_at_record, stop.budget_bytes });
+    try writer.writeByte('\n');
 }
 
 /// Printable ASCII as is; controls, non-ASCII bytes, quotes, and backslashes escaped.
@@ -373,6 +418,7 @@ fn writeOpaque(json: *std.json.Stringify, bytes: []const u8, original: u128, low
 
 fn jsonValidation(json: *std.json.Stringify, failure: *const diagnostics.Failure, validation: *const Validation) std.Io.Writer.Error!void {
     try json.beginObject();
+    try field(json, "outcome", @tagName(validation.outcome()));
     try field(json, "completion", @tagName(validation.completion));
     try json.objectField("policy");
     try json.beginObject();
@@ -381,7 +427,24 @@ fn jsonValidation(json: *std.json.Stringify, failure: *const diagnostics.Failure
     try jsonNamedValue(json, failure, "max_header_bytes", validation.max_header_bytes);
     try jsonNamedValue(json, failure, "header_convention", validation.convention);
     try json.endObject();
+    try json.objectField("checks");
+    try json.beginObject();
+    inline for (Validation.CHECKS) |category| try field(json, @tagName(category), @tagName(validation.check(category)));
+    try json.endObject();
     try jsonNamedValue(json, failure, "examined", validation.examined);
+    const all = validation.totals(null);
+    try json.objectField("findings");
+    try json.beginObject();
+    try jsonNamedValue(json, failure, "errors", all.errors);
+    try jsonNamedValue(json, failure, "warnings", all.warnings);
+    try jsonNamedValue(json, failure, "error_codes", validation.codes(.@"error"));
+    try jsonNamedValue(json, failure, "warning_codes", validation.codes(.warning));
+    try json.endObject();
+    try json.objectField("categories");
+    try json.beginObject();
+    inline for (Validation.CHECKS) |category| try jsonNamedValue(json, failure, @tagName(category), validation.totals(category));
+    try json.endObject();
+    try jsonNamedValue(json, failure, "name_budget", validation.name_budget_stop);
     try jsonNamedValue(json, failure, "records_with_errors", validation.records_with_errors);
     try jsonNamedValue(json, failure, "records_with_warnings", validation.records_with_warnings);
     try json.objectField("codes");

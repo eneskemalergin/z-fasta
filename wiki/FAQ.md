@@ -44,11 +44,11 @@ Yes through default `.zfi` side tables. `.fai` emission rejects it.
 
 ## Can validate fix mixed widths?
 
-Yes when no blocking error prevents repair. Each record is rewrapped to its modal observed non-empty width.
+Yes when no blocking finding prevents repair. Every record is rewrapped at `--width` symbols per line (default 60).
 
 ## Does fix change biological sequence bytes?
 
-It removes spaces and tabs only from sequence-line ends, joins sequence content, and rewraps it. It does not replace invalid characters or invent bases. Use a strict post-fix validation as the gate.
+No. It keeps every symbol in order and drops only what is not a symbol: spaces and tabs in sequence lines, blank lines, CR line ends, and a leading BOM. It does not replace invalid characters or invent bases. Use a strict post-fix validation as the gate.
 
 ## Can fix overwrite the input?
 
@@ -76,7 +76,7 @@ The requested sample classified as protein. Complement-based transforms are nucl
 
 ## How is sequence type detected?
 
-Case-insensitive IUPAC nucleotide symbols must be strictly more than 90 percent of counted symbols. Stats uses the full indexed population, validate samples the first 100000 sequence bytes (report v2: the first 100000 symbols), and GET samples up to 256 requested bases per record for complement eligibility.
+Case-insensitive IUPAC nucleotide symbols must be strictly more than 90 percent of counted symbols. Stats uses the full indexed population, validate samples the first 100000 symbols, and GET samples up to 256 requested bases per record for complement eligibility.
 
 ## Can names or BED come from stdin?
 

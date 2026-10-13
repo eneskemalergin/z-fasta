@@ -37,9 +37,11 @@ FASTQ is coming as a separate project, z-fastq, built around the same priorities
 - Names file identifier: 65535 bytes.
 - BED chromosome or identifier: 65535 bytes.
 - BED or names line reader: 69631 bytes before newline is required.
-- Retained validate events: 10000 in report v1; report v2 keeps the first occurrence of each code and exact counts.
+- Validate examples: the first occurrence of each finding code; counts are exact and uncapped.
+- Validate read buffer: 256 KiB.
+- Validate duplicate check: unbounded unless `--max-name-memory` sets a budget; on a file it reserves about 1 MiB before its first name.
 - Default validate header warning threshold: 1024 bytes.
-- Validate type sample: first 100000 sequence bytes across the file (report v2: symbols).
+- Validate type sample: first 100000 symbols across the file, unless `--type` names the alphabet.
 - GET complement type sample: up to 256 requested bases per record.
 
 ## Streaming batches
@@ -56,7 +58,7 @@ Seekable BED and names files also retain one lookup entry per unique requested i
 
 Index and GET treat bytes greater than ASCII space as sequence symbols. GET side-table extraction ignores ASCII whitespace between symbol runs.
 
-Validate trims only spaces and tabs from the right edge of sequence lines before width and alphabet checks. Interior whitespace remains content for validation and is normally an invalid character.
+Validate uses the same rule: spaces and tabs in a sequence line are not symbols and are reported as `format.sequence_whitespace`; other bytes below space are reported as control bytes.
 
 ## Sequence transforms
 
@@ -71,7 +73,7 @@ Validate trims only spaces and tabs from the right edge of sequence lines before
 - GET wraps at 60 symbols per line.
 - Index `.fai` writes stdout only.
 - Stats writes one human-readable text report.
-- Validate writes human text, JSON Lines, or one JSON summary.
+- Validate writes a human-readable text report or one JSON object.
 
 ## Index limits
 

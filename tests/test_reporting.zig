@@ -25,7 +25,7 @@ fn largest(comptime T: type, preview: diagnostics.Preview) T {
         return attempts;
     }
     if (T == diagnostics.Eof) return .{ .delimiter = .{ .delimiter = 255, .observed_bytes = .{ .at_least = std.math.maxInt(u128) } } };
-    if (T == diagnostics.Blocker) return .{ .invalid_symbol = largest(diagnostics.InvalidSymbol, preview) };
+    if (T == diagnostics.Blocker) return .{ .content_before_header = largest(diagnostics.Preamble, preview) };
     return switch (@typeInfo(T)) {
         .void => {},
         .bool => true,
@@ -218,7 +218,7 @@ test "[edge] - [reporting]: typed exceptional encodings retain read kind and blo
     failure.reset(.validate);
     failure.deferFailure(.{ .details = .{ .@"io.unexpected_eof" = .{ .delimiter = .{ .delimiter = 9, .observed_bytes = .{ .at_least = 9007199254740993 } } } }, .stage = .read });
     failure.addSecondary(.{ .details = .{ .@"index.unsupported_version" = .{ .found_version = 2, .supported_version = 1 } }, .stage = .parse });
-    failure.addSecondary(.{ .details = .{ .@"repair.blocked" = .{ .blocker = .{ .invalid_symbol = .{ .byte = 63, .policy = .{ .alphabet = .dna, .selection = .automatic, .sample = .{ .symbols = 256, .rule = .nucleotide_above_90_percent } } } }, .repair_policy = .legacy_safe } }, .stage = .scan });
+    failure.addSecondary(.{ .details = .{ .@"repair.blocked" = .{ .blocker = .{ .content_before_header = .{ .content_bytes = .{ .at_least = 9007199254740993 } } }, .repair_policy = .preserve_symbols } }, .stage = .scan });
     var buffer: [reporting.JSON_BYTES_LIMIT]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try reporting.writeJson(&writer, &failure, .{});
@@ -232,9 +232,9 @@ test "[edge] - [reporting]: typed exceptional encodings retain read kind and blo
     const version = object(object(result, "secondary").array.items[0], "data");
     try testing.expectEqual(@as(i64, 1), object(version, "supported_versions").array.items[0].integer);
     const repair = object(object(result, "secondary").array.items[1], "data");
-    try testing.expectEqualStrings("sequence.invalid_symbol", object(repair, "reason_code").string);
-    const policy = object(object(repair, "blocker"), "policy");
-    try testing.expectEqualStrings("256", object(object(policy, "sample"), "symbols").string);
+    try testing.expectEqualStrings("fasta.content_before_header", object(repair, "reason_code").string);
+    try testing.expectEqualStrings("9007199254740993", object(object(repair, "blocker"), "content_bytes_min").string);
+    try testing.expectEqualStrings("preserve_symbols", object(repair, "repair_policy").string);
 }
 
 test "[failure] - [reporting]: writes and late flush fail once without changing the original result" {

@@ -4,6 +4,33 @@
 
 All notable changes to z-fasta will be documented in this file.
 
+## [Unreleased]
+
+`validate` is overhauled. It reads the FASTA once through a fixed 256 KiB buffer, by the same rules as `index`, and its peak memory no longer grows with the file. On a 3.15 GB human genome it takes about as long as `index`, under half a second on a warm cache, with under 4 MiB of memory; the previous version mapped the whole file. **Its report, counting rules, and options change; update scripts that parse validate output.**
+
+### Changed
+
+- One report replaces the event list. Each finding code is counted exactly in its unit (byte, line, record, or file), with the records it affects and its first occurrence. Text prints one line per code; `--json` prints one JSON object in the diagnostics envelope, with outcome, per-check states, totals by severity and category, and progress. Nothing is capped, so a file's exit status no longer depends on how many findings it has.
+- Finding codes replace the old kinds: `fasta.no_records`, `fasta.content_before_header`, `fasta.header_control_byte`, `fasta.sequence_control_byte`, `fasta.empty_record`, `fasta.empty_identifier`, `fasta.duplicate_identifier`, `fasta.long_header`, `header.convention_mismatch`, `sequence.invalid_symbol`, and the six `format.*` codes.
+- Spaces and tabs inside sequence lines are whitespace findings, as `index` and `get` already skip them, not invalid symbols. Other control bytes are errors in headers and sequences. Empty identifiers are errors. Content before the first header, blank lines inside records, and empty input are reported precisely.
+- JSON identifiers are reversible: valid UTF-8 as text, other bytes as base64, with truncation and original length.
+- `--fix` writes the repaired copy in the same pass, wrapping symbols at `--width N` (default 60) instead of each record's most common width. It refuses only what the copy cannot keep: no records, content before the first header, and control bytes. Duplicate identifiers and symbols outside the alphabet no longer block repair; the copy keeps them.
+- `--schema` checks the identifier instead of the whole header line.
+
+### Removed
+
+- `--summary`: `--json` always prints one object.
+- `--fix-format-only`: symbols outside the alphabet no longer block repair.
+- The 10,000-event list and its exit status.
+
+### Added
+
+- `--width N` for `--fix`.
+- `--type auto|dna|rna|protein|any` names the alphabet instead of sampling the first 100,000 symbols. `dna` rejects U and `rna` rejects T; `any` checks everything except the alphabet.
+- `validate -` reads standard input.
+- `--max-name-memory BYTES` bounds the duplicate check; past it the check stops and the report is `incomplete`, never a clean pass.
+- Package calls `validation.validate` and `validation.repair` over any `std.Io.Reader`.
+
 ## [0.3.5]
 
 The `.zfi` file format and valid `.fai` rows are unchanged. **Re-index FASTA files that have a space or tab inside or at the end of a sequence line after a record's first line.** Version 0.3.4 indexed those records as fixed-width, so their `.zfi` and `.fai` sidecars report wrong lengths and GET returns the whitespace bytes; the stale-index check does not detect this. Other indexes remain valid. Existing successful FASTA, FAI, statistics and validator JSON v1 output keeps its format.

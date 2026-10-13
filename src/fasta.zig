@@ -102,6 +102,50 @@ pub const Bases = struct {
     pub const countOutside = countWhitespace;
 };
 
+/// IUPAC nucleotide symbols with both T and U, in either case.
+pub const NUCLEOTIDE_SYMBOLS = "ACGTUNRYWSMKHBVDacgtunrywsmkhbvd";
+/// IUPAC DNA symbols, without U, in either case.
+pub const DNA_SYMBOLS = "ACGTNRYWSMKHBVDacgtnrywsmkhbvd";
+/// IUPAC RNA symbols, U instead of T, in either case.
+pub const RNA_SYMBOLS = "ACGUNRYWSMKHBVDacgunrywsmkhbvd";
+/// The 26 letters, `*` for a stop, and `-` for a gap, in either case.
+pub const PROTEIN_SYMBOLS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ*-abcdefghijklmnopqrstuvwxyz";
+
+/// The common symbols of a nucleotide alphabet, which a vector check accepts: `letters` (lowercase)
+/// in either case. Other IUPAC symbols count as outside, so callers check them through the full
+/// alphabet.
+pub fn PlainLetters(comptime letters: []const u8) type {
+    return struct {
+        pub fn countOutside(comptime vector_len: usize, data: []const u8) usize {
+            return countOutsideWith(vector_len, data, isPlain);
+        }
+
+        fn isPlain(comptime Vec: type, bytes: Vec) @Vector(@typeInfo(Vec).vector.len, bool) {
+            const folded = bytes | @as(Vec, @splat(0x20));
+            var inside: @Vector(@typeInfo(Vec).vector.len, bool) = @splat(false);
+            inline for (letters) |letter| inside = inside | (folded == @as(Vec, @splat(letter)));
+            return inside;
+        }
+    };
+}
+
+pub const PlainNucleotides = PlainLetters("acgtun");
+pub const PlainDna = PlainLetters("acgtn");
+pub const PlainRna = PlainLetters("acgun");
+
+/// Exactly `PROTEIN_SYMBOLS`.
+pub const ProteinSymbols = struct {
+    pub fn countOutside(comptime vector_len: usize, data: []const u8) usize {
+        return countOutsideWith(vector_len, data, isProteinSymbol);
+    }
+
+    fn isProteinSymbol(comptime Vec: type, bytes: Vec) @Vector(@typeInfo(Vec).vector.len, bool) {
+        const folded = bytes | @as(Vec, @splat(0x20));
+        const letter = (folded >= @as(Vec, @splat('a'))) & (folded <= @as(Vec, @splat('z')));
+        return letter | (bytes == @as(Vec, @splat('*'))) | (bytes == @as(Vec, @splat('-')));
+    }
+};
+
 /// True when a line of `line_bases` symbols plus an LF or CRLF fills exactly `line_bytes`.
 pub fn isDenseLineGeometry(line_bases: u32, line_bytes: u32) bool {
     if (line_bases == 0 or line_bytes <= line_bases) return false;
@@ -1516,6 +1560,34 @@ fn lineSliceHasWhitespace(data: []const u8, start: usize, end: usize) bool {
         if (!isBase(data[pos])) return true;
     }
     return false;
+}
+
+fn countOutsideWith(comptime vector_len: usize, data: []const u8, comptime inside: anytype) usize {
+    const Vec = @Vector(vector_len, u8);
+    const Wide = @Vector(vector_len, u16);
+    const group = 128;
+    var count: usize = 0;
+    var pos: usize = 0;
+    while (data.len - pos >= vector_len * group) {
+        var lanes: Vec = @splat(0);
+        for (0..group) |_| {
+            const bytes: Vec = data[pos..][0..vector_len].*;
+            lanes += @select(u8, inside(Vec, bytes), @as(Vec, @splat(0)), @as(Vec, @splat(1)));
+            pos += vector_len;
+        }
+        count += @reduce(.Add, @as(Wide, lanes));
+    }
+    var lanes: Vec = @splat(0);
+    while (data.len - pos >= vector_len) : (pos += vector_len) {
+        const bytes: Vec = data[pos..][0..vector_len].*;
+        lanes += @select(u8, inside(Vec, bytes), @as(Vec, @splat(0)), @as(Vec, @splat(1)));
+    }
+    count += @reduce(.Add, @as(Wide, lanes));
+    while (pos < data.len) : (pos += 1) {
+        const one: @Vector(1, u8) = .{data[pos]};
+        count += @intFromBool(!inside(@Vector(1, u8), one)[0]);
+    }
+    return count;
 }
 
 fn countWhitespaceDirect(comptime vector_len: usize, data: []const u8) usize {

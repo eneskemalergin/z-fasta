@@ -874,10 +874,9 @@ fn zfiOutputPath(buffer: []u8, path: []const u8, diag: Diagnostics) ![]const u8 
 fn retainScanCause(failure: ?*diagnostics.Failure, reader: *std.Io.File.Reader, writer: ?*std.Io.File.Writer) void {
     const destination = failure orelse return;
     if (!destination.has_primary) return;
+    diagnostics.retainReaderCause(destination, reader);
     const primary = &destination.primary_storage;
-    if (primary.stage == .read and primary.at.source == .fasta) {
-        if (reader.err) |err| primary.cause = .{ .zig = err };
-    } else if ((primary.stage == .write or primary.stage == .flush) and primary.at.source == .fai_spool) {
+    if ((primary.stage == .write or primary.stage == .flush) and primary.at.source == .fai_spool) {
         if (writer) |output| if (output.err) |err| {
             primary.cause = .{ .zig = err };
         };

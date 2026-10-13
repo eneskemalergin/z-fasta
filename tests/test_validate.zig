@@ -1,4 +1,4 @@
-//! Validate tests: issue kinds, JSON output, `--fix`, and agreement with the indexer.
+//! Validate tests: finding codes and counts, read splits, the vector path, `--fix`, and the CLI.
 
 const std = @import("std");
 const main = @import("main");
@@ -6,6 +6,8 @@ const utility = @import("utility.zig");
 
 const io = std.testing.io;
 const validator = main.validator;
+const diagnostics = main.index_format.diagnostics;
+const reporting = main.reporting;
 
 const ZFASTA_BIN = utility.ZFASTA_BIN;
 const expectCliResult = utility.expectCliResult;
@@ -14,1461 +16,8 @@ const writeFastaArtifact = utility.writeFastaArtifact;
 const writeZfi = utility.writeZfi;
 const captureExtractRegion = utility.captureExtractRegion;
 
-fn validateBytes(allocator: std.mem.Allocator, data: []const u8, options: validator.Options) main.index_format.diagnostics.Error!validator.Summary {
-    var failure: main.index_format.diagnostics.Failure = undefined;
-    return validator.validateData(allocator, data, options, &failure);
-}
-
-fn fixBytes(allocator: std.mem.Allocator, data: []const u8, record_widths: []const u32) main.index_format.diagnostics.Error![]u8 {
-    var failure: main.index_format.diagnostics.Failure = undefined;
-    return validator.fixData(allocator, data, record_widths, &failure);
-}
-
-fn renderEvent(allocator: std.mem.Allocator, event: validator.Event) main.index_format.diagnostics.Error![]u8 {
-    var failure: main.index_format.diagnostics.Failure = undefined;
-    return validator.renderJsonEvent(allocator, event, &failure);
-}
-
-/// The blocker `checkFixAllowed` records, or null when the fix may proceed.
-fn fixBlocker(summary: *const validator.Summary, options: validator.Options) !?std.meta.Tag(main.index_format.diagnostics.Blocker) {
-    var failure: main.index_format.diagnostics.Failure = undefined;
-    failure.reset(.validate);
-    validator.checkFixAllowed(summary, options, &failure) catch |err| {
-        if (err != error.RepairRefused) return err;
-        return std.meta.activeTag(failure.primary().?.details.@"repair.blocked".blocker);
-    };
-    return null;
-}
-
-fn countKind(summary: *const validator.Summary, kind: validator.Kind) usize {
-    var count: usize = 0;
-    for (summary.events.items) |event| {
-        if (event.kind == kind) count += 1;
-    }
-    return count;
-}
-
-fn expectFixIdempotent(allocator: std.mem.Allocator, broken: []const u8) !void {
-    var before = try validateBytes(allocator, broken, .{});
-    defer before.deinit(allocator);
-    try std.testing.expectEqual(null, try fixBlocker(&before, .{}));
-
-    const fixed = try fixBytes(allocator, broken, before.record_widths.items);
-    defer allocator.free(fixed);
-
-    var after = try validateBytes(allocator, fixed, .{});
-    defer after.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 0), after.events.items.len);
-
-    const fixed_again = try fixBytes(allocator, fixed, after.record_widths.items);
-    defer allocator.free(fixed_again);
-    try std.testing.expectEqualStrings(fixed, fixed_again);
-}
-
-fn validateAndDeinitForAllocationCheck(allocator: std.mem.Allocator, data: []const u8) !void {
-    var summary = try validateBytes(allocator, data, .{});
-    defer summary.deinit(allocator);
-}
-
-fn fixAndFreeForAllocationCheck(allocator: std.mem.Allocator, data: []const u8) !void {
-    const widths = [_]u32{4};
-    const fixed = try fixBytes(allocator, data, &widths);
-    defer allocator.free(fixed);
-}
-
-fn renderAndFreeForAllocationCheck(allocator: std.mem.Allocator, name: []const u8) !void {
-    const json = try renderEvent(allocator, .{
-        .level = .error_level,
-        .kind = .duplicate_name,
-        .line = 2,
-        .name = name,
-        .first_line = 1,
-    });
-    defer allocator.free(json);
-}
-
-fn fuzzValidator(_: void, smith: *std.testing.Smith) !void {
-    var storage: [512]u8 = undefined;
-    try checkValidatorProperties(storage[0..smith.slice(&storage)]);
-}
-
-fn checkValidatorProperties(data: []const u8) !void {
-    var summary = try validateBytes(std.testing.allocator, data, .{});
-    defer summary.deinit(std.testing.allocator);
-
-    try std.testing.expect(summary.events.items.len <= validator.MAX_VALIDATE_EVENTS);
-    try std.testing.expect(summary.sequence_count <= summary.header_count);
-    try std.testing.expectEqual(summary.header_count, summary.record_widths.items.len);
-    var total_kind_count: usize = 0;
-    for (summary.kind_counts) |kind_count| total_kind_count += kind_count;
-    try std.testing.expectEqual(summary.error_count + summary.warning_count, total_kind_count);
-    try std.testing.expect(summary.format_warning_count <= summary.warning_count);
-    for (summary.record_widths.items) |width| try std.testing.expect(width > 0);
-
-    var failure: main.index_format.diagnostics.Failure = undefined;
-    failure.reset(.validate);
-    validator.checkFixAllowed(&summary, .{}, &failure) catch |err| switch (err) {
-        error.RepairRefused => return,
-        else => return err,
-    };
-    const fixed = try fixBytes(std.testing.allocator, data, summary.record_widths.items);
-    defer std.testing.allocator.free(fixed);
-
-    var fixed_summary = try validateBytes(std.testing.allocator, fixed, .{});
-    defer fixed_summary.deinit(std.testing.allocator);
-    failure.reset(.validate);
-    try validator.checkFixAllowed(&fixed_summary, .{}, &failure);
-    const fixed_again = try fixBytes(
-        std.testing.allocator,
-        fixed,
-        fixed_summary.record_widths.items,
-    );
-    defer std.testing.allocator.free(fixed_again);
-    try std.testing.expectEqualStrings(fixed, fixed_again);
-}
-
-fn scanZfi(allocator: std.mem.Allocator, data: []const u8) !main.indexer.ZfiIndex {
-    return main.indexer.scanZfiData(allocator, data, true);
-}
-
-fn expectHasSideTable(index: *const main.indexer.ZfiIndex) !void {
-    var any_non_uniform = false;
-    for (index.records.items) |rec| {
-        if (!rec.isUniformWidth()) any_non_uniform = true;
-    }
-    try std.testing.expect(any_non_uniform);
-    try std.testing.expect(index.side_tables.items.len > 0);
-}
-
-fn expectAllUniformNoSideTable(index: *const main.indexer.ZfiIndex) !void {
-    for (index.records.items) |rec| {
-        try std.testing.expect(rec.isUniformWidth());
-    }
-    try std.testing.expectEqual(@as(usize, 0), index.side_tables.items.len);
-}
-
-fn fixFormatOnly(allocator: std.mem.Allocator, broken: []const u8) ![]u8 {
-    var summary = try validateBytes(allocator, broken, .{});
-    defer summary.deinit(allocator);
-    try std.testing.expectEqual(null, try fixBlocker(&summary, .{}));
-    return fixBytes(allocator, broken, summary.record_widths.items);
-}
-
-fn expectValidateClean(allocator: std.mem.Allocator, data: []const u8) !void {
-    var summary = try validateBytes(allocator, data, .{});
-    defer summary.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 0), summary.events.items.len);
-}
-
-fn expectFormatFixPreservesRegion(
-    allocator: std.mem.Allocator,
-    stem: []const u8,
-    broken: []const u8,
-    region: []const u8,
-    expected: []const u8,
-) !void {
-    var broken_index = try scanZfi(allocator, broken);
-    defer broken_index.deinit(allocator);
-    try expectHasSideTable(&broken_index);
-
-    const fixed = try fixFormatOnly(allocator, broken);
-    defer allocator.free(fixed);
-    try expectValidateClean(allocator, fixed);
-
-    var fixed_index = try scanZfi(allocator, fixed);
-    defer fixed_index.deinit(allocator);
-    try expectAllUniformNoSideTable(&fixed_index);
-
-    const broken_stem = try std.fmt.allocPrint(allocator, "{s}-broken", .{stem});
-    defer allocator.free(broken_stem);
-    const fixed_stem = try std.fmt.allocPrint(allocator, "{s}-fixed", .{stem});
-    defer allocator.free(fixed_stem);
-    const broken_path = try writeFastaArtifact(allocator, broken_stem, broken);
-    defer allocator.free(broken_path);
-    defer std.Io.Dir.cwd().deleteFile(io, broken_path) catch {};
-    const fixed_path = try writeFastaArtifact(allocator, fixed_stem, fixed);
-    defer allocator.free(fixed_path);
-    defer std.Io.Dir.cwd().deleteFile(io, fixed_path) catch {};
-    const broken_zfi = try std.fmt.allocPrint(allocator, "{s}.zfi", .{broken_path});
-    defer allocator.free(broken_zfi);
-    defer std.Io.Dir.cwd().deleteFile(io, broken_zfi) catch {};
-    const fixed_zfi = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fixed_path});
-    defer allocator.free(fixed_zfi);
-    defer std.Io.Dir.cwd().deleteFile(io, fixed_zfi) catch {};
-
-    try writeZfi(allocator, broken_path, broken, true);
-    try writeZfi(allocator, fixed_path, fixed, true);
-
-    const broken_output = try captureExtractRegion(allocator, broken_path, region);
-    defer allocator.free(broken_output);
-    const fixed_output = try captureExtractRegion(allocator, fixed_path, region);
-    defer allocator.free(fixed_output);
-
-    try std.testing.expectEqualStrings(broken_output, fixed_output);
-    try std.testing.expectEqualStrings(expected, fixed_output);
-}
-
-fn zfiEmbeddedName(index: *const main.indexer.ZfiIndex, rec_idx: usize) []const u8 {
-    const rec = index.records.items[rec_idx];
-    return index.name_blob.items[rec.name_offset..][0..rec.name_len];
-}
-
-fn checkNativeValidatorAllocations(allocator: std.mem.Allocator, data: []const u8) !void {
-    const diagnostics = main.index_format.diagnostics;
-    var failure: diagnostics.Failure = undefined;
-    var summary = validator.validateData(allocator, data, .{}, &failure) catch |err| {
-        try std.testing.expectEqual(error.OutOfMemory, err);
-        try std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", failure.primary().?.code());
-        try std.testing.expectEqual(error.OutOfMemory, failure.primary().?.cause.?.zig);
-        return error.OutOfMemory;
-    };
-    defer summary.deinit(allocator);
-    const fixed = validator.fixData(allocator, data, summary.record_widths.items, &failure) catch |err| {
-        try std.testing.expectEqual(error.OutOfMemory, err);
-        try std.testing.expectEqual(diagnostics.AllocationRole.rewrite_bytes, failure.primary().?.details.@"resource.out_of_memory".allocation_role);
-        return error.OutOfMemory;
-    };
-    defer allocator.free(fixed);
-    const json = validator.renderJsonEvent(allocator, .{ .level = .warning, .kind = .empty_sequence, .line = 1, .name = "seq" }, &failure) catch |err| {
-        try std.testing.expectEqual(error.OutOfMemory, err);
-        try std.testing.expectEqual(diagnostics.AllocationRole.serialized_event, failure.primary().?.details.@"resource.out_of_memory".allocation_role);
-        return error.OutOfMemory;
-    };
-    defer allocator.free(json);
-}
-
-// --- Validation and report contracts ---
-test "[cli] - [validate]: rejects unknown options regardless of position" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-    const fasta = "tests/data/simple.fasta";
-
-    try expectCliResult(
-        allocator,
-        &.{ ZFASTA_BIN, "validate", "--not-a-flag", fasta },
-        1,
-        "",
-        "error [usage.unknown_option] validate: Unknown option. option=\"--not-a-flag\"\nhint: Correct the command arguments; use --help for accepted options.\n",
-    );
-    try expectCliResult(
-        allocator,
-        &.{ ZFASTA_BIN, "validate", fasta, "--not-a-flag" },
-        1,
-        "",
-        "error [usage.unknown_option] validate: Unknown option. option=\"--not-a-flag\"\nhint: Correct the command arguments; use --help for accepted options.\n",
-    );
-}
-
-test "[cli] - [validate]: rejects invalid arguments with exact diagnostics" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const cases = [_]struct { argv: []const []const u8, stderr: []const u8 }{
-        .{
-            .argv = &.{ ZFASTA_BIN, "validate", "--summary", "tests/data/simple.fasta" },
-            .stderr = "error [usage.option_requires] validate: An option prerequisite is missing. option=summary required=json\nhint: Correct the command arguments; use --help for accepted options.\n",
-        },
-        .{
-            .argv = &.{ ZFASTA_BIN, "validate", "--fix-format-only", "tests/data/simple.fasta" },
-            .stderr = "error [usage.option_requires] validate: An option prerequisite is missing. option=fix_format_only required=fix\nhint: Correct the command arguments; use --help for accepted options.\n",
-        },
-        .{
-            .argv = &.{ ZFASTA_BIN, "validate", "-o", "zig-cache/test-artifacts/unused.fasta", "tests/data/simple.fasta" },
-            .stderr = "error [usage.option_requires] validate: An option prerequisite is missing. option=output required=fix\nhint: Correct the command arguments; use --help for accepted options.\n",
-        },
-        .{
-            .argv = &.{ ZFASTA_BIN, "validate" },
-            .stderr = "error [usage.missing_argument] validate: A required argument is missing. argument=fasta_path\nhint: Correct the command arguments; use --help for accepted options.\n",
-        },
-        .{
-            .argv = &.{ ZFASTA_BIN, "validate", "tests/data/definitely-missing-cli-failure.fasta" },
-            .stderr = "error [io.file_not_found] validate: \"tests/data/definitely-mi\" (47 bytes): Required file was not found.; cause=\"FileNotFound\"\nhint: Check the named input/output and retained I/O cause.\n",
-        },
-        .{
-            .argv = &.{ ZFASTA_BIN, "validate", "tests/data/simple.fasta/child" },
-            .stderr = "error [io.open_failed] validate: \"tests/data/simple.fasta/\" (29 bytes): Could not open the required input.; cause=\"NotDir\"\nhint: Check the named input/output and retained I/O cause.\n",
-        },
-        .{
-            .argv = &.{ ZFASTA_BIN, "validate", "tests/data/simple.fasta", "tests/data/single.fasta" },
-            .stderr = "error [usage.extra_argument] validate: Too many arguments. argument=fasta_path allowed_count=1\nhint: Correct the command arguments; use --help for accepted options.\n",
-        },
-        .{
-            .argv = &.{ ZFASTA_BIN, "validate", "-o" },
-            .stderr = "error [usage.missing_option_value] validate: A required option value is missing. option=output expected=path\nhint: Correct the command arguments; use --help for accepted options.\n",
-        },
-        .{
-            .argv = &.{ ZFASTA_BIN, "validate", "--schema" },
-            .stderr = "error [usage.missing_option_value] validate: A required option value is missing. option=schema expected=schema\nhint: Correct the command arguments; use --help for accepted options.\n",
-        },
-        .{
-            .argv = &.{ ZFASTA_BIN, "validate", "--schema", "ena", "tests/data/simple.fasta" },
-            .stderr = "error [usage.invalid_option_value] validate: Invalid option value. option=schema expected=schema value=\"ena\"\nhint: Correct the command arguments; use --help for accepted options.\n",
-        },
-        .{
-            .argv = &.{ ZFASTA_BIN, "validate", "--custom-alphabet" },
-            .stderr = "error [usage.missing_option_value] validate: A required option value is missing. option=custom_alphabet expected=alphabet\nhint: Correct the command arguments; use --help for accepted options.\n",
-        },
-        .{
-            .argv = &.{ ZFASTA_BIN, "validate", "--max-header-len" },
-            .stderr = "error [usage.missing_option_value] validate: A required option value is missing. option=max_header_len expected=positive_usize\nhint: Correct the command arguments; use --help for accepted options.\n",
-        },
-        .{
-            .argv = &.{ ZFASTA_BIN, "validate", "--max-header-len", "0", "tests/data/simple.fasta" },
-            .stderr = "error [usage.invalid_option_value] validate: Invalid option value. option=max_header_len expected=positive_usize value=\"0\"\nhint: Correct the command arguments; use --help for accepted options.\n",
-        },
-        .{
-            .argv = &.{ ZFASTA_BIN, "validate", "--fix", "tests/data/simple.fasta" },
-            .stderr = "error [usage.option_requires] validate: \"tests/data/simple.fasta\": An option prerequisite is missing. option=fix required=output\nhint: Correct the command arguments; use --help for accepted options.\n",
-        },
-    };
-    for (cases) |case| {
-        try expectCliResult(allocator, case.argv, 1, "", case.stderr);
-    }
-}
-
-test "[cli] - [validate]: returns exact status and output for clean and warning reports" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const path = try writeFastaArtifact(allocator, "cli-validate-warn", ">empty_rec\n");
-    defer allocator.free(path);
-    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
-    const invalid_path = try writeFastaArtifact(allocator, "cli-validate-error", "not FASTA\n");
-    defer allocator.free(invalid_path);
-    defer std.Io.Dir.cwd().deleteFile(io, invalid_path) catch {};
-
-    try expectCliResult(
-        allocator,
-        &.{ ZFASTA_BIN, "validate", path },
-        2,
-        "WARNING: line 1: empty sequence 'empty_rec'\n",
-        "",
-    );
-    try expectCliResult(
-        allocator,
-        &.{ ZFASTA_BIN, "validate", "--strict", path },
-        1,
-        "WARNING: line 1: empty sequence 'empty_rec'\n",
-        "",
-    );
-    try expectCliResult(
-        allocator,
-        &.{ ZFASTA_BIN, "validate", "--json", path },
-        2,
-        "{\"schema_version\":\"v1\",\"level\":\"warning\",\"line\":1,\"kind\":\"empty_sequence\",\"message\":\"empty sequence 'empty_rec'\",\"name\":\"empty_rec\"}\n",
-        "",
-    );
-    try expectCliResult(
-        allocator,
-        &.{ ZFASTA_BIN, "validate", "tests/data/simple.fasta" },
-        0,
-        "OK: no issues found\n",
-        "",
-    );
-    try expectCliResult(
-        allocator,
-        &.{ ZFASTA_BIN, "validate", invalid_path },
-        1,
-        "ERROR: line 1: no sequences found\n",
-        "",
-    );
-}
-
-test "[cli] - [validate]: applies schema, alphabet, and header limits together" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const path = try writeFastaArtifact(allocator, "cli-validate-options", ">bad\nACGTZ\n");
-    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
-
-    try expectCliResult(
-        allocator,
-        &.{
-            ZFASTA_BIN,          "validate",
-            "--schema",          "refseq",
-            "--custom-alphabet", "ACGTZ",
-            "--max-header-len",  "2",
-            path,
-        },
-        2,
-        "WARNING: line 1: header exceeds 2 bytes\n" ++
-            "WARNING: line 1: header for 'bad' does not match schema\n",
-        "",
-    );
-}
-
-test "[unit] - [validate scan]: reports duplicate names and empty records" {
-    var summary = try validateBytes(std.testing.allocator, ">dup\nAAAA\n>dup\n", .{});
-    defer summary.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .duplicate_name));
-    try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .empty_sequence));
-    try std.testing.expectEqual(@as(usize, 0), countKind(&summary, .no_sequences));
-    try std.testing.expectEqual(@as(usize, 1), summary.sequence_count);
-    try std.testing.expectEqual(@as(usize, 2), summary.header_count);
-}
-
-test "[edge] - [validate scan]: reports the complete empty-file contract" {
-    var summary = try validateBytes(std.testing.allocator, "", .{});
-    defer summary.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(usize, 0), summary.header_count);
-    try std.testing.expectEqual(@as(usize, 0), summary.sequence_count);
-    try std.testing.expectEqual(@as(usize, 0), summary.record_widths.items.len);
-    try std.testing.expectEqual(@as(usize, 1), summary.error_count);
-    try std.testing.expectEqual(@as(usize, 1), summary.warning_count);
-    try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .no_sequences));
-    try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .missing_terminal_newline));
-}
-
-test "[failure] - [validate diagnostics]: release partial allocations" {
-    try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
-        validateAndDeinitForAllocationCheck,
-        .{">dup\nAAAA \n>dup\n"},
-    );
-    try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
-        fixAndFreeForAllocationCheck,
-        .{">seq\nAAAA \n"},
-    );
-    try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
-        renderAndFreeForAllocationCheck,
-        .{"seq\"\\\xff"},
-    );
-}
-
-test "[regression] - [validate scan]: repair properties accept safe preamble refusal" {
-    try checkValidatorProperties("junk\n>seq1\nACGT\n");
-}
-
-test "[fuzz] - [validate scan]: returns bounded summaries and idempotent allowed fixes" {
-    try std.testing.fuzz({}, fuzzValidator, .{ .corpus = &.{
-        "",
-        ">a\nA\n",
-        ">a description\r\nAC\r\nGT",
-        "junk\n>seq1\nACGT\n",
-        ">a\nAAA \nCC\nGGGG\n",
-        ">bad\xffname\nA\x00C\n",
-    } });
-}
-
-test "[edge] - [validate events]: caps retained events without losing counts" {
-    const allocator = std.testing.allocator;
-
-    var at_cap: std.ArrayList(u8) = .empty;
-    defer at_cap.deinit(allocator);
-    try at_cap.appendSlice(allocator, ">seq\n");
-    var i: usize = 0;
-    while (i < validator.MAX_VALIDATE_EVENTS) : (i += 1) {
-        try at_cap.appendSlice(allocator, "ACGT \n");
-    }
-
-    var capped = try validateBytes(allocator, at_cap.items, .{});
-    defer capped.deinit(allocator);
-    try std.testing.expect(!capped.truncated);
-    try std.testing.expectEqual(validator.MAX_VALIDATE_EVENTS, capped.events.items.len);
-
-    try at_cap.appendSlice(allocator, "ACGT \n");
-    var over = try validateBytes(allocator, at_cap.items, .{});
-    defer over.deinit(allocator);
-    try std.testing.expect(over.truncated);
-    try std.testing.expectEqual(validator.MAX_VALIDATE_EVENTS, over.events.items.len);
-    try std.testing.expectEqual(
-        validator.MAX_VALIDATE_EVENTS + 1,
-        over.kind_counts[@intFromEnum(validator.Kind.trailing_whitespace)],
-    );
-}
-
-test "[edge] - [validate events]: retains fix blockers after truncation" {
-    const allocator = std.testing.allocator;
-    var input: std.ArrayList(u8) = .empty;
-    defer input.deinit(allocator);
-    try input.appendSlice(allocator, ">dup\n");
-    for (0..validator.MAX_VALIDATE_EVENTS) |_| {
-        try input.appendSlice(allocator, "A \n");
-    }
-    try input.appendSlice(allocator, ">dup\nA\n");
-
-    var summary = try validateBytes(allocator, input.items, .{});
-    defer summary.deinit(allocator);
-
-    try std.testing.expect(summary.truncated);
-    try std.testing.expectEqual(@as(usize, 1), summary.error_count);
-    try std.testing.expectEqual(.duplicate_identifier, (try fixBlocker(&summary, .{})).?);
-    try std.testing.expectEqual(.duplicate_identifier, (try fixBlocker(&summary, .{ .fix_format_only = true })).?);
-}
-
-test "[edge] - [validate events]: retains warnings left after a truncated format fix" {
-    const allocator = std.testing.allocator;
-    var input: std.ArrayList(u8) = .empty;
-    defer input.deinit(allocator);
-    try input.appendSlice(allocator, ">seq\n");
-    for (0..validator.MAX_VALIDATE_EVENTS) |_| {
-        try input.appendSlice(allocator, "A \n");
-    }
-    try input.appendSlice(allocator, ">empty\n");
-
-    var summary = try validateBytes(allocator, input.items, .{});
-    defer summary.deinit(allocator);
-
-    try std.testing.expect(summary.truncated);
-    try std.testing.expectEqual(validator.MAX_VALIDATE_EVENTS + 1, summary.warning_count);
-    try std.testing.expectEqual(@as(u8, 2), validator.exitCodeForOptions(&summary, .{ .fix = true }));
-    try std.testing.expectEqual(@as(u8, 1), validator.exitCodeForOptions(&summary, .{ .fix = true, .strict = true }));
-}
-
-test "[edge] - [validate json]: preserves names longer than 256 bytes" {
-    const allocator = std.testing.allocator;
-    const long_name = "n" ** 400;
-
-    const json = try renderEvent(allocator, .{
-        .level = .warning,
-        .kind = .empty_sequence,
-        .line = 1,
-        .name = long_name,
-    });
-    defer allocator.free(json);
-
-    try std.testing.expect(std.unicode.utf8ValidateSlice(json));
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
-    defer parsed.deinit();
-    const message = parsed.value.object.get("message").?.string;
-    try std.testing.expect(std.mem.indexOf(u8, message, long_name) != null);
-    try std.testing.expectEqualStrings(long_name, parsed.value.object.get("name").?.string);
-}
-
-test "[unit] - [validate json]: preserves valid non-ASCII names" {
-    const allocator = std.testing.allocator;
-    const name = "seq_\u{20ac}_α";
-
-    const json = try renderEvent(allocator, .{
-        .level = .warning,
-        .kind = .empty_sequence,
-        .line = 1,
-        .name = name,
-    });
-    defer allocator.free(json);
-
-    try std.testing.expect(std.unicode.utf8ValidateSlice(json));
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
-    defer parsed.deinit();
-    try std.testing.expectEqualStrings(name, parsed.value.object.get("name").?.string);
-}
-
-test "[unit] - [validate json]: escapes JSON syntax in names" {
-    const allocator = std.testing.allocator;
-    const name = "seq\"a\\b";
-
-    const json = try renderEvent(allocator, .{
-        .level = .warning,
-        .kind = .empty_sequence,
-        .line = 1,
-        .name = name,
-    });
-    defer allocator.free(json);
-
-    try std.testing.expect(std.unicode.utf8ValidateSlice(json));
-    try std.testing.expect(std.mem.indexOf(u8, json, "\\\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\\\\") != null);
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
-    defer parsed.deinit();
-    try std.testing.expectEqualStrings(name, parsed.value.object.get("name").?.string);
-}
-
-test "[edge] - [validate json]: escapes invalid UTF-8 name bytes" {
-    const allocator = std.testing.allocator;
-    const bad_name = "seq\xffname";
-
-    const json = try renderEvent(allocator, .{
-        .level = .error_level,
-        .kind = .duplicate_name,
-        .line = 3,
-        .name = bad_name,
-        .first_line = 1,
-    });
-    defer allocator.free(json);
-
-    try std.testing.expect(std.unicode.utf8ValidateSlice(json));
-    try std.testing.expect(std.mem.indexOf(u8, json, "\\u00ff") != null);
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
-    defer parsed.deinit();
-    try std.testing.expectEqualStrings("seq\u{00ff}name", parsed.value.object.get("name").?.string);
-}
-
-test "[integration] - [validate json]: reports invalid UTF-8 fixture names as valid JSON" {
-    const allocator = std.testing.allocator;
-
-    const utf8_data = try readTestFile(allocator, "tests/data/gates/invalid_utf8_header.fasta");
-    defer allocator.free(utf8_data);
-    var utf8_summary = try validateBytes(allocator, utf8_data, .{});
-    defer utf8_summary.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 2), utf8_summary.header_count);
-    try std.testing.expectEqual(@as(usize, 1), countKind(&utf8_summary, .duplicate_name));
-    const event = utf8_summary.events.items[0];
-    try std.testing.expectEqual(validator.Kind.duplicate_name, event.kind);
-    try std.testing.expectEqualSlices(u8, "bad\xffname", event.name);
-    const json = try renderEvent(allocator, event);
-    defer allocator.free(json);
-    try std.testing.expect(std.unicode.utf8ValidateSlice(json));
-    try std.testing.expect(std.mem.indexOf(u8, json, "\\u00ff") != null);
-}
-
-test "[property] - [validate alphabet]: accepts representative nucleotide and protein symbols" {
-    const cases = [_]struct {
-        sequence: []const u8,
-        sequence_type: main.fasta.SequenceType,
-    }{
-        .{ .sequence = "ACGTNRYWSMKHBVDacgtnrywsmkhbvd", .sequence_type = .nucleotide },
-        .{ .sequence = "ACGUNRYWSMKHBVDacgunrywsmkhbvd", .sequence_type = .nucleotide },
-        .{ .sequence = "ACGTUacgtu", .sequence_type = .nucleotide },
-        .{ .sequence = "EFILPQBZJXUO*-efilpqbzjxuo", .sequence_type = .protein },
-    };
-
-    for (cases) |case| {
-        const fasta = try std.fmt.allocPrint(std.testing.allocator, ">seq\n{s}\n", .{case.sequence});
-        defer std.testing.allocator.free(fasta);
-        var summary = try validateBytes(std.testing.allocator, fasta, .{});
-        defer summary.deinit(std.testing.allocator);
-
-        try std.testing.expectEqual(@as(usize, 0), summary.events.items.len);
-        try std.testing.expectEqual(case.sequence_type, summary.sequence_type);
-        try std.testing.expectEqual(@as(u64, @intCast(case.sequence.len)), summary.type_bases_sampled);
-    }
-}
-
-test "[edge] - [validate scan]: warns only above the configured byte limit" {
-    const cases = [_]struct { fasta: []const u8, warning_count: usize }{
-        .{ .fasta = ">abc\nA\n", .warning_count = 0 },
-        .{ .fasta = ">abcd\nA\n", .warning_count = 1 },
-    };
-
-    for (cases) |case| {
-        var summary = try validateBytes(std.testing.allocator, case.fasta, .{ .max_header_len = 3 });
-        defer summary.deinit(std.testing.allocator);
-        try std.testing.expectEqual(case.warning_count, countKind(&summary, .long_header));
-        if (case.warning_count == 1) {
-            const event = summary.events.items[0];
-            try std.testing.expectEqual(@as(usize, 1), event.line);
-            try std.testing.expectEqual(@as(usize, 3), event.limit);
-        }
-    }
-}
-
-test "[cli] - [validate json]: returns the complete stable schema" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const fasta_path = try writeFastaArtifact(allocator, "validate-type-json", ">seq\nACGT\n");
-    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
-
-    const expected = try std.fmt.allocPrint(
-        allocator,
-        "{{\"schema_version\":\"v1\",\"truncated\":false,\"sequence_type\":\"nucleotide\",\"type_bases_sampled\":4,\"type_sample_cap\":{d},\"counts\":{{\"no_sequences\":0,\"duplicate_name\":0,\"invalid_character\":0,\"null_byte\":0,\"utf8_bom\":0,\"inconsistent_line_widths\":0,\"trailing_whitespace\":0,\"empty_sequence\":0,\"missing_terminal_newline\":0,\"mixed_line_endings\":0,\"long_header\":0,\"schema_violation\":0}},\"first_examples\":{{}}}}\n",
-        .{main.validator.TYPE_SAMPLE_BASES},
-    );
-    try expectCliResult(
-        allocator,
-        &.{ ZFASTA_BIN, "validate", "--json", "--summary", fasta_path },
-        0,
-        expected,
-        "",
-    );
-}
-
-test "[edge] - [validate scan]: reports missing terminal newline and invalid nucleotide byte" {
-    var summary = try validateBytes(std.testing.allocator, ">seq\nACGTACGTAC?", .{});
-    defer summary.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(main.fasta.SequenceType.nucleotide, summary.sequence_type);
-    try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .missing_terminal_newline));
-    try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .invalid_character));
-}
-
-test "[unit] - [validate alphabet]: custom symbols replace the detected alphabet" {
-    var summary = try validateBytes(std.testing.allocator, ">seq\nACGTZ\n", .{
-        .custom_alphabet = "ACGTZ",
-    });
-    defer summary.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(usize, 0), countKind(&summary, .invalid_character));
-}
-
-test "[unit] - [validate scan]: reports width and trailing-whitespace warnings" {
-    var summary = try validateBytes(std.testing.allocator, ">seq\nAAAA\nCC \nGGGG\nTT\n", .{});
-    defer summary.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .trailing_whitespace));
-    try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .inconsistent_line_widths));
-}
-
-test "[edge] - [validate scan]: reports a final line wider than the established width" {
-    var summary = try validateBytes(std.testing.allocator, ">seq\nAA\nAAAA\n", .{});
-    defer summary.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .inconsistent_line_widths));
-    const event = summary.events.items[0];
-    try std.testing.expectEqual(@as(u32, 2), event.expected_width);
-    try std.testing.expectEqual(@as(u32, 4), event.actual_width);
-    try std.testing.expectEqual(@as(usize, 3), event.line);
-}
-
-test "[unit] - [validate schemas]: distinguishes valid and invalid UniProt and RefSeq headers" {
-    const cases = [_]struct {
-        fasta: []const u8,
-        schema: validator.Schema,
-        violations: usize,
-    }{
-        .{ .fasta = ">sp|P12345|PROT_HUMAN\nMAV\n", .schema = .uniprot, .violations = 0 },
-        .{ .fasta = ">P12345\nMAV\n", .schema = .uniprot, .violations = 1 },
-        .{ .fasta = ">NC_000001.11 Homo sapiens\nACGT\n", .schema = .refseq, .violations = 0 },
-        .{ .fasta = ">bad\nACGT\n", .schema = .refseq, .violations = 1 },
-    };
-
-    for (cases) |case| {
-        var summary = try validateBytes(std.testing.allocator, case.fasta, .{ .schema = case.schema });
-        defer summary.deinit(std.testing.allocator);
-        try std.testing.expectEqual(case.violations, countKind(&summary, .schema_violation));
-    }
-}
-
-test "[unit] - [validate]: promotes warnings in strict mode" {
-    try std.testing.expectEqual(@as(u8, 0), validator.exitCode(0, 0, false));
-    try std.testing.expectEqual(@as(u8, 2), validator.exitCode(0, 1, false));
-    try std.testing.expectEqual(@as(u8, 1), validator.exitCode(0, 1, true));
-    try std.testing.expectEqual(@as(u8, 1), validator.exitCode(1, 0, false));
-}
-
-test "[unit] - [validate]: ignores warnings repaired by format rewrite" {
-    var summary = try validateBytes(std.testing.allocator, ">seq\nACGT \n", .{});
-    defer summary.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .trailing_whitespace));
-    try std.testing.expectEqual(@as(u8, 2), validator.exitCodeForOptions(&summary, .{}));
-    try std.testing.expectEqual(@as(u8, 0), validator.exitCodeForOptions(&summary, .{ .fix = true }));
-}
-
-test "[property] - [validate fix]: is idempotent across supported layout rewrites" {
-    const cases = [_][]const u8{
-        "\xEF\xBB\xBF>seq\r\nAAAA\r\nCC \r\nGGGG\r\nTT",
-        ">seq\r\nAAAA\nCC\n",
-        ">seq\nACGT\n",
-    };
-    for (cases) |input| try expectFixIdempotent(std.testing.allocator, input);
-
-    const clean = cases[2];
-    var summary = try validateBytes(std.testing.allocator, clean, .{});
-    defer summary.deinit(std.testing.allocator);
-    const fixed = try fixBytes(std.testing.allocator, clean, summary.record_widths.items);
-    defer std.testing.allocator.free(fixed);
-    try std.testing.expectEqualStrings(clean, fixed);
-}
-
-test "[failure] - [validate fix]: rejects errors outside the format-only contract" {
-    var dup = try validateBytes(std.testing.allocator, ">dup\nACGT\n>dup\nGCTA\n", .{});
-    defer dup.deinit(std.testing.allocator);
-    try std.testing.expectEqual(.duplicate_identifier, (try fixBlocker(&dup, .{})).?);
-
-    var preamble_only = try validateBytes(std.testing.allocator, "not fasta\n", .{});
-    defer preamble_only.deinit(std.testing.allocator);
-    try std.testing.expectEqual(.content_before_header, (try fixBlocker(&preamble_only, .{})).?);
-
-    var none = try validateBytes(std.testing.allocator, "", .{});
-    defer none.deinit(std.testing.allocator);
-    try std.testing.expectEqual(.no_records, (try fixBlocker(&none, .{})).?);
-
-    var bad = try validateBytes(std.testing.allocator, ">seq\nACGT?\n", .{});
-    defer bad.deinit(std.testing.allocator);
-    try std.testing.expectEqual(.invalid_symbol, (try fixBlocker(&bad, .{})).?);
-    try std.testing.expectEqual(null, try fixBlocker(&bad, .{ .fix_format_only = true }));
-
-    var nulls = try validateBytes(std.testing.allocator, ">seq\nACGT\x00TT\n", .{});
-    defer nulls.deinit(std.testing.allocator);
-    try std.testing.expectEqual(.sequence_control_byte, (try fixBlocker(&nulls, .{})).?);
-}
-
-test "[property] - [validate fix]: preserves invalid sequence characters" {
-    const broken = ">seq\nACGT?\n";
-    var summary = try validateBytes(std.testing.allocator, broken, .{});
-    defer summary.deinit(std.testing.allocator);
-    try std.testing.expectEqual(null, try fixBlocker(&summary, .{ .fix_format_only = true }));
-
-    const fixed = try fixBytes(std.testing.allocator, broken, summary.record_widths.items);
-    defer std.testing.allocator.free(fixed);
-    try std.testing.expect(std.mem.indexOf(u8, fixed, "ACGT?") != null);
-
-    var after = try validateBytes(std.testing.allocator, fixed, .{});
-    defer after.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 1), countKind(&after, .invalid_character));
-}
-
-test "[property] - [validate fix]: preserves empty-record warnings" {
-    const cases = [_][]const u8{ ">empty\n", ">empty" };
-    for (cases) |broken| {
-        var summary = try validateBytes(std.testing.allocator, broken, .{});
-        defer summary.deinit(std.testing.allocator);
-        try std.testing.expectEqual(@as(usize, 1), countKind(&summary, .empty_sequence));
-
-        const fixed = try fixBytes(std.testing.allocator, broken, summary.record_widths.items);
-        defer std.testing.allocator.free(fixed);
-        try std.testing.expectEqualStrings(">empty\n", fixed);
-
-        var after = try validateBytes(std.testing.allocator, fixed, .{});
-        defer after.deinit(std.testing.allocator);
-        try std.testing.expectEqual(@as(usize, 1), countKind(&after, .empty_sequence));
-        try std.testing.expectEqual(@as(usize, 0), countKind(&after, .missing_terminal_newline));
-    }
-}
-
-// --- Fix and cross-module contracts ---
-test "[cli] - [validate fix]: replaces the output with the exact library rewrite" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const broken =
-        \\>seq
-        \\AAAA  
-        \\CCCC
-        \\
-    ;
-
-    var summary = try validateBytes(allocator, broken, .{});
-    defer summary.deinit(allocator);
-    const expected = try fixBytes(allocator, broken, summary.record_widths.items);
-
-    const in_path = try writeFastaArtifact(allocator, "validate-fix-cli-in", broken);
-    defer std.Io.Dir.cwd().deleteFile(io, in_path) catch {};
-    const out_path = try writeFastaArtifact(allocator, "validate-fix-cli-out", "previous output\n");
-    defer std.Io.Dir.cwd().deleteFile(io, out_path) catch {};
-
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const spawn_io = threaded.io();
-
-    const result = try std.process.run(allocator, spawn_io, .{
-        .argv = &.{ ZFASTA_BIN, "validate", "--fix", "-o", out_path, in_path },
-        .stdout_limit = .limited(1024 * 1024),
-        .stderr_limit = .limited(1024 * 1024),
-    });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-
-    switch (result.term) {
-        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
-        else => return error.ChildProcessFailed,
-    }
-    try std.testing.expectEqualStrings(
-        "WARNING: line 2: trailing whitespace on sequence line in 'seq'\n",
-        result.stdout,
-    );
-    try std.testing.expectEqual(@as(usize, 0), result.stderr.len);
-
-    const got = try readTestFile(allocator, out_path);
-    try std.testing.expectEqualStrings(expected, got);
-}
-
-test "[cli] - [validate fix]: preserves invalid bytes while normal fix refuses" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const in_path = try writeFastaArtifact(allocator, "validate-format-only-in", ">seq\nACGT? \n");
-    defer std.Io.Dir.cwd().deleteFile(io, in_path) catch {};
-    const rejected_path = try utility.uniqueArtifactPath(allocator, "validate-fix-rejected", "fa");
-    defer std.Io.Dir.cwd().deleteFile(io, rejected_path) catch {};
-    const fixed_path = try utility.uniqueArtifactPath(allocator, "validate-format-only-out", "fa");
-    defer std.Io.Dir.cwd().deleteFile(io, fixed_path) catch {};
-
-    const expected_delivery = try std.fmt.allocPrint(allocator, "error [repair.blocked] validate: \"zig-cache/test-artifacts\" ({d} bytes):2 column=5 offset=9 record=1: Rewrite is blocked by the reported data condition. reason_code=sequence.invalid_symbol byte=0x3f policy=alphabet=protein selection=automatic custom_symbols=unknown sample=symbols=5 rule=nucleotide_above_90_percent interval=unknown request=unknown repair_policy=legacy_safe\nhint: Resolve the reported rewrite blocker before publishing output.\n", .{in_path.len});
-    defer allocator.free(expected_delivery);
-    try expectCliResult(
-        allocator,
-        &.{ ZFASTA_BIN, "validate", "--fix", "-o", rejected_path, in_path },
-        1,
-        "",
-        expected_delivery,
-    );
-    try std.testing.expectError(
-        error.FileNotFound,
-        std.Io.Dir.cwd().openFile(io, rejected_path, .{}),
-    );
-
-    try expectCliResult(
-        allocator,
-        &.{ ZFASTA_BIN, "validate", "--fix", "--fix-format-only", "-o", fixed_path, in_path },
-        1,
-        "WARNING: line 2: trailing whitespace on sequence line in 'seq'\n" ++
-            "ERROR: line 2: invalid sequence character 0x3f\n",
-        "",
-    );
-    const fixed = try readTestFile(allocator, fixed_path);
-    try std.testing.expectEqualStrings(">seq\nACGT?\n", fixed);
-}
-
-test "[cli] - [validate fix]: rejects an aliased input path without modifying it" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const broken = ">seq\nAAAA  \n";
-    const in_path = try writeFastaArtifact(allocator, "validate-fix-input-alias", broken);
-    defer std.Io.Dir.cwd().deleteFile(io, in_path) catch {};
-    const output_alias = try std.fmt.allocPrint(allocator, "./{s}", .{in_path});
-
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const spawn_io = threaded.io();
-
-    const result = try std.process.run(allocator, spawn_io, .{
-        .argv = &.{ ZFASTA_BIN, "validate", "--error-format=json", "--fix", "-o", output_alias, in_path },
-        .stdout_limit = .limited(64 * 1024),
-        .stderr_limit = .limited(64 * 1024),
-    });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-
-    switch (result.term) {
-        .exited => |code| try std.testing.expectEqual(@as(u8, 1), code),
-        else => return error.ChildProcessFailed,
-    }
-    try std.testing.expectEqual(@as(usize, 0), result.stdout.len);
-    try utility.expectDiagnostic(allocator, result.stderr, .@"repair.output_is_input");
-
-    const input_after = try readTestFile(allocator, in_path);
-    try std.testing.expectEqualStrings(broken, input_after);
-}
-
-test "[cli] - [validate fix]: writes a complete rewrite after report truncation" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var input: std.ArrayList(u8) = .empty;
-    defer input.deinit(allocator);
-    try input.appendSlice(allocator, ">seq\n");
-    var i: usize = 0;
-    while (i <= validator.MAX_VALIDATE_EVENTS) : (i += 1) {
-        try input.appendSlice(allocator, "A \n");
-    }
-
-    var summary = try validateBytes(allocator, input.items, .{});
-    defer summary.deinit(allocator);
-    try std.testing.expect(summary.truncated);
-
-    const in_path = try writeFastaArtifact(allocator, "validate-fix-truncated-in", input.items);
-    defer std.Io.Dir.cwd().deleteFile(io, in_path) catch {};
-    const out_path = try utility.uniqueArtifactPath(allocator, "validate-fix-truncated-out", "fa");
-    defer std.Io.Dir.cwd().deleteFile(io, out_path) catch {};
-
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const spawn_io = threaded.io();
-
-    const result = try std.process.run(allocator, spawn_io, .{
-        .argv = &.{ ZFASTA_BIN, "validate", "--fix", "-o", out_path, in_path },
-        .stdout_limit = .limited(4 * 1024 * 1024),
-        .stderr_limit = .limited(64 * 1024),
-    });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-
-    switch (result.term) {
-        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
-        else => return error.ChildProcessFailed,
-    }
-    var expected_stdout: std.ArrayList(u8) = .empty;
-    defer expected_stdout.deinit(allocator);
-    for (0..validator.MAX_VALIDATE_EVENTS) |event_index| {
-        const line = try std.fmt.allocPrint(
-            allocator,
-            "WARNING: line {d}: trailing whitespace on sequence line in 'seq'\n",
-            .{event_index + 2},
-        );
-        try expected_stdout.appendSlice(allocator, line);
-    }
-    try std.testing.expectEqualStrings(expected_stdout.items, result.stdout);
-    const expected_stderr = try std.fmt.allocPrint(
-        allocator,
-        "warning: validate event list truncated at {d}; --fix output was still written\n",
-        .{validator.MAX_VALIDATE_EVENTS},
-    );
-    try std.testing.expectEqualStrings(expected_stderr, result.stderr);
-
-    const fixed = try readTestFile(allocator, out_path);
-    var fixed_summary = try validateBytes(allocator, fixed, .{});
-    defer fixed_summary.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 0), fixed_summary.events.items.len);
-}
-
-test "[integration] - [validate fix]: preserves indexed retrieval across layout rewrites" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-    const cases = [_]struct {
-        stem: []const u8,
-        broken: []const u8,
-        region: []const u8,
-        expected: []const u8,
-    }{
-        .{
-            .stem = "validate-fix-crafted",
-            .broken = ">messy_seq widths and trailing ws\nAAAA    \nCCCC\nGGGGTT\n",
-            .region = "messy_seq:1-14",
-            .expected = ">messy_seq:1-14\nAAAACCCCGGGGTT\n",
-        },
-        .{
-            .stem = "validate-fix-mixed",
-            .broken = ">mixed_widths internal line widths vary\nAAAACCCCGGGG\nTTTTAA\nAACCCCGGGGTT\nTT\n",
-            .region = "mixed_widths:3-24",
-            .expected = ">mixed_widths:3-24\nAACCCCGGGGTTTTAAAACCCC\n",
-        },
-        .{
-            .stem = "validate-fix-trailing",
-            .broken = ">trailing_whitespace spaces and tabs after sequence bytes\nAAAACCCC    \nGGGGTTTT\t\nCCCCAAAA\n",
-            .region = "trailing_whitespace:1-16",
-            .expected = ">trailing_whitespace:1-16\nAAAACCCCGGGGTTTT\n",
-        },
-    };
-
-    for (cases) |case| {
-        try expectFormatFixPreservesRegion(
-            allocator,
-            case.stem,
-            case.broken,
-            case.region,
-            case.expected,
-        );
-    }
-}
-
-test "[integration] - [validate]: agree on messy record catalog and geometry" {
-    const data = try readTestFile(std.testing.allocator, "tests/data/validator_indexer_agreement.fasta");
-    defer std.testing.allocator.free(data);
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    try std.testing.expect(std.mem.indexOf(u8, data, "\r\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, data, "\n\n") != null);
-    try std.testing.expect(!std.mem.endsWith(u8, data, "\n"));
-    try std.testing.expect(!std.mem.endsWith(u8, data, "\r\n"));
-    try std.testing.expect(std.mem.indexOf(u8, data, ">empty_rec\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, data, " \n") != null or std.mem.indexOf(u8, data, "\t\n") != null);
-
-    var summary = try validateBytes(allocator, data, .{});
-    defer summary.deinit(allocator);
-
-    try std.testing.expect(countKind(&summary, .empty_sequence) >= 1);
-    try std.testing.expect(countKind(&summary, .inconsistent_line_widths) >= 1);
-    try std.testing.expect(countKind(&summary, .trailing_whitespace) >= 1);
-    try std.testing.expect(countKind(&summary, .mixed_line_endings) >= 1);
-    try std.testing.expect(countKind(&summary, .missing_terminal_newline) >= 1);
-    try std.testing.expect(countKind(&summary, .long_header) >= 1);
-
-    try std.testing.expectEqual(@as(usize, 6), summary.header_count);
-    try std.testing.expectEqual(@as(usize, 5), summary.sequence_count);
-
-    var index = try scanZfi(allocator, data);
-    defer index.deinit(allocator);
-
-    try std.testing.expectEqual(summary.sequence_count, index.records.items.len);
-    try expectHasSideTable(&index);
-
-    const expected_names = [_][]const u8{
-        "var_widths",
-        "blank_lines",
-        "trailing_ws",
-        "mixed_crlf",
-    };
-    for (expected_names, 0..) |want, i| {
-        try std.testing.expectEqualStrings(want, zfiEmbeddedName(&index, i));
-    }
-    for (0..index.records.items.len) |i| {
-        try std.testing.expect(!std.mem.eql(u8, zfiEmbeddedName(&index, i), "empty_rec"));
-    }
-    const long_name = zfiEmbeddedName(&index, 4);
-    try std.testing.expect(long_name.len > 1024);
-    try std.testing.expectEqual(@as(usize, 1025), long_name.len);
-}
-
-test "[cli] - [validate fix]: refuses preamble loss without changing legacy counts or destination" {
-    const allocator = std.testing.allocator;
-    const data = "junk\n>seq1\nACGT\n";
-    var summary = try validateBytes(allocator, data, .{});
-    defer summary.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 0), summary.events.items.len);
-    try std.testing.expectError(error.RepairRefused, fixBytes(allocator, data, summary.record_widths.items));
-    const input = try writeFastaArtifact(allocator, "validate-preamble-input", data);
-    defer allocator.free(input);
-    defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
-    const output = try writeFastaArtifact(allocator, "validate-preamble-output", "previous destination\n");
-    defer allocator.free(output);
-    defer std.Io.Dir.cwd().deleteFile(io, output) catch {};
-    for ([_]bool{ false, true }) |format_only| {
-        var threaded = std.Io.Threaded.init(allocator, .{});
-        defer threaded.deinit();
-        const argv: []const []const u8 = if (format_only)
-            &.{ ZFASTA_BIN, "validate", "--error-format=json", "--fix", "--fix-format-only", "-o", output, input }
-        else
-            &.{ ZFASTA_BIN, "validate", "--error-format=json", "--fix", "-o", output, input };
-        const result = try std.process.run(allocator, threaded.io(), .{ .argv = argv });
-        defer allocator.free(result.stdout);
-        defer allocator.free(result.stderr);
-        try std.testing.expectEqual(@as(u8, 1), result.term.exited);
-        try std.testing.expectEqualStrings("", result.stdout);
-        try utility.expectDiagnostic(allocator, result.stderr, .@"repair.blocked");
-        const after = try readTestFile(allocator, output);
-        defer allocator.free(after);
-        try std.testing.expectEqualStrings("previous destination\n", after);
-    }
-}
-
-test "[cli] - [validate fix]: rejects a symlink alias and safely replaces a separate hard link" {
-    const allocator = std.testing.allocator;
-    const broken = ">seq1\nACGT";
-    const input = try writeFastaArtifact(allocator, "validate-link-input", broken);
-    defer allocator.free(input);
-    defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
-    const hard = try utility.uniqueArtifactPath(allocator, "validate-hard-output", "fa");
-    defer allocator.free(hard);
-    defer std.Io.Dir.cwd().deleteFile(io, hard) catch {};
-    const sym = try utility.uniqueArtifactPath(allocator, "validate-sym-output", "fa");
-    defer allocator.free(sym);
-    defer std.Io.Dir.cwd().deleteFile(io, sym) catch {};
-    const absolute_input = try std.Io.Dir.cwd().realPathFileAlloc(io, input, allocator);
-    defer allocator.free(absolute_input);
-    try std.Io.Dir.cwd().symLink(io, absolute_input, sym, .{});
-    try std.Io.Dir.cwd().hardLink(input, std.Io.Dir.cwd(), hard, io, .{});
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const rejected = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "validate", "--fix", "-o", sym, input } });
-    defer allocator.free(rejected.stdout);
-    defer allocator.free(rejected.stderr);
-    try std.testing.expectEqual(@as(u8, 1), rejected.term.exited);
-    const accepted = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "validate", "--fix", "-o", hard, input } });
-    defer allocator.free(accepted.stdout);
-    defer allocator.free(accepted.stderr);
-    try std.testing.expectEqual(@as(u8, 0), accepted.term.exited);
-    const input_after = try readTestFile(allocator, input);
-    defer allocator.free(input_after);
-    const output_after = try readTestFile(allocator, hard);
-    defer allocator.free(output_after);
-    try std.testing.expectEqualStrings(broken, input_after);
-    try std.testing.expectEqualStrings(">seq1\nACGT\n", output_after);
-}
-
-test "[failure] - [validate fix]: refuses an output open failure before staging" {
-    const diagnostics = main.index_format.diagnostics;
-    const allocator = std.testing.allocator;
-    const broken = ">seq1\nACGT";
-    const input = try writeFastaArtifact(allocator, "validate-identity-input", broken);
-    defer allocator.free(input);
-    defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
-    const output = try utility.uniqueArtifactPath(allocator, "validate-identity-loop", "fa");
-    defer allocator.free(output);
-    defer std.Io.Dir.cwd().deleteFile(io, output) catch {};
-    const directory = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", allocator);
-    defer allocator.free(directory);
-    const absolute_output = try std.fs.path.join(allocator, &.{ directory, output });
-    defer allocator.free(absolute_output);
-    try std.Io.Dir.cwd().symLink(io, absolute_output, output, .{});
-
-    var failure: diagnostics.Failure = undefined;
-    try std.testing.expectError(error.RepairRefused, validator.runValidate(allocator, io, input, .{ .fix = true, .output_path = output }, &failure));
-    const primary = failure.primary().?;
-    try std.testing.expectEqual(diagnostics.Code.@"repair.output_identity_unknown", primary.code());
-    try std.testing.expectEqual(diagnostics.Stage.check_identity, primary.stage);
-    try std.testing.expectEqual(diagnostics.SourceId.output, primary.at.source.?);
-    try std.testing.expectEqual(error.SymLinkLoop, primary.cause.?.zig);
-    try std.testing.expectEqual(.not_started, failure.outputs.file.state);
-    try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);
-    try std.testing.expect(failure.work_complete);
-    try std.testing.expect(!failure.complete);
-    const after = try readTestFile(allocator, input);
-    defer allocator.free(after);
-    try std.testing.expectEqualStrings(broken, after);
-    try std.testing.expectError(error.SymLinkLoop, std.Io.Dir.cwd().openFile(io, output, .{}));
-}
-
-test "[failure] - [validate diagnostics]: owns duplicate facts beyond retained events" {
-    const diagnostics = main.index_format.diagnostics;
-    const allocator = std.testing.allocator;
-    var data: std.ArrayList(u8) = .empty;
-    defer data.deinit(allocator);
-    try data.appendSlice(allocator, ">dup\n");
-    for (0..validator.MAX_VALIDATE_EVENTS) |_| try data.appendSlice(allocator, "A \n");
-    const duplicate_offset = data.items.len;
-    try data.appendSlice(allocator, ">dup\nA\n");
-    var failure: diagnostics.Failure = undefined;
-    var summary = try validator.validateData(allocator, data.items, .{}, &failure);
-    try std.testing.expect(summary.truncated);
-    try std.testing.expectEqual(@as(usize, 1), summary.error_count);
-    try std.testing.expectError(error.RepairRefused, validator.checkFixAllowed(&summary, .{ .fix_format_only = true }, &failure));
-    const primary = failure.primary().?;
-    try std.testing.expectEqual(@as(?u64, duplicate_offset), primary.at.location.offset);
-    try std.testing.expectEqual(@as(?u64, validator.MAX_VALIDATE_EVENTS + 2), primary.at.location.line);
-    try std.testing.expectEqual(@as(?u64, 1), primary.at.location.column);
-    try std.testing.expectEqual(@as(?u64, 2), primary.at.record);
-    try std.testing.expectEqual(@as(?u64, 1), primary.related.?.location.line);
-    const preview = primary.details.@"repair.blocked".blocker.duplicate_identifier.identifier.?;
-    summary.deinit(allocator);
-    @memset(data.items, '?');
-    try std.testing.expectEqualStrings("dup", failure.preview(preview));
-}
-
-test "[failure] - [validate diagnostics]: distinguishes header and sequence bytes and exact alphabet evidence" {
-    const diagnostics = main.index_format.diagnostics;
-    const cases = [_][]const u8{ ">na\x00me\nACGT\n", ">seq\nA\x00C \n" };
-    for (cases, 0..) |data, i| {
-        var failure: diagnostics.Failure = undefined;
-        var summary = try validator.validateData(std.testing.allocator, data, .{}, &failure);
-        defer summary.deinit(std.testing.allocator);
-        try std.testing.expectError(error.RepairRefused, validator.checkFixAllowed(&summary, .{}, &failure));
-        const primary = failure.primary().?;
-        try std.testing.expectEqual(@as(?u64, if (i == 0) 3 else 6), primary.at.location.offset);
-        try std.testing.expectEqual(@as(?u64, if (i == 0) 4 else 2), primary.at.location.column);
-        try std.testing.expectEqual(@as(?u64, 1), primary.at.record);
-        const blocker = primary.details.@"repair.blocked".blocker;
-        try std.testing.expectEqual(if (i == 0) diagnostics.Code.@"fasta.header_control_byte" else diagnostics.Code.@"fasta.sequence_control_byte", blocker.code());
-    }
-    var failure: diagnostics.Failure = undefined;
-    const options = validator.Options{ .custom_alphabet = "ACGT" };
-    var summary = try validator.validateData(std.testing.allocator, ">seq\n?A#?\n", options, &failure);
-    defer summary.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 2), summary.kind_counts[@intFromEnum(validator.Kind.invalid_character)]);
-    try std.testing.expectError(error.RepairRefused, validator.checkFixAllowed(&summary, options, &failure));
-    const primary = failure.primary().?;
-    try std.testing.expectEqual(@as(?u64, 7), primary.at.location.offset);
-    try std.testing.expectEqual(@as(?u64, 3), primary.at.location.column);
-    const detail = primary.details.@"repair.blocked".blocker.invalid_symbol;
-    try std.testing.expectEqual(@as(u8, '#'), detail.byte);
-    try std.testing.expectEqual(diagnostics.Alphabet.custom, detail.policy.alphabet);
-    try std.testing.expect(detail.policy.sample == null);
-    try std.testing.expect(detail.policy.custom_symbols.?['A' / 8] & (@as(u8, 1) << ('A' % 8)) != 0);
-    failure.reset(.validate);
-    try validator.checkFixAllowed(&summary, .{ .fix_format_only = true, .custom_alphabet = "ACGT" }, &failure);
-    try std.testing.expect(failure.primary() == null);
-}
-
-test "[failure] - [validate diagnostics]: releases scanner, rewrite and event storage" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkNativeValidatorAllocations, .{">seq\nACG \nT\n"});
-}
-
-test "[edge] - [validate diagnostics]: retains original first-line byte columns" {
-    const cases = [_]struct { data: []const u8, offset: u64, column: u64 }{
-        .{ .data = "\xef\xbb\xbf>na\x00me\nACGT\n", .offset = 6, .column = 7 },
-        .{ .data = "\xef\xbb\xbf \tjunk\n>seq\nACGT\n", .offset = 5, .column = 6 },
-    };
-    for (cases) |case| {
-        var failure: main.index_format.diagnostics.Failure = undefined;
-        var summary = try validator.validateData(std.testing.allocator, case.data, .{}, &failure);
-        defer summary.deinit(std.testing.allocator);
-        try std.testing.expectError(error.RepairRefused, validator.checkFixAllowed(&summary, .{}, &failure));
-        try std.testing.expectEqual(@as(?u64, 1), failure.primary().?.at.location.line);
-        try std.testing.expectEqual(@as(?u64, case.offset), failure.primary().?.at.location.offset);
-        try std.testing.expectEqual(@as(?u64, case.column), failure.primary().?.at.location.column);
-        if (summary.preamble != null) {
-            try std.testing.expectError(error.RepairRefused, validator.fixData(std.testing.allocator, case.data, summary.record_widths.items, &failure));
-            try std.testing.expectEqual(@as(?u64, case.offset), failure.primary().?.at.location.offset);
-            try std.testing.expectEqual(@as(?u64, case.column), failure.primary().?.at.location.column);
-        }
-    }
-}
-
-test "[cli] - [validate events]: escapes unsafe names and keeps v1 JSON escaping" {
-    const allocator = std.testing.allocator;
-    const input = try writeFastaArtifact(allocator, "validate-text-name", ">na\x1b\x7f\xffme\nA\n>na\x1b\x7f\xffme\nC\n");
-    defer allocator.free(input);
-    defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
-    try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", input }, 1, "ERROR: line 3: duplicate name 'na\\x1b\\x7f\\xffme' (first seen line 1)\n", "");
-    const json = try renderEvent(allocator, .{ .level = .error_level, .kind = .duplicate_name, .line = 3, .name = "\xff", .first_line = 1 });
-    defer allocator.free(json);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\\u00ff") != null);
-}
-
-test "[failure] - [validate diagnostics]: retains stat and mapping causes before scanning" {
-    const diagnostics = main.index_format.diagnostics;
-    const Fault = struct {
-        fn stat(_: ?*anyopaque, _: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
-            return error.AccessDenied;
-        }
-        fn map(_: ?*anyopaque, _: std.Io.File, _: std.Io.File.MemoryMap.CreateOptions) std.Io.File.MemoryMap.CreateError!std.Io.File.MemoryMap {
-            return error.AccessDenied;
-        }
-    };
-    var vtable = io.vtable.*;
-    const fault_io = std.Io{ .userdata = io.userdata, .vtable = &vtable };
-    var failure: diagnostics.Failure = undefined;
-    vtable.fileStat = Fault.stat;
-    try std.testing.expectError(error.Io, validator.runValidate(std.testing.allocator, fault_io, "tests/data/simple.fasta", .{}, &failure));
-    try std.testing.expectEqual(diagnostics.Code.@"io.stat_failed", failure.primary().?.code());
-    try std.testing.expectEqual(error.AccessDenied, failure.primary().?.cause.?.zig);
-    vtable.fileStat = io.vtable.fileStat;
-    vtable.fileMemoryMapCreate = Fault.map;
-    try std.testing.expectError(error.Io, validator.runValidate(std.testing.allocator, fault_io, "tests/data/simple.fasta", .{}, &failure));
-    try std.testing.expectEqual(diagnostics.Code.@"io.map_failed", failure.primary().?.code());
-    try std.testing.expectEqual(error.AccessDenied, failure.primary().?.cause.?.zig);
-    try std.testing.expect(!failure.work_complete and !failure.complete);
-    try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);
-}
-
-test "[failure] - [validate diagnostics]: preserves published output after report flush failure" {
-    const diagnostics = main.index_format.diagnostics;
-    const Fault = struct {
-        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
-            return switch (operation) {
-                .file_write_streaming => |write| if (write.file.handle == std.Io.File.stdout().handle)
-                    .{ .file_write_streaming = error.BrokenPipe }
-                else
-                    io.vtable.operate(userdata, operation),
-                else => io.vtable.operate(userdata, operation),
-            };
-        }
-    };
-    const allocator = std.testing.allocator;
-    const input = try writeFastaArtifact(allocator, "validate-published-input", ">seq\nACGT");
-    defer allocator.free(input);
-    defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
-    const output = try writeFastaArtifact(allocator, "validate-published-output", "old destination\n");
-    defer allocator.free(output);
-    defer std.Io.Dir.cwd().deleteFile(io, output) catch {};
-    var vtable = io.vtable.*;
-    vtable.operate = Fault.operate;
-    const fault_io = std.Io{ .userdata = io.userdata, .vtable = &vtable };
-    var failure: diagnostics.Failure = undefined;
-    try std.testing.expectError(error.Io, validator.runValidate(allocator, fault_io, input, .{ .fix = true, .output_path = output }, &failure));
-    try std.testing.expectEqual(diagnostics.Code.@"io.flush_failed", failure.primary().?.code());
-    try std.testing.expectEqual(diagnostics.Stage.flush, failure.primary().?.stage);
-    try std.testing.expectEqual(diagnostics.SourceId.stdout, failure.primary().?.at.source);
-    try std.testing.expectEqual(error.BrokenPipe, failure.primary().?.cause.?.zig);
-    try std.testing.expect(failure.work_complete and !failure.complete);
-    try std.testing.expectEqual(.published, failure.outputs.file.state);
-    try std.testing.expectEqual(.succeeded, failure.outputs.file.final_flush);
-    try std.testing.expectEqual(.failed, failure.outputs.stdout.final_flush);
-    const written = try readTestFile(allocator, output);
-    defer allocator.free(written);
-    try std.testing.expectEqualStrings(">seq\nACGT\n", written);
-    const original = try readTestFile(allocator, input);
-    defer allocator.free(original);
-    try std.testing.expectEqualStrings(">seq\nACGT", original);
-}
-
-test "[failure] - [validate diagnostics]: retains final flush cause and resets for reuse" {
-    const diagnostics = main.index_format.diagnostics;
-    const Fault = struct {
-        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
-            return switch (operation) {
-                .file_write_streaming => .{ .file_write_streaming = error.BrokenPipe },
-                else => io.vtable.operate(userdata, operation),
-            };
-        }
-        fn discard(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
-            return switch (operation) {
-                .file_write_streaming => |write| blk: {
-                    var size = write.header.len;
-                    for (write.data, 0..) |data, i| size += data.len * (if (i + 1 == write.data.len) write.splat else 1);
-                    break :blk .{ .file_write_streaming = size };
-                },
-                else => io.vtable.operate(userdata, operation),
-            };
-        }
-    };
-    var vtable = io.vtable.*;
-    vtable.operate = Fault.operate;
-    const fault_io = std.Io{ .userdata = io.userdata, .vtable = &vtable };
-    var failure: diagnostics.Failure = undefined;
-    try std.testing.expectError(error.Io, validator.runValidate(std.testing.allocator, fault_io, "tests/data/simple.fasta", .{ .output_mode = .json_summary }, &failure));
-    try std.testing.expectEqual(diagnostics.Code.@"io.flush_failed", failure.primary().?.code());
-    try std.testing.expectEqual(error.BrokenPipe, failure.primary().?.cause.?.zig);
-    try std.testing.expect(failure.work_complete and !failure.complete);
-    try std.testing.expectEqual(.failed, failure.outputs.stdout.final_flush);
-    try std.testing.expect(failure.outputs.stdout.may_be_partial);
-    try std.testing.expectError(error.Io, validator.runValidate(std.testing.allocator, fault_io, "tests/data/validate-file-does-not-exist.fa", .{}, &failure));
-    try std.testing.expectEqual(diagnostics.Code.@"io.file_not_found", failure.primary().?.code());
-    try std.testing.expect(!failure.work_complete and !failure.complete);
-    try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);
-    vtable.operate = Fault.discard;
-    const result = try validator.runValidate(std.testing.allocator, fault_io, "tests/data/simple.fasta", .{ .output_mode = .json_summary }, &failure);
-    try std.testing.expectEqual(@as(u8, 0), result.status);
-    try std.testing.expect(failure.work_complete and failure.complete);
-    try std.testing.expect(failure.primary() == null);
-    try std.testing.expectEqual(.succeeded, failure.outputs.stdout.final_flush);
-}
-
-test "[cli] - [validate events]: keeps complete counts and explains retained examples" {
-    const allocator = std.testing.allocator;
-    var data: std.ArrayList(u8) = .empty;
-    defer data.deinit(allocator);
-    try data.appendSlice(allocator, ">seq\n");
-    for (0..validator.MAX_VALIDATE_EVENTS + 1) |_| try data.appendSlice(allocator, "A \n");
-    const input = try writeFastaArtifact(allocator, "validate-cap-counts", data.items);
-    defer allocator.free(input);
-    defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
-    const result = try std.process.run(allocator, io, .{ .argv = &.{ ZFASTA_BIN, "validate", "--json", "--summary", input } });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-    switch (result.term) {
-        .exited => |code| try std.testing.expectEqual(@as(u8, 1), code),
-        else => return error.ChildProcessFailed,
-    }
-    try std.testing.expectEqualStrings("error: validate retained 10000 events; scanning and counting completed; fix reported issues and re-run\n", result.stderr);
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, result.stdout, .{});
-    defer parsed.deinit();
-    try std.testing.expect(parsed.value.object.get("truncated").?.bool);
-    try std.testing.expectEqual(@as(i64, validator.MAX_VALIDATE_EVENTS + 1), parsed.value.object.get("counts").?.object.get("trailing_whitespace").?.integer);
-    const machine = try std.process.run(allocator, io, .{ .argv = &.{ ZFASTA_BIN, "validate", "--json", "--summary", "--error-format=json", input } });
-    defer allocator.free(machine.stdout);
-    defer allocator.free(machine.stderr);
-    try std.testing.expectEqual(@as(u8, 1), machine.term.exited);
-    try std.testing.expectEqualStrings(result.stdout, machine.stdout);
-    try std.testing.expectEqualStrings("", machine.stderr);
-
-    const Fault = struct {
-        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
-            return switch (operation) {
-                .file_write_streaming => .{ .file_write_streaming = error.BrokenPipe },
-                else => io.vtable.operate(userdata, operation),
-            };
-        }
-    };
-    var vtable = io.vtable.*;
-    vtable.operate = Fault.operate;
-    var failure: main.index_format.diagnostics.Failure = undefined;
-    try std.testing.expectError(error.Io, validator.runValidate(allocator, .{ .userdata = io.userdata, .vtable = &vtable }, input, .{}, &failure));
-    try std.testing.expectEqual(main.index_format.diagnostics.Code.@"io.write_failed", failure.primary().?.code());
-    try std.testing.expectEqual(error.BrokenPipe, failure.primary().?.cause.?.zig);
-    try std.testing.expect(failure.work_complete and !failure.complete);
-    try std.testing.expectEqual(.not_attempted, failure.outputs.stdout.final_flush);
-}
-
-test "[edge] - [validate fix]: equal frequencies select the first seen width" {
-    const cases = [_]struct { input: []const u8, width: u32, fixed: []const u8 }{
-        .{ .input = ">seq\nAAA\nCC\nGGGG\n", .width = 3, .fixed = ">seq\nAAA\nCCG\nGGG\n" },
-        .{ .input = ">seq\nCC\nAAA\nGGGG\n", .width = 2, .fixed = ">seq\nCC\nAA\nAG\nGG\nG\n" },
-    };
-    for (cases) |case| {
-        var summary = try validateBytes(std.testing.allocator, case.input, .{});
-        defer summary.deinit(std.testing.allocator);
-        try std.testing.expectEqual(case.width, summary.record_widths.items[0]);
-        const fixed = try fixBytes(std.testing.allocator, case.input, summary.record_widths.items);
-        defer std.testing.allocator.free(fixed);
-        try std.testing.expectEqualStrings(case.fixed, fixed);
-    }
-}
-
-// --- Report v2 ---
-
 const Expected = struct {
-    code: main.index_format.diagnostics.Code,
+    code: diagnostics.Code,
     occurrences: u64,
     records: u64,
     offset: ?u64,
@@ -1477,12 +26,43 @@ const Expected = struct {
     record: ?u64,
 };
 
-fn reportBytes(allocator: std.mem.Allocator, data: []const u8, options: validator.Options) !*validator.Report {
+fn reportWith(allocator: std.mem.Allocator, data: []const u8, buffer_len: usize, rules: validator.Rules) !*validator.Report {
     const report = try allocator.create(validator.Report);
     errdefer allocator.destroy(report);
-    var failure: main.index_format.diagnostics.Failure = undefined;
-    try validator.reportData(allocator, data, options, report, &failure);
+    const buffer = try allocator.alloc(u8, buffer_len);
+    defer allocator.free(buffer);
+    var reader = std.Io.Reader.fixed(data);
+    var failure: diagnostics.Failure = undefined;
+    try validator.validate(allocator, &reader, buffer, null, rules, report, &failure);
     return report;
+}
+
+fn reportBytes(allocator: std.mem.Allocator, data: []const u8, rules: validator.Rules) !*validator.Report {
+    return reportWith(allocator, data, validator.READ_BUFFER_BYTES, rules);
+}
+
+fn repairBytes(allocator: std.mem.Allocator, data: []const u8, width: u64) ![]u8 {
+    const report = try allocator.create(validator.Report);
+    defer allocator.destroy(report);
+    const buffer = try allocator.alloc(u8, 4096);
+    defer allocator.free(buffer);
+    var reader = std.Io.Reader.fixed(data);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
+    var failure: diagnostics.Failure = undefined;
+    try validator.repair(allocator, &reader, buffer, null, .{}, width, &output.writer, report, &failure);
+    return output.toOwnedSlice();
+}
+
+fn renderJson(allocator: std.mem.Allocator, report: *const validator.Report, rules: validator.Rules) ![]u8 {
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.validate);
+    failure.succeed();
+    const view = report.validation(rules, false);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
+    try reporting.writeJson(&output.writer, &failure, .{ .validation = &view });
+    return output.toOwnedSlice();
 }
 
 fn expectFindings(report: *const validator.Report, expected: []const Expected) !void {
@@ -1507,29 +87,182 @@ fn expectFindings(report: *const validator.Report, expected: []const Expected) !
     }
 }
 
-test "[unit] - [validate report]: counts every invalid byte where v1 counts distinct values" {
-    const diagnostics = main.index_format.diagnostics;
-    const data = ">s\nACGT????\n";
-    const report = try reportBytes(std.testing.allocator, data, .{});
+// Alphabet policies may differ.
+fn expectSameFindings(a: *const validator.Report, b: *const validator.Report) !void {
+    try std.testing.expectEqual(a.completion, b.completion);
+    try std.testing.expectEqual(a.examined, b.examined);
+    try std.testing.expectEqual(a.records_with_errors, b.records_with_errors);
+    try std.testing.expectEqual(a.records_with_warnings, b.records_with_warnings);
+    try std.testing.expectEqualSlices(u64, &a.invalid_symbols, &b.invalid_symbols);
+    for (a.findings, b.findings) |left, right| {
+        errdefer std.debug.print("code {s}\n", .{@tagName(left.code)});
+        try std.testing.expectEqual(left.occurrences, right.occurrences);
+        try std.testing.expectEqual(left.records, right.records);
+        try std.testing.expectEqual(left.first == null, right.first == null);
+        const first = left.first orelse continue;
+        const other = right.first.?;
+        try std.testing.expectEqual(first.at, other.at);
+        try std.testing.expectEqual(first.related, other.related);
+        try std.testing.expectEqual(first.identifier == null, other.identifier == null);
+        if (first.identifier) |identifier| try std.testing.expectEqualSlices(u8, identifier.slice(), other.identifier.?.slice());
+        switch (first.details) {
+            .@"sequence.invalid_symbol" => |facts| try std.testing.expectEqual(facts.byte, other.details.@"sequence.invalid_symbol".byte),
+            else => try std.testing.expectEqualDeep(first.details, other.details),
+        }
+    }
+}
+
+// The clean lead exceeds the alphabet sample, so the defects after it go through the vector path.
+fn largeInput(allocator: std.mem.Allocator, random: std.Random, protein: bool) ![]u8 {
+    const alphabet = if (protein) "ACDEFGHIKLMNPQRSTVWY" else "ACGTNacgtn";
+    const odd = "RYKMSWBDHVU?@1.*-\x00\x01\x7f\xff \t\r";
+    const eol: []const u8 = if (random.boolean()) "\n" else "\r\n";
+    const width = random.intRangeAtMost(usize, 50, 80);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, ">lead clean");
+    try out.appendSlice(allocator, eol);
+    for (0..110_000 / width + 1) |_| {
+        for (0..width) |_| try out.append(allocator, alphabet[random.uintLessThan(usize, alphabet.len)]);
+        try out.appendSlice(allocator, eol);
+    }
+    for (0..random.intRangeAtMost(usize, 30, 60)) |_| {
+        try out.print(allocator, ">{s}r{d}{s}", .{ if (random.uintLessThan(u8, 20) == 0) " " else "", random.uintLessThan(u8, 20), if (random.uintLessThan(u8, 20) == 0) "\x01" else " desc" });
+        try out.appendSlice(allocator, if (random.uintLessThan(u8, 30) == 0) "\r\n" else eol);
+        const lines = random.uintLessThan(usize, 90);
+        const record_width = if (random.uintLessThan(u8, 4) == 0) random.intRangeAtMost(usize, 1, 12) else width;
+        for (0..lines) |k| {
+            const len = if (k + 1 < lines) record_width else random.intRangeAtMost(usize, 1, record_width + 2);
+            if (random.uintLessThan(u8, 100) == 0) {
+                try out.appendSlice(allocator, eol);
+                continue;
+            }
+            const start = out.items.len;
+            for (0..len) |_| try out.append(allocator, alphabet[random.uintLessThan(usize, alphabet.len)]);
+            if (random.uintLessThan(u8, 25) == 0) out.items[start + random.uintLessThan(usize, len)] = odd[random.uintLessThan(usize, odd.len)];
+            try out.appendSlice(allocator, if (random.uintLessThan(u8, 100) == 0) "\r\n" else eol);
+        }
+    }
+    if (random.uintLessThan(u8, 5) == 0) _ = out.pop();
+    return out.toOwnedSlice(allocator);
+}
+
+const FailingSource = struct {
+    data: []const u8,
+    fail_at: usize,
+    position: usize = 0,
+    reader: std.Io.Reader,
+
+    fn init(data: []const u8, fail_at: usize) FailingSource {
+        return .{ .data = data, .fail_at = fail_at, .reader = .{ .vtable = &.{ .stream = stream }, .buffer = &.{}, .seek = 0, .end = 0 } };
+    }
+
+    fn stream(reader: *std.Io.Reader, writer: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        const self: *FailingSource = @fieldParentPtr("reader", reader);
+        if (self.position == self.fail_at) return error.ReadFailed;
+        const stop = @min(self.fail_at, self.data.len);
+        if (self.position == stop) return error.EndOfStream;
+        const rest = self.data[self.position..stop];
+        const n = try writer.write(rest[0..limit.minInt(rest.len)]);
+        self.position += n;
+        return n;
+    }
+};
+
+fn fuzzValidator(_: void, smith: *std.testing.Smith) !void {
+    var storage: [512]u8 = undefined;
+    try checkValidatorProperties(storage[0..smith.slice(&storage)]);
+}
+
+fn checkValidatorProperties(data: []const u8) !void {
+    const allocator = std.testing.allocator;
+    const report = try reportBytes(allocator, data, .{});
+    defer allocator.destroy(report);
+    try std.testing.expectEqual(reporting.Validation.Completion.complete, report.completion);
+    try std.testing.expectEqual(@as(u64, data.len), report.examined.bytes);
+    try std.testing.expectEqual(report.examined.records, report.examined.records_completed);
+    const fixed = repairBytes(allocator, data, 7) catch |err| switch (err) {
+        error.RepairRefused => return,
+        else => return err,
+    };
+    defer allocator.free(fixed);
+    const again = try reportBytes(allocator, fixed, .{});
+    defer allocator.destroy(again);
+    for (again.findings) |finding| {
+        if (finding.occurrences != 0) try std.testing.expect(diagnostics.metadata(finding.code).category != .format);
+    }
+    const twice = try repairBytes(allocator, fixed, 7);
+    defer allocator.free(twice);
+    try std.testing.expectEqualStrings(fixed, twice);
+}
+
+fn checkReportAllocations(allocator: std.mem.Allocator, data: []const u8) !void {
+    const report = try std.testing.allocator.create(validator.Report);
+    defer std.testing.allocator.destroy(report);
+    var buffer: [64]u8 = undefined;
+    var reader = std.Io.Reader.fixed(data);
+    var failure: diagnostics.Failure = undefined;
+    validator.validate(allocator, &reader, &buffer, null, .{}, report, &failure) catch |err| {
+        try std.testing.expectEqual(error.OutOfMemory, err);
+        try std.testing.expectEqual(reporting.Validation.Completion.interrupted, report.completion);
+        try std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", failure.primary().?.code());
+        try std.testing.expect(report.examined.bytes <= data.len);
+        try std.testing.expect(report.examined.records_completed <= report.examined.records);
+        return error.OutOfMemory;
+    };
+    try std.testing.expectEqual(reporting.Validation.Completion.complete, report.completion);
+}
+
+fn scanZfi(allocator: std.mem.Allocator, data: []const u8) !main.indexer.ZfiIndex {
+    return main.indexer.scanZfiData(allocator, data, true);
+}
+
+fn expectFixPreservesRegion(allocator: std.mem.Allocator, stem: []const u8, broken: []const u8, region: []const u8, expected: []const u8) !void {
+    var broken_index = try scanZfi(allocator, broken);
+    defer broken_index.deinit(allocator);
+    try std.testing.expect(broken_index.side_tables.items.len > 0);
+    const fixed = try repairBytes(allocator, broken, 4);
+    defer allocator.free(fixed);
+    var fixed_index = try scanZfi(allocator, fixed);
+    defer fixed_index.deinit(allocator);
+    for (fixed_index.records.items) |record| try std.testing.expect(record.isUniformWidth());
+    try std.testing.expectEqual(@as(usize, 0), fixed_index.side_tables.items.len);
+
+    const broken_stem = try std.fmt.allocPrint(allocator, "{s}-broken", .{stem});
+    const fixed_stem = try std.fmt.allocPrint(allocator, "{s}-fixed", .{stem});
+    const broken_path = try writeFastaArtifact(allocator, broken_stem, broken);
+    defer std.Io.Dir.cwd().deleteFile(io, broken_path) catch {};
+    const fixed_path = try writeFastaArtifact(allocator, fixed_stem, fixed);
+    defer std.Io.Dir.cwd().deleteFile(io, fixed_path) catch {};
+    const broken_zfi = try std.fmt.allocPrint(allocator, "{s}.zfi", .{broken_path});
+    defer std.Io.Dir.cwd().deleteFile(io, broken_zfi) catch {};
+    const fixed_zfi = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fixed_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fixed_zfi) catch {};
+    try writeZfi(allocator, broken_path, broken, true);
+    try writeZfi(allocator, fixed_path, fixed, true);
+    const broken_output = try captureExtractRegion(allocator, broken_path, region);
+    const fixed_output = try captureExtractRegion(allocator, fixed_path, region);
+    try std.testing.expectEqualStrings(broken_output, fixed_output);
+    try std.testing.expectEqualStrings(expected, fixed_output);
+}
+
+// --- Counts and first occurrences ---
+
+test "[unit] - [validate report]: counts every invalid byte" {
+    const report = try reportBytes(std.testing.allocator, ">s\nACGT????\n", .{});
     defer std.testing.allocator.destroy(report);
     try expectFindings(report, &.{
         .{ .code = .@"sequence.invalid_symbol", .occurrences = 4, .records = 1, .offset = 7, .line = 2, .column = 5, .record = 1 },
     });
     try std.testing.expectEqual(@as(u64, 4), report.invalid_symbols['?']);
     try std.testing.expectEqual(diagnostics.Alphabet.protein, report.alphabet.alphabet);
-    try std.testing.expectEqual(@as(u8, 1), report.status(.{}));
-
-    var summary = try validateBytes(std.testing.allocator, data, .{});
-    defer summary.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 1), summary.kind_counts[@intFromEnum(validator.Kind.invalid_character)]);
+    try std.testing.expectEqual(@as(u8, 1), report.status(false, false));
 }
 
 test "[unit] - [validate report]: counts structure and identifier codes in their units" {
-    const diagnostics = main.index_format.diagnostics;
-    const reporting = main.reporting;
     const data = "\xEF\xBB\xBFjunk\n>a desc\nACGT\n>a\x01x\r\n>a\nAC\n>\n>NC_1 a long description\nACGT";
-    const options: validator.Options = .{ .max_header_len = 20, .schema = .refseq };
-    const report = try reportBytes(std.testing.allocator, data, options);
+    const rules: validator.Rules = .{ .max_header_bytes = 20, .schema = .refseq };
+    const report = try reportBytes(std.testing.allocator, data, rules);
     defer std.testing.allocator.destroy(report);
     try expectFindings(report, &.{
         .{ .code = .@"fasta.content_before_header", .occurrences = 1, .records = 0, .offset = 3, .line = 1, .column = 4, .record = null },
@@ -1543,11 +276,6 @@ test "[unit] - [validate report]: counts structure and identifier codes in their
         .{ .code = .@"format.missing_terminal_newline", .occurrences = 1, .records = 0, .offset = 64, .line = 9, .column = 5, .record = null },
         .{ .code = .@"format.mixed_line_endings", .occurrences = 1, .records = 0, .offset = 25, .line = 4, .column = 5, .record = null },
     });
-    const duplicate = report.finding(.@"fasta.duplicate_identifier").first.?;
-    try std.testing.expectEqualStrings("a", duplicate.identifier.?.slice());
-    try std.testing.expectEqual(@as(?u64, 9), duplicate.related.?.location.offset);
-    try std.testing.expectEqual(@as(?u64, 2), duplicate.related.?.location.line);
-    try std.testing.expectEqual(@as(?u64, 2), duplicate.related.?.location.column);
     const control = report.finding(.@"fasta.header_control_byte").first.?.details.@"fasta.header_control_byte";
     try std.testing.expectEqual(@as(u8, 1), control.byte);
     try std.testing.expectEqual(diagnostics.Grammar.controls_except_tab, control.grammar);
@@ -1555,16 +283,13 @@ test "[unit] - [validate report]: counts structure and identifier codes in their
     try std.testing.expectEqual(@as(u64, 23), long.observed_bytes);
     try std.testing.expectEqual(@as(u64, 20), long.limit_bytes);
     try std.testing.expectEqual(@as(u64, 4), report.finding(.@"fasta.content_before_header").first.?.details.@"fasta.content_before_header".content_bytes.exact);
-    try std.testing.expectEqual(reporting.Validation.Examined{ .bytes = 64, .lines = 9, .records = 5, .symbols = 10 }, report.examined);
+    try std.testing.expectEqual(reporting.Validation.Examined{ .bytes = 64, .lines = 9, .records = 5, .records_completed = 5, .symbols = 10 }, report.examined);
     try std.testing.expectEqual(@as(u64, 3), report.records_with_errors);
     try std.testing.expectEqual(@as(u64, 5), report.records_with_warnings);
     try std.testing.expectEqual(reporting.Validation.Completion.complete, report.completion);
-    try std.testing.expectEqual(@as(u8, 1), report.status(options));
 }
 
 test "[unit] - [validate report]: counts sequence and format codes in their units" {
-    const diagnostics = main.index_format.diagnostics;
-    const reporting = main.reporting;
     const data = ">s1\nACGTACGT\nAC GT\tAC\n\nAC?G\x00T\n>s2\nACGTACGT\nACGTACGTAC\n  \nA*\x7f\n";
     const report = try reportBytes(std.testing.allocator, data, .{});
     defer std.testing.allocator.destroy(report);
@@ -1586,7 +311,7 @@ test "[unit] - [validate report]: counts sequence and format codes in their unit
     for (report.invalid_symbols, 0..) |occurrences, byte| {
         try std.testing.expectEqual(@as(u64, if (byte == '*' or byte == '?' or byte == 0x7f) 1 else 0), occurrences);
     }
-    try std.testing.expectEqual(reporting.Validation.Examined{ .bytes = 61, .lines = 10, .records = 2, .symbols = 40 }, report.examined);
+    try std.testing.expectEqual(reporting.Validation.Examined{ .bytes = 61, .lines = 10, .records = 2, .records_completed = 2, .symbols = 40 }, report.examined);
     try std.testing.expectEqual(@as(u64, 2), report.records_with_errors);
     try std.testing.expectEqual(@as(u64, 2), report.records_with_warnings);
 }
@@ -1599,9 +324,6 @@ test "[edge] - [validate report]: repeated findings in one record count the reco
         .{ .code = .@"format.sequence_whitespace", .occurrences = 2, .records = 1, .offset = 9, .line = 3, .column = 2, .record = 1 },
         .{ .code = .@"format.inconsistent_wrapping", .occurrences = 1, .records = 1, .offset = 24, .line = 7, .column = 1, .record = 2 },
     });
-    const wrapping = report.finding(.@"format.inconsistent_wrapping").first.?.details.@"format.inconsistent_wrapping";
-    try std.testing.expectEqual(@as(u64, 4), wrapping.expected_width);
-    try std.testing.expectEqual(@as(u64, 6), wrapping.actual_width);
     try std.testing.expectEqual(@as(u64, 1), report.records_with_errors);
     try std.testing.expectEqual(@as(u64, 2), report.records_with_warnings);
 }
@@ -1614,12 +336,37 @@ test "[edge] - [validate report]: empty and whitespace-only input report only mi
             .{ .code = .@"fasta.no_records", .occurrences = 1, .records = 0, .offset = null, .line = null, .column = null, .record = null },
         });
         try std.testing.expectEqual(@as(u64, data.len), report.examined.bytes);
-        try std.testing.expectEqual(@as(u8, 1), report.status(.{}));
+        try std.testing.expectEqual(@as(u8, 1), report.status(false, false));
     }
 }
 
+test "[edge] - [validate report]: a duplicate points at its first definition" {
+    const data = "\xEF\xBB\xBF>dup one\nAC\n>other\nAC\n>dup two\nAC\n>dup three\n";
+    const report = try reportBytes(std.testing.allocator, data, .{});
+    defer std.testing.allocator.destroy(report);
+    const duplicate = report.finding(.@"fasta.duplicate_identifier");
+    try std.testing.expectEqual(@as(u64, 2), duplicate.occurrences);
+    try std.testing.expectEqual(@as(?diagnostics.Reference, null), duplicate.first.?.related);
+
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(io, .{ .sub_path = "dup.fa", .data = data });
+    const file = try temporary.dir.openFile(io, "dup.fa", .{});
+    defer file.close(io);
+    var buffer: [8]u8 = undefined;
+    var file_reader = file.reader(io, &.{});
+    const from_file = try std.testing.allocator.create(validator.Report);
+    defer std.testing.allocator.destroy(from_file);
+    var failure: diagnostics.Failure = undefined;
+    try validator.validate(std.testing.allocator, &file_reader.interface, &buffer, .{ .io = io, .file = file, .size = data.len }, .{}, from_file, &failure);
+    const related = from_file.finding(.@"fasta.duplicate_identifier").first.?.related.?;
+    try std.testing.expectEqual(@as(?u64, 4), related.location.offset);
+    try std.testing.expectEqual(@as(?u64, 1), related.location.line);
+    try std.testing.expectEqual(@as(?u64, 5), related.location.column);
+    try std.testing.expectEqual(@as(?u64, 1), related.record);
+}
+
 test "[edge] - [validate report]: layout does not change symbol and alphabet counts" {
-    const diagnostics = main.index_format.diagnostics;
     const layouts = [_][]const u8{
         ">a\nACGTNACGTN\nACG*\n>b\nMKV?\n",
         ">a\r\nACGTN\r\nACGTN\r\nACG*\r\n>b\r\nMK\r\nV?\r\n",
@@ -1639,22 +386,256 @@ test "[edge] - [validate report]: layout does not change symbol and alphabet cou
     }
 }
 
-test "[unit] - [validate report]: identifiers keep their bytes in JSON" {
-    const diagnostics = main.index_format.diagnostics;
-    const reporting = main.reporting;
+test "[edge] - [validate report]: more than 10,000 findings keep exact counts and acceptance" {
+    var data: std.ArrayList(u8) = .empty;
+    defer data.deinit(std.testing.allocator);
+    for (0..10_001) |index| try data.print(std.testing.allocator, ">r{d}\n", .{index});
+    const report = try reportBytes(std.testing.allocator, data.items, .{});
+    defer std.testing.allocator.destroy(report);
+    try std.testing.expectEqual(@as(u64, 10_001), report.finding(.@"fasta.empty_record").occurrences);
+    try std.testing.expectEqual(reporting.Validation.Completion.complete, report.completion);
+    try std.testing.expectEqual(@as(u8, 2), report.status(false, false));
+    try std.testing.expectEqual(@as(u8, 1), report.status(true, false));
+}
+
+test "[edge] - [validate report]: a name budget stops only the duplicate check" {
+    const allocator = std.testing.allocator;
+    var data: std.ArrayList(u8) = .empty;
+    defer data.deinit(allocator);
+    for (0..40_000) |index| try data.print(allocator, ">name{d:0>6}\nAC\n", .{index % 30_000});
+
+    const whole = try reportBytes(allocator, data.items, .{});
+    defer allocator.destroy(whole);
+    try std.testing.expectEqual(@as(u64, 10_000), whole.finding(.@"fasta.duplicate_identifier").occurrences);
+    try std.testing.expectEqual(reporting.Validation.Completion.complete, whole.completion);
+
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(io, .{ .sub_path = "names.fa", .data = data.items });
+    const file = try temporary.dir.openFile(io, "names.fa", .{});
+    defer file.close(io);
+    for ([_]bool{ false, true }) |from_file| {
+        errdefer std.debug.print("from file: {}\n", .{from_file});
+        const report = try allocator.create(validator.Report);
+        defer allocator.destroy(report);
+        var buffer: [4096]u8 = undefined;
+        var fixed = std.Io.Reader.fixed(data.items);
+        var file_reader = file.reader(io, &.{});
+        const source: *std.Io.Reader = if (from_file) &file_reader.interface else &fixed;
+        const names: ?validator.NameSource = if (from_file) .{ .io = io, .file = file, .size = data.items.len } else null;
+        var failure: diagnostics.Failure = undefined;
+        // A file-backed set reserves its name cache first, so it needs about 1 MiB before any name.
+        const budget: u64 = if (from_file) 1024 * 1024 else 700 * 1024;
+        try validator.validate(allocator, source, &buffer, names, .{ .max_name_bytes = budget }, report, &failure);
+        try std.testing.expect(failure.complete);
+        const stop = report.name_budget_stop.?;
+        try std.testing.expectEqual(budget, stop.budget_bytes);
+        try std.testing.expect(stop.stopped_at_record > 1 and stop.stopped_at_record <= 30_000);
+        try std.testing.expectEqual(@as(u64, 0), report.finding(.@"fasta.duplicate_identifier").occurrences);
+        try std.testing.expectEqual(reporting.Validation.Completion.incomplete, report.completion);
+        try std.testing.expectEqual(@as(u64, data.items.len), report.examined.bytes);
+        try std.testing.expectEqual(@as(u64, 40_000), report.examined.records_completed);
+        const view = report.validation(.{}, false);
+        try std.testing.expectEqual(reporting.Validation.CheckState.incomplete, view.check(.identifiers));
+        try std.testing.expectEqual(reporting.Validation.CheckState.passed, view.check(.structure));
+        try std.testing.expectEqual(reporting.Validation.Outcome.incomplete, view.outcome());
+        try std.testing.expectEqual(@as(u8, 1), report.status(false, false));
+    }
+}
+
+// --- Reading ---
+
+test "[property] - [validate scan]: read splits give identical reports" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    var inputs: [5][]const u8 = undefined;
+    inputs[0] = try allocator.dupe(u8, "\xEF\xBB\xBFjunk\n>a desc\nACGT\n>a\x01x\r\n>a\nAC\n>\n>NC_1 a long description\nACGT");
+    inputs[1] = try allocator.dupe(u8, ">s1\nACGTACGT\nAC GT\tAC\n\nAC?G\x00T\r\n>s2\nACGTACGT\nACGTACGTAC\n  \nA*\x7f\r");
+    inputs[2] = try allocator.dupe(u8, "\xEF\xBB");
+    inputs[3] = try largeInput(allocator, prng.random(), false);
+    inputs[4] = try largeInput(allocator, prng.random(), true);
+    defer for (inputs) |input| allocator.free(input);
+    for (inputs) |data| {
+        const whole = try reportBytes(allocator, data, .{});
+        defer allocator.destroy(whole);
+        const expected = try renderJson(allocator, whole, .{});
+        defer allocator.free(expected);
+        for ([_]usize{ 1, 2, 3, 31, 64, 4096 }) |size| {
+            errdefer std.debug.print("buffer {d}, input {d} bytes\n", .{ size, data.len });
+            const split = try reportWith(allocator, data, size, .{});
+            defer allocator.destroy(split);
+            const actual = try renderJson(allocator, split, .{});
+            defer allocator.free(actual);
+            try std.testing.expectEqualStrings(expected, actual);
+        }
+    }
+}
+
+test "[property] - [validate scan]: vector checks agree with the per-byte path" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    for (0..6) |round| {
+        const protein = round % 2 == 1;
+        const data = try largeInput(allocator, prng.random(), protein);
+        defer allocator.free(data);
+        const vector = try reportBytes(allocator, data, .{});
+        defer allocator.destroy(vector);
+        try std.testing.expectEqual(if (protein) diagnostics.Alphabet.protein else diagnostics.Alphabet.nucleotide, vector.alphabet.alphabet);
+        const per_byte = try reportBytes(allocator, data, .{ .custom_alphabet = if (protein) main.fasta.PROTEIN_SYMBOLS else main.fasta.NUCLEOTIDE_SYMBOLS });
+        defer allocator.destroy(per_byte);
+        try expectSameFindings(vector, per_byte);
+    }
+}
+
+test "[failure] - [validate report]: a read failure keeps what was examined" {
+    const data = ">a\nACGT\n>b\nACGT\n>c\nACGT\n";
+    var source = FailingSource.init(data, 13);
+    const report = try std.testing.allocator.create(validator.Report);
+    defer std.testing.allocator.destroy(report);
+    var buffer: [4]u8 = undefined;
+    var failure: diagnostics.Failure = undefined;
+    try std.testing.expectError(error.Io, validator.validate(std.testing.allocator, &source.reader, &buffer, null, .{}, report, &failure));
+    try std.testing.expectEqual(diagnostics.Code.@"io.read_failed", failure.primary().?.code());
+    try std.testing.expectEqual(@as(?u64, 12), failure.primary().?.at.location.offset);
+    try std.testing.expectEqual(reporting.Validation.Completion.interrupted, report.completion);
+    try std.testing.expectEqual(@as(u64, 12), report.examined.bytes);
+    try std.testing.expectEqual(@as(u64, 3), report.examined.lines);
+    try std.testing.expectEqual(@as(u64, 2), report.examined.records);
+    try std.testing.expectEqual(@as(u64, 1), report.examined.records_completed);
+    try std.testing.expectEqual(@as(u64, 0), report.finding(.@"fasta.no_records").occurrences);
+    try std.testing.expectEqual(@as(u8, 1), report.status(false, false));
+}
+
+test "[failure] - [validate report]: running out of memory interrupts the report" {
+    var data: std.ArrayList(u8) = .empty;
+    defer data.deinit(std.testing.allocator);
+    for (0..64) |index| try data.print(std.testing.allocator, ">r{d:0>2} {s}\nACGT\n", .{ index % 40, "description" });
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkReportAllocations, .{data.items});
+}
+
+test "[fuzz] - [validate scan]: completes on any bytes and repairs idempotently" {
+    try std.testing.fuzz({}, fuzzValidator, .{});
+}
+
+// --- Rules ---
+
+test "[property] - [validate alphabet]: accepts every symbol of the chosen alphabet" {
+    const nucleotide = try std.fmt.allocPrint(std.testing.allocator, ">n\n{s}\n", .{main.fasta.NUCLEOTIDE_SYMBOLS});
+    defer std.testing.allocator.free(nucleotide);
+    const protein = try std.fmt.allocPrint(std.testing.allocator, ">p\n{s}\n", .{main.fasta.PROTEIN_SYMBOLS});
+    defer std.testing.allocator.free(protein);
+    for ([_][]const u8{ nucleotide, protein }) |data| {
+        const report = try reportBytes(std.testing.allocator, data, .{});
+        defer std.testing.allocator.destroy(report);
+        try std.testing.expectEqual(@as(u64, 0), report.finding(.@"sequence.invalid_symbol").occurrences);
+    }
+}
+
+test "[unit] - [validate alphabet]: a custom alphabet is exact and case-sensitive" {
+    const report = try reportBytes(std.testing.allocator, ">s\nACGTacgt-\n", .{ .custom_alphabet = "ACGT-" });
+    defer std.testing.allocator.destroy(report);
+    try std.testing.expectEqual(@as(u64, 4), report.finding(.@"sequence.invalid_symbol").occurrences);
+    try std.testing.expectEqual(diagnostics.Alphabet.custom, report.alphabet.alphabet);
+    try std.testing.expectEqual(@as(?diagnostics.Sample, null), report.alphabet.sample);
+}
+
+test "[unit] - [validate alphabet]: explicit alphabets check every symbol" {
+    const data = ">a\nACGTU\n>b\nacgun\n>c\nMKV*-\n";
+    const Case = struct { alphabet: validator.Alphabet, occurrences: u64, records: u64, offset: ?u64, column: ?u64 };
+    const cases = [_]Case{
+        .{ .alphabet = .dna, .occurrences = 4, .records = 3, .offset = 7, .column = 5 },
+        .{ .alphabet = .rna, .occurrences = 3, .records = 2, .offset = 6, .column = 4 },
+        .{ .alphabet = .protein, .occurrences = 0, .records = 0, .offset = null, .column = null },
+        .{ .alphabet = .any, .occurrences = 0, .records = 0, .offset = null, .column = null },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("alphabet {s}\n", .{@tagName(case.alphabet)});
+        const report = try reportBytes(std.testing.allocator, data, .{ .alphabet = case.alphabet });
+        defer std.testing.allocator.destroy(report);
+        const invalid = report.finding(.@"sequence.invalid_symbol");
+        try std.testing.expectEqual(case.occurrences, invalid.occurrences);
+        try std.testing.expectEqual(case.records, invalid.records);
+        try std.testing.expectEqual(case.offset, if (invalid.first) |first| first.at.location.offset else null);
+        try std.testing.expectEqual(case.column, if (invalid.first) |first| first.at.location.column else null);
+        try std.testing.expectEqual(diagnostics.AlphabetSelection.explicit, report.alphabet.selection);
+        try std.testing.expectEqual(@as(?diagnostics.Sample, null), report.alphabet.sample);
+    }
+    const dna = try reportBytes(std.testing.allocator, data, .{ .alphabet = .dna });
+    defer std.testing.allocator.destroy(dna);
+    for ([_]u8{ 'U', 'u', '*', '-' }) |byte| try std.testing.expectEqual(@as(u64, 1), dna.invalid_symbols[byte]);
+    const any = try reportBytes(std.testing.allocator, ">a\nA?\x01 C\n", .{ .alphabet = .any });
+    defer std.testing.allocator.destroy(any);
+    try std.testing.expectEqual(@as(u64, 1), any.finding(.@"fasta.sequence_control_byte").occurrences);
+    try std.testing.expectEqual(@as(u64, 1), any.finding(.@"format.sequence_whitespace").occurrences);
+    try std.testing.expectEqual(@as(u64, 3), any.examined.symbols);
+}
+
+test "[property] - [validate alphabet]: an explicit alphabet does not depend on record order" {
+    const allocator = std.testing.allocator;
+    const first = try reportBytes(allocator, ">p\nMKVLAQ\n>n\nACGTACGT\n", .{ .alphabet = .dna });
+    defer allocator.destroy(first);
+    const second = try reportBytes(allocator, ">n\nACGTACGT\n>p\nMKVLAQ\n", .{ .alphabet = .dna });
+    defer allocator.destroy(second);
+    try std.testing.expectEqual(first.finding(.@"sequence.invalid_symbol").occurrences, second.finding(.@"sequence.invalid_symbol").occurrences);
+    try std.testing.expectEqual(@as(u64, 2), first.finding(.@"sequence.invalid_symbol").occurrences);
+    try std.testing.expectEqualSlices(u64, &first.invalid_symbols, &second.invalid_symbols);
+}
+
+test "[property] - [validate scan]: explicit vector checks agree with the per-byte path" {
+    const allocator = std.testing.allocator;
+    var everything: [223]u8 = undefined;
+    for (&everything, 0x21..) |*byte, value| byte.* = @intCast(value);
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const Case = struct { protein: bool, alphabet: validator.Alphabet, symbols: []const u8 };
+    const cases = [_]Case{
+        .{ .protein = false, .alphabet = .dna, .symbols = main.fasta.DNA_SYMBOLS },
+        .{ .protein = false, .alphabet = .rna, .symbols = main.fasta.RNA_SYMBOLS },
+        .{ .protein = true, .alphabet = .protein, .symbols = main.fasta.PROTEIN_SYMBOLS },
+        .{ .protein = false, .alphabet = .any, .symbols = &everything },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("alphabet {s}\n", .{@tagName(case.alphabet)});
+        const data = try largeInput(allocator, prng.random(), case.protein);
+        defer allocator.free(data);
+        const vector = try reportBytes(allocator, data, .{ .alphabet = case.alphabet });
+        defer allocator.destroy(vector);
+        const per_byte = try reportBytes(allocator, data, .{ .custom_alphabet = case.symbols });
+        defer allocator.destroy(per_byte);
+        try expectSameFindings(vector, per_byte);
+    }
+}
+
+test "[unit] - [validate schemas]: checks UniProt and RefSeq identifiers" {
+    const data = ">sp|P12345|NAME_HUMAN desc\nM\n>tr|Q1|X\nM\n>db|A|B\nM\n>sp|P1\nM\n>NC_000001.11 chr1\nA\n>chr2\nA\n";
+    const uniprot = try reportBytes(std.testing.allocator, data, .{ .schema = .uniprot });
+    defer std.testing.allocator.destroy(uniprot);
+    try std.testing.expectEqual(@as(u64, 3), uniprot.finding(.@"header.convention_mismatch").occurrences);
+    try std.testing.expectEqual(@as(?u64, 4), uniprot.finding(.@"header.convention_mismatch").first.?.at.record);
+    const refseq = try reportBytes(std.testing.allocator, data, .{ .schema = .refseq });
+    defer std.testing.allocator.destroy(refseq);
+    try std.testing.expectEqual(@as(u64, 5), refseq.finding(.@"header.convention_mismatch").occurrences);
+}
+
+test "[edge] - [validate scan]: warns only above the header byte limit" {
+    const report = try reportBytes(std.testing.allocator, ">abcd\nA\n>abcde\nA\n>ab\r\nA\r\n", .{ .max_header_bytes = 4 });
+    defer std.testing.allocator.destroy(report);
+    const long = report.finding(.@"fasta.long_header");
+    try std.testing.expectEqual(@as(u64, 1), long.occurrences);
+    try std.testing.expectEqual(@as(?u64, 2), long.first.?.at.record);
+}
+
+// --- Identifiers in JSON ---
+
+test "[unit] - [validate json]: identifiers keep their bytes" {
+    const allocator = std.testing.allocator;
     var long_name: [300]u8 = undefined;
     @memset(&long_name, 'n');
-    const data = ">bad\xff\n>bad\xc3\xbf\nAC\n>bad\xc3\xbf\n>c\\q\"\x01\nAC\n>" ++ long_name ++ "\nAC\n>" ++ long_name ++ "\n";
-    const report = try reportBytes(std.testing.allocator, data, .{ .max_header_len = 4 });
-    defer std.testing.allocator.destroy(report);
-    var failure: diagnostics.Failure = undefined;
-    failure.reset(.validate);
-    failure.succeed();
-    const view = report.validation(.{ .max_header_len = 4 });
-    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer aw.deinit();
-    try reporting.writeJson(&aw.writer, &failure, .{ .validation = &view });
-    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, aw.written(), .{});
+    const data = ">bad\xff\n>bad\xc3\xbf\nAC\n>bad\xc3\xbf\n>c\\q\"\x01\nAC\n";
+    const report = try reportBytes(allocator, data, .{ .max_header_bytes = 4 });
+    defer allocator.destroy(report);
+    const json = try renderJson(allocator, report, .{ .max_header_bytes = 4 });
+    defer allocator.free(json);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
     defer parsed.deinit();
     const codes = parsed.value.object.get("validation").?.object.get("codes").?.array.items;
     const Want = struct { code: []const u8, encoding: []const u8, bytes: []const u8, original: []const u8 };
@@ -1662,7 +643,6 @@ test "[unit] - [validate report]: identifiers keep their bytes in JSON" {
         .{ .code = "fasta.header_control_byte", .encoding = "utf8", .bytes = "c\\q\"\x01", .original = "5" },
         .{ .code = "fasta.empty_record", .encoding = "base64", .bytes = "bad\xff", .original = "4" },
         .{ .code = "fasta.duplicate_identifier", .encoding = "utf8", .bytes = "bad\xc3\xbf", .original = "5" },
-        .{ .code = "fasta.long_header", .encoding = "utf8", .bytes = "bad\xc3\xbf", .original = "5" },
     };
     var buffer: [diagnostics.PREVIEW_BYTES]u8 = undefined;
     for (wants) |want| {
@@ -1681,109 +661,190 @@ test "[unit] - [validate report]: identifiers keep their bytes in JSON" {
         try std.testing.expectEqualStrings(want.original, identifier.get("original_bytes").?.string);
         try std.testing.expect(!identifier.get("truncated").?.bool);
     }
-    try std.testing.expectEqual(@as(u64, 2), report.finding(.@"fasta.duplicate_identifier").occurrences);
-    try std.testing.expectEqual(@as(u64, 3), report.finding(.@"fasta.empty_record").occurrences);
 
-    const long_report = try reportBytes(std.testing.allocator, ">" ++ long_name ++ "\n", .{});
-    defer std.testing.allocator.destroy(long_report);
-    const long_view = long_report.validation(.{});
-    var long_writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer long_writer.deinit();
-    try reporting.writeJson(&long_writer.writer, &failure, .{ .validation = &long_view });
-    var long_parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, long_writer.written(), .{});
+    const long_input = ">" ++ long_name ++ "\n";
+    const long_report = try reportBytes(allocator, long_input, .{});
+    defer allocator.destroy(long_report);
+    const long_json = try renderJson(allocator, long_report, .{});
+    defer allocator.free(long_json);
+    var long_parsed = try std.json.parseFromSlice(std.json.Value, allocator, long_json, .{});
     defer long_parsed.deinit();
-    const long_code = long_parsed.value.object.get("validation").?.object.get("codes").?.array.items[0].object;
-    const preview = long_code.get("first").?.object.get("identifier").?.object;
-    try std.testing.expectEqualStrings("fasta.empty_record", long_code.get("code").?.string);
+    const preview = long_parsed.value.object.get("validation").?.object.get("codes").?.array.items[0].object.get("first").?.object.get("identifier").?.object;
     try std.testing.expect(preview.get("truncated").?.bool);
     try std.testing.expectEqualStrings("300", preview.get("original_bytes").?.string);
     try std.testing.expectEqualStrings(long_name[0..diagnostics.PREVIEW_BYTES], preview.get("value").?.string);
 }
 
-test "[edge] - [validate report]: more than 10,000 findings keep v2 acceptance and v1's cap" {
-    const reporting = main.reporting;
-    var data: std.ArrayList(u8) = .empty;
-    defer data.deinit(std.testing.allocator);
-    for (0..validator.MAX_VALIDATE_EVENTS + 1) |index| try data.print(std.testing.allocator, ">r{d}\n", .{index});
-    const report = try reportBytes(std.testing.allocator, data.items, .{});
-    defer std.testing.allocator.destroy(report);
-    try std.testing.expectEqual(@as(u64, validator.MAX_VALIDATE_EVENTS + 1), report.finding(.@"fasta.empty_record").occurrences);
-    try std.testing.expectEqual(reporting.Validation.Completion.complete, report.completion);
-    try std.testing.expectEqual(@as(u8, 2), report.status(.{}));
-    try std.testing.expectEqual(@as(u8, 1), report.status(.{ .strict = true }));
-
-    var summary = try validateBytes(std.testing.allocator, data.items, .{});
-    defer summary.deinit(std.testing.allocator);
-    try std.testing.expect(summary.truncated);
-    try std.testing.expectEqual(@as(usize, validator.MAX_VALIDATE_EVENTS), summary.events.items.len);
+test "[unit] - [validate json]: states the outcome, checks, and totals" {
+    const allocator = std.testing.allocator;
+    const report = try reportBytes(allocator, ">a\nAC?\n>a\n", .{});
+    defer allocator.destroy(report);
+    const json = try renderJson(allocator, report, .{});
+    defer allocator.free(json);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+    const validation = parsed.value.object.get("validation").?.object;
+    try std.testing.expectEqualStrings("invalid", validation.get("outcome").?.string);
+    const checks = validation.get("checks").?.object;
+    try std.testing.expectEqualStrings("warnings", checks.get("structure").?.string);
+    try std.testing.expectEqualStrings("failed", checks.get("identifiers").?.string);
+    try std.testing.expectEqualStrings("failed", checks.get("alphabet").?.string);
+    try std.testing.expectEqualStrings("passed", checks.get("format").?.string);
+    const findings = validation.get("findings").?.object;
+    try std.testing.expectEqualStrings("2", findings.get("errors").?.string);
+    try std.testing.expectEqualStrings("1", findings.get("warnings").?.string);
+    try std.testing.expectEqualStrings("2", findings.get("error_codes").?.string);
+    const categories = validation.get("categories").?.object;
+    try std.testing.expectEqualStrings("1", categories.get("identifiers").?.object.get("errors").?.string);
+    try std.testing.expectEqualStrings("1", categories.get("structure").?.object.get("warnings").?.string);
+    try std.testing.expectEqualStrings("2", validation.get("examined").?.object.get("records_completed").?.string);
 }
 
-test "[failure] - [validate report]: an interrupted scan keeps the lines it examined" {
-    const diagnostics = main.index_format.diagnostics;
-    const reporting = main.reporting;
-    var data: std.ArrayList(u8) = .empty;
-    defer data.deinit(std.testing.allocator);
-    for (0..64) |index| try data.print(std.testing.allocator, ">r{d:0>2}\nACGT\n", .{index});
-    const line_bytes = ">r00\nACGT\n".len;
-    var interrupted: usize = 0;
-    var fail_index: usize = 0;
-    while (true) : (fail_index += 1) {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
-        const report = try std.testing.allocator.create(validator.Report);
-        defer std.testing.allocator.destroy(report);
-        var failure: diagnostics.Failure = undefined;
-        validator.reportData(failing.allocator(), data.items, .{}, report, &failure) catch |err| {
-            try std.testing.expectEqual(error.OutOfMemory, err);
-            try std.testing.expectEqual(reporting.Validation.Completion.interrupted, report.completion);
-            try std.testing.expect(!failure.complete);
-            const primary = failure.primary().?;
-            try std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", primary.code());
-            const records = report.examined.records;
-            try std.testing.expectEqual(records * line_bytes, report.examined.bytes);
-            try std.testing.expectEqual(records * 2, report.examined.lines);
-            try std.testing.expectEqual(records * 4, report.examined.symbols);
-            try std.testing.expectEqual(@as(u64, 0), report.finding(.@"fasta.no_records").occurrences);
-            if (primary.details.@"resource.out_of_memory".allocation_role == .validation_identifiers) {
-                try std.testing.expectEqual(@as(?u64, report.examined.bytes), primary.at.location.offset);
-            }
-            interrupted += 1;
-            continue;
-        };
-        try std.testing.expectEqual(reporting.Validation.Completion.complete, report.completion);
-        try std.testing.expectEqual(@as(u64, 64), report.examined.records);
-        try std.testing.expectEqual(@as(u8, 0), report.status(.{}));
-        break;
+// --- Repair ---
+
+test "[unit] - [validate fix]: rewrites layout and keeps headers and symbols" {
+    const allocator = std.testing.allocator;
+    const fixed = try repairBytes(allocator, "\xEF\xBB\xBF>a desc\r\nAC GT\r\nACG\n\nTTTTTT\t\n>b\n>c\nAC?", 4);
+    defer allocator.free(fixed);
+    try std.testing.expectEqualStrings(">a desc\nACGT\nACGT\nTTTT\nT\n>b\n>c\nAC?\n", fixed);
+    const clean = try repairBytes(allocator, ">x\nACGTACGT\nACG\n", 8);
+    defer allocator.free(clean);
+    try std.testing.expectEqualStrings(">x\nACGTACGT\nACG\n", clean);
+}
+
+test "[failure] - [validate fix]: refuses what it cannot keep" {
+    for ([_][]const u8{ "junk\n>a\nAC\n", ">a\x01\nAC\n", ">a\nA\x00C\n", "", "  \n" }) |data| {
+        try std.testing.expectError(error.RepairRefused, repairBytes(std.testing.allocator, data, 60));
     }
-    try std.testing.expect(interrupted >= 3);
 }
 
-test "[cli] - [validate report]: selects v2 output and keeps statuses" {
+test "[property] - [validate fix]: repairs once and keeps duplicates and invalid symbols" {
+    const inputs = [_][]const u8{
+        ">dup\nAC??\n>dup\nAAAA  \nCCCC\nGGGGTT\n",
+        ">mixed\r\nAAAACCCCGGGG\nTTTTAA\r\nAACCCCGGGGTT\nTT",
+        "\xEF\xBB\xBF>e\n>f\n\nACGT\n",
+    };
+    for (inputs) |data| try checkValidatorProperties(data);
+}
+
+test "[integration] - [validate fix]: preserves indexed retrieval across layout rewrites" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const path = try writeFastaArtifact(allocator, "cli-report-warn", ">empty_rec\n");
-    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    const cases = [_]struct { stem: []const u8, broken: []const u8, region: []const u8, expected: []const u8 }{
+        .{ .stem = "validate-fix-crafted", .broken = ">messy_seq widths and trailing ws\nAAAA    \nCCCC\nGGGGTT\n", .region = "messy_seq:1-14", .expected = ">messy_seq:1-14\nAAAACCCCGGGGTT\n" },
+        .{ .stem = "validate-fix-mixed", .broken = ">mixed_widths internal line widths vary\nAAAACCCCGGGG\nTTTTAA\nAACCCCGGGGTT\nTT\n", .region = "mixed_widths:3-24", .expected = ">mixed_widths:3-24\nAACCCCGGGGTTTTAAAACCCC\n" },
+        .{ .stem = "validate-fix-trailing", .broken = ">trailing_whitespace spaces and tabs after sequence bytes\nAAAACCCC    \nGGGGTTTT\t\nCCCCAAAA\n", .region = "trailing_whitespace:1-16", .expected = ">trailing_whitespace:1-16\nAAAACCCCGGGGTTTT\n" },
+    };
+    for (cases) |case| try expectFixPreservesRegion(allocator, case.stem, case.broken, case.region, case.expected);
+}
 
-    try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", "--report", "v2", "tests/data/simple.fasta" }, 0,
+test "[integration] - [validate]: agrees with index on records and symbols" {
+    const allocator = std.testing.allocator;
+    const data = try readTestFile(allocator, "tests/data/validator_indexer_agreement.fasta");
+    defer allocator.free(data);
+    const report = try reportBytes(allocator, data, .{});
+    defer allocator.destroy(report);
+    try std.testing.expectEqual(@as(u64, 6), report.examined.records);
+    try std.testing.expectEqual(@as(u64, 1), report.finding(.@"fasta.empty_record").occurrences);
+    for ([_]diagnostics.Code{ .@"format.inconsistent_wrapping", .@"format.sequence_whitespace", .@"format.mixed_line_endings", .@"format.missing_terminal_newline", .@"fasta.long_header" }) |code| {
+        const found = for (report.findings) |finding| {
+            if (finding.code == code) break finding.occurrences;
+        } else 0;
+        try std.testing.expect(found >= 1);
+    }
+    var index = try scanZfi(allocator, data);
+    defer index.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 5), index.records.items.len);
+    var indexed_symbols: u64 = 0;
+    for (index.records.items) |record| indexed_symbols += record.seq_len;
+    try std.testing.expectEqual(indexed_symbols, report.examined.symbols);
+}
+
+// --- CLI ---
+
+test "[cli] - [validate]: rejects unknown options regardless of position" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const fasta = "tests/data/simple.fasta";
+    const stderr = "error [usage.unknown_option] validate: Unknown option. option=\"--not-a-flag\"\nhint: Correct the command arguments; use --help for accepted options.\n";
+    try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", "--not-a-flag", fasta }, 1, "", stderr);
+    try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", fasta, "--not-a-flag" }, 1, "", stderr);
+    try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", "--summary", fasta }, 1, "", "error [usage.unknown_option] validate: Unknown option. option=\"--summary\"\nhint: Correct the command arguments; use --help for accepted options.\n");
+}
+
+test "[cli] - [validate]: rejects invalid arguments with exact diagnostics" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const hint = "\nhint: Correct the command arguments; use --help for accepted options.\n";
+    const cases = [_]struct { argv: []const []const u8, stderr: []const u8 }{
+        .{ .argv = &.{ ZFASTA_BIN, "validate", "-o", "zig-cache/test-artifacts/unused.fasta", "tests/data/simple.fasta" }, .stderr = "error [usage.option_requires] validate: An option prerequisite is missing. option=output required=fix" ++ hint },
+        .{ .argv = &.{ ZFASTA_BIN, "validate", "--width", "70", "tests/data/simple.fasta" }, .stderr = "error [usage.option_requires] validate: An option prerequisite is missing. option=width required=fix" ++ hint },
+        .{ .argv = &.{ ZFASTA_BIN, "validate", "--fix", "--width", "0", "tests/data/simple.fasta" }, .stderr = "error [usage.invalid_option_value] validate: Invalid option value. option=width expected=positive_usize value=\"0\"" ++ hint },
+        .{ .argv = &.{ ZFASTA_BIN, "validate", "--width" }, .stderr = "error [usage.missing_option_value] validate: A required option value is missing. option=width expected=positive_usize" ++ hint },
+        .{ .argv = &.{ZFASTA_BIN, "validate"}, .stderr = "error [usage.missing_argument] validate: A required argument is missing. argument=fasta_path" ++ hint },
+        .{ .argv = &.{ ZFASTA_BIN, "validate", "tests/data/definitely-missing-cli-failure.fasta" }, .stderr = "error [io.file_not_found] validate: \"tests/data/definitely-mi\" (47 bytes): Required file was not found.; cause=\"FileNotFound\"\nhint: Check the named input/output and retained I/O cause.\n" },
+        .{ .argv = &.{ ZFASTA_BIN, "validate", "tests/data/simple.fasta/child" }, .stderr = "error [io.open_failed] validate: \"tests/data/simple.fasta/\" (29 bytes): Could not open the required input.; cause=\"NotDir\"\nhint: Check the named input/output and retained I/O cause.\n" },
+        .{ .argv = &.{ ZFASTA_BIN, "validate", "tests/data/simple.fasta", "tests/data/single.fasta" }, .stderr = "error [usage.extra_argument] validate: Too many arguments. argument=fasta_path allowed_count=1" ++ hint },
+        .{ .argv = &.{ ZFASTA_BIN, "validate", "-o" }, .stderr = "error [usage.missing_option_value] validate: A required option value is missing. option=output expected=path" ++ hint },
+        .{ .argv = &.{ ZFASTA_BIN, "validate", "--schema" }, .stderr = "error [usage.missing_option_value] validate: A required option value is missing. option=schema expected=schema" ++ hint },
+        .{ .argv = &.{ ZFASTA_BIN, "validate", "--schema", "ena", "tests/data/simple.fasta" }, .stderr = "error [usage.invalid_option_value] validate: Invalid option value. option=schema expected=schema value=\"ena\"" ++ hint },
+        .{ .argv = &.{ ZFASTA_BIN, "validate", "--custom-alphabet" }, .stderr = "error [usage.missing_option_value] validate: A required option value is missing. option=custom_alphabet expected=alphabet" ++ hint },
+        .{ .argv = &.{ ZFASTA_BIN, "validate", "--max-header-len" }, .stderr = "error [usage.missing_option_value] validate: A required option value is missing. option=max_header_len expected=positive_usize" ++ hint },
+        .{ .argv = &.{ ZFASTA_BIN, "validate", "--max-header-len", "0", "tests/data/simple.fasta" }, .stderr = "error [usage.invalid_option_value] validate: Invalid option value. option=max_header_len expected=positive_usize value=\"0\"" ++ hint },
+        .{ .argv = &.{ ZFASTA_BIN, "validate", "--fix", "tests/data/simple.fasta" }, .stderr = "error [usage.option_requires] validate: \"tests/data/simple.fasta\": An option prerequisite is missing. option=fix required=output" ++ hint },
+        .{ .argv = &.{ ZFASTA_BIN, "validate", "--max-name-memory", "0", "tests/data/simple.fasta" }, .stderr = "error [usage.invalid_option_value] validate: Invalid option value. option=max_name_memory expected=positive_usize value=\"0\"" ++ hint },
+        .{ .argv = &.{ ZFASTA_BIN, "validate", "--type", "dnaa", "tests/data/simple.fasta" }, .stderr = "error [usage.invalid_option_value] validate: Invalid option value. option=sequence_type expected=sequence_type value=\"dnaa\"" ++ hint },
+        .{ .argv = &.{ ZFASTA_BIN, "validate", "--type", "dna", "--custom-alphabet", "ACGT", "tests/data/simple.fasta" }, .stderr = "error [usage.conflicting_options] validate: Selected options conflict. arguments=custom_alphabet,sequence_type" ++ hint },
+    };
+    for (cases) |case| try expectCliResult(allocator, case.argv, 1, "", case.stderr);
+}
+
+test "[cli] - [validate]: returns exact status and text for each outcome" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const warn = try writeFastaArtifact(allocator, "cli-validate-warn", ">empty_rec\n");
+    defer std.Io.Dir.cwd().deleteFile(io, warn) catch {};
+    const invalid = try writeFastaArtifact(allocator, "cli-validate-error", "not FASTA\n");
+    defer std.Io.Dir.cwd().deleteFile(io, invalid) catch {};
+
+    try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", "tests/data/simple.fasta" }, 0,
         \\OK tests/data/simple.fasta: no findings
         \\complete: examined 82 bytes, 5 lines, 2 records, 36 symbols; nucleotide alphabet chosen from 36 symbols
         \\
     , "");
     const warning_text = try std.fmt.allocPrint(allocator,
-        \\WARNINGS {s}: 0 error codes, 1 warning code; 0 of 1 record with errors, 1 with warnings
+        \\WARNINGS {s}: 0 errors in 0 codes, 1 warning in 1 code; 0 of 1 record with errors, 1 with warnings
         \\warning [fasta.empty_record] 1 record; first at line 1 column 1, record 1 "empty_rec": FASTA record contains no sequence symbols.
         \\complete: examined 11 bytes, 1 line, 1 record, 0 symbols; nucleotide alphabet chosen from 0 symbols
         \\
-    , .{path});
-    try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", "--report", "v2", path }, 2, warning_text, "");
-    try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", "--strict", "--report", "v2", path }, 1, warning_text, "");
-    try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", "--report", "v1", path }, 2, "WARNING: line 1: empty sequence 'empty_rec'\n", "");
+    , .{warn});
+    try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", warn }, 2, warning_text, "");
+    try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", "--strict", warn }, 1, warning_text, "");
+    const error_text = try std.fmt.allocPrint(allocator,
+        \\INVALID {s}: 2 errors in 2 codes, 0 warnings in 0 codes; 0 of 0 records with errors, 0 with warnings
+        \\error [fasta.no_records]: No FASTA records were found.
+        \\error [fasta.content_before_header] 1 line; first at line 1 column 1: Content appears before the first FASTA header. content_bytes=9
+        \\complete: examined 10 bytes, 1 line, 0 records, 0 symbols; nucleotide alphabet chosen from 0 symbols
+        \\
+    , .{invalid});
+    try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", invalid }, 1, error_text, "");
+}
 
+test "[cli] - [validate json]: writes one report object with the status" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const path = try writeFastaArtifact(allocator, "cli-validate-json", ">empty_rec\n");
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     for ([_][]const []const u8{
-        &.{ ZFASTA_BIN, "validate", "--json", "--report", "v2", "--error-format=json", path },
-        &.{ ZFASTA_BIN, "validate", "--report", "v2", "--json", "--summary", path },
+        &.{ ZFASTA_BIN, "validate", "--json", path },
+        &.{ ZFASTA_BIN, "validate", "--json", "--error-format=json", path },
     }) |argv| {
         const result = try std.process.run(allocator, threaded.io(), .{ .argv = argv });
         switch (result.term) {
@@ -1792,41 +853,284 @@ test "[cli] - [validate report]: selects v2 output and keeps statuses" {
         }
         try std.testing.expectEqualStrings("", result.stderr);
         try std.testing.expect(std.mem.endsWith(u8, result.stdout, "}\n"));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, result.stdout, "\n"));
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, result.stdout, .{});
         const object = parsed.value.object;
-        try std.testing.expectEqualStrings("v2", object.get("schema_version").?.string);
         try std.testing.expectEqualStrings("summary", object.get("kind").?.string);
         try std.testing.expect(object.get("accepted").?.bool);
         try std.testing.expect(object.get("failure").? == .null);
         const validation = object.get("validation").?.object;
+        try std.testing.expectEqualStrings("warnings", validation.get("outcome").?.string);
         try std.testing.expectEqualStrings("complete", validation.get("completion").?.string);
         const code = validation.get("codes").?.array.items[0].object;
         try std.testing.expectEqualStrings("fasta.empty_record", code.get("code").?.string);
-        try std.testing.expectEqualStrings("warning", code.get("severity").?.string);
-        try std.testing.expectEqualStrings("record", code.get("unit").?.string);
-        try std.testing.expectEqualStrings("1", code.get("occurrences").?.string);
         try std.testing.expectEqualStrings("empty_rec", code.get("first").?.object.get("identifier").?.object.get("value").?.string);
     }
 }
 
-test "[cli] - [validate report]: rejects an unknown version and v2 with --fix" {
+test "[cli] - [validate fix]: writes the repaired copy and reports the input" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", "--report", "v3", "tests/data/simple.fasta" }, 1, "",
-        \\error [usage.invalid_option_value] validate: Invalid option value. option=report expected=report_version value="v3"
-        \\hint: Correct the command arguments; use --help for accepted options.
+    const input = try writeFastaArtifact(allocator, "validate-fix-input", ">a\r\nACGT ACGT\r\nAC\r\n>a\nAC?\n");
+    defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
+    const output = try utility.uniqueArtifactPath(allocator, "validate-fix-output", "fa");
+    defer std.Io.Dir.cwd().deleteFile(io, output) catch {};
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const result = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "validate", "--fix", "--width", "3", "-o", output, input } });
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+    try std.testing.expect(std.mem.startsWith(u8, result.stdout, "INVALID "));
+    try std.testing.expectEqualStrings("", result.stderr);
+    try std.testing.expectEqualStrings(">a\nACG\nTAC\nGTA\nC\n>a\nAC?\n", try readTestFile(allocator, output));
+
+    const warnings = try writeFastaArtifact(allocator, "validate-fix-warnings", ">b\nACGT  \nAC\n");
+    defer std.Io.Dir.cwd().deleteFile(io, warnings) catch {};
+    const repaired = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "validate", "--json", "--fix", "-o", output, warnings } });
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, repaired.term);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, repaired.stdout, .{});
+    try std.testing.expectEqualStrings("warnings", parsed.value.object.get("validation").?.object.get("outcome").?.string);
+    try std.testing.expectEqualStrings(">b\nACGTAC\n", try readTestFile(allocator, output));
+
+    // Under --strict, the published copy's repaired warnings no longer fail the run, in the status and in `accepted`.
+    const strict = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "validate", "--json", "--strict", "--fix", "-o", output, warnings } });
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, strict.term);
+    try std.testing.expect((try std.json.parseFromSlice(std.json.Value, allocator, strict.stdout, .{})).value.object.get("accepted").?.bool);
+    const unrepaired = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "validate", "--json", "--strict", warnings } });
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, unrepaired.term);
+    try std.testing.expect(!(try std.json.parseFromSlice(std.json.Value, allocator, unrepaired.stdout, .{})).value.object.get("accepted").?.bool);
+}
+
+test "[cli] - [validate fix]: refuses blocked rewrites and keeps the destination" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const output = try writeFastaArtifact(allocator, "validate-blocked-output", "previous destination\n");
+    defer std.Io.Dir.cwd().deleteFile(io, output) catch {};
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    for ([_][]const u8{ "junk\n>seq1\nACGT\n", ">a\x01\nAC\n", ">a\nA\x00C\n", "" }) |data| {
+        const input = try writeFastaArtifact(allocator, "validate-blocked-input", data);
+        defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
+        const result = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "validate", "--error-format=json", "--fix", "-o", output, input } });
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+        try std.testing.expect(std.mem.startsWith(u8, result.stdout, "INVALID "));
+        try utility.expectDiagnostic(allocator, result.stderr, .@"repair.blocked");
+        try std.testing.expectEqualStrings("previous destination\n", try readTestFile(allocator, output));
+        try std.testing.expectEqualStrings(data, try readTestFile(allocator, input));
+    }
+}
+
+test "[cli] - [validate fix]: rejects an aliased input path without modifying it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const broken = ">seq\nAAAA  \n";
+    const in_path = try writeFastaArtifact(allocator, "validate-fix-input-alias", broken);
+    defer std.Io.Dir.cwd().deleteFile(io, in_path) catch {};
+    const output_alias = try std.fmt.allocPrint(allocator, "./{s}", .{in_path});
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const result = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "validate", "--error-format=json", "--fix", "-o", output_alias, in_path } });
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+    try std.testing.expectEqual(@as(usize, 0), result.stdout.len);
+    try utility.expectDiagnostic(allocator, result.stderr, .@"repair.output_is_input");
+    try std.testing.expectEqualStrings(broken, try readTestFile(allocator, in_path));
+}
+
+test "[cli] - [validate fix]: rejects a symlink alias and safely replaces a separate hard link" {
+    const allocator = std.testing.allocator;
+    const broken = ">seq1\nACGT";
+    const input = try writeFastaArtifact(allocator, "validate-link-input", broken);
+    defer allocator.free(input);
+    defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
+    const hard = try utility.uniqueArtifactPath(allocator, "validate-hard-output", "fa");
+    defer allocator.free(hard);
+    defer std.Io.Dir.cwd().deleteFile(io, hard) catch {};
+    const sym = try utility.uniqueArtifactPath(allocator, "validate-sym-output", "fa");
+    defer allocator.free(sym);
+    defer std.Io.Dir.cwd().deleteFile(io, sym) catch {};
+    const absolute_input = try std.Io.Dir.cwd().realPathFileAlloc(io, input, allocator);
+    defer allocator.free(absolute_input);
+    try std.Io.Dir.cwd().symLink(io, absolute_input, sym, .{});
+    try std.Io.Dir.cwd().hardLink(input, std.Io.Dir.cwd(), hard, io, .{});
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const rejected = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "validate", "--fix", "-o", sym, input } });
+    defer allocator.free(rejected.stdout);
+    defer allocator.free(rejected.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, rejected.term);
+    const accepted = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "validate", "--fix", "-o", hard, input } });
+    defer allocator.free(accepted.stdout);
+    defer allocator.free(accepted.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, accepted.term);
+    const input_after = try readTestFile(allocator, input);
+    defer allocator.free(input_after);
+    const output_after = try readTestFile(allocator, hard);
+    defer allocator.free(output_after);
+    try std.testing.expectEqualStrings(broken, input_after);
+    try std.testing.expectEqualStrings(">seq1\nACGT\n", output_after);
+}
+
+// --- Operational failures ---
+
+test "[failure] - [validate fix]: refuses an output open failure before staging" {
+    const allocator = std.testing.allocator;
+    const broken = ">seq1\nACGT";
+    const input = try writeFastaArtifact(allocator, "validate-identity-input", broken);
+    defer allocator.free(input);
+    defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
+    const output = try utility.uniqueArtifactPath(allocator, "validate-identity-loop", "fa");
+    defer allocator.free(output);
+    defer std.Io.Dir.cwd().deleteFile(io, output) catch {};
+    const directory = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(directory);
+    const absolute_output = try std.fs.path.join(allocator, &.{ directory, output });
+    defer allocator.free(absolute_output);
+    try std.Io.Dir.cwd().symLink(io, absolute_output, output, .{});
+    var failure: diagnostics.Failure = undefined;
+    try std.testing.expectError(error.RepairRefused, validator.runValidate(allocator, io, input, .{ .fix = true, .output_path = output }, &failure));
+    const primary = failure.primary().?;
+    try std.testing.expectEqual(diagnostics.Code.@"repair.output_identity_unknown", primary.code());
+    try std.testing.expectEqual(diagnostics.Stage.check_identity, primary.stage);
+    try std.testing.expectEqual(diagnostics.SourceId.output, primary.at.source.?);
+    try std.testing.expectEqual(error.SymLinkLoop, primary.cause.?.zig);
+    try std.testing.expectEqual(.not_started, failure.outputs.file.state);
+    try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);
+    try std.testing.expect(!failure.work_complete and !failure.complete);
+    const after = try readTestFile(allocator, input);
+    defer allocator.free(after);
+    try std.testing.expectEqualStrings(broken, after);
+}
+
+test "[failure] - [validate diagnostics]: retains a stat cause before scanning" {
+    const Fault = struct {
+        fn stat(_: ?*anyopaque, _: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
+            return error.AccessDenied;
+        }
+    };
+    var vtable = io.vtable.*;
+    vtable.fileStat = Fault.stat;
+    const fault_io = std.Io{ .userdata = io.userdata, .vtable = &vtable };
+    var failure: diagnostics.Failure = undefined;
+    try std.testing.expectError(error.Io, validator.runValidate(std.testing.allocator, fault_io, "tests/data/simple.fasta", .{}, &failure));
+    try std.testing.expectEqual(diagnostics.Code.@"io.stat_failed", failure.primary().?.code());
+    try std.testing.expectEqual(error.AccessDenied, failure.primary().?.cause.?.zig);
+    try std.testing.expect(!failure.work_complete and !failure.complete);
+    try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);
+}
+
+test "[failure] - [validate diagnostics]: preserves published output after report flush failure" {
+    const Fault = struct {
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            return switch (operation) {
+                .file_write_streaming => |write| if (write.file.handle == std.Io.File.stdout().handle)
+                    .{ .file_write_streaming = error.BrokenPipe }
+                else
+                    io.vtable.operate(userdata, operation),
+                else => io.vtable.operate(userdata, operation),
+            };
+        }
+    };
+    const allocator = std.testing.allocator;
+    const input = try writeFastaArtifact(allocator, "validate-published-input", ">seq\nACGT");
+    defer allocator.free(input);
+    defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
+    const output = try writeFastaArtifact(allocator, "validate-published-output", "old destination\n");
+    defer allocator.free(output);
+    defer std.Io.Dir.cwd().deleteFile(io, output) catch {};
+    var vtable = io.vtable.*;
+    vtable.operate = Fault.operate;
+    const fault_io = std.Io{ .userdata = io.userdata, .vtable = &vtable };
+    var failure: diagnostics.Failure = undefined;
+    try std.testing.expectError(error.Io, validator.runValidate(allocator, fault_io, input, .{ .fix = true, .output_path = output }, &failure));
+    try std.testing.expectEqual(diagnostics.Code.@"io.flush_failed", failure.primary().?.code());
+    try std.testing.expectEqual(diagnostics.SourceId.stdout, failure.primary().?.at.source);
+    try std.testing.expectEqual(error.BrokenPipe, failure.primary().?.cause.?.zig);
+    try std.testing.expect(failure.work_complete and !failure.complete);
+    try std.testing.expectEqual(.published, failure.outputs.file.state);
+    try std.testing.expectEqual(.succeeded, failure.outputs.file.final_flush);
+    try std.testing.expectEqual(.failed, failure.outputs.stdout.final_flush);
+    const written = try readTestFile(allocator, output);
+    defer allocator.free(written);
+    try std.testing.expectEqualStrings(">seq\nACGT\n", written);
+}
+
+test "[failure] - [validate diagnostics]: retains the final flush cause and resets for reuse" {
+    const Fault = struct {
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            return switch (operation) {
+                .file_write_streaming => .{ .file_write_streaming = error.BrokenPipe },
+                else => io.vtable.operate(userdata, operation),
+            };
+        }
+        fn discard(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            return switch (operation) {
+                .file_write_streaming => |write| blk: {
+                    var size = write.header.len;
+                    for (write.data, 0..) |data, i| size += data.len * (if (i + 1 == write.data.len) write.splat else 1);
+                    break :blk .{ .file_write_streaming = size };
+                },
+                else => io.vtable.operate(userdata, operation),
+            };
+        }
+    };
+    var vtable = io.vtable.*;
+    vtable.operate = Fault.operate;
+    const fault_io = std.Io{ .userdata = io.userdata, .vtable = &vtable };
+    var failure: diagnostics.Failure = undefined;
+    try std.testing.expectError(error.Io, validator.runValidate(std.testing.allocator, fault_io, "tests/data/simple.fasta", .{ .json = true }, &failure));
+    try std.testing.expectEqual(diagnostics.Code.@"io.flush_failed", failure.primary().?.code());
+    try std.testing.expectEqual(error.BrokenPipe, failure.primary().?.cause.?.zig);
+    try std.testing.expect(failure.work_complete and !failure.complete);
+    try std.testing.expectEqual(.failed, failure.outputs.stdout.final_flush);
+    try std.testing.expectError(error.Io, validator.runValidate(std.testing.allocator, fault_io, "tests/data/validate-file-does-not-exist.fa", .{}, &failure));
+    try std.testing.expectEqual(diagnostics.Code.@"io.file_not_found", failure.primary().?.code());
+    try std.testing.expect(!failure.work_complete and !failure.complete);
+    vtable.operate = Fault.discard;
+    const result = try validator.runValidate(std.testing.allocator, fault_io, "tests/data/simple.fasta", .{ .json = true }, &failure);
+    try std.testing.expectEqual(@as(u8, 0), result.status);
+    try std.testing.expect(failure.work_complete and failure.complete);
+    try std.testing.expect(failure.primary() == null);
+    try std.testing.expectEqual(.succeeded, failure.outputs.stdout.final_flush);
+}
+
+test "[cli] - [validate]: reads standard input" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const child_io = threaded.io();
+    const data = ">a\nAC GT\n>a\nAC\n";
+    const output = try utility.uniqueArtifactPath(allocator, "validate-stdin-output", "fa");
+    defer std.Io.Dir.cwd().deleteFile(io, output) catch {};
+    const Run = struct { argv: []const []const u8, status: u8, stdout: []const u8 };
+    const runs = [_]Run{
+        .{ .argv = &.{ ZFASTA_BIN, "validate", "-" }, .status = 1, .stdout = 
+        \\INVALID stdin: 1 error in 1 code, 1 warning in 1 code; 1 of 2 records with errors, 1 with warnings
+        \\error [fasta.duplicate_identifier] 1 record; first at line 3 column 2, record 2 "a": Identifier duplicates an earlier record.
+        \\warning [format.sequence_whitespace] 1 line in 1 record; first at line 2 column 3, record 1 "a": Sequence line contains whitespace. whitespace_bytes=1
+        \\complete: examined 15 bytes, 4 lines, 2 records, 6 symbols; nucleotide alphabet chosen from 6 symbols
         \\
-    );
-    try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", "tests/data/simple.fasta", "--report" }, 1, "",
-        \\error [usage.missing_option_value] validate: A required option value is missing. option=report expected=report_version
-        \\hint: Correct the command arguments; use --help for accepted options.
-        \\
-    );
-    try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", "--report", "v2", "--fix", "-o", "unused.fa", "tests/data/simple.fasta" }, 1, "",
-        \\error [usage.conflicting_options] validate: Selected options conflict. arguments=fix,report
-        \\hint: Correct the command arguments; use --help for accepted options.
-        \\
-    );
-    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, "unused.fa", .{}));
+        },
+        .{ .argv = &.{ ZFASTA_BIN, "validate", "--fix", "-o", output, "-" }, .status = 1, .stdout = "" },
+    };
+    for (runs) |run| {
+        var child = try std.process.spawn(child_io, .{ .argv = run.argv, .stdin = .pipe, .stdout = .pipe, .stderr = .pipe });
+        try child.stdin.?.writeStreamingAll(child_io, data);
+        child.stdin.?.close(child_io);
+        child.stdin = null;
+        var stdout_buffer: [4096]u8 = undefined;
+        var stdout_reader = child.stdout.?.readerStreaming(child_io, &stdout_buffer);
+        const stdout = try stdout_reader.interface.allocRemaining(allocator, .limited(64 * 1024));
+        var stderr_buffer: [4096]u8 = undefined;
+        var stderr_reader = child.stderr.?.readerStreaming(child_io, &stderr_buffer);
+        const stderr = try stderr_reader.interface.allocRemaining(allocator, .limited(64 * 1024));
+        const term = try child.wait(child_io);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = run.status }, term);
+        try std.testing.expectEqualStrings("", stderr);
+        if (run.stdout.len != 0) try std.testing.expectEqualStrings(run.stdout, stdout) else try std.testing.expect(std.mem.startsWith(u8, stdout, "INVALID stdin: "));
+    }
+    try std.testing.expectEqualStrings(">a\nACGT\n>a\nAC\n", try readTestFile(allocator, output));
 }

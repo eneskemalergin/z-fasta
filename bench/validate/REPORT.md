@@ -10,7 +10,7 @@ This report checks `z-fasta validate` on crafted, messy, and REAL inputs, then t
 
 **What each tool checks**
 
-- **z-fasta validate:** structure, headers, alphabet, and line layout in one pass over the file. Timed as `validate --json --summary`, which prints one summary object; the alphabet is chosen automatically from the first 100,000 sequence bytes.
+- **z-fasta validate:** structure, identifiers, alphabet, and line layout in one streaming pass through a 256 KiB buffer, with every occurrence counted. Timed as `validate --json`, which prints one report object; the alphabet is chosen automatically from the first 100,000 symbols.
 - **SeqKit `seq -v`** (partial): checks every sequence against an explicit alphabet (`-t dna` or `-t protein`) on one thread (`-j 1`) and writes the records back out (`-o /dev/null`), so its time includes that rewrite. It does not check layout or headers.
 - **samtools `faidx`** (partial): builds a `.fai`, which needs fixed line geometry. It checks layout, not the alphabet.
 
@@ -18,7 +18,7 @@ Correctness reported **46** passing and **0** failing checks before performance 
 
 ## Correctness
 
-Expected findings come from how each input is built and from the documented exit rules: 0 for a clean file, 2 for warnings only, and 1 for errors or for more than 10,000 events without `--fix`. A file counts as accepted when validate reports no error-level finding (no sequences, a duplicate name, an invalid character, or a null byte); an exit 1 caused only by the event cap is not a rejection.
+Expected findings come from how each input is built and from the documented exit rules: 0 for a clean file, 2 for warnings only, and 1 for errors. A file counts as accepted when validate reports no error-level code.
 
 | Inputs | Check | Passed |
 | --- | --- | --- |
@@ -38,31 +38,31 @@ Expected findings come from how each input is built and from the documented exit
 
 | Case | Expected | Observed | Status |
 | --- | --- | --- | --- |
-| `duplicate_name` | exit 1; duplicate_name | exit 1; duplicate_name | pass |
-| `invalid_character` | exit 1; invalid_character | exit 1; invalid_character | pass |
-| `null_byte` | exit 1; null_byte | exit 1; null_byte | pass |
-| `utf8_bom` | exit 2; utf8_bom | exit 2; utf8_bom | pass |
-| `empty_sequence` | exit 2; empty_sequence | exit 2; empty_sequence | pass |
-| `missing_terminal_newline` | exit 2; missing_terminal_newline | exit 2; missing_terminal_newline | pass |
-| `interior_space` | exit 1; invalid_character | exit 1; invalid_character | pass |
-| `long_header` | exit 2; long_header | exit 2; long_header | pass |
-| `strict` | exit 1; empty_sequence | exit 1; empty_sequence | pass |
+| `duplicate_identifier` | exit 1; fasta.duplicate_identifier | exit 1; fasta.duplicate_identifier | pass |
+| `invalid_symbol` | exit 1; sequence.invalid_symbol | exit 1; sequence.invalid_symbol | pass |
+| `header_nul` | exit 1; fasta.header_control_byte | exit 1; fasta.header_control_byte | pass |
+| `leading_bom` | exit 2; format.leading_bom | exit 2; format.leading_bom | pass |
+| `empty_record` | exit 2; fasta.empty_record | exit 2; fasta.empty_record | pass |
+| `missing_terminal_newline` | exit 2; format.missing_terminal_newline | exit 2; format.missing_terminal_newline | pass |
+| `interior_space` | exit 2; format.sequence_whitespace | exit 2; format.sequence_whitespace | pass |
+| `long_header` | exit 2; fasta.long_header | exit 2; fasta.long_header | pass |
+| `strict` | exit 1; fasta.empty_record | exit 1; fasta.empty_record | pass |
 
 ### Verdicts on real and messy files
 
-validate's findings, with the verdict each other tool gives the same file. `index` accepts every one, and validate accepts the same files. samtools rejects exactly the files where validate reports a width, trailing-whitespace, or line-ending finding.
+validate's findings, with the verdict each other tool gives the same file. `index` accepts every one, and validate accepts the same files. samtools rejects exactly the files where validate reports a wrapping, whitespace, blank-line, or line-ending finding.
 
 | Inputs | File | validate exit; findings | index | samtools faidx | SeqKit seq -v |
 | --- | --- | --- | --- | --- | --- |
 | Messy fixtures | `uniform` | exit 0; none | accept | accept |  |
-| Messy fixtures | `mixed_widths` | exit 2; inconsistent_line_widths | accept | reject |  |
-| Messy fixtures | `trailing_whitespace` | exit 2; trailing_whitespace | accept | reject |  |
-| Messy fixtures | `blank_lines` | exit 2; inconsistent_line_widths | accept | reject |  |
-| Messy fixtures | `mixed_crlf` | exit 2; inconsistent_line_widths,mixed_line_endings | accept | reject |  |
-| Messy proteome variants | `mixed_widths` | exit 1; inconsistent_line_widths | accept | reject |  |
-| Messy proteome variants | `trailing_whitespace` | exit 1; trailing_whitespace | accept | reject |  |
-| Messy proteome variants | `mixed_crlf` | exit 2; mixed_line_endings | accept | reject |  |
-| Messy proteome variants | `all_messy` | exit 1; inconsistent_line_widths,mixed_line_endings,trailing_whitespace | accept | reject |  |
+| Messy fixtures | `mixed_widths` | exit 2; format.inconsistent_wrapping | accept | reject |  |
+| Messy fixtures | `trailing_whitespace` | exit 2; format.sequence_whitespace | accept | reject |  |
+| Messy fixtures | `blank_lines` | exit 2; format.blank_sequence_line,format.inconsistent_wrapping | accept | reject |  |
+| Messy fixtures | `mixed_crlf` | exit 2; format.inconsistent_wrapping,format.mixed_line_endings | accept | reject |  |
+| Messy proteome variants | `mixed_widths` | exit 2; format.inconsistent_wrapping | accept | reject |  |
+| Messy proteome variants | `trailing_whitespace` | exit 2; format.sequence_whitespace | accept | reject |  |
+| Messy proteome variants | `mixed_crlf` | exit 2; format.mixed_line_endings | accept | reject |  |
+| Messy proteome variants | `all_messy` | exit 2; format.inconsistent_wrapping,format.mixed_line_endings,format.sequence_whitespace | accept | reject |  |
 | REAL datasets | `Genome` | accept; findings not asserted | accept | accept | accept |
 | REAL datasets | `Transcriptome` | accept; findings not asserted | accept | accept | accept |
 | REAL datasets | `Proteome` | accept; findings not asserted | accept | accept | accept |
@@ -75,7 +75,7 @@ Each file holds one byte in question inside 240 nucleotide bases, checked with S
 | --- | --- | --- |
 | `rna_u` | reject | accept |
 | `dot_gap` | accept | reject |
-| `space_inside` | accept | reject |
+| `space_inside` | accept | accept |
 | `tab_at_end` | reject | accept |
 
 ## Performance
@@ -86,39 +86,39 @@ zebrac times each command in turn, in one batch, on a warm page cache. The peers
 
 | Dataset | z-fasta validate | SeqKit seq -v (partial) | samtools faidx (partial) |
 | --- | --- | --- | --- |
-| Genome | 5.779 +/- 0.086 s | 5.559 +/- 0.028 s | 8.106 +/- 0.011 s |
-| Transcriptome | 0.962 +/- 0.011 s | 0.630 +/- 0.005 s | 1.698 +/- 0.007 s |
-| Proteome | 0.028 +/- 0.000 s | 0.084 +/- 0.004 s | 0.060 +/- 0.001 s |
+| Genome | 0.462 +/- 0.026 s | 7.203 +/- 0.861 s | 8.162 +/- 0.049 s |
+| Transcriptome | 0.192 +/- 0.005 s | 0.642 +/- 0.021 s | 1.764 +/- 0.041 s |
+| Proteome | 0.015 +/- 0.000 s | 0.094 +/- 0.006 s | 0.063 +/- 0.002 s |
 
 ### Peak memory (mean resident set)
 
-validate maps the whole input, so its peak memory grows with the file size; the peers stream.
+validate reads through a fixed buffer, so its peak memory does not grow with sequence bytes; its duplicate check keeps a fingerprint and an offset per identifier.
 
 | Dataset | z-fasta validate | SeqKit seq -v (partial) | samtools faidx (partial) |
 | --- | --- | --- | --- |
-| Genome | 3,005.8 MiB | 1,192.7 MiB | 9.2 MiB |
-| Transcriptome | 472.3 MiB | 71.9 MiB | 65.6 MiB |
-| Proteome | 14.6 MiB | 70.9 MiB | 10.7 MiB |
+| Genome | 3.6 MiB | 1,191.7 MiB | 9.2 MiB |
+| Transcriptome | 5.5 MiB | 72.0 MiB | 65.6 MiB |
+| Proteome | 3.6 MiB | 70.3 MiB | 10.9 MiB |
 
 ### Minor page faults (mean)
 
 | Dataset | z-fasta validate | SeqKit seq -v (partial) | samtools faidx (partial) |
 | --- | --- | --- | --- |
-| Genome | 21,006 | 304,030 | 728 |
-| Transcriptome | 10,804 | 17,407 | 15,456 |
-| Proteome | 931 | 17,074 | 1,311 |
+| Genome | 394 | 304,055 | 723 |
+| Transcriptome | 2,296 | 17,370 | 15,454 |
+| Proteome | 588 | 16,888 | 1,315 |
 
 ### Throughput (input MiB per second of wall time)
 
 | Dataset | z-fasta validate | SeqKit seq -v (partial) | samtools faidx (partial) |
 | --- | --- | --- | --- |
-| Genome | 520 MiB/s | 541 MiB/s | 371 MiB/s |
-| Transcriptome | 477 MiB/s | 729 MiB/s | 270 MiB/s |
-| Proteome | 465 MiB/s | 155 MiB/s | 220 MiB/s |
+| Genome | 6,511 MiB/s | 417 MiB/s | 368 MiB/s |
+| Transcriptome | 2,395 MiB/s | 714 MiB/s | 260 MiB/s |
+| Proteome | 852 MiB/s | 139 MiB/s | 208 MiB/s |
 
 ## Run Provenance
 
-- Run: `20261012_173005`, zebrac `zebrac 0.6.2`, 5 measured samples, 3 warmups, 5000 ms budget per command.
+- Run: `20261013_064940`, zebrac `zebrac 0.6.2`, 5 measured samples, 3 warmups, 5000 ms budget per command.
 - z-fasta: `z-fasta 0.3.5`.
 - samtools: `samtools 1.24`; SeqKit: `seqkit v2.13.0`.
 
@@ -126,15 +126,15 @@ validate maps the whole input, so its peak memory grows with the file size; the 
 
 ```json
 {
-  "checkout_revision": "d4aa41e6038430323082ad65fb3cbaae3f4a2b2b",
-  "checkout_dirty": false,
+  "checkout_revision": "2a8049b8c088969ffdfa87766b2f79b641a670c3",
+  "checkout_dirty": true,
   "executable": {
     "path": "zig-out/bin/z-fasta",
-    "size": 826232,
-    "mtime_ns": 1791851038711991885,
-    "ctime_ns": 1791851038861992419,
+    "size": 869528,
+    "mtime_ns": 1791899290055441367,
+    "ctime_ns": 1791899346416676763,
     "device": 52,
-    "inode": 36089708
+    "inode": 36410242
   },
   "declared_build": {
     "revision": null,

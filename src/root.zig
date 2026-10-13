@@ -4,6 +4,7 @@
 //! Intervals are zero-based half-open and never clipped. A reader is not safe for concurrent use,
 //! and its `io` must outlive it.
 //! `RecordReader` streams every record of a FASTA from any `std.Io.Reader`, by `index`'s rules.
+//! `validation` checks a FASTA stream in one pass, and can write a repaired copy in the same pass.
 
 const std = @import("std");
 
@@ -11,8 +12,18 @@ pub const diagnostics = @import("diagnostics");
 const fasta = @import("fasta.zig");
 const getter = @import("getter.zig");
 const index_format = @import("index_format.zig");
+const validator = @import("validator.zig");
 
 pub const RecordReader = fasta.RecordReader;
+
+pub const validation = struct {
+    pub const Rules = validator.Rules;
+    pub const Report = validator.Report;
+    pub const NameSource = validator.NameSource;
+    pub const READ_BUFFER_BYTES = validator.READ_BUFFER_BYTES;
+    pub const validate = validator.validate;
+    pub const repair = validator.repair;
+};
 
 pub const Interval = struct {
     start: u64,

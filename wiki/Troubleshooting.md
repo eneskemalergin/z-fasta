@@ -143,23 +143,15 @@ Use `--strict` when warnings must fail automation:
 z-fasta validate --strict genome.fa
 ```
 
-## Validate retained 10000 examples
+## Validate reports an interrupted check
 
-Scanning and legacy kind counts continued, but additional event examples were omitted. JSON includes `truncated: true`. Without fix, the existing cap policy returns exit 1. With fix, a permitted rewrite can finish and the remaining findings select the status.
-
-Text mode says the retained examples were capped. Machine error mode omits that prose notice; inspect the v1 report's truncation field and the actual status. This is not a new coded biological failure. `--report v2` keeps exact counts without an event cap, so its status depends only on the findings.
+`INTERRUPTED` (JSON `completion: interrupted`) means a read or memory failure stopped the scan. The report covers what was examined, whole-file findings such as a missing final newline are not decided, the failure is on stderr, and the exit status is 1. Fix the cause and rerun; a partial report is never a pass.
 
 ## Fix refuses the file
 
-Fix cannot repair no-sequence, duplicate-name, or null-byte errors. It also refuses non-null content before the first header instead of discarding it. Resolve those in the source.
+`repair.blocked` names the first finding the copy could not keep: no records, content before the first header, or a control byte in a header or sequence line. The report on stdout lists every finding. Resolve those in the source; an existing destination is left unchanged.
 
-Invalid alphabet bytes require either source correction, a correct `--custom-alphabet`, or an explicit format-only decision:
-
-```bash
-z-fasta validate --fix --fix-format-only -o output.fa input.fa
-```
-
-The invalid bytes remain and still affect exit status.
+Duplicate identifiers and symbols outside the alphabet do not block repair. The copy keeps them, and they still affect the exit status.
 
 ## Fix refuses the output path
 

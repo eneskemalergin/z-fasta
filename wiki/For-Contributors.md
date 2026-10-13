@@ -39,7 +39,7 @@ The filter applies to Zig tests. Separate native callers still run when selected
 - `src/index_format.zig`: `.zfi` or `.fai` loading, validation, lookup, and ownership.
 - `src/getter.zig`: requests, coordinates, transforms, and bounded output.
 - `src/stats.zig`: length and composition reports.
-- `src/validator.zig`: events, JSON, fix policy, and normalized rewrite.
+- `src/validator.zig`: the streaming validation scan, its report, and the repair written in the same pass.
 - `src/bed_parser.zig`: BED row conversion and strand parsing.
 - `src/fasta.zig`: bases, identifier ends, alphabet detection, the IUPAC complement, the record scanner, and the record reader.
 - `src/platform.zig`: portable read-only mapping and advice.
@@ -56,7 +56,7 @@ bash tests/check_diagnostics.sh
 
 The separate caller in `tests/diagnostics_commands_caller.zig` handles failures from the actual command functions and then calls them again successfully. It uses existing exports without running the CLI dispatcher. Preserve finite error unions, allocator cleanup, original causes and the primary failure when cleanup or reporting also fails. Reset `Failure` once at the owning operation entry; nested helpers retain facts before returning and must not reset them.
 
-Borrowed source labels live through handling or reset. Retained preview views belong to their `Failure`. Validator event names borrow the input while `Summary` owns its arrays. Keep those input bytes alive until handling is finished. Failure capture allocates no new message; preview exhaustion marks truncation and must not hide the original failure. See [Error diagnostics](Error-Diagnostics) for units, encoding and output states.
+Borrowed source labels live through handling or reset. Retained preview views belong to their `Failure`. A validator `Report` copies the identifiers it keeps. Failure capture allocates no new message; preview exhaustion marks truncation and must not hide the original failure. See [Error diagnostics](Error-Diagnostics) for units, encoding and output states.
 
 ## Local correctness gates
 
@@ -79,7 +79,7 @@ Run every affected gate after code changes. Synthetic unit fixtures do not repla
 - Positional and BED coordinate systems remain distinct and explicit.
 - Shared type detection changes are checked in stats, GET, and validate.
 - GET and index hot paths stay bounded by fixed sequence payload buffers.
-- Validate fix preserves biological sequence bytes and never overwrites input.
+- Validate fix preserves every header byte and every symbol, and never overwrites input.
 
 ## Documentation update map
 

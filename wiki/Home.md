@@ -58,7 +58,7 @@ reference.fa
 - Positional GET behavior is checked for byte equality with `samtools faidx` on the verified path.
 - BED, names, reverse-complement, and messy-layout extraction have dedicated correctness coverage.
 - Stats scans indexed sequence spans and reports nucleotide or protein composition, Nx, auN, quartiles, and extrema.
-- Validate reports the documented structure, alphabet, and header problems, then rewrites supported format issues to a separate file.
+- Validate counts every documented structure, identifier, alphabet, and layout problem in one streaming pass, then can write a repaired copy to a separate file.
 
 ## Know the boundary
 

@@ -194,22 +194,22 @@ pub const Argument = enum {
     complement_only,
     reverse_only,
     annotate_rc,
-    summary,
     strict,
     json,
     fix,
     output,
-    fix_format_only,
     schema,
     custom_alphabet,
+    sequence_type,
     max_header_len,
-    report,
+    max_name_memory,
+    width,
     error_format,
     read_buffer,
 };
 pub const Arguments = std.EnumSet(Argument);
-pub const Expected = enum { path, request_source, schema, alphabet, positive_usize, report_version, error_format, nonempty_buffer };
-pub const Requirement = enum { bed, transform_or_strand, json, fix, output };
+pub const Expected = enum { path, request_source, schema, alphabet, sequence_type, positive_usize, error_format, nonempty_buffer };
+pub const Requirement = enum { bed, transform_or_strand, fix, output };
 pub const AllocationRole = enum {
     argv,
     arena,
@@ -233,12 +233,8 @@ pub const AllocationRole = enum {
     lengths,
     traversal_order,
     validation_identifiers,
-    validation_events,
     validation_report,
-    line_widths,
-    rewrite_bytes,
     serialized_index,
-    serialized_event,
 };
 pub const CapacityRole = enum {
     input_bytes,
@@ -264,7 +260,6 @@ pub const Counter = enum {
     physical_lines,
     records,
     requests,
-    events,
     composition_bin,
     lowercase_symbols,
     report_ordinal,
@@ -319,8 +314,8 @@ pub const SourceChange = struct {
 pub const Format = enum { zfi, fai };
 pub const NamingPolicy = enum { first_nonempty, all_nonempty };
 /// `controls_except_tab`: every byte below 0x20 except tab.
-pub const Grammar = enum { legacy_nul_only, controls_except_tab };
-pub const Alphabet = enum { dna, rna, nucleotide, protein, custom };
+pub const Grammar = enum { controls_except_tab };
+pub const Alphabet = enum { dna, rna, nucleotide, protein, any, custom };
 pub const AlphabetSelection = enum { explicit, automatic, custom };
 pub const ClassifierRule = enum { nucleotide_above_90_percent };
 /// One-based inclusive, unlike the package's zero-based `Interval`.
@@ -377,7 +372,8 @@ pub const NonuniformReason = enum {
 };
 pub const FooterLayouts = packed struct(u8) { tight: bool, legacy: bool, reserved: u6 = 0 };
 pub const LookupScope = enum { complete_catalog, retained_matches };
-pub const RepairPolicy = enum { legacy_safe, legacy_format_only };
+/// `preserve_symbols`: the rewrite keeps every header byte and every symbol, and refuses otherwise.
+pub const RepairPolicy = enum { preserve_symbols };
 pub const IdentityComparison = enum { lexical_path, canonical_path };
 pub const Component = enum { cli, indexer, index_loader, getter, bed_parser, stats, validator, reporting, platform };
 pub const Check = enum {
@@ -477,8 +473,6 @@ pub const Blocker = union(enum) {
     content_before_header: Preamble,
     header_control_byte: ControlByte,
     sequence_control_byte: ControlByte,
-    duplicate_identifier: Duplicate,
-    invalid_symbol: InvalidSymbol,
 
     pub fn code(self: *const Blocker) Code {
         return switch (self.*) {
@@ -486,8 +480,6 @@ pub const Blocker = union(enum) {
             .content_before_header => .@"fasta.content_before_header",
             .header_control_byte => .@"fasta.header_control_byte",
             .sequence_control_byte => .@"fasta.sequence_control_byte",
-            .duplicate_identifier => .@"fasta.duplicate_identifier",
-            .invalid_symbol => .@"sequence.invalid_symbol",
         };
     }
 };
@@ -814,6 +806,15 @@ pub fn readFailure(requested: u64, received: ?u64) Details {
         .{ .@"io.unexpected_eof" = .{ .exact = .{ .requested_bytes = requested, .received_bytes = got } } }
     else
         .{ .@"io.read_failed" = .{ .requested_bytes = requested } };
+}
+
+/// After a failed read of the FASTA, replaces a generic read cause with the file reader's own error.
+pub fn retainReaderCause(failure: *Failure, reader: *const std.Io.File.Reader) void {
+    if (!failure.has_primary) return;
+    const primary = &failure.primary_storage;
+    if (primary.stage == .read and primary.at.source == .fasta) {
+        if (reader.err) |err| primary.cause = .{ .zig = err };
+    }
 }
 
 /// Flushes `writer` and records the outcome in `state`; returns the error to report when the flush fails.
