@@ -32,7 +32,7 @@ No. Index lookup and GET output use the identifier before the first space or tab
 
 ## What happens to duplicate names?
 
-Default indexing keeps the first non-empty record. `--no-dedup` retains all records for index population and stats, but GET still returns the first exact match. Validate reports duplicates as errors.
+Indexing keeps every non-empty record, duplicates included, and stats counts them all. GET returns the first exact match. Validate reports duplicates as errors.
 
 ## What happens to empty sequences?
 

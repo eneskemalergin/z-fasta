@@ -59,7 +59,7 @@ Work through these checks in order:
 
 - Identifier spelling and case.
 - Header token before the first space or tab.
-- Duplicate and empty-record policy.
+- Duplicate identifiers, which resolve to the first record, and empty records, which are not indexed.
 - Names-file whitespace.
 - Whether a colon suffix was interpreted as coordinates.
 - Whether the chosen sidecar belongs to this FASTA.
@@ -174,7 +174,7 @@ A separate hard-link destination can be atomically replaced without modifying th
 
 - `fasta.no_records`: the input is empty.
 - `index.initial_header_required`: the first byte is not `>`. The report's `byte` shows it; `0xef` is the start of a UTF-8 BOM.
-- `index.no_indexable_records`: every record is empty. The report counts seen, empty, and duplicate records.
+- `index.no_indexable_records`: every record is empty.
 
 Index requires a non-empty input whose first byte is `>`. Validate can report a BOM and write a clean copy:
 

@@ -54,9 +54,7 @@ class ReportCounters:
 # Styling.
 COLORS = {
     "z-fasta-fai": "#F7A41D",  # Zig gold (peer-comparable)
-    "z-fasta-fai-nodedup": "#FBC02D",
     "z-fasta-zfi": "#E65100",  # deep orange (first-class)
-    "z-fasta-zfi-nodedup": "#EF6C00",
     "noodles": "#C45C26",  # rust bronze
     "rustbio-custom-index": "#8B3A2A",  # rust-bio benchmark lane
     "samtools": "#555555",  # C grey (GitHub linguist)
@@ -66,9 +64,7 @@ COLORS = {
 }
 DISPLAY_NAMES = {
     "z-fasta-fai": "z-fasta (.fai)",
-    "z-fasta-fai-nodedup": "z-fasta (.fai) --no-dedup",
     "z-fasta-zfi": "z-fasta (.zfi)",
-    "z-fasta-zfi-nodedup": "z-fasta (.zfi) --no-dedup",
     "samtools": "samtools",
     "seqkit": "seqkit",
     "fastahack": "fastahack",
@@ -100,6 +96,7 @@ EDGE_CONTRACT_CLASSES = {
     "fai_parity": "FAI parity",
     "zfi_messy": "ZFI messy support",
     "invalid_input": "Invalid input review",
+    "all_records": "Every record indexed",
 }
 EDGE_MESSY_CASES = {"uniform", "mixed_widths", "trailing_whitespace", "blank_lines", "mixed_crlf"}
 DATASET_ORDER = ["Genome", "Transcriptome", "Proteome"]
@@ -119,13 +116,11 @@ REAL_DATASETS = [
     },
 ]
 
-# Product section: format and dedup matrix on the record-rich real datasets.
+# Product section: both output formats on the record-rich real datasets.
 PRODUCT_WORKLOADS = ("Transcriptome", "Proteome")
 PRODUCT_COMPARISON_TOOLS = [
     "z-fasta-fai",
-    "z-fasta-fai-nodedup",
     "z-fasta-zfi",
-    "z-fasta-zfi-nodedup",
 ]
 
 # Headline real-dataset chart: peer-comparable z-fasta (.fai) plus competitors.
@@ -1287,7 +1282,7 @@ def fig_product_comparison_tradeoff(
         ax.set_xlabel("Peak RSS (MiB, log scale)", fontsize=10)
 
     fig.suptitle(
-        "Format and Dedup Comparison: Time vs Memory",
+        "Format Comparison: Time vs Memory",
         fontsize=12,
         fontweight="bold",
         y=0.98,
@@ -1443,13 +1438,12 @@ def md_overview(manifest: dict | None) -> str:
     return "\n\n".join(
         [
             "This report presents the benchmark sections captured by the selected run: "
-            "correctness, real-data performance and memory, format and dedup behavior, and "
+            "correctness, real-data performance and memory, the two output formats, and "
             "synthetic scaling where available.",
             (
                 "Cross-tool tables use `z-fasta index --emit-fai` because the peer tools "
                 "write samtools-compatible `.fai` indexes. The z-fasta-only comparison "
-                f"separately covers `.fai` and the default `.zfi`, with dedup on and "
-                f"off, on {product_dataset_text}."
+                f"separately covers `.fai` and the default `.zfi` on {product_dataset_text}."
             ),
             (
                 "The **rust-bio** label needs one clarification: rust-bio has no equivalent "
@@ -1637,11 +1631,10 @@ def md_performance_real_datasets(df: pd.DataFrame, nums: ReportCounters) -> str:
     f_perf = nums.next_figure()
     blocks = [
         "Headline comparison on the three human reference datasets (see **Datasets**). "
-        "**z-fasta (.fai)** is `index --emit-fai` with dedup. It constructs the "
+        "**z-fasta (.fai)** is `index --emit-fai`. It constructs the "
         "peer-compatible output while discarding the emitted stream; peers write sidecar "
-        "files. Output destinations and duplicate-name policies therefore are not identical. "
-        "The product table isolates z-fasta's dedup cost. CLI default `index` writes `.zfi`; "
-        "see **z-fasta Format and Dedup Comparison**.",
+        "files, so output destinations are not identical. CLI default `index` writes `.zfi`; "
+        "see **z-fasta Format Comparison**.",
         md_real_performance_result(df),
         f"**Table {t_wall}:** Zebrac wall time per dataset (seconds, mean ± stddev, warm cache). "
         "Lower is better. Tool order: z-fasta, noodles, rust-bio, samtools, seqkit, "
@@ -1678,8 +1671,8 @@ def md_performance_real_datasets(df: pd.DataFrame, nums: ReportCounters) -> str:
             "- **Bar labels:** `1x` on z-fasta (baseline); competitor labels = z-fasta speedup "
             f"(competitor time / z-fasta time). Border color matches the tool. Dashed gold line "
             f"= z-fasta wall time for that dataset. Details in Table {t_cmp}.\n"
-            "- **z-fasta only:** this section uses the peer-comparable `.fai` lane; format and "
-            "dedup tradeoffs are in **z-fasta Format and Dedup Comparison**."
+            "- **z-fasta only:** this section uses the peer-comparable `.fai` lane; format "
+            "tradeoffs are in **z-fasta Format Comparison**."
         ),
     ]
     return "\n\n".join(blocks)
@@ -1816,48 +1809,32 @@ def md_scaling_section(
 
 
 def md_product_effect_table(df: pd.DataFrame) -> str:
-    """Dedup-on vs no-dedup wall time and RSS within each output format."""
-    formats = (
-        (".fai", "z-fasta-fai", "z-fasta-fai-nodedup"),
-        (".zfi", "z-fasta-zfi", "z-fasta-zfi-nodedup"),
-    )
+    """`.zfi` against `.fai` wall time and RSS on each dataset."""
     rows = []
     for dataset in sorted(df["dataset"].unique(), key=dataset_sort_key):
-        for output, dedup_tool, no_dedup_tool in formats:
-            dedup = df[(df["dataset"] == dataset) & (df["tool"] == dedup_tool)]
-            no_dedup = df[(df["dataset"] == dataset) & (df["tool"] == no_dedup_tool)]
-            if dedup.empty or no_dedup.empty:
-                continue
-            dedup_row = dedup.iloc[0]
-            no_dedup_row = no_dedup.iloc[0]
-            no_dedup_wall = float(no_dedup_row["mean"])
-            no_dedup_rss = float(no_dedup_row["peak_rss_mb"])
-            wall_ratio = (
-                float(dedup_row["mean"]) / no_dedup_wall
-                if no_dedup_wall > 0
-                else None
-            )
-            rss_ratio = (
-                float(dedup_row["peak_rss_mb"]) / no_dedup_rss
-                if no_dedup_rss > 0
-                else None
-            )
-            rows.append(
-                {
-                    "Dataset": dataset,
-                    "Output": output,
-                    "Dedup wall": f"{dedup_row['mean']:.4f}s ±{dedup_row['stddev']:.4f}",
-                    "No-dedup wall": (
-                        f"{no_dedup_row['mean']:.4f}s ±{no_dedup_row['stddev']:.4f}"
-                    ),
-                    "Wall ratio": f"{wall_ratio:.2f}x" if wall_ratio else "n/a",
-                    "Dedup RSS": f"{dedup_row['peak_rss_mb']:.2f} MiB",
-                    "No-dedup RSS": f"{no_dedup_row['peak_rss_mb']:.2f} MiB",
-                    "RSS ratio": f"{rss_ratio:.2f}x" if rss_ratio else "n/a",
-                }
-            )
+        fai = df[(df["dataset"] == dataset) & (df["tool"] == "z-fasta-fai")]
+        zfi = df[(df["dataset"] == dataset) & (df["tool"] == "z-fasta-zfi")]
+        if fai.empty or zfi.empty:
+            continue
+        fai_row = fai.iloc[0]
+        zfi_row = zfi.iloc[0]
+        fai_wall = float(fai_row["mean"])
+        fai_rss = float(fai_row["peak_rss_mb"])
+        wall_ratio = float(zfi_row["mean"]) / fai_wall if fai_wall > 0 else None
+        rss_ratio = float(zfi_row["peak_rss_mb"]) / fai_rss if fai_rss > 0 else None
+        rows.append(
+            {
+                "Dataset": dataset,
+                ".fai wall": f"{fai_row['mean']:.4f}s ±{fai_row['stddev']:.4f}",
+                ".zfi wall": f"{zfi_row['mean']:.4f}s ±{zfi_row['stddev']:.4f}",
+                "Wall ratio": f"{wall_ratio:.2f}x" if wall_ratio else "n/a",
+                ".fai RSS": f"{fai_row['peak_rss_mb']:.2f} MiB",
+                ".zfi RSS": f"{zfi_row['peak_rss_mb']:.2f} MiB",
+                "RSS ratio": f"{rss_ratio:.2f}x" if rss_ratio else "n/a",
+            }
+        )
     if not rows:
-        return "_No complete format and dedup pairs._"
+        return "_No complete format pairs._"
     return pd.DataFrame(rows).to_markdown(index=False)
 
 
@@ -1865,51 +1842,21 @@ def md_product_comparison_section(
     df: pd.DataFrame,
     nums: ReportCounters,
 ) -> str:
-    """Thin z-fasta-only view of output format and dedup cost."""
+    """Thin z-fasta-only view of the two output formats."""
     t_effect = nums.next_table()
     f_trade = nums.next_figure()
     datasets = sorted(df["dataset"].unique(), key=dataset_sort_key)
     dataset_text = readable_list([f"**{dataset}**" for dataset in datasets])
-
-    effects = []
-    for dataset in datasets:
-        for output, dedup_tool, no_dedup_tool in (
-            (".fai", "z-fasta-fai", "z-fasta-fai-nodedup"),
-            (".zfi", "z-fasta-zfi", "z-fasta-zfi-nodedup"),
-        ):
-            dedup = df[(df["dataset"] == dataset) & (df["tool"] == dedup_tool)]
-            no_dedup = df[(df["dataset"] == dataset) & (df["tool"] == no_dedup_tool)]
-            if dedup.empty or no_dedup.empty:
-                continue
-            effects.append(
-                (
-                    float(dedup.iloc[0]["peak_rss_mb"])
-                    / float(no_dedup.iloc[0]["peak_rss_mb"]),
-                    dataset,
-                    output,
-                )
-            )
-    if effects:
-        rss_ratio, rss_dataset, rss_output = max(effects)
-        result = (
-            f"**Measured result:** the largest dedup memory cost is {rss_ratio:.2f}x on "
-            f"{rss_dataset} (`{rss_output}`)."
-        )
-    else:
-        result = ""
-
     blocks = [
         (
-            f"This focused z-fasta comparison uses {dataset_text}. It isolates output format "
-            "(`.fai` or `.zfi`) and duplicate-name tracking (dedup or `--no-dedup`). Peer "
-            "indexers stay in the cross-tool performance sections, where they answer a "
-            "different question."
+            f"This focused z-fasta comparison uses {dataset_text}. It isolates the output "
+            "format: `.fai` from `index --emit-fai`, and the default `.zfi`. Peer indexers "
+            "stay in the cross-tool performance sections, where they answer a different "
+            "question."
         ),
-        result,
         (
-            f"**Table {t_effect}:** Measured wall time and peak RSS for each matched pair. "
-            "Each ratio is dedup divided by no-dedup within the same dataset and output "
-            "format. Values above `1x` are the measured dedup cost."
+            f"**Table {t_effect}:** Measured wall time and peak RSS for each format. Each "
+            "ratio is `.zfi` divided by `.fai` within the same dataset."
         ),
         md_product_effect_table(df),
         '<div style="margin: 1.5em 0"></div>',
@@ -1919,15 +1866,14 @@ def md_product_comparison_section(
             "memory."
         ),
         (
-            f"![Figure {f_trade}: format and dedup time versus memory]"
+            f"![Figure {f_trade}: format time versus memory]"
             "(results/figures/product_comparison.png)"
         ),
         (
             f"**Reading Figure {f_trade}**\n"
             f"- Panels: {readable_list(datasets)}.\n"
             "- Gold points: `.fai`; orange points: `.zfi`.\n"
-            "- Lighter points: `--no-dedup`; darker points: dedup.\n"
-            f"- Exact measurements and within-format ratios are in Table {t_effect}."
+            f"- Exact measurements and ratios are in Table {t_effect}."
         ),
     ]
     return "\n\n".join(blocks)
@@ -1984,12 +1930,11 @@ def md_memory_usage_real_datasets(df: pd.DataFrame, nums: ReportCounters) -> str
         best = lower.loc[lower["ratio"].idxmin()]
         result = (
             f"**Measured result:** {best.competitor} uses less peak RSS on {best.dataset} "
-            f"({best.comp_v:.2f} MiB vs {best.zfasta_v:.2f} MiB). The headline z-fasta "
-            "lane includes default duplicate-name tracking."
+            f"({best.comp_v:.2f} MiB vs {best.zfasta_v:.2f} MiB)."
         )
     blocks = [
         "Same zebrac runs as **Performance: Real Datasets**. z-fasta (.fai) only; "
-        "other product lanes are in **z-fasta Format and Dedup Comparison**.",
+        "the `.zfi` lane is in **z-fasta Format Comparison**.",
         result,
         (
             "### Peak RSS\n\n"
@@ -1998,7 +1943,7 @@ def md_memory_usage_real_datasets(df: pd.DataFrame, nums: ReportCounters) -> str
             "`ru_maxrss` via `getrusage`). Table and figure show the mean across "
             "samples.\n\n"
             "Use this to compare tools on the same file and host. Grey dashed lines show file "
-            "size as context; output and dedup state can still affect memory. A low bar does "
+            "size as context; the output format can still affect memory. A low bar does "
             "not always mean less work, so wall time and page faults provide the surrounding "
             "context."
         ),
@@ -2161,6 +2106,7 @@ def md_edge_case_summary_table(df: pd.DataFrame) -> str:
         "fai_parity": "z-fasta (.fai) vs samtools acceptance and FAI bytes",
         "zfi_messy": "z-fasta (.zfi) side table; FAI peers expected incompatible",
         "invalid_input": "raw behavior shown; no parity claim for binary input",
+        "all_records": "z-fasta (.fai) keeps each duplicate; samtools keeps the first",
     }
     rows = []
     for class_name, label in EDGE_CONTRACT_CLASSES.items():
@@ -2299,10 +2245,8 @@ def md_tools_tested(tools: dict[str, str] | None = None, z_fasta: str | None = N
     zf_version = short_tool_version(z_fasta, "z-fasta ")
     lines = [
         f"- **z-fasta ({zf_version})**\n"
-        "  - `.fai`, dedup: peer-comparable cross-tool and scaling lane.\n"
-        "  - `.fai`, no dedup: isolates duplicate-name tracking cost.\n"
-        "  - `.zfi`, dedup: default product mode.\n"
-        "  - `.zfi`, no dedup: default format without duplicate-name tracking."
+        "  - `.fai`: peer-comparable cross-tool and scaling lane.\n"
+        "  - `.zfi`: default product mode."
     ]
     specs = (
         ("noodles", "noodles", "noodles-fasta ", "Rust noodles-fasta wrapper"),
@@ -2426,7 +2370,7 @@ def main():
         else None
     )
     if product_df is not None and not product_df.empty:
-        section("z-fasta Format and Dedup Comparison")
+        section("z-fasta Format Comparison")
         report_lines.append(md_product_comparison_section(product_df, nums))
         p = fig_product_comparison_tradeoff(
             product_df,

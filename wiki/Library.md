@@ -63,7 +63,7 @@ try testing.expect(reader.record(2) == null);
 ```
 
 - `open` takes `.{ .index = .automatic }` by default, which prefers `ref.fa.zfi` and then `ref.fa.fai`, as `get` does. `.{ .index = .{ .fai = path } }` or `.{ .zfi = path }` opens exactly that file and never falls back.
-- `recordCount`, `record(ordinal)`, and `lookup(name)` read no sequence. `lookup` returns the first record with that name; later duplicates are reachable by ordinal.
+- `open` checks every index record once, and the `.zfi` name table; a `.fai` is read into a name map. `recordCount`, `record(ordinal)`, and `lookup(name)` read no sequence. `lookup` returns the first record with that name; later duplicates are reachable by ordinal.
 - `fetchInto` checks the ordinal, the interval, and that `dst` holds `end - start` bytes before it writes anything; a read failure after that can leave a prefix. It returns the slice of `dst` it filled.
 - A reader keeps the files open until `deinit`. It is not safe to share between threads, and its `io` must outlive it. A gzip input fails with `input.unsupported_format`.
 

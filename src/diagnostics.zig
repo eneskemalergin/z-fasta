@@ -314,7 +314,6 @@ pub const SourceChange = struct {
 };
 
 pub const Format = enum { zfi, fai };
-pub const NamingPolicy = enum { first_nonempty, all_nonempty };
 /// `controls_except_tab`: every byte below 0x20 except tab.
 pub const Grammar = enum { controls_except_tab };
 pub const Alphabet = enum { dna, rna, nucleotide, protein, any, custom };
@@ -358,7 +357,7 @@ pub const BedField = enum { chrom, start, end };
 pub const BedCoordinate = enum { start, end };
 pub const CoordinateSystem = enum { one_based_inclusive, zero_based_half_open };
 pub const Arithmetic = enum { add, subtract, multiply };
-pub const Section = enum { header, records, side_table_count, side_table_entries, name_blob };
+pub const Section = enum { header, records, side_table_count, side_table_entries, name_blob, name_table };
 pub const BoundSource = enum { declared, actual };
 pub const OffsetRole = enum { wire, retained, local };
 pub const CountLimitRole = enum { zfi_header, scanner_count };
@@ -372,7 +371,6 @@ pub const NonuniformReason = enum {
     sequence_whitespace,
     nonuniform_layout,
 };
-pub const FooterLayouts = packed struct(u8) { tight: bool, legacy: bool, reserved: u6 = 0 };
 pub const LookupScope = enum { complete_catalog, retained_matches };
 /// `preserve_symbols`: the rewrite keeps every header byte and every symbol, and refuses otherwise.
 pub const RepairPolicy = enum { preserve_symbols };
@@ -384,7 +382,6 @@ pub const Check = enum {
     retained_shortest_name,
     retained_longest_name,
     record_reservation,
-    record_ordinal,
     composition_accounting,
     reader_buffer,
     traversal_position,
@@ -429,7 +426,6 @@ pub const IndexDiscovery = struct { zfi_source: SourceId, fai_source: SourceId }
 pub const Magic = struct { expected_magic: [4]u8, actual: ?Preview = null };
 pub const Version = struct { found_version: u8, supported_version: u8 };
 pub const Truncation = struct { section: Section, required_end: u128, available_end: u64 };
-pub const NameFlags = struct { flags: u8, required_flag: u8 };
 pub const NameBlob = struct { name_blob_bytes: u64, payload_end: u64, records_end: u64 };
 pub const NameExtent = struct { name_offset: u64, name_bytes: u64, blob_bytes: u64 };
 pub const InvalidGeometry = struct { geometry: Geometry, constraint: GeometryConstraint };
@@ -544,7 +540,7 @@ pub const Details = union(enum(u8)) {
     @"format.missing_terminal_newline": void,
     @"format.mixed_line_endings": void,
     @"index.initial_header_required": struct { byte: u8, required_offset: u64 = 0 },
-    @"index.no_indexable_records": struct { naming_policy: NamingPolicy, seen_records: ?u64 = null, empty_records: ?u64 = null, duplicate_records: ?u64 = null },
+    @"index.no_indexable_records": struct {},
     @"index.identifier_too_long": IdentifierLimit,
     @"index.sequence_line_too_long": LineLimit,
     @"index.record_count_limit_exceeded": RecordLimit,
@@ -556,8 +552,8 @@ pub const Details = union(enum(u8)) {
     @"index.invalid_magic": Magic,
     @"index.unsupported_version": Version,
     @"index.truncated": Truncation,
-    @"index.name_not_embedded": NameFlags,
-    @"index.name_footer_missing": FooterLayouts,
+    @"index.name_footer_missing": struct {},
+    @"index.name_table_invalid": struct { slot: u64 },
     @"index.name_blob_out_of_bounds": NameBlob,
     @"index.name_out_of_bounds": NameExtent,
     @"index.zero_sequence_length": struct { sequence_length: u64 = 0 },
@@ -914,8 +910,8 @@ fn describeCode(code: Code) Metadata {
         .@"index.invalid_magic" => describe(code, .index_integrity, .finding, .file, .rebuild_index, error.InvalidIndex),
         .@"index.unsupported_version" => describe(code, .index_integrity, .finding, .file, .rebuild_index, error.InvalidIndex),
         .@"index.truncated" => describe(code, .index_integrity, .finding, .file, .rebuild_index, error.InvalidIndex),
-        .@"index.name_not_embedded" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
         .@"index.name_footer_missing" => describe(code, .index_integrity, .finding, .file, .rebuild_index, error.InvalidIndex),
+        .@"index.name_table_invalid" => describe(code, .index_integrity, .finding, .file, .rebuild_index, error.InvalidIndex),
         .@"index.name_blob_out_of_bounds" => describe(code, .index_integrity, .finding, .file, .rebuild_index, error.InvalidIndex),
         .@"index.name_out_of_bounds" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),
         .@"index.zero_sequence_length" => describe(code, .index_integrity, .finding, .record, .rebuild_index, error.InvalidIndex),

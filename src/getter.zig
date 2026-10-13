@@ -131,8 +131,8 @@ pub fn fetchSymbols(idx: *const LoadedIndex, ordinal: usize, start: u64, end: u6
     const index_source: diagnostics.SourceId = if (idx.source == .zfi) .zfi else .fai;
     var context = Diagnostics{ .failure = failure, .output_source = .output, .index_source = index_source, .at = .{ .source = index_source } };
     const diag = &context;
-    if (ordinal >= idx.records.len) return diag.fail(.{ .@"request.ordinal_out_of_range" = .{ .ordinal = ordinal, .record_count = idx.records.len } }, .resolve, index_source, null, null);
-    const rec = idx.records[ordinal];
+    if (ordinal >= idx.records.len()) return diag.fail(.{ .@"request.ordinal_out_of_range" = .{ .ordinal = ordinal, .record_count = idx.records.len() } }, .resolve, index_source, null, null);
+    const rec = try idx.checkedRecord(ordinal, failure);
     if (end < start) return diag.fail(.{ .@"request.end_before_start" = .{ .start = start, .end = end } }, .resolve, index_source, null, null);
     if (end > rec.seq_len) return diag.fail(.{ .@"request.end_after_sequence" = .{ .end = end, .sequence_length = rec.seq_len } }, .resolve, index_source, null, null);
     const count = end - start;
@@ -392,7 +392,7 @@ fn parseRangeSuffix(suffix: []const u8) ?ParsedRange {
 
 fn resolveRegionText(idx: *const LoadedIndex, region_str: []const u8, diag: *Diagnostics) diagnostics.Error!ResolvedRegion {
     const region = parseRegion(region_str);
-    const rec_idx = idx.lookupName(region.name) orelse return diag.missing(region.name);
+    const rec_idx = try idx.findName(region.name, diag.failure) orelse return diag.missing(region.name);
     return resolveParsedRequest(idx, .{ .region = region, .orientation = .{} }, rec_idx, false, diag);
 }
 
@@ -403,7 +403,7 @@ fn resolveParsedRequest(
     annotate_transform: bool,
     diag: *Diagnostics,
 ) diagnostics.Error!ResolvedRegion {
-    const rec = idx.records[rec_idx];
+    const rec = try idx.checkedRecord(rec_idx, diag.failure);
     const region = request.region;
 
     var start = region.start;
@@ -1071,6 +1071,9 @@ fn requestReference(source: ?diagnostics.SourceId, line: ?u64, ordinal: u64) dia
     return .{ .source = source, .location = .{ .line = line }, .request = ordinal };
 }
 
+/// Smaller batches look names up one at a time.
+const PREFETCH_MIN_REQUESTS = 32;
+
 fn processParsedRequests(
     allocator: std.mem.Allocator,
     idx: *LoadedIndex,
@@ -1088,6 +1091,13 @@ fn processParsedRequests(
     _ = try diag.add(.requests, request_base, request_entries.len);
     const resolved = allocator.alloc(ResolvedRegion, request_entries.len) catch return diag.oom(.resolved_requests);
     defer allocator.free(resolved);
+    if (idx.on_demand != null and request_entries.len >= PREFETCH_MIN_REQUESTS) prefetch: {
+        const names = allocator.alloc([]const u8, request_entries.len) catch break :prefetch;
+        defer allocator.free(names);
+        for (request_entries, names) |entry, *name| name.* = entry.parsed(active_names).region.name;
+        idx.prefetchNames(allocator, names);
+    }
+    defer idx.clearPrefetch();
     var last_name: ?[]const u8 = null;
     var last_rec_idx: usize = 0;
     var last_typed_rec_idx: ?usize = null;
@@ -1098,9 +1108,9 @@ fn processParsedRequests(
         diag.at = requestReference(request_source, entry.lineNumber(), request_base + i + 1);
         const request = entry.parsed(active_names);
         const rec_idx = if (last_name) |name|
-            if (std.mem.eql(u8, name, request.region.name)) last_rec_idx else idx.lookupName(request.region.name) orelse return diag.missing(request.region.name)
+            if (std.mem.eql(u8, name, request.region.name)) last_rec_idx else try idx.findName(request.region.name, diag.failure) orelse return diag.missing(request.region.name)
         else
-            idx.lookupName(request.region.name) orelse return diag.missing(request.region.name);
+            try idx.findName(request.region.name, diag.failure) orelse return diag.missing(request.region.name);
         last_name = request.region.name;
         last_rec_idx = rec_idx;
         resolved[i] = try resolveParsedRequest(idx, request, rec_idx, annotate_transform, diag);
@@ -1357,7 +1367,8 @@ fn runFileGet(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path: []co
     var idx = load: {
         var requested = RequestedNames.init(backing_allocator);
         defer requested.deinit();
-        const load_mode: index_format.LoadMode = if (request_file != null) matched: {
+        // A `.zfi` resolves any name through its name table, so only a `.fai` needs the names first.
+        const load_mode: index_format.LoadMode = if (request_file != null and !zfiPresent(io, fasta_path)) matched: {
             const reader = if (buffered_requests != null) &small_reader else &request_reader.?.interface;
             const complete = requested.collect(reader, source, buffered_requests != null) catch return diag.oom(.request_collection);
             if (!complete) break :matched .lookup_full_map;
@@ -1368,9 +1379,17 @@ fn runFileGet(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path: []co
     };
     defer idx.deinit();
     diag.index_source = if (idx.source == .zfi) .zfi else .fai;
+    if (idx.source == .zfi) diag.lookup_scope = .complete_catalog;
     if (buffered_requests) |bytes| small_reader = std.Io.Reader.fixed(bytes);
     if (request_reader != null) request_reader = request_file.?.file.reader(io, &request_buffer);
     return emitGet(backing_allocator, io, &idx, options, &.{}, request_file, if (buffered_requests != null) &small_reader else if (request_reader) |*reader| &reader.interface else null, if (request_reader) |*reader| reader else null, diag, buffers);
+}
+
+fn zfiPresent(io: std.Io, fasta_path: []const u8) bool {
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const zfi_path = std.fmt.bufPrint(&path_buffer, "{s}.zfi", .{fasta_path}) catch return false;
+    std.Io.Dir.cwd().access(io, zfi_path, .{}) catch return false;
+    return true;
 }
 
 fn emitGet(
@@ -1415,7 +1434,7 @@ fn emitGet(
 fn loadTestIndex(test_io: std.Io, fasta_path: []const u8) diagnostics.Error!LoadedIndex {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.get);
-    return index_format.loadIndex(std.testing.allocator, test_io, fasta_path, .automatic, .lookup_full_map, &failure);
+    return index_format.loadIndex(std.testing.allocator, test_io, fasta_path, .automatic, .checked, &failure);
 }
 
 fn collectNamesForAllocationCheck(allocator: std.mem.Allocator, stable_input: bool) !void {
@@ -1730,7 +1749,7 @@ test "[failure] - [get requests]: releases partial batches on allocation failure
     try std.testing.checkAllAllocationFailures(std.testing.allocator, checkGetRequestAllocations, .{});
 }
 
-test "[failure] - [get requests]: detects metadata changes and limits equal-metadata misses" {
+test "[failure] - [get requests]: detects metadata changes and finds uncollected names through a .zfi" {
     const io = std.testing.io;
     var directory = std.testing.tmpDir(.{});
     defer directory.cleanup();
@@ -1758,10 +1777,8 @@ test "[failure] - [get requests]: detects metadata changes and limits equal-meta
     var reader = file.reader(io, &input);
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    try std.testing.expectError(error.InvalidRequest, processRequestReader(std.testing.allocator, &idx, &reader.interface, .{ .names = .{} }, 0, false, &output.writer, fastaSource(&idx), &context, opened, buffers));
-    try std.testing.expectEqual(diagnostics.LookupScope.retained_matches, failure.primary().?.details.@"request.sequence_not_found".lookup_scope);
-    try std.testing.expectEqualStrings("seq2", failure.preview(failure.primary().?.details.@"request.sequence_not_found".identifier.?));
-    try std.testing.expectEqual(@as(usize, 0), output.written().len);
+    _ = try processRequestReader(std.testing.allocator, &idx, &reader.interface, .{ .names = .{} }, 0, false, &output.writer, fastaSource(&idx), &context, opened, buffers);
+    try std.testing.expect(std.mem.startsWith(u8, output.written(), ">seq2\n"));
 }
 
 test "[failure] - [get requests]: retains required read and comparison causes" {
@@ -1867,6 +1884,11 @@ test "[regression] - [get requests]: retries interrupted discovery with the full
     defer std.testing.allocator.free(path);
     const request_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/requests.txt", .{path});
     defer std.testing.allocator.free(request_path);
+    // Discovery runs only for a `.fai`; a `.zfi` finds any name without it.
+    const fasta_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/ref.fa", .{path});
+    defer std.testing.allocator.free(fasta_path);
+    try directory.dir.writeFile(io, .{ .sub_path = "ref.fa", .data = ">seq1 test sequence\nACGTACGTACGT\nACGTACGTACGT\n>seq2 another sequence\nGGGGCCCCAAAA\n" });
+    try directory.dir.writeFile(io, .{ .sub_path = "ref.fa.fai", .data = "seq1\t24\t20\t12\t13\nseq2\t12\t69\t12\t13\n" });
     var vtable = io.vtable.*;
     vtable.fileReadPositional = Fault.read;
     vtable.operate = Fault.operate;
@@ -1892,7 +1914,7 @@ test "[regression] - [get requests]: retries interrupted discovery with the full
             Fault.output_len = 0;
             var failure: diagnostics.Failure = undefined;
             if (scenario == .persistent) {
-                try std.testing.expectError(error.Io, runGet(std.testing.allocator, fault_io, "tests/data/simple.fasta", options, &failure));
+                try std.testing.expectError(error.Io, runGet(std.testing.allocator, fault_io, fasta_path, options, &failure));
                 const primary = failure.primary().?;
                 try std.testing.expectEqual(diagnostics.Code.@"io.read_failed", primary.code());
                 try std.testing.expectEqual(error.InputOutput, primary.cause.?.zig);
@@ -1902,7 +1924,7 @@ test "[regression] - [get requests]: retries interrupted discovery with the full
                 try std.testing.expectEqual(@as(usize, 0), Fault.output_len);
                 try std.testing.expect(!failure.complete and !failure.work_complete);
             } else {
-                const result = try runGet(std.testing.allocator, fault_io, "tests/data/simple.fasta", options, &failure);
+                const result = try runGet(std.testing.allocator, fault_io, fasta_path, options, &failure);
                 try std.testing.expectEqual(@as(usize, 2), result.region_count);
                 try std.testing.expectEqual(@as(u64, if (bed) 4 else 36), result.total_bases);
                 const expected = if (bed) ">seq1:1-2\nAC\n>seq2:1-2\nGG\n" else ">seq1\nACGTACGTACGTACGTACGTACGT\n>seq2\nGGGGCCCCAAAA\n";

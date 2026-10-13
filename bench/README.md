@@ -87,8 +87,7 @@ Every CLI option and package call, with the Zig tests that cover it (file and te
 - **index**
   - Default `.zfi`: `tests/test_index.zig` (`index`, `zfi writer`, `zfi loader`). REAL: index suite, a `.zfi` reader written from the format compares every entry with `samtools faidx`.
   - `--emit-fai`: `tests/test_index.zig` (`fai output`). REAL: index suite, byte-identical to `samtools faidx`.
-  - `--no-dedup`: `tests/test_index.zig`, `tests/test_library.zig`. No REAL check: the REAL datasets have no duplicate identifiers. The stats suite checks it on a fixture with duplicates (`--no-dedup` keeps more records than the default).
-  - `--dedup`: accepted as the default's name since the first release, but not in `--help`, and no test or check covers it.
+  - Duplicate identifiers, all indexed: `tests/test_index.zig`, `tests/test_library.zig`. No REAL check: the REAL datasets have no duplicate identifiers. The stats suite checks the counts on a fixture with duplicates, and the GET suite that a duplicate resolves to its first record.
 - **get**
   - Positional regions: `tests/test_get.zig` (`get extraction`, `region resolution`). REAL: GET suite section 6, 100 regions against `samtools faidx`, through `.zfi` and `.fai`.
   - `--names FILE` and `--names -`: `tests/test_get.zig` (`get names`). REAL: section 6, against `samtools faidx -r`, and the same output from standard input.

@@ -50,7 +50,7 @@ pub const IndexedReader = struct {
 
     pub fn open(allocator: std.mem.Allocator, io: std.Io, path: []const u8, options: Options, failure: *diagnostics.Failure) diagnostics.Error!IndexedReader {
         failure.reset(.get);
-        var index = try index_format.loadIndex(allocator, io, path, options.index, .lookup_full_map, failure);
+        var index = try index_format.loadIndex(allocator, io, path, options.index, .checked, failure);
         errdefer index.deinit();
         try rejectCompressed(index, failure);
         const read_buffer = index.arena.allocator().alloc(u8, READ_BUFFER_BYTES) catch return failure.fail(.{
@@ -70,15 +70,15 @@ pub const IndexedReader = struct {
 
     /// Counts repeated names separately.
     pub fn recordCount(self: *const IndexedReader) usize {
-        return self.index.records.len;
+        return self.index.records.len();
     }
 
     pub fn record(self: *const IndexedReader, ordinal: usize) ?RecordInfo {
-        if (ordinal >= self.index.records.len) return null;
+        if (ordinal >= self.index.records.len()) return null;
         return .{
             .ordinal = ordinal,
             .name = self.index.recordName(ordinal) orelse "",
-            .length = self.index.records[ordinal].seq_len,
+            .length = self.index.records.get(ordinal).seq_len,
         };
     }
 

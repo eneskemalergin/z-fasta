@@ -152,7 +152,7 @@ z-fasta stats assembly-b.fa > assembly-b.stats.txt
 diff -u assembly-a.stats.txt assembly-b.stats.txt
 ```
 
-Align duplicate-index policy before comparing the biological metrics.
+Build both indexes with the same tool before comparing the biological metrics; a samtools `.fai` leaves out later duplicates.
 
 The raw diff also includes the FASTA path and file size. Use it for human review, not as a stable machine comparison contract.
 

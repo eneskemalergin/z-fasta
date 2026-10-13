@@ -125,7 +125,7 @@ Names input does not parse coordinate suffixes.
 
 ## Duplicate names
 
-Default indexing keeps the first non-empty record for each name. `--no-dedup` retains all index records, but GET still resolves the first exact match.
+Indexing keeps every non-empty record, duplicate names included. GET resolves a duplicate name to its first record.
 
 Validate reports duplicate identifiers as errors. Rename the source records when each one must remain independently addressable.
 

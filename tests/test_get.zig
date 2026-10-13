@@ -94,7 +94,7 @@ test "[unit] - [get orientation]: composes independent reverse and complement op
 }
 
 test "[integration] - [region resolution]: preserves indexed coordinate geometry" {
-    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/simple.fasta", .lookup_full_map);
+    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/simple.fasta", .checked);
     defer idx.deinit();
 
     const Case = struct {
@@ -122,12 +122,12 @@ test "[integration] - [region resolution]: preserves indexed coordinate geometry
         try std.testing.expectEqual(case.display_end, resolved.display_end);
         try std.testing.expectEqual(case.num_bases, resolved.num_bases);
         try std.testing.expectEqual(case.is_full, resolved.is_full);
-        try std.testing.expectEqual(idx.records[0].seq_offset, resolved.seq_offset);
+        try std.testing.expectEqual(idx.records.get(0).seq_offset, resolved.seq_offset);
     }
 }
 
 test "[integration] - [region resolution]: accepts a pipe-delimited protein identifier" {
-    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/proteome.fasta", .lookup_full_map);
+    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/proteome.fasta", .checked);
     defer idx.deinit();
 
     const r = try resolveRegion(&idx, "sp|P12345|PROT_HUMAN:1-10");
@@ -137,7 +137,7 @@ test "[integration] - [region resolution]: accepts a pipe-delimited protein iden
 }
 
 test "[integration] - [region resolution]: accepts a 200-byte identifier" {
-    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/edge_cases.fasta", .lookup_full_map);
+    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/edge_cases.fasta", .checked);
     defer idx.deinit();
 
     const long_name = "A" ** 200;
@@ -162,7 +162,7 @@ test "[property] - [get extraction]: zfi and fai match across uniform FASTA line
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
     defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
 
-    try writeZfi(allocator, path, data, true);
+    try writeZfi(allocator, path, data);
 
     const zfi_output = try captureExtractRegion(allocator, path, "seq1:10-15");
     const expected =
@@ -218,7 +218,7 @@ test "[integration] - [get extraction]: extracts across non-uniform FASTA lines"
     const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{path});
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
 
-    try writeZfi(allocator, path, data, true);
+    try writeZfi(allocator, path, data);
 
     const region = "mixed_widths:3-24";
     const output = try captureExtractRegion(allocator, path, region);
@@ -244,7 +244,7 @@ test "[cli] - [get]: selects the first empty identifier through zfi and fai" {
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
     defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
 
-    try writeZfi(allocator, fasta_path, data, false);
+    try writeZfi(allocator, fasta_path, data);
     try expectCliSuccess(allocator, &.{ ZFASTA_BIN, "get", fasta_path, "" }, ">\nAAAA\n");
 
     try std.Io.Dir.cwd().deleteFile(io, zfi_path);
@@ -366,7 +366,7 @@ test "[cli] - [get names]: accepts the index name-length boundary in both format
     defer std.Io.Dir.cwd().deleteFile(io, zfi_fasta) catch {};
     const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{zfi_fasta});
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
-    try writeZfi(allocator, zfi_fasta, fasta.items, true);
+    try writeZfi(allocator, zfi_fasta, fasta.items);
 
     const fai_fasta = try writeFastaArtifact(allocator, "names-max-fai", fasta.items);
     defer std.Io.Dir.cwd().deleteFile(io, fai_fasta) catch {};
@@ -854,7 +854,7 @@ test "[failure] - [bed parser]: owns bounded previews after the input is reused"
 
 test "[failure] - [get diagnostics]: returns exact request facts without exiting" {
     const diagnostics = main.index_format.diagnostics;
-    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/simple.fasta", .lookup_full_map);
+    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/simple.fasta", .checked);
     defer idx.deinit();
     const cases = [_]struct { request: []const u8, code: diagnostics.Code }{
         .{ .request = "missing", .code = .@"request.sequence_not_found" },
@@ -909,7 +909,7 @@ test "[failure] - [get diagnostics]: retains FASTA read causes and exact short r
             return 0;
         }
     };
-    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/simple.fasta", .lookup_full_map);
+    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/simple.fasta", .checked);
     defer idx.deinit();
     for (0..2) |i| {
         var vtable = io.vtable.*;
@@ -921,7 +921,7 @@ test "[failure] - [get diagnostics]: retains FASTA read causes and exact short r
         var failure: diagnostics.Failure = undefined;
         try std.testing.expectError(error.Io, main.getter.extractRegion(&idx, "seq1:1-2", &output.writer, &failure));
         const primary = failure.primary().?;
-        try std.testing.expectEqual(@as(?u64, idx.records[0].seq_offset), primary.at.location.offset);
+        try std.testing.expectEqual(@as(?u64, idx.records.get(0).seq_offset), primary.at.location.offset);
         try std.testing.expectEqual(@as(?diagnostics.SourceId, .fasta), primary.at.source);
         try std.testing.expectEqual(@as(?u64, 1), primary.related.?.request);
         if (i == 0) {
@@ -941,7 +941,7 @@ test "[failure] - [get diagnostics]: retains FASTA read causes and exact short r
 
 test "[failure] - [get diagnostics]: returns partial writer failure with no final flush" {
     const diagnostics = main.index_format.diagnostics;
-    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/simple.fasta", .lookup_full_map);
+    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/simple.fasta", .checked);
     defer idx.deinit();
     var buffer: [1]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
@@ -1159,4 +1159,30 @@ test "[failure] - [get diagnostics]: classifies an overlong FASTA path" {
     try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);
     try std.testing.expectEqual(.not_attempted, failure.outputs.stdout.final_flush);
     try std.testing.expectEqual(@as(usize, 0), failure.secondaryItems().len);
+}
+
+test "[cli] - [get]: many .zfi lookups keep every record's bytes, uniform or not" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var fasta: std.ArrayList(u8) = .empty;
+    var names: std.ArrayList(u8) = .empty;
+    var expected: std.ArrayList(u8) = .empty;
+    for (0..600) |i| {
+        try fasta.print(allocator, ">rec{d}\n", .{i});
+        if (i % 3 == 0) try fasta.appendSlice(allocator, "ACG\nTACGT\nAC\n") else try fasta.appendSlice(allocator, "ACGT\nACGT\nAC\n");
+    }
+    for (0..600) |k| {
+        const i = (k * 7) % 600;
+        try names.print(allocator, "rec{d}\n", .{i});
+        try expected.print(allocator, ">rec{d}\n{s}\n", .{ i, if (i % 3 == 0) "ACGTACGTAC" else "ACGTACGTAC" });
+    }
+    const fasta_path = try writeFastaArtifact(allocator, "get-many-lookups", fasta.items);
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+    const names_path = try writeFastaArtifact(allocator, "get-many-lookups-names", names.items);
+    defer std.Io.Dir.cwd().deleteFile(io, names_path) catch {};
+    try utility.expectCliResult(allocator, &.{ ZFASTA_BIN, "index", fasta_path }, 0, "", try std.fmt.allocPrint(allocator, "wrote {s} (600 sequences)\n", .{zfi_path}));
+    try expectCliSuccess(allocator, &.{ ZFASTA_BIN, "get", fasta_path, "--names", names_path }, expected.items);
 }

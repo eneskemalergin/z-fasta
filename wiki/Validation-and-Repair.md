@@ -179,7 +179,7 @@ z-fasta validate --index=backup/genome.fa.zfi genome.fa
 - `pair.line_geometry_mismatch`: the symbols or bytes per line differ, or one side uses the fixed-width formula and the other a side table;
 - `pair.side_table_mismatch`: both use a side table and the tables differ; `line` names the first line where they do.
 
-Each is an error, counted per record. A record without symbols is never indexed, and an index made with the default first-wins rule leaves out later duplicates; neither is missing. The closing line counts the matches and the duplicates left out:
+Each is an error, counted per record. A record without symbols is never indexed, and an index that leaves out later duplicates, as a samtools `.fai` does, is not missing them. The closing line counts the matches and the duplicates left out:
 
 ```text
 OK genome.fa: no findings
@@ -238,7 +238,7 @@ Bound the duplicate check when a file may hold more identifiers than memory allo
 z-fasta validate --max-name-memory 268435456 proteins.fa
 ```
 
-Past the budget the duplicate check stops and the report is `incomplete`; it never evicts names or guesses. `--index` reads the index in file order through three 64 KiB buffers, so it adds almost no memory. Only when the index lists records in a different order from the FASTA does validate load the whole index, as `get` does, to match the remaining records by name. On a file the check reserves about 1 MiB before its first name. Equally wrapped lines are checked in vector blocks; the first irregular byte drops to a per-byte check at that byte. The duplicate check is the only part that grows with the input: with the number of distinct identifiers, plus a copy of each identifier that repeats, never with sequence bytes.
+Past the budget the duplicate check stops and the report is `incomplete`; it never evicts names or guesses. `--index` reads the index in file order through three 64 KiB buffers and rebuilds the `.zfi` name table from the entries to compare with the stored one, so it adds about 5 bytes per record. Only when the index lists records in a different order from the FASTA does validate load the whole index to match the remaining records by name. On a file the check reserves about 1 MiB before its first name. Equally wrapped lines are checked in vector blocks; the first irregular byte drops to a per-byte check at that byte. The duplicate check is the only part that grows with the input: with the number of distinct identifiers, plus a copy of each identifier that repeats, never with sequence bytes.
 
 ## Related pages
 

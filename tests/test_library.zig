@@ -62,7 +62,7 @@ fn expectRecordsMatchIndex(allocator: std.mem.Allocator, fixture: *const Fixture
     try fixture.write(name, bytes);
     const fasta = try fixture.path(allocator, name);
     defer allocator.free(fasta);
-    try runCli(allocator, &.{ ZFASTA_BIN, "index", "--no-dedup", fasta }, null);
+    try runCli(allocator, &.{ ZFASTA_BIN, "index", fasta }, null);
 
     var index_failure: diagnostics.Failure = undefined;
     var indexed = try zfasta.IndexedReader.open(allocator, io, fasta, .{}, &index_failure);
@@ -221,7 +221,7 @@ test "[integration] - [indexed reader]: lookup is first-wins while ordinals reac
     try fixture.write("dup.fa", ">x\nAAAA\n>x\nCCCC\n");
     const fasta = try fixture.path(allocator, "dup.fa");
     defer allocator.free(fasta);
-    try runCli(allocator, &.{ ZFASTA_BIN, "index", "--no-dedup", fasta }, null);
+    try runCli(allocator, &.{ ZFASTA_BIN, "index", fasta }, null);
 
     var failure: diagnostics.Failure = undefined;
     var reader = try zfasta.IndexedReader.open(allocator, io, fasta, .{}, &failure);

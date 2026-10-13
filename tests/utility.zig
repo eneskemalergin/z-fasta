@@ -143,10 +143,9 @@ pub fn writeZfi(
     allocator: std.mem.Allocator,
     fasta_path: []const u8,
     data: []const u8,
-    enable_dedup: bool,
 ) !void {
     const io = std.testing.io;
-    var index = try main.indexer.scanZfiData(allocator, data, enable_dedup);
+    var index = try main.indexer.scanZfiData(allocator, data);
     defer index.deinit(allocator);
 
     var path_buffer: [4096]u8 = undefined;

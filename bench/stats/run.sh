@@ -343,7 +343,7 @@ run_stats_tools() {
 
 SKIP_TOOLS=false
 SKIP_MESSY=false
-SKIP_DEDUP=false
+SKIP_DUPLICATES=false
 SKIP_EDGE=false
 SKIP_LAYOUT=false
 
@@ -539,7 +539,9 @@ verify_formats() {
     check_oracle "$label" check fai "$fasta" "$exp" "$fai_txt"
     mv "$stash" "${fasta}.zfi"
 
-    check_oracle "[index:cross] $name .zfi == .fai" same "$zfi_txt" "$fai_txt"
+    if [[ "$("$PYTHON" -c "import json; print(json.load(open('$exp'))['duplicates'])")" -eq 0 ]]; then
+        check_oracle "[index:cross] $name .zfi == .fai" same "$zfi_txt" "$fai_txt"
+    fi
 }
 
 # One pass per peer tool so failures name the tool (get-style).
@@ -650,37 +652,24 @@ verify_messy() {
     verify_formats "extended:messy" "messy_$name" "$fasta" "$TMPDIR/messy_${name}.expected.json"
 }
 
-verify_dedup_stats() {
-    local dedup_fasta="$TMPDIR/dedup_default.fasta"
-    local nodedup_fasta="$TMPDIR/dedup_nodedup.fasta"
-    local exp_dedup="$TMPDIR/dedup_default.expected.json"
-    local exp_nodedup="$TMPDIR/nodedup.expected.json"
-    local label="[extended:dedup] --no-dedup indexes more sequences than default"
-    local err dedup_seqs nodedup_seqs
+# samtools faidx keeps the first record of each name; z-fasta indexes every record.
+verify_duplicate_stats() {
+    local fasta="$TMPDIR/duplicates.fasta"
+    local exp="$TMPDIR/duplicates.expected.json"
+    local label="[extended:duplicates] .zfi counts every duplicate record"
+    local duplicates
 
-    cp "$TEST_DATA/edge_cases.fasta" "$dedup_fasta"
-    rm -f "${dedup_fasta}.zfi" "${dedup_fasta}.fai"
-    ensure_index "$dedup_fasta" || { fail "[extended:dedup] default index setup" "$TMPDIR/faidx.err"; return; }
-    oracle expected "$dedup_fasta" >"$exp_dedup"
-    err="$TMPDIR/dedup_default.err"
-    run_stats "$dedup_fasta" "$TMPDIR/dedup_default.txt" "$err" \
-        || { fail "[extended:dedup] default stats" "$err"; return; }
-    check_oracle "[extended:dedup] default exact report" check zfi \
-        "$dedup_fasta" "$exp_dedup" "$TMPDIR/dedup_default.txt"
-
-    cp "$TEST_DATA/edge_cases.fasta" "$nodedup_fasta"
-    rm -f "${nodedup_fasta}.zfi" "${nodedup_fasta}.fai"
-    "$ZFASTA" index --no-dedup "$nodedup_fasta" >/dev/null 2>&1 \
-        || { fail "[extended:dedup] index --no-dedup"; return; }
-    oracle expected "$nodedup_fasta" --no-dedup >"$exp_nodedup"
-    verify_formats "extended:dedup" "edge_cases_nodedup" "$nodedup_fasta" "$exp_nodedup" zfi-only
-    dedup_seqs="$("$PYTHON" -c "import json; print(json.load(open('$exp_dedup'))['num_seqs'])")"
-    nodedup_seqs="$("$PYTHON" -c "import json; print(json.load(open('$exp_nodedup'))['num_seqs'])")"
-    if [[ "$nodedup_seqs" -gt "$dedup_seqs" ]]; then
+    cp "$TEST_DATA/edge_cases.fasta" "$fasta"
+    rm -f "${fasta}.zfi" "${fasta}.fai"
+    ensure_index "$fasta" || { fail "[extended:duplicates] index setup" "$TMPDIR/faidx.err"; return; }
+    oracle expected "$fasta" >"$exp"
+    verify_formats "extended:duplicates" "duplicates" "$fasta" "$exp"
+    duplicates="$("$PYTHON" -c "import json; print(json.load(open('$exp'))['duplicates'])")"
+    if [[ "$duplicates" -gt 0 ]]; then
         pass "$label"
     else
-        echo "dedup=$dedup_seqs nodedup=$nodedup_seqs" >"$TMPDIR/dedup_cmp.err"
-        fail "$label" "$TMPDIR/dedup_cmp.err"
+        echo "fixture has no duplicate names" >"$TMPDIR/duplicates_cmp.err"
+        fail "$label" "$TMPDIR/duplicates_cmp.err"
     fi
 }
 
@@ -821,7 +810,7 @@ run_tests() {
     echo "  z-fasta:  $ZFASTA"
     echo "  skip tools: $SKIP_TOOLS"
     echo "  skip messy: $SKIP_MESSY"
-    echo "  skip dedup: $SKIP_DEDUP"
+    echo "  skip duplicates: $SKIP_DUPLICATES"
     echo "  skip edge: $SKIP_EDGE"
     echo "  skip layout: $SKIP_LAYOUT"
 
@@ -852,8 +841,8 @@ run_tests() {
         verify_layout_twins
     fi
 
-    if ! $SKIP_DEDUP; then
-        verify_dedup_stats
+    if ! $SKIP_DUPLICATES; then
+        verify_duplicate_stats
     fi
 
     verify_real

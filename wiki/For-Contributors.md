@@ -36,7 +36,7 @@ The filter applies to Zig tests. Separate native callers still run when selected
 - `src/root.zig`: the Zig package: `IndexedReader`, `RecordReader`, and `validation`; [Zig package](Library) describes it.
 - `src/diagnostics.zig`: native codes, observed facts and caller-owned failure storage.
 - `src/reporting.zig`: text and JSON encoding without allocation or flushing.
-- `src/indexer.zig`: duplicate policy and index output.
+- `src/indexer.zig`: record scanning and index output.
 - `src/index_format.zig`: `.zfi` or `.fai` loading, validation, lookup, and ownership.
 - `src/getter.zig`: requests, coordinates, transforms, and bounded output.
 - `src/stats.zig`: length and composition reports.

@@ -44,8 +44,8 @@ const USAGE =
     \\Index options:
     \\  --emit-fai   Output FAI to stdout when every record has fixed line geometry;
     \\               otherwise fails and directs you to default .zfi indexing
-    \\  --no-dedup   Keep duplicate sequence names in the index (default: first wins
-    \\               at index time). get resolves duplicate names to the first record.
+    \\  Every record with bases is indexed, duplicate names included; get resolves
+    \\  a duplicate name to its first record.
     \\
     \\Get usage:
     \\  z-fasta get <file.fasta> [options] <region> [region ...]
@@ -309,19 +309,18 @@ fn dispatch(cli: *Cli, environ: std.process.Environ, command: ?[]const u8) diagn
 
 fn runIndex(cli: *Cli, environ: std.process.Environ) diagnostics.Error!u8 {
     var emit_fai = false;
-    var enable_dedup = true;
     var path: ?[]const u8 = null;
     while (cli.next()) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) return cli.stdout(USAGE);
         if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")) return cli.stdout("z-fasta " ++ VERSION ++ "\n");
-        if (std.mem.eql(u8, arg, "--emit-fai")) emit_fai = true else if (std.mem.eql(u8, arg, "--no-dedup")) enable_dedup = false else if (std.mem.eql(u8, arg, "--dedup")) enable_dedup = true else {
+        if (std.mem.eql(u8, arg, "--emit-fai")) emit_fai = true else {
             try cli.positional(arg);
             if (path != null) return cli.fail(.{ .@"usage.extra_argument" = .{ .argument = .fasta_path, .allowed_count = 1 } });
             path = arg;
         }
     }
     const fasta_path = path orelse return cli.fail(.{ .@"usage.missing_argument" = .{ .argument = .fasta_path } });
-    const result = try indexer.runIndex(std.heap.page_allocator, cli.io, environ, fasta_path, .{ .emit_fai = emit_fai, .enable_dedup = enable_dedup }, cli.failure);
+    const result = try indexer.runIndex(std.heap.page_allocator, cli.io, environ, fasta_path, .{ .emit_fai = emit_fai }, cli.failure);
     if (!emit_fai and cli.format == .text) try writeNotice(cli, .{ .index = .{ .path = fasta_path, .count = result.record_count } });
     return 0;
 }

@@ -232,12 +232,12 @@ def verify(args: argparse.Namespace) -> None:
     zfi_fasta = Path(args.zfi_fasta) if args.zfi_fasta else fasta
     if zfi_fasta.read_bytes() != fasta.read_bytes():
         raise SystemExit("z-fasta .zfi: FASTA view differs from oracle input")
-    assert_equal("z-fasta .zfi", expected_zfasta(zfi_fasta, ".zfi", not args.no_dedup), Path(args.zfi).read_text())
+    assert_equal("z-fasta .zfi", expected_zfasta(zfi_fasta, ".zfi", deduplicate=False), Path(args.zfi).read_text())
     if args.fai:
         fai_fasta = Path(args.fai_fasta) if args.fai_fasta else fasta
         if fai_fasta.read_bytes() != fasta.read_bytes():
             raise SystemExit("z-fasta .fai: FASTA view differs from oracle input")
-        assert_equal("z-fasta .fai", expected_zfasta(fai_fasta, ".fai", not args.no_dedup), Path(args.fai).read_text())
+        assert_equal("z-fasta .fai", expected_zfasta(fai_fasta, ".fai"), Path(args.fai).read_text())
     peer = expected_peer(fasta)
     if args.noodles:
         assert_equal("noodles", peer, Path(args.noodles).read_text())
@@ -248,12 +248,12 @@ def verify(args: argparse.Namespace) -> None:
 def legacy_command(args: argparse.Namespace) -> None:
     """Serve the permanent runner's small command interface."""
     if args.command == "expected":
-        values = calculate(Path(args.fasta), not args.no_dedup)
-        print(json.dumps({"num_seqs": values["count"], "no_dedup": args.no_dedup}))
+        # z-fasta indexes every record; samtools faidx keeps the first of each name.
+        count = calculate(Path(args.fasta), deduplicate=False)["count"]
+        print(json.dumps({"num_seqs": count, "duplicates": count - calculate(Path(args.fasta))["count"]}))
         return
     if args.command == "check":
-        metadata = json.loads(Path(args.expected).read_text())
-        expected = expected_zfasta(Path(args.fasta), f".{args.format}", not metadata["no_dedup"])
+        expected = expected_zfasta(Path(args.fasta), f".{args.format}", deduplicate=args.format == "fai")
         assert_equal(f"z-fasta .{args.format}", expected, Path(args.output).read_text())
         return
     if args.command == "same":
@@ -447,10 +447,8 @@ def main() -> None:
     verify_parser.add_argument("--fai-fasta")
     verify_parser.add_argument("--noodles")
     verify_parser.add_argument("--rustbio")
-    verify_parser.add_argument("--no-dedup", action="store_true")
     expected_parser = commands.add_parser("expected")
     expected_parser.add_argument("fasta")
-    expected_parser.add_argument("--no-dedup", action="store_true")
     check_parser = commands.add_parser("check")
     check_parser.add_argument("format", choices=("zfi", "fai"))
     check_parser.add_argument("fasta")

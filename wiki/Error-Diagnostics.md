@@ -185,7 +185,7 @@ A field ending in `offset` or describing a byte extent refers to bytes in its na
   - `format.mixed_line_endings`: finding per file; no fields.
 - `index`
   - `index.initial_header_required`: finding per file; fields `byte`, `required_offset`.
-  - `index.no_indexable_records`: finding per file; fields `naming_policy`, `seen_records`, `empty_records`, `duplicate_records`.
+  - `index.no_indexable_records`: finding per file; no fields.
   - `index.identifier_too_long`: finding per record; fields `observed_bytes`, `limit_bytes`, `format`.
   - `index.sequence_line_too_long`: finding per line; fields `field`, `observed`, `limit`, `width_role`, `format`.
   - `index.record_count_limit_exceeded`: finding per file; fields `record_count`, `max_records`, `format`, `limit_role`.
@@ -197,8 +197,8 @@ A field ending in `offset` or describing a byte extent refers to bytes in its na
   - `index.invalid_magic`: finding per file; fields `expected_magic`, `actual`.
   - `index.unsupported_version`: finding per file; fields `found_version`, `supported_version`.
   - `index.truncated`: finding per file; fields `section`, `required_end`, `available_end`.
-  - `index.name_not_embedded`: finding per record; fields `flags`, `required_flag`.
-  - `index.name_footer_missing`: finding per file; fields `tight`, `legacy`, `reserved`.
+  - `index.name_footer_missing`: finding per file; no fields.
+  - `index.name_table_invalid`: finding per file; fields `slot`.
   - `index.name_blob_out_of_bounds`: finding per file; fields `name_blob_bytes`, `payload_end`, `records_end`.
   - `index.name_out_of_bounds`: finding per record; fields `name_offset`, `name_bytes`, `blob_bytes`.
   - `index.zero_sequence_length`: finding per record; fields `sequence_length`.

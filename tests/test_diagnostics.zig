@@ -27,8 +27,8 @@ const HELP_STDOUT =
     \\Index options:
     \\  --emit-fai   Output FAI to stdout when every record has fixed line geometry;
     \\               otherwise fails and directs you to default .zfi indexing
-    \\  --no-dedup   Keep duplicate sequence names in the index (default: first wins
-    \\               at index time). get resolves duplicate names to the first record.
+    \\  Every record with bases is indexed, duplicate names included; get resolves
+    \\  a duplicate name to its first record.
     \\
     \\Get usage:
     \\  z-fasta get <file.fasta> [options] <region> [region ...]

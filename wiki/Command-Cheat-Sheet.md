@@ -17,9 +17,6 @@ z-fasta index genome.fa
 
 # Samtools-compatible .fai for uniform FASTA
 z-fasta index --emit-fai genome.fa > genome.fa.fai
-
-# Retain duplicate index records
-z-fasta index --no-dedup genome.fa
 ```
 
 ## Get

@@ -639,13 +639,13 @@ const Pair = struct {
         const entry = head.*;
         lookup.taken.set(entry);
         head.* = lookup.next[entry];
-        return .{ .entry = catalog.records[entry] };
+        return .{ .entry = catalog.records.get(entry) };
     }
 
     fn buildLookup(self: *Pair) diagnostics.Error!void {
         self.catalog = try index_format.loadIndex(self.allocator, self.io, self.fasta_path, self.selection, .catalog, self.failure);
         const catalog = &self.catalog.?;
-        const entries = catalog.records.len;
+        const entries = catalog.records.len();
         if (entries >= NO_ENTRY) return self.failure.fail(.{ .details = .{ .@"resource.capacity_limit_exceeded" = .{ .capacity_role = .name_map, .limit = NO_ENTRY - 1, .required = .{ .exact = entries } } }, .stage = .allocate, .at = .{ .source = self.source() } });
         const oom = diagnostics.Diagnostic{ .details = .{ .@"resource.out_of_memory" = .{ .allocation_role = .name_map } }, .stage = .allocate, .at = .{ .source = self.source() }, .cause = .{ .zig = error.OutOfMemory } };
         var lookup: Lookup = .{ .heads = .empty, .next = self.allocator.alloc(u32, entries) catch return self.failure.fail(oom), .taken = undefined };
@@ -1271,12 +1271,12 @@ const Scan = struct {
         if (pair.scanner.active) pair.scanner.emitRecord(self, compareRecord) catch |err| return self.pairFailed(err);
         if (pair.catalog) |*catalog| {
             const lookup = &pair.lookup.?;
-            for (0..catalog.records.len) |entry| {
+            for (0..catalog.records.len()) |entry| {
                 if (lookup.taken.isSet(entry)) continue;
-                const offset = if (pair.source() == .zfi) @sizeOf(index_format.ZfiHeader) + entry * @sizeOf(index_format.IndexRecord) else catalog.records[entry].name_offset;
+                const offset = if (pair.source() == .zfi) @sizeOf(index_format.ZfiHeader) + entry * index_format.ZFI_INDEX_RECORD_BYTES else catalog.records.get(entry).name_offset;
                 self.countMissingEntry(offset, entry + 1, catalog.recordName(entry).?);
             }
-            pair.entries = catalog.records.len;
+            pair.entries = catalog.records.len();
             return;
         }
         if (pair.head) |head| self.countMissingEntry(head.offset, head.ordinal, head.name);
@@ -1309,7 +1309,8 @@ const Scan = struct {
         if (entry.seq_offset != record.seq_offset) self.count(.{ .@"pair.sequence_offset_mismatch" = .{ .indexed_offset = entry.seq_offset, .observed_offset = record.seq_offset } }, at);
         const indexed_layout: diagnostics.LineLayout = if (entry.isUniformWidth()) .uniform else .side_table;
         const observed_layout: diagnostics.LineLayout = if (record.uses_uniform_formula) .uniform else .side_table;
-        if (indexed_layout != observed_layout or entry.line_bases != record.line_bases or entry.line_bytes != record.line_bytes) {
+        const geometry_differs = indexed_layout == .uniform and (entry.line_bases != record.line_bases or entry.line_bytes != record.line_bytes);
+        if (indexed_layout != observed_layout or geometry_differs) {
             self.count(.{ .@"pair.line_geometry_mismatch" = .{ .indexed_line_bases = entry.line_bases, .indexed_line_bytes = entry.line_bytes, .indexed_layout = indexed_layout, .observed_line_bases = record.line_bases, .observed_line_bytes = record.line_bytes, .observed_layout = observed_layout } }, at);
         } else if (indexed_layout == .side_table) {
             if (try pair.sideTableDifference(entry, record.side_table)) |mismatch| self.count(.{ .@"pair.side_table_mismatch" = mismatch }, at);
@@ -1620,4 +1621,273 @@ test "[failure] - [validate fix]: a failed flush aborts staging and keeps the de
     const after = try tmp.dir.readFileAlloc(std.testing.io, "out.fa", std.testing.allocator, .limited(1024));
     defer std.testing.allocator.free(after);
     try std.testing.expectEqualStrings("old output\n", after);
+}
+
+fn checkPackedNameAllocations(allocator: std.mem.Allocator) !void {
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.validate);
+    const diag = ScanDiag{ .failure = &failure };
+    errdefer |err| {
+        if (err == error.OutOfMemory) {
+            std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", failure.primary().?.code()) catch @panic("missing allocation diagnostic");
+            std.testing.expectEqual(diagnostics.Stage.allocate, failure.primary().?.stage) catch @panic("wrong allocation stage");
+        }
+    }
+
+    var names = PackedNames.init(allocator);
+    names.diag = diag;
+    defer names.deinit();
+    try names.ensureCapacity(16);
+    var name = [_]u8{'A'} ** MAX_INDEX_NAME_BYTES;
+    for (0..3) |i| {
+        name[0] = @intCast('A' + i);
+        try std.testing.expect(!try names.observeAt(&name, 0));
+    }
+    for (0..300) |i| {
+        var buffer: [32]u8 = undefined;
+        const short = try std.fmt.bufPrint(&buffer, "name-{d}", .{i});
+        try std.testing.expect(!try names.observeAt(short, 0));
+    }
+    for (0..3) |i| {
+        name[0] = @intCast('A' + i);
+        try std.testing.expect(try names.observeAt(&name, 0));
+    }
+}
+
+fn checkSourceNameAllocations(allocator: std.mem.Allocator, data: []const u8) !void {
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.validate);
+    const diag = ScanDiag{ .failure = &failure };
+    errdefer |err| {
+        if (err == error.OutOfMemory) {
+            std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", failure.primary().?.code()) catch @panic("missing allocation diagnostic");
+            std.testing.expectEqual(diagnostics.Stage.allocate, failure.primary().?.stage) catch @panic("wrong allocation stage");
+        }
+    }
+
+    var names = SourceNames.init(allocator, std.testing.io, undefined, data.len);
+    names.diag = diag;
+    defer names.deinit();
+    names.setChunk(data, 0);
+    for ([_]bool{ false, true }) |duplicate| {
+        var lines = std.mem.tokenizeScalar(u8, data, '\n');
+        while (lines.next()) |name| {
+            const offset = @intFromPtr(name.ptr) - @intFromPtr(data.ptr);
+            try std.testing.expectEqual(duplicate, try names.observe(name, offset));
+        }
+    }
+    try std.testing.expectEqual(@as(u32, 5000), names.tables.narrow.count());
+}
+
+test "[edge] - [name catalog]: full source tables retain duplicate lookups" {
+    inline for (.{ u32, u64 }) |Offset| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var source = SourceNames.init(failing.allocator(), std.testing.io, undefined, if (Offset == u32) 0 else std.math.maxInt(u32));
+        defer source.deinit();
+        source.cache_full = true;
+        source.setChunk("alpha\nbeta\n", 0);
+        const set = if (Offset == u32) &source.tables.narrow else &source.tables.wide;
+        try std.testing.expect(!try set.observeWithFingerprint(&source, "alpha", 0, 0));
+        set.len = std.math.maxInt(u32);
+        failing.fail_index = failing.alloc_index;
+        try std.testing.expect(try set.observeWithFingerprint(&source, "alpha", 0, 0));
+        try std.testing.expectError(error.OutOfMemory, set.observeWithFingerprint(&source, "beta", 6, 0));
+        try std.testing.expect(!failing.has_induced_failure);
+        try std.testing.expectEqual(std.math.maxInt(u32), set.len);
+    }
+}
+
+test "[property] - [name catalog]: complete names resolve fingerprint collisions" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const io = std.testing.io;
+    const file = try temporary.dir.createFile(io, "names.fa", .{ .read = true });
+    defer file.close(io);
+    const long = "a-much-longer-different-name";
+    const data = long ++ "\nalpha\nalphabet\nbeta\nalpha\n";
+    try file.writePositionalAll(io, data, 0);
+    var source = SourceNames.init(std.testing.allocator, io, file, data.len);
+    defer source.deinit();
+    source.cache_full = true;
+    const set = &source.tables.narrow;
+    const start = long.len + 1;
+    try std.testing.expect(!try set.observeWithFingerprint(&source, "alpha", start, 0));
+    try std.testing.expect(!try set.observeWithFingerprint(&source, "alphabet", start + 6, 0));
+    try std.testing.expect(!try set.observeWithFingerprint(&source, "beta", start + 15, 0));
+    try std.testing.expect(try set.observeWithFingerprint(&source, "alpha", start + 20, 0));
+    try std.testing.expect(!try set.observeWithFingerprint(&source, long, 0, 0));
+}
+
+test "[unit] - [name catalog]: exact comparisons use the current input chunk" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const io = std.testing.io;
+    const file = try temporary.dir.createFile(io, "names.fa", .{ .read = true });
+    defer file.close(io);
+    const data = "alpha\nalphabet\nbeta\nalpha\n";
+    var source = SourceNames.init(std.testing.allocator, io, file, data.len);
+    defer source.deinit();
+    source.cache_full = true;
+    source.setChunk(data, 0);
+    const set = &source.tables.narrow;
+    try std.testing.expect(!try set.observeWithFingerprint(&source, "alpha", 0, 0));
+    try std.testing.expect(!try set.observeWithFingerprint(&source, "alphabet", 6, 0));
+    try std.testing.expect(try set.observeWithFingerprint(&source, "alpha", 20, 0));
+}
+
+test "[edge] - [name catalog]: retain offsets above four GiB" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const io = std.testing.io;
+    const file = try temporary.dir.createFile(io, "names.fa", .{ .read = true });
+    defer file.close(io);
+    const offset: u64 = @as(u64, std.math.maxInt(u32)) + 64;
+    const data = "alpha\nalphabet\nbeta\nalpha\n";
+    var source = SourceNames.init(std.testing.allocator, io, file, offset + data.len);
+    defer source.deinit();
+    source.cache_full = true;
+    source.setChunk(data, offset);
+    const set = &source.tables.wide;
+    try std.testing.expect(!try set.observeWithFingerprint(&source, "alpha", offset, 0));
+    try std.testing.expect(!try set.observeWithFingerprint(&source, "alphabet", offset + 6, 0));
+    try std.testing.expect(try set.observeWithFingerprint(&source, "alpha", offset + 20, 0));
+    try std.testing.expectEqual(offset, set.keyAt(0).offset);
+    try std.testing.expectEqual(@as(u64, 0), (try file.stat(io)).size);
+}
+
+test "[property] - [name catalog]: cached names resolve fingerprint collisions" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const io = std.testing.io;
+    const file = try temporary.dir.createFile(io, "names.fa", .{ .read = true });
+    defer file.close(io);
+    const data = "alpha\nalphabet\nbeta\nalpha\n";
+    try file.writePositionalAll(io, data, 0);
+    var source = SourceNames.init(std.testing.allocator, io, file, data.len);
+    defer source.deinit();
+    const set = &source.tables.narrow;
+    try std.testing.expect(!try set.observeWithFingerprint(&source, "alpha", 0, 0));
+    try std.testing.expect(!try set.observeWithFingerprint(&source, "alphabet", 6, 0));
+    try std.testing.expect(!try set.observeWithFingerprint(&source, "beta", 15, 0));
+    try std.testing.expect(try set.observeWithFingerprint(&source, "alpha", 20, 0));
+}
+
+test "[failure] - [name catalog]: read errors leave the insertion unfinished" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const io = std.testing.io;
+    const file = try temporary.dir.createFile(io, "names.fa", .{});
+    defer file.close(io);
+    const data = "alpha\nbeta\n";
+    try file.writePositionalAll(io, data, 0);
+    var source = SourceNames.init(std.testing.allocator, io, file, data.len);
+    defer source.deinit();
+    source.cache_full = true;
+    const set = &source.tables.narrow;
+    try std.testing.expect(!try set.observeWithFingerprint(&source, "alpha", 0, 0));
+    try std.testing.expectError(error.SourceReadFailed, set.observeWithFingerprint(&source, "beta", 6, 0));
+    try std.testing.expectEqual(@as(u32, 1), set.count());
+}
+
+test "[failure] - [name catalog]: block growth cleans every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkPackedNameAllocations, .{});
+}
+
+test "[failure] - [name catalog]: table and entry growth clean every allocation failure" {
+    var data: std.ArrayList(u8) = .empty;
+    defer data.deinit(std.testing.allocator);
+    for (0..5000) |i| {
+        var buffer: [32]u8 = undefined;
+        try data.appendSlice(std.testing.allocator, try std.fmt.bufPrint(&buffer, "lookup-{d:0>8}\n", .{i}));
+    }
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkSourceNameAllocations, .{data.items});
+}
+
+test "[edge] - [name catalog]: maximum names cross copied and retained cache blocks" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const io = std.testing.io;
+    const file = try temporary.dir.createFile(io, "names.fa", .{ .read = true });
+    defer file.close(io);
+    var name: [MAX_INDEX_NAME_BYTES]u8 = undefined;
+    const stride = MAX_INDEX_NAME_BYTES + 1;
+    for (0..6) |i| {
+        @memset(&name, @intCast('A' + i));
+        try file.writePositionalAll(io, &name, i * stride);
+        try file.writePositionalAll(io, "\n", i * stride + name.len);
+    }
+    var names = SourceNames.init(std.testing.allocator, io, file, 6 * stride);
+    defer names.deinit();
+    for ([_]bool{ false, true, true }) |duplicate| {
+        for (0..6) |i| {
+            @memset(&name, @intCast('A' + i));
+            try std.testing.expectEqual(duplicate, try names.observe(&name, i * stride));
+        }
+    }
+    try std.testing.expect(names.cache_full);
+    try std.testing.expect(names.hot_blocks.items.len >= 2);
+}
+
+test "[failure] - [name catalog]: short reads distinguish collisions from truncation" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const io = std.testing.io;
+    const file = try temporary.dir.createFile(io, "names.fa", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, "alpha\n", 0);
+    var names = SourceNames.init(std.testing.allocator, io, file, 6);
+    defer names.deinit();
+    names.cache_full = true;
+    const flag = SourceNames.Tables(u32).CACHE_FLAG;
+    try std.testing.expect(!names.sameName("alphabet", 0, flag));
+    try std.testing.expect(!names.read_failed);
+    try file.setLength(io, 3);
+    try std.testing.expect(!names.sameName("alpha", 0, flag));
+    try std.testing.expect(names.read_failed);
+}
+
+test "[failure] - [name catalog]: source offsets cannot overlap cache flags" {
+    var narrow = SourceNames.init(std.testing.allocator, std.testing.io, undefined, 0);
+    defer narrow.deinit();
+    try std.testing.expectError(error.SourceChanged, narrow.observe("name", SourceNames.Tables(u32).CACHE_FLAG));
+    try std.testing.expectEqual(@as(u32, 0), narrow.tables.narrow.count());
+    var wide = SourceNames.init(std.testing.allocator, std.testing.io, undefined, std.math.maxInt(u32));
+    defer wide.deinit();
+    try std.testing.expectError(error.SourceChanged, wide.observe("name", SourceNames.Tables(u64).CACHE_FLAG));
+    try std.testing.expectEqual(@as(u32, 0), wide.tables.wide.count());
+}
+
+test "[failure] - [name catalog]: oversized offsets roll back the insertion" {
+    if (comptime @bitSizeOf(usize) <= 32) return error.SkipZigTest;
+    var names = PackedNames.init(std.testing.allocator);
+    defer names.deinit();
+    names.position = @as(usize, std.math.maxInt(u32)) + 1;
+    try std.testing.expectError(error.OutOfMemory, names.observeAt("name", 0));
+    try std.testing.expectEqual(@as(u32, 0), names.map.count());
+}
+
+test "[failure] - [name catalog]: cache representation limits are capacity failures" {
+    var failure: diagnostics.Failure = undefined;
+    inline for (.{ u32, u64 }) |Offset| {
+        failure.reset(.validate);
+        var names = SourceNames.init(std.testing.allocator, std.testing.io, undefined, if (Offset == u32) 0 else std.math.maxInt(u32));
+        names.diag = .{ .failure = &failure };
+        defer names.deinit();
+        const limit = SourceNames.Tables(Offset).CACHE_FLAG;
+        try std.testing.expectError(error.CapacityExceeded, names.observe("name", limit));
+        const details = failure.primary().?.details.@"resource.capacity_limit_exceeded";
+        try std.testing.expectEqual(diagnostics.CapacityRole.name_cache_offset, details.capacity_role);
+        try std.testing.expectEqual(@as(u128, limit - 1), details.limit);
+        try std.testing.expectEqual(@as(u128, limit), details.required.exact);
+    }
+    if (comptime @bitSizeOf(usize) > 32) {
+        failure.reset(.validate);
+        var names = PackedNames.init(std.testing.allocator);
+        names.diag = .{ .failure = &failure };
+        defer names.deinit();
+        names.position = @as(usize, std.math.maxInt(u32)) + 1;
+        try std.testing.expectError(error.CapacityExceeded, names.observeAt("name", 0));
+        try std.testing.expectEqual(diagnostics.CapacityRole.name_offset, failure.primary().?.details.@"resource.capacity_limit_exceeded".capacity_role);
+        try std.testing.expectEqual(@as(u32, 0), names.map.count());
+    }
 }

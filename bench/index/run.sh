@@ -43,7 +43,7 @@
 #   seqs_fixed_{N}.fasta     1024 bp per sequence, N in 100k 250k 500k 1M
 #
 # Headline and scaling comparisons use z-fasta .fai. Transcriptome and Proteome also use
-# all four format and dedup product lanes.
+# the default .zfi lane.
 
 set -euo pipefail
 
@@ -370,15 +370,11 @@ bench_file() {
         bench_add_command "$section" "$workload" "z-fasta-fai" "z-fasta" "$json_out" \
             "$clean; TMPDIR=$qt $qz index --emit-fai $qf > /dev/null" "$nbytes"
     else
-        # Product matrix: {.fai, .zfi} x {dedup, --no-dedup}.
+        # Product lanes: .fai and .zfi.
         bench_add_command "$section" "$workload" "z-fasta-fai" "z-fasta" "$json_out" \
             "$clean; TMPDIR=$qt $qz index --emit-fai $qf > /dev/null" "$nbytes"
-        bench_add_command "$section" "$workload" "z-fasta-fai-nodedup" "z-fasta" "$json_out" \
-            "$clean; TMPDIR=$qt $qz index --emit-fai --no-dedup $qf > /dev/null" "$nbytes"
         bench_add_command "$section" "$workload" "z-fasta-zfi" "z-fasta" "$json_out" \
             "$clean; $qz index $qf > /dev/null" "$nbytes"
-        bench_add_command "$section" "$workload" "z-fasta-zfi-nodedup" "z-fasta" "$json_out" \
-            "$clean; $qz index --no-dedup $qf > /dev/null" "$nbytes"
     fi
 
     bench_add_command "$section" "$workload" "samtools" "samtools" "$json_out" \
@@ -514,15 +510,29 @@ run_tests() {
         fi
     }
 
+    # z-fasta indexes every record; samtools faidx keeps only the first of each name.
+    score_every_duplicate() {
+        local name="$1"
+        if [[ $zf_exit -eq 0 ]] && diff -q "$zf_fai" <(printf 'dup\t4\t5\t4\t5\ndup\t4\t15\t4\t5\ndup\t4\t25\t4\t5\n') &>/dev/null; then
+            match="MATCH"
+        else
+            match="DIFF"
+            echo "FAILURE: $name (every duplicate record expected)" >> "$fail_log"
+        fi
+    }
+
     for file in "$EDGE_DIR"/*.fasta; do
         [[ -f "$file" ]] || continue
         name="$(basename "$file" .fasta)"
         contract_class="fai_parity"
         [[ "$name" == "binary_data" ]] && contract_class="invalid_input"
+        [[ "$name" == "triple_dup" ]] && contract_class="all_records"
         total=$((total + 1))
         run_index_tools "$file"
         if [[ "$contract_class" == "invalid_input" ]]; then
             match="REVIEW"
+        elif [[ "$contract_class" == "all_records" ]]; then
+            score_every_duplicate "$name"
         else
             score_edge_case "$file" "$name"
         fi
@@ -547,10 +557,10 @@ from pathlib import Path
 import sys
 zfi = Path(sys.argv[1]).read_bytes()
 expected = sys.argv[2]
-if len(zfi) < 16 or zfi[:4] != b"ZFI\x01":
+if len(zfi) < 16 or zfi[:4] != b"ZFI\x02":
     raise SystemExit(1)
 count = int.from_bytes(zfi[4:8], "little")
-side = any(zfi[16 + i * 40 + 10] & 1 for i in range(count))
+side = any(zfi[16 + i * 24 + 23] & 0x80 for i in range(count))
 raise SystemExit(0 if (expected == "side-table") == side else 1)
 PY
     }
@@ -635,16 +645,19 @@ PY
 import struct, sys
 data = open(sys.argv[1], "rb").read()
 magic, count, _size = struct.unpack_from("<4sIQ", data, 0)
-assert magic == b"ZFI\x01", magic
-footer, blob_len = struct.unpack_from("<4sQ", data, len(data) - 12)
-assert footer == b"ZFNM", footer
-payload_end = len(data) - 12
-if data[payload_end - 12:payload_end - 8] == b"ZFID":
-    payload_end -= 12
-blob = payload_end - blob_len
+assert magic == b"ZFI\x02", magic
+identity, _mtime, footer, blob_len = struct.unpack_from("<4sQ4sQ", data, len(data) - 24)
+assert identity == b"ZFID" and footer == b"ZFNM", (identity, footer)
+table_len = 4 * (count + count // 4 + 1)
+blob = len(data) - 24 - table_len - blob_len
 rows = []
 for i in range(count):
-    name_offset, name_len, flags, seq_offset, seq_len, line_bases, line_bytes = struct.unpack_from("<QH6sQQII", data, 16 + 40 * i)
+    bits = int.from_bytes(data[16 + 24 * i:16 + 24 * (i + 1)], "little")
+    field = lambda start, width: (bits >> start) & ((1 << width) - 1)
+    assert not field(191, 1), "samtools-comparable records are uniform"
+    seq_offset, name_len, seq_len, name_offset = field(0, 48), field(48, 16), field(64, 48), field(112, 40)
+    line_bases = field(152, 32)
+    line_bytes = line_bases + field(184, 7)
     name = data[blob + name_offset:blob + name_offset + name_len].decode()
     rows.append("\t".join(map(str, (name, seq_len, seq_offset, line_bases, line_bytes))))
 expected = [line.rstrip("\n") for line in open(sys.argv[2])]

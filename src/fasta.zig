@@ -27,19 +27,7 @@ pub fn isNameDelimiter(byte: u8) bool {
 }
 
 pub fn countBases(data: []const u8) u64 {
-    var count: u64 = 0;
-    var pos: usize = 0;
-    while (pos + SIMD_CHUNK_SIZE <= data.len) {
-        const chunk: SimdVec = data[pos..][0..SIMD_CHUNK_SIZE].*;
-        const space_char: SimdVec = @splat(' ');
-        count += std.simd.countTrues(chunk > space_char);
-        pos += SIMD_CHUNK_SIZE;
-    }
-    while (pos < data.len) {
-        if (isBase(data[pos])) count += 1;
-        pos += 1;
-    }
-    return count;
+    return data.len - countWhitespace(SIMD_CHUNK_SIZE, data);
 }
 
 pub fn countBasesInLineSlice(data: []const u8, start: usize, end: usize) u32 {
@@ -52,31 +40,11 @@ pub fn countBasesInLineSlice(data: []const u8, start: usize, end: usize) u32 {
 
 // Aligned so the hot loop's position in a cache line does not depend on where the linker puts it.
 pub fn countWhitespace(comptime vector_len: usize, data: []const u8) align(64) usize {
-    if (data.len < 2048) return countWhitespaceDirect(vector_len, data);
-    const Vec = @Vector(vector_len, u8);
-    const Wide = @Vector(vector_len, u16);
-    const group = 128;
-    var count: usize = 0;
-    var pos: usize = 0;
-    while (data.len - pos >= vector_len * group) {
-        var lanes: Vec = @splat(0);
-        for (0..group) |_| {
-            const bytes: Vec = data[pos..][0..vector_len].*;
-            lanes += @select(u8, bytes <= @as(Vec, @splat(' ')), @as(Vec, @splat(1)), @as(Vec, @splat(0)));
-            pos += vector_len;
-        }
-        count += @reduce(.Add, @as(Wide, lanes));
-    }
-    var lanes: Vec = @splat(0);
-    while (data.len - pos >= vector_len) : (pos += vector_len) {
-        const bytes: Vec = data[pos..][0..vector_len].*;
-        lanes += @select(u8, bytes <= @as(Vec, @splat(' ')), @as(Vec, @splat(1)), @as(Vec, @splat(0)));
-    }
-    count += @reduce(.Add, @as(Wide, lanes));
-    while (pos < data.len) : (pos += 1) {
-        count += @intFromBool(!isBase(data[pos]));
-    }
-    return count;
+    return countVectorized(vector_len, data, isWhitespace);
+}
+
+fn isWhitespace(comptime Vec: type, bytes: Vec) @Vector(@typeInfo(Vec).vector.len, bool) {
+    return bytes <= @as(Vec, @splat(' '));
 }
 
 pub fn findNameDelimiter(data: []const u8, start: usize) usize {
@@ -413,8 +381,8 @@ pub const RecordReader = struct {
 pub const LineEntry = extern struct {
     base_start: u64,
     byte_offset: u64,
-    line_bytes: u64,
-    line_bases: u64,
+    line_bytes: u32,
+    line_bases: u32,
 };
 
 /// A record with bases, as `RecordScannerWith` found it. Slices borrow the scanner until the next
@@ -1100,13 +1068,8 @@ pub fn SourceDedupWith(comptime Diag: type) type {
         cache_full: bool = false,
         allocation_failed: bool = false,
         source_match: bool = false,
-        source_name_hits: u32 = 0,
-        hydrated: bool = false,
         hot_blocks: std.ArrayList([]u8) = .empty,
         hot_len: usize = 0,
-        replay_file: ?std.Io.File = null,
-        replay_context: ?*anyopaque = null,
-        replay_fn: ?*const fn (*anyopaque, *SourceDedup) anyerror!void = null,
         read_failed: bool = false,
 
         pub fn init(allocator: std.mem.Allocator, io: std.Io, file: std.Io.File, size: u64) @This() {
@@ -1222,20 +1185,6 @@ pub fn SourceDedupWith(comptime Diag: type) type {
             return std.mem.eql(u8, name[0..prefix], anchor[0..prefix]) and
                 std.mem.eql(u8, name[prefix..][0..middle_len], self.cache.items[start + header_len ..][0..middle_len]) and
                 std.mem.eql(u8, name[name.len - suffix ..], anchor[anchor.len - suffix ..]);
-        }
-
-        pub fn retainAt(self: *@This(), ordinal: u32, name: []const u8) !void {
-            switch (self.tables) {
-                .narrow => |*set| try set.retainAt(self, ordinal, name),
-                .wide => |*set| try set.retainAt(self, ordinal, name),
-            }
-        }
-
-        pub fn uniqueCount(self: *const @This()) u32 {
-            return switch (self.tables) {
-                .narrow => |*set| set.count(),
-                .wide => |*set| set.count(),
-            };
         }
 
         fn appendHot(self: *@This(), input: []const u8) !void {
@@ -1415,16 +1364,7 @@ pub fn SourceDedupWith(comptime Diag: type) type {
                             const key = self.keyAt(self.buckets[candidate] - 1);
                             if (key.fingerprint != fingerprint) continue;
                             if (source.sameName(name, key.offset, CACHE_FLAG)) {
-                                if (source.source_match) {
-                                    key.offset = @intCast(try source.rememberHot(name, CACHE_FLAG));
-                                    source.source_name_hits += 1;
-                                    if (!source.hydrated and source.source_name_hits >= 64) {
-                                        if (source.replay_fn) |replay| {
-                                            source.hydrated = true;
-                                            try replay(source.replay_context.?, source);
-                                        }
-                                    }
-                                }
+                                if (source.source_match) key.offset = @intCast(try source.rememberHot(name, CACHE_FLAG));
                                 return true;
                             }
                             if (source.read_failed) return error.SourceReadFailed;
@@ -1454,13 +1394,6 @@ pub fn SourceDedupWith(comptime Diag: type) type {
                     self.metadata[position] = tag(fingerprint);
                     self.len += 1;
                     return false;
-                }
-
-                pub fn retainAt(self: *@This(), source: *SourceDedup, ordinal: u32, name: []const u8) !void {
-                    if (ordinal >= self.len) return source.diag.consistency(.record_ordinal, error.SourceReadFailed);
-                    const key = self.keyAt(ordinal);
-                    if (key.offset & CACHE_FLAG != 0) return;
-                    key.offset = @intCast(try source.rememberHot(name, CACHE_FLAG));
                 }
 
                 fn spread(fingerprint: u32) usize {
@@ -1521,17 +1454,15 @@ fn countDenseLinesWith(comptime vector_len: usize, comptime Symbols: type, data:
 
 fn denseBlockLines(comptime vector_len: usize, comptime Symbols: type, data: []const u8, start: usize, line_count: usize, line_bases: usize, line_bytes: usize) usize {
     const sep_len = line_bytes - line_bases;
-    var line_index: usize = 0;
-    while (line_index < line_count) : (line_index += 1) {
-        const line_start = start + line_index * line_bytes;
-        if (data[line_start] == '>') break;
-        if (!hasLineSeparatorAt(data, line_start + line_bases, sep_len)) break;
-    }
-    const candidate_lines = line_index;
+    const candidate_lines = switch (sep_len) {
+        1 => separatedLines("\n", data[start..][0 .. line_count * line_bytes], line_bases, line_bytes),
+        2 => separatedLines("\r\n", data[start..][0 .. line_count * line_bytes], line_bases, line_bytes),
+        else => unreachable,
+    };
     if (candidate_lines == 0) return 0;
     const block_end = start + candidate_lines * line_bytes;
     if (Symbols.countOutside(vector_len, data[start..block_end]) == candidate_lines * sep_len) return candidate_lines;
-    line_index = 0;
+    var line_index: usize = 0;
     while (line_index < candidate_lines) : (line_index += 1) {
         const line_start = start + line_index * line_bytes;
         if (Symbols.countOutside(vector_len, data[line_start .. line_start + line_bases]) != 0) return line_index;
@@ -1539,69 +1470,76 @@ fn denseBlockLines(comptime vector_len: usize, comptime Symbols: type, data: []c
     return 0;
 }
 
-fn hasLineSeparatorAt(data: []const u8, pos: usize, sep_len: usize) bool {
-    return switch (sep_len) {
-        1 => pos < data.len and data[pos] == '\n',
-        2 => pos + 1 < data.len and data[pos] == '\r' and data[pos + 1] == '\n',
-        else => false,
-    };
+// Lines of `block` that start with no `>` and end in `separator`; `block` holds whole lines.
+fn separatedLines(comptime separator: []const u8, block: []const u8, line_bases: usize, line_bytes: usize) usize {
+    var line_start: usize = 0;
+    while (line_start != block.len) : (line_start += line_bytes) {
+        if (block[line_start] == '>') break;
+        if (!std.mem.eql(u8, block[line_start + line_bases ..][0..separator.len], separator)) break;
+    }
+    return line_start / line_bytes;
 }
 
 fn lineSliceHasWhitespace(data: []const u8, start: usize, end: usize) bool {
+    const space: SimdVec = @splat(' ');
+    if (end - start < SIMD_CHUNK_SIZE) {
+        for (data[start..end]) |byte| if (byte <= ' ') return true;
+        return false;
+    }
     var pos = start;
-    while (pos + SIMD_CHUNK_SIZE <= end) {
+    while (end - pos > SIMD_CHUNK_SIZE) : (pos += SIMD_CHUNK_SIZE) {
         const chunk: SimdVec = data[pos..][0..SIMD_CHUNK_SIZE].*;
-        const space_char: SimdVec = @splat(' ');
-        const mask = chunk <= space_char;
-        if (@reduce(.Or, mask)) return true;
-        pos += SIMD_CHUNK_SIZE;
+        if (@reduce(.Or, chunk <= space)) return true;
     }
-    while (pos < end) : (pos += 1) {
-        if (!isBase(data[pos])) return true;
-    }
-    return false;
+    const last: SimdVec = data[end - SIMD_CHUNK_SIZE ..][0..SIMD_CHUNK_SIZE].*;
+    return @reduce(.Or, last <= space);
 }
 
 fn countOutsideWith(comptime vector_len: usize, data: []const u8, comptime inside: anytype) usize {
+    return countVectorized(vector_len, data, struct {
+        fn outside(comptime Vec: type, bytes: Vec) @Vector(@typeInfo(Vec).vector.len, bool) {
+            return !inside(Vec, bytes);
+        }
+    }.outside);
+}
+
+// Counts the bytes `matches` selects: u8 lanes summed per group, so no lane overflows, and a last
+// partial vector read as the slice's final full vector with its already-counted lanes masked off.
+fn countVectorized(comptime vector_len: usize, data: []const u8, comptime matches: anytype) usize {
     const Vec = @Vector(vector_len, u8);
     const Wide = @Vector(vector_len, u16);
+    const one: Vec = @splat(1);
+    const zero: Vec = @splat(0);
+    if (data.len < vector_len) {
+        var count: usize = 0;
+        for (data) |byte| count += @intFromBool(matches(@Vector(1, u8), .{byte})[0]);
+        return count;
+    }
     const group = 128;
+    const step = 4 * vector_len;
     var count: usize = 0;
     var pos: usize = 0;
     while (data.len - pos >= vector_len * group) {
-        var lanes: Vec = @splat(0);
-        for (0..group) |_| {
-            const bytes: Vec = data[pos..][0..vector_len].*;
-            lanes += @select(u8, inside(Vec, bytes), @as(Vec, @splat(0)), @as(Vec, @splat(1)));
-            pos += vector_len;
+        var lanes: Vec = zero;
+        for (0..group / 4) |_| {
+            inline for (0..4) |k| lanes += @select(u8, matches(Vec, data[pos + k * vector_len ..][0..vector_len].*), one, zero);
+            pos += step;
         }
         count += @reduce(.Add, @as(Wide, lanes));
     }
-    var lanes: Vec = @splat(0);
+    var lanes: Vec = zero;
+    while (data.len - pos >= step) : (pos += step) {
+        inline for (0..4) |k| lanes += @select(u8, matches(Vec, data[pos + k * vector_len ..][0..vector_len].*), one, zero);
+    }
     while (data.len - pos >= vector_len) : (pos += vector_len) {
-        const bytes: Vec = data[pos..][0..vector_len].*;
-        lanes += @select(u8, inside(Vec, bytes), @as(Vec, @splat(0)), @as(Vec, @splat(1)));
+        lanes += @select(u8, matches(Vec, data[pos..][0..vector_len].*), one, zero);
     }
-    count += @reduce(.Add, @as(Wide, lanes));
-    while (pos < data.len) : (pos += 1) {
-        const one: @Vector(1, u8) = .{data[pos]};
-        count += @intFromBool(!inside(@Vector(1, u8), one)[0]);
+    const rest = data.len - pos;
+    if (rest != 0) {
+        const fresh = std.simd.iota(u8, vector_len) >= @as(Vec, @splat(@intCast(vector_len - rest)));
+        lanes += @select(u8, matches(Vec, data[data.len - vector_len ..][0..vector_len].*), one, zero) & @select(u8, fresh, one, zero);
     }
-    return count;
-}
-
-fn countWhitespaceDirect(comptime vector_len: usize, data: []const u8) usize {
-    const Vec = @Vector(vector_len, u8);
-    var count: usize = 0;
-    var pos: usize = 0;
-    while (pos + vector_len <= data.len) : (pos += vector_len) {
-        const chunk: Vec = data[pos..][0..vector_len].*;
-        count += std.simd.countTrues(chunk <= @as(Vec, @splat(' ')));
-    }
-    while (pos < data.len) : (pos += 1) {
-        count += @intFromBool(!isBase(data[pos]));
-    }
-    return count;
+    return count + @reduce(.Add, @as(Wide, lanes));
 }
 
 fn setPair(table: *[256]u8, left: u8, right: u8) void {
@@ -1638,7 +1576,7 @@ const IUPAC_COMPLEMENT_TABLE: [256]u8 = buildComplementTable();
 
 test "[property] - [fasta scanner]: whitespace counts match scalar counts" {
     var data: [12289]u8 = undefined;
-    const lengths = [_]usize{ 0, 15, 16, 31, 32, 127, 128, 2047, 2048, 2049, 4095, 4096, 4097, 8191, 8192, 8193, data.len };
+    const lengths = [_]usize{ 0, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 2047, 2048, 2049, 4095, 4096, 4097, 8191, 8192, 8193, data.len };
     for ([_]?u8{ null, ' ', 'X' }) |fill| {
         for (&data, 0..) |*byte, i| byte.* = fill orelse @as(u8, @truncate(i * 17 + i / 31));
         for (lengths) |len| {
@@ -1646,6 +1584,20 @@ test "[property] - [fasta scanner]: whitespace counts match scalar counts" {
             for (data[0..len]) |byte| expected += @intFromBool(byte <= ' ');
             inline for (.{ 1, 8, 16, 32, 64 }) |width| {
                 try std.testing.expectEqual(expected, countWhitespace(width, data[0..len]));
+            }
+        }
+    }
+    var line = [_]u8{'A'} ** 80;
+    for ([_]usize{ 0, 1, 7 }) |start| {
+        for (start..line.len + 1) |end| {
+            try std.testing.expect(!lineSliceHasWhitespace(&line, start, end));
+            for (start..end) |at| {
+                line[at] = ' ';
+                try std.testing.expect(lineSliceHasWhitespace(&line, start, end));
+                inline for (.{ 1, 16, 32, 64 }) |width| {
+                    try std.testing.expectEqual(@as(usize, 1), countWhitespace(width, line[start..end]));
+                }
+                line[at] = 'A';
             }
         }
     }

@@ -1,6 +1,6 @@
 //! Builds `.zfi` and `.fai` indexes in one pass through a 256 KiB reader.
 //! A header starts with `>` at line start; names and bases follow `fasta.zig`. Empty records are
-//! skipped. Duplicate names are first-wins by exact string equality, even when hashes collide.
+//! skipped; every other record is kept, duplicate names included.
 //! A record is uniform when all lines share one width (a shorter last line is allowed); any other
 //! layout gets a side table, and `--emit-fai` rejects it. Dense runs of lines are checked in
 //! vector blocks; the first odd byte drops back to the line parser at that byte.
@@ -19,7 +19,6 @@ pub const INDEX_READ_BUFFER_SIZE = 256 * 1024;
 pub const MAX_INDEX_NAME_LEN = std.math.maxInt(u16);
 
 pub const ScanOptions = struct {
-    enable_dedup: bool,
     max_name_len: ?usize = null,
     collect_side_tables: bool = false,
     require_initial_header: bool = false,
@@ -28,12 +27,9 @@ pub const ScanOptions = struct {
 
 pub const Options = struct {
     emit_fai: bool = false,
-    enable_dedup: bool = true,
 };
 
 pub const Result = struct { record_count: u32 };
-
-pub const NameDedup = NameDedupWith(std.hash_map.StringContext);
 
 /// Slices are borrowed only for the duration of the callback.
 pub const FastaRecordEmit = struct {
@@ -43,18 +39,19 @@ pub const FastaRecordEmit = struct {
     nonuniform_reason: diagnostics.NonuniformReason = .nonuniform_layout,
     uses_uniform_formula: bool,
     side_table: []const u8 = &.{},
-    name_embedded: bool = false,
 };
 
 pub const ZfiIndex = struct {
     records: std.ArrayList(IndexRecord),
     side_tables: std.ArrayList(u8),
     name_blob: std.ArrayList(u8),
+    name_table: []u32 = &.{},
 
     pub fn deinit(self: *ZfiIndex, allocator: std.mem.Allocator) void {
         self.records.deinit(allocator);
         self.side_tables.deinit(allocator);
         self.name_blob.deinit(allocator);
+        allocator.free(self.name_table);
     }
 };
 
@@ -86,48 +83,38 @@ pub fn scanZfiReader(
                 ctx.index.side_tables.appendSlice(ctx.allocator, emit_info.side_table) catch return ctx.diag.forRecord(emit_info).oom(.side_tables, emit_info.side_table.len);
                 try ctx.diag.forRecord(emit_info).markNonUniform(&rec, local_offset, .local);
             }
-            if (!emit_info.name_embedded) {
-                try embedZfiName(ctx.allocator, &rec, emit_info.name, &ctx.index.name_blob, ctx.diag.forRecord(emit_info));
-            }
+            try embedZfiName(ctx.allocator, &rec, emit_info.name, &ctx.index.name_blob, ctx.diag.forRecord(emit_info));
             ctx.index.records.append(ctx.allocator, rec) catch return ctx.diag.forRecord(emit_info).oom(.records, @sizeOf(IndexRecord));
         }
     };
 
     var ctx = Ctx{ .index = &index, .allocator = allocator, .diag = diag };
-    var blob_dedup: ?NameDedup = null;
-    defer if (blob_dedup) |*seen| seen.deinit();
-    if (options.enable_dedup) {
-        blob_dedup = NameDedup.initOwningBlob(allocator, &index.name_blob);
-        blob_dedup.?.diag = diag;
-        try blob_dedup.?.ensureCapacity(DEDUP_INITIAL_CAPACITY);
-    }
-    const external_dedup: ?*NameDedup = if (blob_dedup) |*s| s else null;
     _ = try scanFastaReader(
         allocator,
         reader,
         read_buf,
         .{
-            .enable_dedup = options.enable_dedup,
             .collect_side_tables = true,
             .require_initial_header = options.require_initial_header,
             .failure = options.failure,
         },
-        external_dedup,
         &ctx,
         Ctx.emit,
     );
     try finalizeSideTableOffsets(&index, diag);
+    var table = index_format.NameTable.Builder.init(allocator, index.records.items.len) catch return diag.oom(.name_map, null);
+    for (index.records.items) |rec| table.insertHash(index_format.NameTable.hash(index.name_blob.items[rec.name_offset..][0..rec.name_len]));
+    index.name_table = table.finish();
     return index;
 }
 
 pub fn scanZfiData(
     allocator: std.mem.Allocator,
     data: []const u8,
-    enable_dedup: bool,
 ) !ZfiIndex {
     var r = std.Io.Reader.fixed(data);
     var read_buf: [INDEX_READ_BUFFER_SIZE]u8 = undefined;
-    return scanZfiReader(allocator, &r, &read_buf, .{ .enable_dedup = enable_dedup });
+    return scanZfiReader(allocator, &r, &read_buf, .{});
 }
 
 pub fn writeZfiIndexFile(
@@ -156,30 +143,10 @@ pub fn scanFastaReader(
     reader: *std.Io.Reader,
     read_buf: []u8,
     options: ScanOptions,
-    external_dedup: anytype,
     ctx: anytype,
     comptime emitRecord: fn (@TypeOf(ctx), FastaRecordEmit) anyerror!void,
 ) !u32 {
     try checkReadBufferSize(read_buf.len, options.failure);
-    var owned_original: ?NameDedup = null;
-    defer if (owned_original) |*seen| seen.deinit();
-    const Dedup = if (@TypeOf(external_dedup) == ?*SourceAdapter) SourceAdapter else if (@TypeOf(external_dedup) == ?*PackedNames) PackedNames else NameDedup;
-    const external: ?*Dedup = external_dedup;
-    const dedup_ptr: ?*Dedup = blk: {
-        if (external) |pointer| break :blk pointer;
-        if (comptime Dedup == NameDedup) {
-            if (options.enable_dedup) {
-                owned_original = NameDedup.init(allocator);
-                owned_original.?.diag = .{ .failure = options.failure };
-                try owned_original.?.ensureCapacity(DEDUP_INITIAL_CAPACITY);
-                break :blk &owned_original.?;
-            }
-        } else {
-            std.debug.assert(!options.enable_dedup);
-        }
-        break :blk null;
-    };
-
     var state = RecordScanner{
         .allocator = allocator,
         .collect_side_tables = options.collect_side_tables,
@@ -188,7 +155,7 @@ pub fn scanFastaReader(
     defer state.name.deinit(allocator);
     defer if (options.collect_side_tables) state.side_table.deinit(allocator);
     var record_count: u32 = 0;
-    var emitter = IndexEmitter(@TypeOf(ctx), emitRecord, ?*Dedup){ .ctx = ctx, .seen_names = dedup_ptr, .record_count = &record_count, .diag = state.diag };
+    var emitter = IndexEmitter(@TypeOf(ctx), emitRecord){ .ctx = ctx, .record_count = &record_count, .diag = state.diag };
     const max_name_len = @min(options.max_name_len orelse MAX_INDEX_NAME_LEN, MAX_INDEX_NAME_LEN);
     var file_offset: u64 = 0;
 
@@ -201,9 +168,6 @@ pub fn scanFastaReader(
             return read_diag.fail(.{ .@"index.initial_header_required" = .{ .byte = read_buf[0] } }, .scan, .fasta, null, error.NotFasta);
         }
         const next_offset = std.math.add(u64, file_offset, n) catch return read_diag.fail(.{ .@"resource.count_overflow" = .{ .counter = .source_bytes, .max_value = std.math.maxInt(u64), .current = file_offset, .increment = n } }, .scan, .fasta, null, error.SourceTooLong);
-        if (comptime Dedup == SourceAdapter) {
-            if (dedup_ptr) |seen| seen.source_names.setChunk(read_buf[0..n], file_offset);
-        }
         try state.processChunk(read_buf[0..n], file_offset, max_name_len, &emitter, @TypeOf(emitter).emit);
         file_offset = next_offset;
     }
@@ -219,11 +183,10 @@ pub fn scanFaiData(
     allocator: std.mem.Allocator,
     data: []const u8,
     writer: anytype,
-    enable_dedup: bool,
 ) !u32 {
     var r = std.Io.Reader.fixed(data);
     var read_buf: [INDEX_READ_BUFFER_SIZE]u8 = undefined;
-    return scanFaiReader(allocator, &r, &read_buf, writer, .{ .enable_dedup = enable_dedup }, null);
+    return scanFaiReader(allocator, &r, &read_buf, writer, .{});
 }
 
 pub fn runIndex(
@@ -248,6 +211,7 @@ pub fn runIndex(
     defer file.close(io);
     const stat = file.stat(io) catch |err| return failure.fail(.{ .details = .{ .@"io.stat_failed" = {} }, .stage = .stat, .at = .{ .source = .fasta }, .cause = .{ .zig = err } });
     if (stat.size == 0) return failure.fail(.{ .details = .{ .@"fasta.no_records" = {} }, .stage = .stat, .at = .{ .source = .fasta } });
+    if (!options.emit_fai and stat.size > index_format.MAX_ZFI_SOURCE_OFFSET) return failure.fail(.{ .details = .{ .@"resource.capacity_limit_exceeded" = .{ .capacity_role = .input_bytes, .limit = index_format.MAX_ZFI_SOURCE_OFFSET, .required = .{ .exact = stat.size } } }, .stage = .stat, .at = .{ .source = .fasta } });
     const count = (if (stat.size <= SMALL_INDEX_MAX_BYTES)
         runIndexSmall(allocator, io, environ, path, options, file, stat, diag)
     else
@@ -270,7 +234,6 @@ const INDEX_OUTPUT_BUFFER_SIZE = 64 * 1024;
 const INDEX_PATH_BUFFER_SIZE = std.Io.Dir.max_path_bytes;
 const SMALL_INDEX_MAX_BYTES = 32 * 1024 * 1024;
 const ZFI_INITIAL_RECORD_CAPACITY = 4096;
-const DEDUP_INITIAL_CAPACITY: u32 = 16384;
 const FAI_SPOOL_NAME_BUFFER_SIZE = 64;
 const FAI_U64_DECIMAL_DIGITS = 20;
 const FAI_SUFFIX_BUFFER_SIZE = 4 * (1 + FAI_U64_DECIMAL_DIGITS) + 1;
@@ -354,133 +317,6 @@ const Diagnostics = struct {
     }
 };
 
-const NameBlobRef = struct { offset: u32, len: u32 };
-
-fn NameDedupWith(comptime Context: type) type {
-    return struct {
-        diag: Diagnostics = .{},
-        map: std.HashMap([]const u8, void, Context, std.hash_map.default_max_load_percentage),
-        key_arena: ?std.heap.ArenaAllocator = null,
-        name_blob: ?*std.ArrayList(u8) = null,
-        ref_map: ?BlobRefMap = null,
-        last_offset: u32 = 0,
-        last_len: u16 = 0,
-
-        const BlobHashContext = struct {
-            blob: *std.ArrayList(u8),
-            pub fn hash(self: @This(), key: NameBlobRef) u64 {
-                return std.hash_map.hashString(self.blob.items[key.offset..][0..key.len]);
-            }
-            pub fn eql(self: @This(), a: NameBlobRef, b: NameBlobRef) bool {
-                if (a.len != b.len) return false;
-                return std.mem.eql(
-                    u8,
-                    self.blob.items[a.offset..][0..a.len],
-                    self.blob.items[b.offset..][0..b.len],
-                );
-            }
-        };
-
-        const BlobRefMap = std.HashMap(
-            NameBlobRef,
-            void,
-            BlobHashContext,
-            std.hash_map.default_max_load_percentage,
-        );
-
-        const SliceLookup = struct {
-            blob: *std.ArrayList(u8),
-            pub fn hash(_: @This(), name: []const u8) u64 {
-                return std.hash_map.hashString(name);
-            }
-            pub fn eql(self: @This(), name: []const u8, ref: NameBlobRef) bool {
-                if (name.len != ref.len) return false;
-                return std.mem.eql(u8, name, self.blob.items[ref.offset..][0..ref.len]);
-            }
-        };
-
-        const Self = @This();
-
-        pub fn init(allocator: std.mem.Allocator) Self {
-            return .{
-                .map = std.HashMap([]const u8, void, Context, std.hash_map.default_max_load_percentage).init(allocator),
-                .key_arena = std.heap.ArenaAllocator.init(allocator),
-            };
-        }
-
-        fn observeAt(self: *Self, name: []const u8, offset: u64) !bool {
-            _ = offset;
-            return self.observe(name);
-        }
-
-        fn initOwningBlob(allocator: std.mem.Allocator, blob: *std.ArrayList(u8)) Self {
-            return .{
-                .map = std.HashMap([]const u8, void, Context, std.hash_map.default_max_load_percentage).init(allocator),
-                .name_blob = blob,
-                .ref_map = BlobRefMap.initContext(allocator, .{ .blob = blob }),
-            };
-        }
-
-        fn bindsToBlob(self: *const Self) bool {
-            return self.name_blob != null;
-        }
-
-        fn ensureCapacity(self: *Self, min_cap: u32) !void {
-            if (self.ref_map) |*rm| {
-                rm.ensureTotalCapacity(min_cap) catch return self.diag.oom(.dedup_table, null);
-                return;
-            }
-            self.map.ensureTotalCapacity(min_cap) catch return self.diag.oom(.dedup_table, null);
-        }
-
-        pub fn deinit(self: *Self) void {
-            if (self.ref_map) |*rm| {
-                rm.deinit();
-                self.ref_map = null;
-            }
-            self.map.deinit();
-            if (self.key_arena) |*arena| arena.deinit();
-            self.key_arena = null;
-            self.name_blob = null;
-        }
-
-        /// True when the exact name was already seen; otherwise keeps a copy.
-        pub fn observe(self: *Self, name: []const u8) !bool {
-            if (self.name_blob) |blob| {
-                var rm = &(self.ref_map orelse unreachable);
-                const lookup = SliceLookup{ .blob = blob };
-                const gop = rm.getOrPutAdapted(name, lookup) catch return self.diag.oom(.dedup_table, null);
-                if (gop.found_existing) {
-                    self.last_offset = gop.key_ptr.offset;
-                    self.last_len = @intCast(gop.key_ptr.len);
-                    return true;
-                }
-                const off = std.math.cast(u32, blob.items.len) orelse {
-                    _ = rm.removeByPtr(gop.key_ptr);
-                    return self.diag.capacity(.name_offset, std.math.maxInt(u32), blob.items.len, error.OutOfMemory);
-                };
-                blob.appendSlice(rm.allocator, name) catch {
-                    _ = rm.removeByPtr(gop.key_ptr);
-                    return self.diag.oom(.names, name.len);
-                };
-                gop.key_ptr.* = .{ .offset = off, .len = @intCast(name.len) };
-                self.last_offset = off;
-                self.last_len = @intCast(name.len);
-                return false;
-            }
-            const arena = &(self.key_arena orelse unreachable);
-            const gop = self.map.getOrPut(name) catch return self.diag.oom(.dedup_table, null);
-            if (gop.found_existing) return true;
-            const owned = arena.allocator().dupe(u8, name) catch {
-                _ = self.map.remove(name);
-                return self.diag.oom(.names, name.len);
-            };
-            gop.key_ptr.* = owned;
-            return false;
-        }
-    };
-}
-
 const RecordScanner = fasta.RecordScannerWith(Diagnostics);
 
 comptime {
@@ -490,31 +326,14 @@ comptime {
     }
 }
 
-/// Applies the duplicate policy and the record limit to each scanned record, then emits it as an
-/// index record.
-fn IndexEmitter(comptime Ctx: type, comptime emitRecord: fn (Ctx, FastaRecordEmit) anyerror!void, comptime Seen: type) type {
+/// Applies the record limit to each scanned record, then emits it as an index record.
+fn IndexEmitter(comptime Ctx: type, comptime emitRecord: fn (Ctx, FastaRecordEmit) anyerror!void) type {
     return struct {
         ctx: Ctx,
-        seen_names: Seen,
         record_count: *u32,
         diag: Diagnostics,
 
         fn emit(self: *@This(), info: fasta.ScannedRecord) anyerror!void {
-            var name_embedded = false;
-            var name_offset: u64 = info.header_offset + 1;
-            var out_name_len: u16 = @intCast(info.name.len);
-            var name_pad: [6]u8 = .{0} ** 6;
-            if (self.seen_names) |seen| {
-                if (try seen.observeAt(info.name, info.header_offset + 1)) return;
-                if (comptime @hasField(@TypeOf(seen.*), "last_offset")) {
-                    if (seen.bindsToBlob()) {
-                        name_offset = seen.last_offset;
-                        out_name_len = seen.last_len;
-                        name_pad[0] = index_format.NAME_IN_ZFI_FLAG;
-                        name_embedded = true;
-                    }
-                }
-            }
             if (self.record_count.* == std.math.maxInt(u32)) {
                 @branchHint(.cold);
                 var diag = self.diag;
@@ -524,20 +343,18 @@ fn IndexEmitter(comptime Ctx: type, comptime emitRecord: fn (Ctx, FastaRecordEmi
             }
             try emitRecord(self.ctx, .{
                 .record = .{
-                    .name_offset = name_offset,
-                    .name_len = out_name_len,
+                    .name_offset = info.header_offset + 1,
+                    .name_len = @intCast(info.name.len),
                     .seq_offset = info.seq_offset,
                     .seq_len = info.seq_len,
                     .line_bases = info.line_bases,
                     .line_bytes = info.line_bytes,
-                    .flags_and_offset = name_pad,
                 },
                 .name = info.name,
                 .source_reference = info.reference,
                 .nonuniform_reason = info.nonuniform_reason,
                 .uses_uniform_formula = info.uses_uniform_formula,
                 .side_table = info.side_table,
-                .name_embedded = name_embedded,
             });
             self.record_count.* += 1;
         }
@@ -545,7 +362,7 @@ fn IndexEmitter(comptime Ctx: type, comptime emitRecord: fn (Ctx, FastaRecordEmi
 }
 
 fn finalizeSideTableOffsets(index: *ZfiIndex, diag: Diagnostics) !void {
-    const side_table_base = @sizeOf(index_format.ZfiHeader) + index.records.items.len * @sizeOf(IndexRecord);
+    const side_table_base = @sizeOf(index_format.ZfiHeader) + index.records.items.len * index_format.ZFI_INDEX_RECORD_BYTES;
     for (index.records.items) |*rec| {
         if (!rec.isUniformWidth()) {
             const local_offset = rec.sideTableOffset();
@@ -561,10 +378,14 @@ fn embedZfiName(
     name_blob: *std.ArrayList(u8),
     diag: Diagnostics,
 ) !void {
+    try checkNameOffset(name_blob.items.len, diag);
     rec.name_offset = name_blob.items.len;
     rec.name_len = @intCast(name.len);
     name_blob.appendSlice(allocator, name) catch return diag.oom(.names, name.len);
-    rec.flags_and_offset[0] |= index_format.NAME_IN_ZFI_FLAG;
+}
+
+fn checkNameOffset(offset: u64, diag: Diagnostics) !void {
+    if (offset > index_format.MAX_ZFI_NAME_OFFSET) return diag.capacity(.name_offset, index_format.MAX_ZFI_NAME_OFFSET, offset, error.OutOfMemory);
 }
 
 fn writeZfiIndex(
@@ -579,9 +400,10 @@ fn writeZfiIndex(
         .source_size = source_size,
     };
     try writer.writeAll(std.mem.asBytes(&header));
-    try writer.writeAll(std.mem.sliceAsBytes(index.records.items));
+    for (index.records.items) |rec| try writer.writeAll(std.mem.asBytes(&index_format.ZfiRecord.encode(rec)));
     try writer.writeAll(index.side_tables.items);
     try writer.writeAll(index.name_blob.items);
+    try writer.writeAll(std.mem.sliceAsBytes(index.name_table));
     try writer.writeAll(&index_format.encodeZfiSourceId(source_mtime_ns));
     try writer.writeAll(&index_format.encodeZfiNameFooter(index.name_blob.items.len));
 }
@@ -832,7 +654,6 @@ fn scanFaiReader(
     read_buf: []u8,
     writer: anytype,
     options: ScanOptions,
-    dedup: anytype,
 ) !u32 {
     try checkReadBufferSize(read_buf.len, options.failure);
     var fai_buf = FaiEmitBuffer{ .writer = writer, .diag = .{ .failure = options.failure, .format = .fai } };
@@ -844,17 +665,8 @@ fn scanFaiReader(
         }
     };
 
-    var replay = FaiNameReplay{ .buffer = &fai_buf, .file = undefined, .io = undefined };
-    if (comptime @TypeOf(dedup) == ?*SourceAdapter) {
-        if (dedup) |seen| {
-            replay.file = seen.source_names.replay_file.?;
-            replay.io = seen.source_names.io;
-            seen.source_names.replay_context = &replay;
-            seen.source_names.replay_fn = FaiNameReplay.replay;
-        }
-    }
     var ctx = Ctx{ .buffer = &fai_buf };
-    const count = try scanFastaReader(allocator, reader, read_buf, options, dedup, &ctx, Ctx.emit);
+    const count = try scanFastaReader(allocator, reader, read_buf, options, &ctx, Ctx.emit);
     try fai_buf.flush();
     return count;
 }
@@ -863,8 +675,8 @@ fn sourceTimestamp(stat: std.Io.File.Stat, diag: Diagnostics) !u64 {
     return index_format.timestampToNs(stat.mtime) catch return diag.fail(.{ .@"index.source_timestamp_out_of_range" = .{ .timestamp_ns = stat.mtime.nanoseconds, .min_ns = 0, .max_ns = std.math.maxInt(u64) } }, .stat, .fasta, null, error.UnsupportedTimestamp);
 }
 
-fn noIndexableRecords(options: Options, diag: Diagnostics) anyerror {
-    return diag.fail(.{ .@"index.no_indexable_records" = .{ .naming_policy = if (options.enable_dedup) .first_nonempty else .all_nonempty } }, .scan, .fasta, null, error.NoValidSequences);
+fn noIndexableRecords(diag: Diagnostics) anyerror {
+    return diag.fail(.{ .@"index.no_indexable_records" = .{} }, .scan, .fasta, null, error.NoValidSequences);
 }
 
 fn zfiOutputPath(buffer: []u8, path: []const u8, diag: Diagnostics) ![]const u8 {
@@ -888,26 +700,21 @@ fn indexFai(
     io: std.Io,
     environ: std.process.Environ,
     path: []const u8,
-    options: Options,
     stat: std.Io.File.Stat,
     reader: *std.Io.File.Reader,
     read_buf: []u8,
-    dedup: anytype,
     diag: Diagnostics,
 ) !u32 {
     var spool = try openFaiSpool(allocator, io, environ, diag, .fai_spool);
     defer spool.deinit(io);
-    if (comptime @TypeOf(dedup) == ?*SourceAdapter) {
-        if (dedup) |seen| seen.source_names.replay_file = spool.file;
-    }
     var tmp_io_buf: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
     var tmp_fw = spool.file.writer(io, &tmp_io_buf);
-    const count = scanFaiReader(allocator, &reader.interface, read_buf, &tmp_fw.interface, .{ .enable_dedup = options.enable_dedup, .require_initial_header = true, .failure = diag.failure }, dedup) catch |err| {
+    const count = scanFaiReader(allocator, &reader.interface, read_buf, &tmp_fw.interface, .{ .require_initial_header = true, .failure = diag.failure }) catch |err| {
         retainScanCause(diag.failure, reader, &tmp_fw);
         return err;
     };
     if (diagnostics.flushOutput(&tmp_fw, null)) |cause| return diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .fai_spool, cause, error.FaiSpoolWriteFailed);
-    if (count == 0) return noIndexableRecords(options, diag);
+    if (count == 0) return noIndexableRecords(diag);
     try checkSourceUnchanged(io, .cwd(), path, stat, diag);
     const tmp_size = (spool.file.stat(io) catch |err| return diag.fail(.{ .@"io.stat_failed" = {} }, .stat, .fai_spool, err, error.FaiSpoolReadFailed)).size;
     var out_buf: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
@@ -939,23 +746,16 @@ fn runIndexSmall(allocator: std.mem.Allocator, io: std.Io, environ: std.process.
     var io_buf: [FILE_IO_BUF_SIZE]u8 = undefined;
     var read_buf: [INDEX_READ_BUFFER_SIZE]u8 = undefined;
     var file_reader = file.reader(io, &io_buf);
-    if (options.emit_fai) {
-        var seen = PackedNames.init(allocator);
-        seen.diag = diag;
-        defer seen.deinit();
-        if (options.enable_dedup) try seen.ensureCapacity(DEDUP_INITIAL_CAPACITY);
-        const dedup: ?*PackedNames = if (options.enable_dedup) &seen else null;
-        return indexFai(allocator, io, environ, path, options, stat, &file_reader, &read_buf, dedup, diag);
-    }
+    if (options.emit_fai) return indexFai(allocator, io, environ, path, stat, &file_reader, &read_buf, diag);
     var path_buf: [INDEX_PATH_BUFFER_SIZE]u8 = undefined;
     const zfi_path = try zfiOutputPath(&path_buf, path, diag);
-    var index = scanZfiReader(allocator, &file_reader.interface, &read_buf, .{ .enable_dedup = options.enable_dedup, .require_initial_header = true, .failure = diag.failure }) catch |err| {
+    var index = scanZfiReader(allocator, &file_reader.interface, &read_buf, .{ .require_initial_header = true, .failure = diag.failure }) catch |err| {
         retainScanCause(diag.failure, &file_reader, null);
         return err;
     };
     defer index.deinit(allocator);
     const count: u32 = @intCast(index.records.items.len);
-    if (count == 0) return noIndexableRecords(options, diag);
+    if (count == 0) return noIndexableRecords(diag);
     const mtime = try sourceTimestamp(stat, diag);
     var atomic = std.Io.Dir.cwd().createFileAtomic(io, zfi_path, .{ .replace = true }) catch |err| return diag.fail(.{ .@"io.create_failed" = {} }, .create, .zfi, err, error.ZfiWriteFailed);
     defer cleanupAtomic(&atomic, io, diag.failure);
@@ -978,35 +778,29 @@ fn runIndexSmall(allocator: std.mem.Allocator, io: std.Io, environ: std.process.
 }
 
 fn runIndexLarge(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, path: []const u8, options: Options, file: std.Io.File, stat: std.Io.File.Stat, diag: Diagnostics) !u32 {
-    var names = SourceDedup.init(allocator, io, file, stat.size);
-    names.diag = diag;
-    defer names.deinit();
-    var adapter = SourceAdapter{ .source_names = &names };
-    const dedup: ?*SourceAdapter = if (options.enable_dedup) &adapter else null;
     var io_buf: [FILE_IO_BUF_SIZE]u8 = undefined;
     var read_buf: [INDEX_READ_BUFFER_SIZE]u8 = undefined;
     var reader = file.reader(io, &io_buf);
-    if (options.emit_fai) return indexFai(allocator, io, environ, path, options, stat, &reader, &read_buf, dedup, diag);
+    if (options.emit_fai) return indexFai(allocator, io, environ, path, stat, &reader, &read_buf, diag);
     var path_buf: [INDEX_PATH_BUFFER_SIZE]u8 = undefined;
     const zfi_path = try zfiOutputPath(&path_buf, path, diag);
     var deferred = diag;
     deferred.deferred = true;
     deferred.at = .{ .source = .fasta };
     const storage = CatalogBytes{ .allocator = allocator, .io = io, .environ = environ, .diag = deferred, .role = .name_spool };
-    var catalog = StreamedCatalog{ .io = io, .path = zfi_path, .diag = deferred, .names = .{ .raw = storage, .compressed = .{ .encoded = storage } }, .sides = storage };
+    var catalog = StreamedCatalog{ .io = io, .path = zfi_path, .diag = deferred, .names = .{ .raw = storage, .lengths = storage, .compressed = .{ .encoded = storage } }, .sides = storage };
     catalog.sides.role = .side_spool;
     defer catalog.deinit();
-    names.replay_context = &catalog;
-    names.replay_fn = StreamedCatalog.replayNames;
-    const count = scanFastaReader(allocator, &reader.interface, &read_buf, .{ .enable_dedup = options.enable_dedup, .require_initial_header = true, .collect_side_tables = true, .failure = diag.failure }, dedup, &catalog, StreamedCatalog.emit) catch |err| {
+    const count = scanFastaReader(allocator, &reader.interface, &read_buf, .{ .require_initial_header = true, .collect_side_tables = true, .failure = diag.failure }, &catalog, StreamedCatalog.emit) catch |err| {
         retainScanCause(diag.failure, &reader, null);
         return err;
     };
-    if (count == 0) return noIndexableRecords(options, diag);
+    if (count == 0) return noIndexableRecords(diag);
     const mtime = try sourceTimestamp(stat, diag);
     if (diag.failure) |failure| try failure.finishDeferred();
     catalog.diag.deferred = false;
     catalog.names.raw.diag.deferred = false;
+    catalog.names.lengths.diag.deferred = false;
     catalog.names.compressed.encoded.diag.deferred = false;
     catalog.sides.diag.deferred = false;
     try catalog.finish(count, stat.size, mtime);
@@ -1021,13 +815,6 @@ fn runIndexLarge(allocator: std.mem.Allocator, io: std.Io, environ: std.process.
         failure.work_complete = true;
     }
     return count;
-}
-
-const PackedNames = fasta.PackedNamesWith(Diagnostics);
-const SourceDedup = fasta.SourceDedupWith(Diagnostics);
-
-fn Tables(comptime Offset: type) type {
-    return SourceDedup.Tables(Offset);
 }
 
 const CatalogBytes = struct {
@@ -1078,7 +865,13 @@ const CatalogBytes = struct {
     }
 
     fn take(self: *@This(), reader: *std.Io.Reader, file_reader: ?*std.Io.File.Reader, count: usize) ![]const u8 {
-        return reader.take(count) catch |err| {
+        const bytes = try self.peek(reader, file_reader, count);
+        reader.toss(count);
+        return bytes;
+    }
+
+    fn peek(self: *@This(), reader: *std.Io.Reader, file_reader: ?*std.Io.File.Reader, count: usize) ![]const u8 {
+        return reader.peek(count) catch |err| {
             if (self.spool == null) return self.diag.consistency(.codec_state, err);
             const cause: anyerror = if (file_reader) |input| if (input.err) |failure| failure else err else err;
             if (err == error.EndOfStream) return self.diag.fail(diagnostics.readFailure(count, reader.bufferedLen()), .read, self.role, null, err);
@@ -1141,7 +934,7 @@ const CompressedNames = struct {
         self.count += 1;
     }
 
-    fn retain(self: *@This(), names: *SourceDedup) !void {
+    fn write(self: *@This(), writer: *std.Io.Writer, table: *index_format.NameTable.Builder) !void {
         try self.encoded.flush();
         var read_buffer: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
         var memory_reader = std.Io.Reader.fixed(self.encoded.bytes.items);
@@ -1151,52 +944,25 @@ const CompressedNames = struct {
             break :blk &file_reader.interface;
         } else &memory_reader;
         var anchor_len: usize = 0;
-        for (0..self.count) |ordinal| {
-            const header = (try self.encoded.take(reader, if (self.encoded.spool != null) &file_reader else null, 6))[0..6].*;
-            const prefix = std.mem.readInt(u16, header[0..2], .little);
-            const suffix = std.mem.readInt(u16, header[2..4], .little);
-            const middle_len = std.mem.readInt(u16, header[4..6], .little);
-            const middle = try self.encoded.take(reader, if (self.encoded.spool != null) &file_reader else null, middle_len);
-            if (prefix == MAX_INDEX_NAME_LEN and suffix == MAX_INDEX_NAME_LEN) {
-                @memcpy(self.anchor[0..middle.len], middle);
-                anchor_len = middle.len;
-                try names.retainAt(@intCast(ordinal), middle);
-            } else {
-                const full_len = @as(usize, prefix) + middle_len + suffix;
-                names.scratch.resize(names.allocator, full_len) catch return names.diag.oom(.retained_names, full_len);
-                @memcpy(names.scratch.items[0..prefix], self.anchor[0..prefix]);
-                @memcpy(names.scratch.items[prefix..][0..middle_len], middle);
-                @memcpy(names.scratch.items[@as(usize, prefix) + middle_len ..][0..suffix], self.anchor[anchor_len - suffix .. anchor_len]);
-                try names.retainAt(@intCast(ordinal), names.scratch.items[0..full_len]);
-            }
-        }
-    }
-
-    fn write(self: *@This(), writer: *std.Io.Writer) !void {
-        try self.encoded.flush();
-        var read_buffer: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
-        var memory_reader = std.Io.Reader.fixed(self.encoded.bytes.items);
-        var file_reader: std.Io.File.Reader = undefined;
-        const reader = if (self.encoded.spool) |spool| blk: {
-            file_reader = spool.file.reader(self.encoded.io, &read_buffer);
-            break :blk &file_reader.interface;
-        } else &memory_reader;
-        var anchor_len: usize = 0;
+        var name_buffer: [MAX_INDEX_NAME_LEN]u8 = undefined;
         for (0..self.count) |_| {
             const header = (try self.encoded.take(reader, if (self.encoded.spool != null) &file_reader else null, 6))[0..6].*;
             const prefix = std.mem.readInt(u16, header[0..2], .little);
             const suffix = std.mem.readInt(u16, header[2..4], .little);
             const middle_len = std.mem.readInt(u16, header[4..6], .little);
             const middle = try self.encoded.take(reader, if (self.encoded.spool != null) &file_reader else null, middle_len);
+            var name = middle;
             if (prefix == MAX_INDEX_NAME_LEN and suffix == MAX_INDEX_NAME_LEN) {
                 @memcpy(self.anchor[0..middle.len], middle);
                 anchor_len = middle.len;
-                writer.writeAll(middle) catch |err| return self.encoded.diag.fail(.{ .@"io.write_failed" = {} }, .write, .zfi, err, error.WriteFailed);
             } else {
-                writer.writeAll(self.anchor[0..prefix]) catch |err| return self.encoded.diag.fail(.{ .@"io.write_failed" = {} }, .write, .zfi, err, error.WriteFailed);
-                writer.writeAll(middle) catch |err| return self.encoded.diag.fail(.{ .@"io.write_failed" = {} }, .write, .zfi, err, error.WriteFailed);
-                writer.writeAll(self.anchor[anchor_len - suffix .. anchor_len]) catch |err| return self.encoded.diag.fail(.{ .@"io.write_failed" = {} }, .write, .zfi, err, error.WriteFailed);
+                @memcpy(name_buffer[0..prefix], self.anchor[0..prefix]);
+                @memcpy(name_buffer[prefix..][0..middle.len], middle);
+                @memcpy(name_buffer[prefix + middle.len ..][0..suffix], self.anchor[anchor_len - suffix .. anchor_len]);
+                name = name_buffer[0 .. prefix + middle.len + suffix];
             }
+            table.insert(name);
+            writer.writeAll(name) catch |err| return self.encoded.diag.fail(.{ .@"io.write_failed" = {} }, .write, .zfi, err, error.WriteFailed);
         }
     }
 };
@@ -1237,24 +1003,6 @@ const StreamedCatalog = struct {
         return atomic.dir.openFile(self.io, &basename, .{ .mode = .read_only }) catch |err| return self.diag.fail(.{ .@"io.open_failed" = {} }, .open, .catalog_spool, err, error.ZfiWriteFailed);
     }
 
-    fn replayNames(context: *anyopaque, names: *SourceDedup) !void {
-        const self: *@This() = @ptrCast(@alignCast(context));
-        if (self.write_failed) return;
-        self.flushRecords() catch {
-            self.write_failed = true;
-            return;
-        };
-        const read_file = self.openRecordsReader() catch {
-            self.write_failed = true;
-            return;
-        };
-        defer read_file.close(self.io);
-        self.names.retain(names, read_file) catch |err| {
-            if (err == error.OutOfMemory) return err;
-            self.write_failed = true;
-        };
-    }
-
     fn emit(self: *@This(), info: FastaRecordEmit) !void {
         if (self.write_failed) return;
         self.emitInner(info) catch |err| {
@@ -1265,18 +1013,19 @@ const StreamedCatalog = struct {
 
     fn emitInner(self: *@This(), info: FastaRecordEmit) !void {
         var record = info.record;
+        try checkNameOffset(self.names.raw_len, self.diag);
         record.name_offset = self.names.raw_len;
         record.name_len = @intCast(info.name.len);
-        record.flags_and_offset[0] |= index_format.NAME_IN_ZFI_FLAG;
         try self.names.append(info.name);
         if (!info.uses_uniform_formula) {
             try self.diag.markNonUniform(&record, self.sides.len, .local);
             try self.sides.append(info.side_table);
         }
-        if (self.buffered + @sizeOf(IndexRecord) > self.records.len) try self.flushRecords();
-        @memcpy(self.records[self.buffered..][0..@sizeOf(IndexRecord)], std.mem.asBytes(&record));
-        self.buffered += @sizeOf(IndexRecord);
-        self.record_bytes += @sizeOf(IndexRecord);
+        const wire = index_format.ZfiRecord.encode(record);
+        if (self.buffered + @sizeOf(index_format.ZfiRecord) > self.records.len) try self.flushRecords();
+        @memcpy(self.records[self.buffered..][0..@sizeOf(index_format.ZfiRecord)], std.mem.asBytes(&wire));
+        self.buffered += @sizeOf(index_format.ZfiRecord);
+        self.record_bytes += @sizeOf(index_format.ZfiRecord);
     }
 
     fn finish(self: *@This(), count: u32, size: u64, mtime: u64) !void {
@@ -1288,7 +1037,7 @@ const StreamedCatalog = struct {
         if (self.sides.len != 0) {
             const read_file = try self.openRecordsReader();
             defer read_file.close(self.io);
-            var records: [1024]IndexRecord = undefined;
+            var records: [1024]index_format.ZfiRecord = undefined;
             const bytes = std.mem.sliceAsBytes(&records);
             const base = @sizeOf(ZfiHeader) + self.record_bytes;
             var offset: u64 = 0;
@@ -1296,8 +1045,11 @@ const StreamedCatalog = struct {
                 const wanted: usize = @intCast(@min(bytes.len, self.record_bytes - offset));
                 const actual = read_file.readPositionalAll(self.io, bytes[0..wanted], @sizeOf(ZfiHeader) + offset) catch |err| return self.diag.failReadAt(.catalog_spool, @sizeOf(ZfiHeader) + offset, wanted, null, err, error.ReadFailed);
                 if (actual != wanted) return self.diag.failReadAt(.catalog_spool, @sizeOf(ZfiHeader) + offset, wanted, actual, null, error.ReadFailed);
-                for (records[0 .. wanted / @sizeOf(IndexRecord)]) |*record| {
-                    if (!record.isUniformWidth()) try self.diag.markNonUniform(record, base + record.sideTableOffset(), .wire);
+                for (records[0 .. wanted / @sizeOf(index_format.ZfiRecord)]) |*wire| {
+                    var record = wire.decode();
+                    if (record.isUniformWidth()) continue;
+                    try self.diag.markNonUniform(&record, base + record.sideTableOffset(), .wire);
+                    wire.* = .encode(record);
                 }
                 file.writePositionalAll(self.io, bytes[0..wanted], @sizeOf(ZfiHeader) + offset) catch |err| return self.diag.fail(.{ .@"io.write_failed" = {} }, .write, .zfi, err, error.ZfiWriteFailed);
                 offset += wanted;
@@ -1310,10 +1062,13 @@ const StreamedCatalog = struct {
             self.retainWriteCause(output.err);
             return err;
         };
-        self.names.write(&output.interface) catch |err| {
+        var table = index_format.NameTable.Builder.init(self.sides.allocator, count) catch return self.diag.oom(.name_map, null);
+        defer table.deinit(self.sides.allocator);
+        self.names.write(&output.interface, &table) catch |err| {
             self.retainWriteCause(output.err);
             return err;
         };
+        output.interface.writeAll(table.bytes()) catch |err| return self.diag.fail(.{ .@"io.write_failed" = {} }, .write, .zfi, if (output.err) |cause| cause else err, error.ZfiWriteFailed);
         output.interface.writeAll(&index_format.encodeZfiSourceId(mtime)) catch |err| return self.diag.fail(.{ .@"io.write_failed" = {} }, .write, .zfi, if (output.err) |cause| cause else err, error.ZfiWriteFailed);
         output.interface.writeAll(&index_format.encodeZfiNameFooter(self.names.raw_len)) catch |err| return self.diag.fail(.{ .@"io.write_failed" = {} }, .write, .zfi, if (output.err) |cause| cause else err, error.ZfiWriteFailed);
         if (diagnostics.flushOutput(&output, if (self.diag.failure) |failure| &failure.outputs.file else null)) |cause| return self.diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .zfi, cause, error.ZfiWriteFailed);
@@ -1327,40 +1082,12 @@ const StreamedCatalog = struct {
     }
 };
 
-const SourceAdapter = struct {
-    source_names: *SourceDedup,
-
-    fn observeAt(self: *@This(), name: []const u8, offset: u64) !bool {
-        return self.source_names.observe(name, offset);
-    }
-};
-
-const FaiNameReplay = struct {
-    buffer: *FaiEmitBuffer,
-    file: std.Io.File,
-    io: std.Io,
-
-    fn replay(context: *anyopaque, names: *SourceDedup) !void {
-        const self: *@This() = @ptrCast(@alignCast(context));
-        try self.buffer.flush();
-        self.buffer.writer.flush() catch |err| return self.buffer.diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .fai_spool, err, error.FaiSpoolWriteFailed);
-        var read_buffer: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
-        var input = self.file.reader(self.io, &read_buffer);
-        for (0..names.uniqueCount()) |ordinal| {
-            const name = input.interface.takeDelimiterInclusive('\t') catch |err| return self.readFailure(&input, err, '\t');
-            try names.retainAt(@intCast(ordinal), name[0 .. name.len - 1]);
-            _ = input.interface.takeDelimiterInclusive('\n') catch |err| return self.readFailure(&input, err, '\n');
-        }
-    }
-
-    fn readFailure(self: *@This(), input: *std.Io.File.Reader, err: anyerror, delimiter: u8) anyerror {
-        if (err == error.EndOfStream) return self.buffer.diag.fail(.{ .@"io.unexpected_eof" = .{ .delimiter = .{ .delimiter = delimiter } } }, .read, .fai_spool, null, error.FaiSpoolReadFailed);
-        return self.buffer.diag.fail(.{ .@"io.read_failed" = .{} }, .read, .fai_spool, if (input.err) |cause| cause else err, error.FaiSpoolReadFailed);
-    }
-};
-
 const StagedNames = struct {
     raw: CatalogBytes,
+    /// Each raw name's length, so `write` can find the names in the blob for the table.
+    lengths: CatalogBytes,
+    length_block: [1024]u16 = undefined,
+    length_count: usize = 0,
     compressed: CompressedNames,
     mode: enum { sampling, raw, compressed } = .sampling,
     sample_lengths: [8]u16 = undefined,
@@ -1371,12 +1098,13 @@ const StagedNames = struct {
 
     fn deinit(self: *@This()) void {
         self.raw.deinit();
+        self.lengths.deinit();
         self.compressed.deinit();
     }
 
     fn append(self: *@This(), name: []const u8) !void {
         switch (self.mode) {
-            .raw => try self.raw.append(name),
+            .raw => try self.appendRaw(name),
             .compressed => try self.compressed.append(name),
             .sampling => {
                 if (self.sample_count == 0) {
@@ -1391,7 +1119,7 @@ const StagedNames = struct {
                 }
                 self.sample_lengths[self.sample_count] = @intCast(name.len);
                 self.sample_count += 1;
-                try self.raw.append(name);
+                try self.appendRaw(name);
                 if (self.sample_count == self.sample_lengths.len) {
                     if (self.estimated_bytes * 4 < self.raw.len * 3) {
                         var offset: usize = 0;
@@ -1403,6 +1131,7 @@ const StagedNames = struct {
                         self.raw.bytes = .empty;
                         self.raw.spool = null;
                         self.raw.buffered = 0;
+                        self.length_count = 0;
                         self.mode = .compressed;
                     } else {
                         self.mode = .raw;
@@ -1414,143 +1143,60 @@ const StagedNames = struct {
         self.count += 1;
     }
 
-    fn write(self: *@This(), writer: *std.Io.Writer) !void {
-        if (self.mode == .compressed) try self.compressed.write(writer) else try self.raw.copyTo(writer);
+    fn appendRaw(self: *@This(), name: []const u8) !void {
+        try self.raw.append(name);
+        self.length_block[self.length_count] = @intCast(name.len);
+        self.length_count += 1;
+        if (self.length_count == self.length_block.len) try self.flushLengths();
     }
 
-    fn retain(self: *@This(), names: *SourceDedup, records_file: std.Io.File) !void {
-        if (self.mode == .compressed) return self.compressed.retain(names);
+    fn flushLengths(self: *@This()) !void {
+        try self.lengths.append(std.mem.sliceAsBytes(self.length_block[0..self.length_count]));
+        self.length_count = 0;
+    }
+
+    /// Writes the name blob and inserts each name into `table`, in record order.
+    fn write(self: *@This(), writer: *std.Io.Writer, table: *index_format.NameTable.Builder) !void {
+        if (self.mode == .compressed) return self.compressed.write(writer, table);
+        try self.flushLengths();
+        try self.lengths.flush();
         try self.raw.flush();
-        var name_buffer: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
-        var record_buffer: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
-        var memory_reader = std.Io.Reader.fixed(self.raw.bytes.items);
-        var file_reader: std.Io.File.Reader = undefined;
-        const reader = if (self.raw.spool) |spool| blk: {
-            file_reader = spool.file.reader(self.raw.io, &name_buffer);
-            break :blk &file_reader.interface;
-        } else &memory_reader;
-        var records = records_file.reader(self.raw.io, &record_buffer);
-        records.seekTo(@sizeOf(ZfiHeader)) catch |err| return self.raw.diag.fail(.{ .@"io.seek_failed" = .{ .requested_offset = @sizeOf(ZfiHeader) } }, .seek, .catalog_spool, if (records.seek_err) |cause| cause else err, error.ReadFailed);
-        for (0..self.count) |ordinal| {
-            const record = records.interface.takeArray(@sizeOf(IndexRecord)) catch |err| {
-                if (err == error.EndOfStream) return self.raw.diag.fail(diagnostics.readFailure(@sizeOf(IndexRecord), records.interface.bufferedLen()), .read, .catalog_spool, null, err);
-                return self.raw.diag.fail(diagnostics.readFailure(@sizeOf(IndexRecord), null), .read, .catalog_spool, if (records.err) |cause| cause else err, err);
-            };
-            const start = @offsetOf(IndexRecord, "name_len");
-            const len = std.mem.readInt(u16, record[start..][0..2], .little);
-            try names.retainAt(@intCast(ordinal), try self.raw.take(reader, if (self.raw.spool != null) &file_reader else null, len));
+        var names_buffer: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
+        var names_memory = std.Io.Reader.fixed(self.raw.bytes.items);
+        var names_file: std.Io.File.Reader = undefined;
+        const names = if (self.raw.spool) |spool| blk: {
+            names_file = spool.file.reader(self.raw.io, &names_buffer);
+            break :blk &names_file.interface;
+        } else &names_memory;
+        var lengths_buffer: [8192]u8 = undefined;
+        var lengths_memory = std.Io.Reader.fixed(self.lengths.bytes.items);
+        var lengths_file: std.Io.File.Reader = undefined;
+        const lengths = if (self.lengths.spool) |spool| blk: {
+            lengths_file = spool.file.reader(self.lengths.io, &lengths_buffer);
+            break :blk &lengths_file.interface;
+        } else &lengths_memory;
+        // Names are hashed where they sit in the read buffer; the blob goes out a buffer at a time.
+        var walked: usize = 0;
+        var remaining: usize = self.count;
+        while (remaining != 0) {
+            const n: usize = @min(remaining, lengths_buffer.len / 2);
+            const block = try self.lengths.take(lengths, if (self.lengths.spool != null) &lengths_file else null, n * 2);
+            for (0..n) |i| {
+                const len = std.mem.readInt(u16, block[i * 2 ..][0..2], .native);
+                if (names.bufferedLen() - walked < len) {
+                    writer.writeAll(names.buffered()[0..walked]) catch |err| return self.raw.diag.fail(.{ .@"io.write_failed" = {} }, .write, .zfi, err, error.WriteFailed);
+                    names.toss(walked);
+                    walked = 0;
+                    _ = try self.raw.peek(names, if (self.raw.spool != null) &names_file else null, len);
+                }
+                table.insert(names.buffered()[walked..][0..len]);
+                walked += len;
+            }
+            remaining -= n;
         }
+        writer.writeAll(names.buffered()[0..walked]) catch |err| return self.raw.diag.fail(.{ .@"io.write_failed" = {} }, .write, .zfi, err, error.WriteFailed);
     }
 };
-
-fn checkPackedNameAllocations(allocator: std.mem.Allocator) !void {
-    var failure: diagnostics.Failure = undefined;
-    failure.reset(.index);
-    const diag = Diagnostics{ .failure = &failure };
-    errdefer |err| {
-        if (err == error.OutOfMemory) {
-            std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", failure.primary().?.code()) catch @panic("missing allocation diagnostic");
-            std.testing.expectEqual(diagnostics.Stage.allocate, failure.primary().?.stage) catch @panic("wrong allocation stage");
-        }
-    }
-
-    var names = PackedNames.init(allocator);
-    names.diag = diag;
-    defer names.deinit();
-    try names.ensureCapacity(16);
-    var name = [_]u8{'A'} ** MAX_INDEX_NAME_LEN;
-    for (0..3) |i| {
-        name[0] = @intCast('A' + i);
-        try std.testing.expect(!try names.observeAt(&name, 0));
-    }
-    for (0..300) |i| {
-        var buffer: [32]u8 = undefined;
-        const short = try std.fmt.bufPrint(&buffer, "name-{d}", .{i});
-        try std.testing.expect(!try names.observeAt(short, 0));
-    }
-    for (0..3) |i| {
-        name[0] = @intCast('A' + i);
-        try std.testing.expect(try names.observeAt(&name, 0));
-    }
-}
-
-fn checkSourceNameAllocations(allocator: std.mem.Allocator, data: []const u8) !void {
-    var failure: diagnostics.Failure = undefined;
-    failure.reset(.index);
-    const diag = Diagnostics{ .failure = &failure };
-    errdefer |err| {
-        if (err == error.OutOfMemory) {
-            std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", failure.primary().?.code()) catch @panic("missing allocation diagnostic");
-            std.testing.expectEqual(diagnostics.Stage.allocate, failure.primary().?.stage) catch @panic("wrong allocation stage");
-        }
-    }
-
-    var names = SourceDedup.init(allocator, std.testing.io, undefined, data.len);
-    names.diag = diag;
-    defer names.deinit();
-    names.setChunk(data, 0);
-    for ([_]bool{ false, true }) |duplicate| {
-        var lines = std.mem.tokenizeScalar(u8, data, '\n');
-        while (lines.next()) |name| {
-            const offset = @intFromPtr(name.ptr) - @intFromPtr(data.ptr);
-            try std.testing.expectEqual(duplicate, try names.observe(name, offset));
-        }
-    }
-    try std.testing.expectEqual(@as(u32, 5000), names.uniqueCount());
-}
-
-fn checkStagedNameReplay(allocator: std.mem.Allocator, data: []const u8, compressed: bool) !void {
-    var failure: diagnostics.Failure = undefined;
-    failure.reset(.index);
-    const diag = Diagnostics{ .failure = &failure };
-    errdefer |err| {
-        if (err == error.OutOfMemory) {
-            std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", failure.primary().?.code()) catch @panic("missing allocation diagnostic");
-            std.testing.expectEqual(diagnostics.Stage.allocate, failure.primary().?.stage) catch @panic("wrong allocation stage");
-        }
-    }
-
-    const io = std.testing.io;
-    var temporary = std.testing.tmpDir(.{});
-    defer temporary.cleanup();
-    const file = try temporary.dir.createFile(io, "source.fa", .{ .read = true });
-    defer file.close(io);
-    try file.writePositionalAll(io, data, 0);
-    var names = SourceDedup.init(allocator, io, file, data.len);
-    names.diag = diag;
-    defer names.deinit();
-    names.cache_full = true;
-    var adapter = SourceAdapter{ .source_names = &names };
-    const storage = CatalogBytes{ .allocator = allocator, .io = io, .environ = .empty, .diag = diag, .role = .name_spool };
-    var catalog = StreamedCatalog{ .io = io, .dir = temporary.dir, .path = "out.zfi", .diag = diag, .names = .{ .raw = storage, .compressed = .{ .encoded = storage } }, .sides = storage };
-    catalog.sides.role = .side_spool;
-    defer catalog.deinit();
-    names.replay_context = &catalog;
-    names.replay_fn = StreamedCatalog.replayNames;
-    var reader = std.Io.Reader.fixed(data);
-    var read_buffer: [31]u8 = undefined;
-    const count = try scanFastaReader(
-        allocator,
-        &reader,
-        &read_buffer,
-        .{ .enable_dedup = true, .collect_side_tables = true, .failure = &failure },
-        @as(?*SourceAdapter, &adapter),
-        &catalog,
-        StreamedCatalog.emit,
-    );
-    try std.testing.expectEqual(@as(u32, 128), count);
-    try std.testing.expect(names.hydrated);
-    try std.testing.expectEqual(compressed, catalog.names.mode == .compressed);
-
-    names.setChunk(&.{}, 0);
-    try file.setLength(io, 0);
-    var lines = std.mem.splitScalar(u8, data, '\n');
-    while (lines.next()) |line| {
-        if (line.len != 0 and line[0] == '>') {
-            try std.testing.expect(try names.observe(line[1..], 0));
-        }
-    }
-}
 
 fn checkCollectedIndexAllocations(allocator: std.mem.Allocator) !void {
     var failure: diagnostics.Failure = undefined;
@@ -1564,11 +1210,11 @@ fn checkCollectedIndexAllocations(allocator: std.mem.Allocator) !void {
     const data = ">one\nACGT\nAC\nTTTT\n>two\nA C\n>one\nTT\n";
     var reader = std.Io.Reader.fixed(data);
     var buffer: [7]u8 = undefined;
-    var index = try scanZfiReader(allocator, &reader, &buffer, .{ .enable_dedup = true, .failure = &failure });
+    var index = try scanZfiReader(allocator, &reader, &buffer, .{ .failure = &failure });
     defer index.deinit(allocator);
     const bytes = try zfiIndexToBytes(allocator, &index, data.len, 0, &failure);
     defer allocator.free(bytes);
-    try std.testing.expectEqual(@as(usize, 2), index.records.items.len);
+    try std.testing.expectEqual(@as(usize, 3), index.records.items.len);
     try std.testing.expect(failure.primary() == null);
 }
 
@@ -1636,8 +1282,7 @@ test "[unit] - [fasta scanner]: gates initial-header validation by option" {
             &unchecked_reader,
             &read_buf,
             &output.writer,
-            .{ .enable_dedup = true },
-            null,
+            .{},
         ),
     );
 
@@ -1649,8 +1294,7 @@ test "[unit] - [fasta scanner]: gates initial-header validation by option" {
             &checked_reader,
             &read_buf,
             &output.writer,
-            .{ .enable_dedup = true, .require_initial_header = true },
-            null,
+            .{ .require_initial_header = true },
         ),
     );
 }
@@ -1699,62 +1343,12 @@ test "[edge] - [fasta scanner]: rejects excess records before emitting" {
     };
     var ctx = Ctx{};
     var count: u32 = std.math.maxInt(u32) - 1;
-    var plain = IndexEmitter(*Ctx, Ctx.emit, ?*NameDedup){ .ctx = &ctx, .seen_names = null, .record_count = &count, .diag = .{} };
+    var plain = IndexEmitter(*Ctx, Ctx.emit){ .ctx = &ctx, .record_count = &count, .diag = .{} };
     try plain.emit(record);
     try std.testing.expectEqual(std.math.maxInt(u32), count);
     try std.testing.expectError(error.TooManySequences, plain.emit(record));
     try std.testing.expectEqual(@as(usize, 1), ctx.count);
     try std.testing.expectEqual(std.math.maxInt(u32), count);
-
-    var seen = NameDedup.init(std.testing.allocator);
-    defer seen.deinit();
-    try std.testing.expect(!try seen.observe("limit"));
-    var deduped = IndexEmitter(*Ctx, Ctx.emit, ?*NameDedup){ .ctx = &ctx, .seen_names = &seen, .record_count = &count, .diag = .{} };
-    try deduped.emit(record);
-    try std.testing.expectEqual(@as(usize, 1), ctx.count);
-    try std.testing.expectEqual(std.math.maxInt(u32), count);
-}
-
-test "[edge] - [name catalog]: full source tables retain duplicate lookups" {
-    inline for (.{ u32, u64 }) |Offset| {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        var source = SourceDedup.init(failing.allocator(), std.testing.io, undefined, if (Offset == u32) 0 else std.math.maxInt(u32));
-        defer source.deinit();
-        source.cache_full = true;
-        source.setChunk("alpha\nbeta\n", 0);
-        const set = if (Offset == u32) &source.tables.narrow else &source.tables.wide;
-        try std.testing.expect(!try set.observeWithFingerprint(&source, "alpha", 0, 0));
-        set.len = std.math.maxInt(u32);
-        failing.fail_index = failing.alloc_index;
-        try std.testing.expect(try set.observeWithFingerprint(&source, "alpha", 0, 0));
-        try std.testing.expectError(error.TooManySequences, set.observeWithFingerprint(&source, "beta", 6, 0));
-        try std.testing.expect(!failing.has_induced_failure);
-        try std.testing.expectEqual(std.math.maxInt(u32), set.len);
-    }
-}
-
-test "[property] - [name catalog]: remains exact under hash collisions" {
-    const CollisionContext = struct {
-        pub fn hash(_: @This(), _: []const u8) u64 {
-            return 0;
-        }
-
-        pub fn eql(_: @This(), a: []const u8, b: []const u8) bool {
-            return std.mem.eql(u8, a, b);
-        }
-    };
-    const CollidingDedup = NameDedupWith(CollisionContext);
-    const names = [_][]const u8{ "alpha", "beta", "alpha", "gamma", "beta" };
-    var seen = CollidingDedup.init(std.testing.allocator);
-    defer seen.deinit();
-
-    var kept: usize = 0;
-    for (names) |name| {
-        if (!(try seen.observe(name))) kept += 1;
-    }
-
-    try std.testing.expectEqual(@as(usize, 3), kept);
-    try std.testing.expectEqual(@as(usize, 3), seen.map.count());
 }
 
 test "[failure] - [fasta scanner]: maps reader failures to SourceReadFailed" {
@@ -1770,8 +1364,7 @@ test "[failure] - [fasta scanner]: maps reader failures to SourceReadFailed" {
             &reader,
             &read_buf,
             &output.writer,
-            .{ .enable_dedup = true },
-            null,
+            .{},
         ),
     );
 }
@@ -1788,8 +1381,7 @@ test "[failure] - [fai scanner]: maps writer failures to FaiSpoolWriteFailed" {
             &reader,
             &read_buf,
             &writer,
-            .{ .enable_dedup = true },
-            null,
+            .{},
         ),
     );
 }
@@ -1842,155 +1434,6 @@ test "[integration] - [index]: detects path replacement" {
     try std.testing.expect(!details.disappeared);
 }
 
-test "[property] - [name catalog]: complete names resolve fingerprint collisions" {
-    var temporary = std.testing.tmpDir(.{});
-    defer temporary.cleanup();
-    const io = std.testing.io;
-    const file = try temporary.dir.createFile(io, "names.fa", .{ .read = true });
-    defer file.close(io);
-    const long = "a-much-longer-different-name";
-    const data = long ++ "\nalpha\nalphabet\nbeta\nalpha\n";
-    try file.writePositionalAll(io, data, 0);
-    var source = SourceDedup.init(std.testing.allocator, io, file, data.len);
-    defer source.deinit();
-    source.cache_full = true;
-    const set = &source.tables.narrow;
-    const start = long.len + 1;
-    try std.testing.expect(!try set.observeWithFingerprint(&source, "alpha", start, 0));
-    try std.testing.expect(!try set.observeWithFingerprint(&source, "alphabet", start + 6, 0));
-    try std.testing.expect(!try set.observeWithFingerprint(&source, "beta", start + 15, 0));
-    try std.testing.expect(try set.observeWithFingerprint(&source, "alpha", start + 20, 0));
-    try std.testing.expect(!try set.observeWithFingerprint(&source, long, 0, 0));
-}
-
-test "[unit] - [name catalog]: exact comparisons use the current input chunk" {
-    var temporary = std.testing.tmpDir(.{});
-    defer temporary.cleanup();
-    const io = std.testing.io;
-    const file = try temporary.dir.createFile(io, "names.fa", .{ .read = true });
-    defer file.close(io);
-    const data = "alpha\nalphabet\nbeta\nalpha\n";
-    var source = SourceDedup.init(std.testing.allocator, io, file, data.len);
-    defer source.deinit();
-    source.cache_full = true;
-    source.setChunk(data, 0);
-    const set = &source.tables.narrow;
-    try std.testing.expect(!try set.observeWithFingerprint(&source, "alpha", 0, 0));
-    try std.testing.expect(!try set.observeWithFingerprint(&source, "alphabet", 6, 0));
-    try std.testing.expect(try set.observeWithFingerprint(&source, "alpha", 20, 0));
-}
-
-test "[edge] - [name catalog]: retain offsets above four GiB" {
-    var temporary = std.testing.tmpDir(.{});
-    defer temporary.cleanup();
-    const io = std.testing.io;
-    const file = try temporary.dir.createFile(io, "names.fa", .{ .read = true });
-    defer file.close(io);
-    const offset: u64 = @as(u64, std.math.maxInt(u32)) + 64;
-    const data = "alpha\nalphabet\nbeta\nalpha\n";
-    var source = SourceDedup.init(std.testing.allocator, io, file, offset + data.len);
-    defer source.deinit();
-    source.cache_full = true;
-    source.setChunk(data, offset);
-    const set = &source.tables.wide;
-    try std.testing.expect(!try set.observeWithFingerprint(&source, "alpha", offset, 0));
-    try std.testing.expect(!try set.observeWithFingerprint(&source, "alphabet", offset + 6, 0));
-    try std.testing.expect(try set.observeWithFingerprint(&source, "alpha", offset + 20, 0));
-    try std.testing.expectEqual(offset, set.keyAt(0).offset);
-    try std.testing.expectEqual(@as(u64, 0), (try file.stat(io)).size);
-}
-
-test "[property] - [name catalog]: cached names resolve fingerprint collisions" {
-    var temporary = std.testing.tmpDir(.{});
-    defer temporary.cleanup();
-    const io = std.testing.io;
-    const file = try temporary.dir.createFile(io, "names.fa", .{ .read = true });
-    defer file.close(io);
-    const data = "alpha\nalphabet\nbeta\nalpha\n";
-    try file.writePositionalAll(io, data, 0);
-    var source = SourceDedup.init(std.testing.allocator, io, file, data.len);
-    defer source.deinit();
-    const set = &source.tables.narrow;
-    try std.testing.expect(!try set.observeWithFingerprint(&source, "alpha", 0, 0));
-    try std.testing.expect(!try set.observeWithFingerprint(&source, "alphabet", 6, 0));
-    try std.testing.expect(!try set.observeWithFingerprint(&source, "beta", 15, 0));
-    try std.testing.expect(try set.observeWithFingerprint(&source, "alpha", 20, 0));
-}
-
-test "[failure] - [name catalog]: read errors leave the insertion unfinished" {
-    var temporary = std.testing.tmpDir(.{});
-    defer temporary.cleanup();
-    const io = std.testing.io;
-    const file = try temporary.dir.createFile(io, "names.fa", .{});
-    defer file.close(io);
-    const data = "alpha\nbeta\n";
-    try file.writePositionalAll(io, data, 0);
-    var source = SourceDedup.init(std.testing.allocator, io, file, data.len);
-    defer source.deinit();
-    source.cache_full = true;
-    const set = &source.tables.narrow;
-    try std.testing.expect(!try set.observeWithFingerprint(&source, "alpha", 0, 0));
-    try std.testing.expectError(error.SourceReadFailed, set.observeWithFingerprint(&source, "beta", 6, 0));
-    try std.testing.expectEqual(@as(u32, 1), set.count());
-}
-
-test "[failure] - [name catalog]: block growth cleans every allocation failure" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkPackedNameAllocations, .{});
-}
-
-test "[failure] - [name catalog]: table and entry growth clean every allocation failure" {
-    var data: std.ArrayList(u8) = .empty;
-    defer data.deinit(std.testing.allocator);
-    for (0..5000) |i| {
-        var buffer: [32]u8 = undefined;
-        try data.appendSlice(std.testing.allocator, try std.fmt.bufPrint(&buffer, "lookup-{d:0>8}\n", .{i}));
-    }
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkSourceNameAllocations, .{data.items});
-}
-
-test "[edge] - [name catalog]: maximum names cross copied and retained cache blocks" {
-    var temporary = std.testing.tmpDir(.{});
-    defer temporary.cleanup();
-    const io = std.testing.io;
-    const file = try temporary.dir.createFile(io, "names.fa", .{ .read = true });
-    defer file.close(io);
-    var name: [MAX_INDEX_NAME_LEN]u8 = undefined;
-    const stride = MAX_INDEX_NAME_LEN + 1;
-    for (0..6) |i| {
-        @memset(&name, @intCast('A' + i));
-        try file.writePositionalAll(io, &name, i * stride);
-        try file.writePositionalAll(io, "\n", i * stride + name.len);
-    }
-    var names = SourceDedup.init(std.testing.allocator, io, file, 6 * stride);
-    defer names.deinit();
-    for ([_]bool{ false, true, true }) |duplicate| {
-        for (0..6) |i| {
-            @memset(&name, @intCast('A' + i));
-            try std.testing.expectEqual(duplicate, try names.observe(&name, i * stride));
-        }
-    }
-    try std.testing.expect(names.cache_full);
-    try std.testing.expect(names.hot_blocks.items.len >= 2);
-}
-
-test "[failure] - [name catalog]: short reads distinguish collisions from truncation" {
-    var temporary = std.testing.tmpDir(.{});
-    defer temporary.cleanup();
-    const io = std.testing.io;
-    const file = try temporary.dir.createFile(io, "names.fa", .{ .read = true });
-    defer file.close(io);
-    try file.writePositionalAll(io, "alpha\n", 0);
-    var names = SourceDedup.init(std.testing.allocator, io, file, 6);
-    defer names.deinit();
-    names.cache_full = true;
-    const flag = Tables(u32).CACHE_FLAG;
-    try std.testing.expect(!names.sameName("alphabet", 0, flag));
-    try std.testing.expect(!names.read_failed);
-    try file.setLength(io, 3);
-    try std.testing.expect(!names.sameName("alpha", 0, flag));
-    try std.testing.expect(names.read_failed);
-}
-
 test "[integration] - [name catalog]: spill replay preserves bytes and removes its file" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -2019,24 +1462,33 @@ test "[integration] - [name catalog]: spill replay preserves bytes and removes i
     try std.testing.expectError(error.FileNotFound, spool_dir.?.statFile(io, spool_name[0..spool_name_len], .{}));
 }
 
-test "[property] - [name catalog]: raw and compressed replay retain exact names" {
+test "[integration] - [name catalog]: spilled raw names replay into the blob and the name table" {
     const allocator = std.testing.allocator;
-    for ([_]bool{ false, true }) |compressed| {
-        var data: std.ArrayList(u8) = .empty;
-        defer data.deinit(allocator);
-        for (0..2) |_| {
-            for (0..128) |i| {
-                var header: [64]u8 = undefined;
-                const name = if (compressed)
-                    try std.fmt.bufPrint(&header, ">ENST000000{d:0>6}.1\n", .{i})
-                else
-                    try std.fmt.bufPrint(&header, ">name-{d}\n", .{i});
-                try data.appendSlice(allocator, name);
-                try data.appendSlice(allocator, if (i % 2 == 0) "ACGT\nAC\n" else "ACGT\nAC\nTTTT\n");
-            }
-        }
-        try std.testing.checkAllAllocationFailures(allocator, checkStagedNameReplay, .{ data.items, compressed });
+    const io = std.testing.io;
+    const storage = CatalogBytes{ .allocator = allocator, .io = io, .environ = .empty };
+    var names = StagedNames{ .raw = storage, .lengths = storage, .compressed = .{ .encoded = storage } };
+    defer names.deinit();
+    const count = CatalogBytes.MEMORY_BYTES / 2 + 4096;
+    var expected_blob = std.Io.Writer.Allocating.init(allocator);
+    defer expected_blob.deinit();
+    var expected = try index_format.NameTable.Builder.init(allocator, count);
+    defer expected.deinit(allocator);
+    const long = [_]u8{'L'} ** 40_000;
+    for (0..count) |i| {
+        var buffer: [16]u8 = undefined;
+        const name = if (i % 100_000 == 7) long[0 .. 30_000 + i / 100_000] else try std.fmt.bufPrint(&buffer, "n{d}", .{i});
+        try names.append(name);
+        try expected_blob.writer.writeAll(name);
+        expected.insert(name);
     }
+    try std.testing.expect(names.mode == .raw and names.raw.spool != null and names.lengths.spool != null);
+    var actual = try index_format.NameTable.Builder.init(allocator, count);
+    defer actual.deinit(allocator);
+    var blob = std.Io.Writer.Allocating.init(allocator);
+    defer blob.deinit();
+    try names.write(&blob.writer, &actual);
+    try std.testing.expectEqualSlices(u8, expected_blob.written(), blob.written());
+    try std.testing.expectEqualSlices(u8, expected.bytes(), actual.bytes());
 }
 
 test "[failure] - [zfi writer]: parse errors precede record write failures" {
@@ -2044,7 +1496,7 @@ test "[failure] - [zfi writer]: parse errors precede record write failures" {
     const io = std.testing.io;
     var data: std.ArrayList(u8) = .empty;
     defer data.deinit(allocator);
-    for (0..2000) |_| try data.appendSlice(allocator, ">name\nACGT\n");
+    for (0..3000) |_| try data.appendSlice(allocator, ">name\nACGT\n");
     try data.append(allocator, '>');
     try data.appendNTimes(allocator, 'A', MAX_INDEX_NAME_LEN + 1);
     try data.appendSlice(allocator, "\nACGT\n");
@@ -2055,7 +1507,7 @@ test "[failure] - [zfi writer]: parse errors precede record write failures" {
         .io = io,
         .dir = temporary.dir,
         .path = "missing/out.zfi",
-        .names = .{ .raw = storage, .compressed = .{ .encoded = storage } },
+        .names = .{ .raw = storage, .lengths = storage, .compressed = .{ .encoded = storage } },
         .sides = storage,
     };
     defer catalog.deinit();
@@ -2065,33 +1517,12 @@ test "[failure] - [zfi writer]: parse errors precede record write failures" {
         allocator,
         &reader,
         &buffer,
-        .{ .enable_dedup = false },
-        null,
+        .{},
         &catalog,
         StreamedCatalog.emit,
     ));
     try std.testing.expect(catalog.write_failed);
-    try std.testing.expectError(error.ZfiWriteFailed, catalog.finish(2000, data.items.len, 0));
-}
-
-test "[failure] - [name catalog]: source offsets cannot overlap cache flags" {
-    var narrow = SourceDedup.init(std.testing.allocator, std.testing.io, undefined, 0);
-    defer narrow.deinit();
-    try std.testing.expectError(error.SourceChanged, narrow.observe("name", Tables(u32).CACHE_FLAG));
-    try std.testing.expectEqual(@as(u32, 0), narrow.uniqueCount());
-    var wide = SourceDedup.init(std.testing.allocator, std.testing.io, undefined, std.math.maxInt(u32));
-    defer wide.deinit();
-    try std.testing.expectError(error.SourceChanged, wide.observe("name", Tables(u64).CACHE_FLAG));
-    try std.testing.expectEqual(@as(u32, 0), wide.uniqueCount());
-}
-
-test "[failure] - [name catalog]: oversized offsets roll back the insertion" {
-    if (comptime @bitSizeOf(usize) <= 32) return error.SkipZigTest;
-    var names = PackedNames.init(std.testing.allocator);
-    defer names.deinit();
-    names.position = @as(usize, std.math.maxInt(u32)) + 1;
-    try std.testing.expectError(error.OutOfMemory, names.observeAt("name", 0));
-    try std.testing.expectEqual(@as(u32, 0), names.map.count());
+    try std.testing.expectError(error.ZfiWriteFailed, catalog.finish(3000, data.items.len, 0));
 }
 
 test "[failure] - [index diagnostics]: retains scanner limit operands and source positions" {
@@ -2107,7 +1538,7 @@ test "[failure] - [index diagnostics]: retains scanner limit operands and source
     };
     var ctx = Ctx{};
     var count: u32 = max;
-    var emitter = IndexEmitter(*Ctx, Ctx.emit, ?*NameDedup){ .ctx = &ctx, .seen_names = null, .record_count = &count, .diag = state.diag };
+    var emitter = IndexEmitter(*Ctx, Ctx.emit){ .ctx = &ctx, .record_count = &count, .diag = state.diag };
     const Emitter = @TypeOf(emitter);
     for (0..3) |i| {
         failure.reset(.index);
@@ -2139,38 +1570,12 @@ test "[failure] - [index diagnostics]: retains scanner limit operands and source
     try std.testing.expectEqual(@as(?u64, 1), primary.at.record);
 }
 
-test "[failure] - [index diagnostics]: cache representation limits are capacity failures" {
-    var failure: diagnostics.Failure = undefined;
-    inline for (.{ u32, u64 }) |Offset| {
-        failure.reset(.index);
-        var names = SourceDedup.init(std.testing.allocator, std.testing.io, undefined, if (Offset == u32) 0 else std.math.maxInt(u32));
-        names.diag = .{ .failure = &failure };
-        defer names.deinit();
-        const limit = Tables(Offset).CACHE_FLAG;
-        try std.testing.expectError(error.CapacityExceeded, names.observe("name", limit));
-        const details = failure.primary().?.details.@"resource.capacity_limit_exceeded";
-        try std.testing.expectEqual(diagnostics.CapacityRole.name_cache_offset, details.capacity_role);
-        try std.testing.expectEqual(@as(u128, limit - 1), details.limit);
-        try std.testing.expectEqual(@as(u128, limit), details.required.exact);
-    }
-    if (comptime @bitSizeOf(usize) > 32) {
-        failure.reset(.index);
-        var names = PackedNames.init(std.testing.allocator);
-        names.diag = .{ .failure = &failure };
-        defer names.deinit();
-        names.position = @as(usize, std.math.maxInt(u32)) + 1;
-        try std.testing.expectError(error.CapacityExceeded, names.observeAt("name", 0));
-        try std.testing.expectEqual(diagnostics.CapacityRole.name_offset, failure.primary().?.details.@"resource.capacity_limit_exceeded".capacity_role);
-        try std.testing.expectEqual(@as(u32, 0), names.map.count());
-    }
-}
-
 test "[failure] - [index diagnostics]: parser failure promotes over deferred catalog cause" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var data: std.ArrayList(u8) = .empty;
     defer data.deinit(allocator);
-    for (0..2000) |_| try data.appendSlice(allocator, ">name\nACGT\n");
+    for (0..3000) |_| try data.appendSlice(allocator, ">name\nACGT\n");
     try data.append(allocator, '>');
     try data.appendNTimes(allocator, 'A', MAX_INDEX_NAME_LEN + 1);
     var temporary = std.testing.tmpDir(.{});
@@ -2179,14 +1584,14 @@ test "[failure] - [index diagnostics]: parser failure promotes over deferred cat
     failure.reset(.index);
     const diag = Diagnostics{ .failure = &failure, .deferred = true, .at = .{} };
     const storage = CatalogBytes{ .allocator = allocator, .io = io, .environ = .empty, .diag = diag };
-    var catalog = StreamedCatalog{ .io = io, .dir = temporary.dir, .path = "missing/out.zfi", .diag = diag, .names = .{ .raw = storage, .compressed = .{ .encoded = storage } }, .sides = storage };
+    var catalog = StreamedCatalog{ .io = io, .dir = temporary.dir, .path = "missing/out.zfi", .diag = diag, .names = .{ .raw = storage, .lengths = storage, .compressed = .{ .encoded = storage } }, .sides = storage };
     defer catalog.deinit();
     var reader = std.Io.Reader.fixed(data.items);
     var buffer: [8192]u8 = undefined;
-    try std.testing.expectError(error.InvalidIndex, scanFastaReader(allocator, &reader, &buffer, .{ .enable_dedup = false, .failure = &failure }, null, &catalog, StreamedCatalog.emit));
+    try std.testing.expectError(error.InvalidIndex, scanFastaReader(allocator, &reader, &buffer, .{ .failure = &failure }, &catalog, StreamedCatalog.emit));
     try std.testing.expectEqual(diagnostics.Code.@"index.identifier_too_long", failure.primary().?.code());
-    try std.testing.expectEqual(@as(?u64, 2001), failure.primary().?.at.record);
-    try std.testing.expectEqual(@as(?u64, 22000), failure.primary().?.at.location.offset);
+    try std.testing.expectEqual(@as(?u64, 3001), failure.primary().?.at.record);
+    try std.testing.expectEqual(@as(?u64, 33000), failure.primary().?.at.location.offset);
     try std.testing.expectEqual(@as(usize, 1), failure.secondaryItems().len);
     try std.testing.expectEqual(diagnostics.Code.@"io.create_failed", failure.secondaryItems()[0].code());
     try std.testing.expectEqual(error.FileNotFound, failure.secondaryItems()[0].cause.?.zig);
@@ -2251,31 +1656,6 @@ test "[failure] - [index diagnostics]: spill IO retains causes and exact short r
             try std.testing.expectEqual(@as(?u64, expected_offset), failure.primary().?.at.location.offset);
         }
         try std.testing.expectEqual(diagnostics.SourceId.name_spool, failure.primary().?.at.source.?);
-    }
-}
-
-test "[regression] - [index diagnostics]: missing delimiters retain EOF without a field length" {
-    const io = std.testing.io;
-    var temporary = std.testing.tmpDir(.{});
-    defer temporary.cleanup();
-    const file = try temporary.dir.createFile(io, "replay.fai", .{ .read = true });
-    defer file.close(io);
-    var names = SourceDedup.init(std.testing.allocator, io, undefined, 10);
-    defer names.deinit();
-    try std.testing.expect(!try names.observe("name", 0));
-    for ([_][]const u8{ "name", "name\t4\t5\t4\t5" }, [_]u8{ '\t', '\n' }) |bytes, delimiter| {
-        try file.setLength(io, 0);
-        try file.writePositionalAll(io, bytes, 0);
-        var failure: diagnostics.Failure = undefined;
-        failure.reset(.index);
-        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
-        defer output.deinit();
-        var buffer = FaiEmitBuffer{ .writer = &output.writer, .diag = .{ .failure = &failure } };
-        var replay = FaiNameReplay{ .buffer = &buffer, .file = file, .io = io };
-        try std.testing.expectError(error.Io, FaiNameReplay.replay(&replay, &names));
-        const details = failure.primary().?.details.@"io.unexpected_eof".delimiter;
-        try std.testing.expectEqual(delimiter, details.delimiter);
-        try std.testing.expectEqual(@as(?diagnostics.Measurement, null), details.observed_bytes);
     }
 }
 
@@ -2347,7 +1727,7 @@ test "[edge] - [index diagnostics]: buffer width and ZFI count reject before nar
     var output_bytes: [16]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_bytes);
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    try std.testing.expectError(error.InvalidArgument, scanFaiReader(failing.allocator(), &reader, &empty_buffer, &output, .{ .enable_dedup = true, .failure = &failure }, null));
+    try std.testing.expectError(error.InvalidArgument, scanFaiReader(failing.allocator(), &reader, &empty_buffer, &output, .{ .failure = &failure }));
     try std.testing.expectEqual(@as(usize, 0), output.buffered().len);
     try std.testing.expectEqual(@as(usize, 0), reader.seek);
     try std.testing.expectEqual(@as(usize, 0), failing.allocations);

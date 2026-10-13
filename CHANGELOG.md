@@ -16,6 +16,9 @@ All notable changes to z-fasta will be documented in this file.
 - JSON identifiers are reversible: valid UTF-8 as text, other bytes as base64, with truncation and original length.
 - `--fix` writes the repaired copy in the same pass, wrapping symbols at `--width N` (default 60) instead of each record's most common width. It refuses only what the copy cannot keep: no records, content before the first header, and control bytes. Duplicate identifiers and symbols outside the alphabet no longer block repair; the copy keeps them.
 - `--schema` checks the identifier instead of the whole header line.
+- `.zfi` version 2 stores each record in 24 bytes instead of 40 and each side-table line in 24 bytes instead of 32, so indexes are 10% smaller on the human transcriptome and a third smaller on a million short records, with the same direct access by position and name. **Re-index:** a `.zfi` from an earlier version fails with `index.unsupported_version`.
+- `.zfi` adds a name table (5 bytes per record) that finds an identifier's first record directly. `get` on a `.zfi` looks names up there and checks the index's frame plus only the records and side tables its requests use, so it no longer reads the whole index: a single region from the human transcriptome index takes under 1 ms and about 1 MiB, and seekable BED and names files no longer need a first pass over the index. `stats`, `IndexedReader.open`, and `validate --index` still check every record, and the last two the name table (`index.name_table_invalid`). `IndexedReader.open` no longer builds a name map for a `.zfi`.
+- `index` keeps every record that has symbols, duplicate identifiers included, so `stats` counts them all. `get` and the package still resolve a name to its first record, and `validate` still reports duplicates. Indexing a million short records is about a quarter faster and needs a tenth of the memory.
 
 ### Removed
 
@@ -23,6 +26,9 @@ All notable changes to z-fasta will be documented in this file.
 - `--summary`: `--json` always prints one object.
 - `--fix-format-only`: symbols outside the alphabet no longer block repair.
 - The 10,000-event list and its exit status.
+- `index --dedup` and `--no-dedup`.
+- The fields of `index.no_indexable_records`, which now means that every record is empty.
+- `index.name_not_embedded` and the fields of `index.name_footer_missing`: every version 2 `.zfi` embeds its names and ends with its source identity.
 
 ### Added
 

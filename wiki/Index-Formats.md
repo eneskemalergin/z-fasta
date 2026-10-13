@@ -13,12 +13,13 @@ z-fasta index genome.fa
 `.zfi` stores:
 
 - source FASTA size;
-- source FASTA mtime in current production indexes;
+- source FASTA mtime;
 - indexed record geometry;
 - embedded identifiers;
+- a name table that finds an identifier's first record directly;
 - optional side tables for non-uniform records.
 
-Uniform records use direct byte-offset arithmetic. Non-uniform records use a binary-searchable per-line table.
+Uniform records use direct byte-offset arithmetic. Non-uniform records use a binary-searchable per-line table. Each record takes 24 bytes plus its identifier and 5 bytes of name table, and a non-uniform record adds 24 bytes per sequence line. Everything is read in place: GET looks a name up and checks only the records it uses, so opening even a large index costs about as much as opening a small one. `stats`, the Zig package's `IndexedReader.open`, and `validate --index` check every record.
 
 ## Compatibility `.fai`
 
@@ -52,7 +53,7 @@ Current `.zfi` loading checks:
 - embedded source size equals FASTA size;
 - embedded source mtime equals FASTA mtime.
 
-Legacy embedded-name `.zfi` files without the source-identity trailer use the weaker sidecar-age and source-size checks.
+A `.zfi` written by an earlier z-fasta version fails with `index.unsupported_version`; rebuild it with `z-fasta index`.
 
 `.fai` has no embedded source identity. z-fasta can only check that the sidecar is not older than the FASTA.
 

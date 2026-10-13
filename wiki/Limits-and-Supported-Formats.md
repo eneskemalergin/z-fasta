@@ -32,7 +32,7 @@ FASTQ is coming as a separate project, z-fastq, built around the same priorities
 ## Input limits
 
 - Indexed identifier: 65535 bytes.
-- Retained index records: 4294967295 per file, after skipping empty records and applying the selected duplicate policy.
+- Retained index records: 4294967295 per file, after skipping empty records.
 - Positional GET regions: 1024 per invocation.
 - Names file identifier: 65535 bytes.
 - BED chromosome or identifier: 65535 bytes.
@@ -52,7 +52,7 @@ FASTQ is coming as a separate project, z-fastq, built around the same priorities
 
 These are memory bounds, not whole-input row caps. Names and BED continue with a fresh reusable batch.
 
-Seekable BED and names files also retain one lookup entry per unique requested identifier. Matched non-uniform `.zfi` records retain their required side tables. This lookup storage is separate from the active output batch; stdin and named FIFOs retain the complete index lookup.
+A `.zfi` needs no lookup storage: identifiers resolve through its name table. With a `.fai`, seekable BED and names files retain one lookup entry per unique requested identifier, separate from the active output batch, and stdin and named FIFOs retain the complete `.fai` lookup.
 
 ## Symbol treatment
 

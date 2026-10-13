@@ -1687,8 +1687,8 @@ section5() {
 
     local dup="$TMPDIR/dup_edge.fasta"
     printf '>dupname\nAAAA\n>other\nGG\n>dupname\nCCCCCC\n' > "$dup"
-    "$ZFASTA" index --no-dedup "$dup" >/dev/null 2>&1 || fail "[extended:dedup] index"
-    "$ZFASTA" index --emit-fai --no-dedup "$dup" > "${dup}.fai" 2>/dev/null || fail "[extended:dedup] fai index"
+    "$ZFASTA" index "$dup" >/dev/null 2>&1 || fail "[extended:duplicates] index"
+    "$ZFASTA" index --emit-fai "$dup" > "${dup}.fai" 2>/dev/null || fail "[extended:duplicates] fai index"
     printf '>dupname\nAAAA\n' > "$TMPDIR/dup_expected.fa"
     printf '>dupname:1-4\nAAAA\n' > "$TMPDIR/dup_bed_expected.fa"
     printf 'dupname\n' > "$TMPDIR/dup_names.txt"
@@ -1698,14 +1698,14 @@ section5() {
             mv "${dup}.zfi" "$TMPDIR/dup.zfi"
         fi
         "$ZFASTA" get "$dup" dupname > "$TMPDIR/got.tmp" 2>/dev/null \
-            && diff_oracle "$TMPDIR/dup_expected.fa" "$TMPDIR/got.tmp" "[extended:dedup] $sidecar positional first record" \
-            || fail "[extended:dedup] $sidecar positional first record"
+            && diff_oracle "$TMPDIR/dup_expected.fa" "$TMPDIR/got.tmp" "[extended:duplicates] $sidecar positional first record" \
+            || fail "[extended:duplicates] $sidecar positional first record"
         "$ZFASTA" get "$dup" --names "$TMPDIR/dup_names.txt" > "$TMPDIR/got.tmp" 2>/dev/null \
-            && diff_oracle "$TMPDIR/dup_expected.fa" "$TMPDIR/got.tmp" "[extended:dedup] $sidecar names first record" \
-            || fail "[extended:dedup] $sidecar names first record"
+            && diff_oracle "$TMPDIR/dup_expected.fa" "$TMPDIR/got.tmp" "[extended:duplicates] $sidecar names first record" \
+            || fail "[extended:duplicates] $sidecar names first record"
         "$ZFASTA" get "$dup" --bed "$TMPDIR/dup.bed" > "$TMPDIR/got.tmp" 2>/dev/null \
-            && diff_oracle "$TMPDIR/dup_bed_expected.fa" "$TMPDIR/got.tmp" "[extended:dedup] $sidecar BED first record" \
-            || fail "[extended:dedup] $sidecar BED first record"
+            && diff_oracle "$TMPDIR/dup_bed_expected.fa" "$TMPDIR/got.tmp" "[extended:duplicates] $sidecar BED first record" \
+            || fail "[extended:duplicates] $sidecar BED first record"
         if [[ "$sidecar" == fai ]]; then
             mv "$TMPDIR/dup.zfi" "${dup}.zfi"
         fi
@@ -1713,8 +1713,8 @@ section5() {
 
     local empty_name="$TMPDIR/empty_name.fasta"
     printf '>\nAAAA\n>\nCCCCCC\n' > "$empty_name"
-    "$ZFASTA" index --no-dedup "$empty_name" >/dev/null 2>&1 || fail "[extended:empty-name] zfi index"
-    "$ZFASTA" index --emit-fai --no-dedup "$empty_name" > "${empty_name}.fai" 2>/dev/null || fail "[extended:empty-name] fai index"
+    "$ZFASTA" index "$empty_name" >/dev/null 2>&1 || fail "[extended:empty-name] zfi index"
+    "$ZFASTA" index --emit-fai "$empty_name" > "${empty_name}.fai" 2>/dev/null || fail "[extended:empty-name] fai index"
     printf '>\nAAAA\n' > "$TMPDIR/empty_name_expected.fa"
     "$ZFASTA" get "$empty_name" "" > "$TMPDIR/got.tmp" 2>/dev/null \
         && diff_oracle "$TMPDIR/empty_name_expected.fa" "$TMPDIR/got.tmp" "[extended:empty-name] zfi positional first record" \
