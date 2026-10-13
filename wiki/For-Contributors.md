@@ -35,13 +35,13 @@ The filter applies to Zig tests. Separate native callers still run when selected
 - `src/main.zig`: CLI parsing, help, dispatch, diagnostics and checked final status.
 - `src/diagnostics.zig`: native codes, observed facts and caller-owned failure storage.
 - `src/reporting.zig`: text and JSON encoding without allocation or flushing.
-- `src/indexer.zig`: bounded FASTA scanner and index output.
+- `src/indexer.zig`: duplicate policy and index output.
 - `src/index_format.zig`: `.zfi` or `.fai` loading, validation, lookup, and ownership.
 - `src/getter.zig`: requests, coordinates, transforms, and bounded output.
 - `src/stats.zig`: length and composition reports.
 - `src/validator.zig`: events, JSON, fix policy, and normalized rewrite.
 - `src/bed_parser.zig`: BED row conversion and strand parsing.
-- `src/fasta.zig`: bases, identifier ends, alphabet detection, the IUPAC complement, and the record reader.
+- `src/fasta.zig`: bases, identifier ends, alphabet detection, the IUPAC complement, the record scanner, and the record reader.
 - `src/platform.zig`: portable read-only mapping and advice.
 
 The Wiki owns public behavior and workflow documentation. Source files and their tests own implementation details that are not part of the public contract.

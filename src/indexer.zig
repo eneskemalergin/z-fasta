@@ -180,7 +180,7 @@ pub fn scanFastaReader(
         break :blk null;
     };
 
-    var state = ChunkParseState{
+    var state = RecordScanner{
         .allocator = allocator,
         .collect_side_tables = options.collect_side_tables,
         .diag = .{ .failure = options.failure, .format = if (options.collect_side_tables) .zfi else .fai },
@@ -188,6 +188,8 @@ pub fn scanFastaReader(
     defer state.name.deinit(allocator);
     defer if (options.collect_side_tables) state.side_table.deinit(allocator);
     var record_count: u32 = 0;
+    var emitter = IndexEmitter(@TypeOf(ctx), emitRecord, ?*Dedup){ .ctx = ctx, .seen_names = dedup_ptr, .record_count = &record_count, .diag = state.diag };
+    const max_name_len = @min(options.max_name_len orelse MAX_INDEX_NAME_LEN, MAX_INDEX_NAME_LEN);
     var file_offset: u64 = 0;
 
     while (true) {
@@ -202,21 +204,12 @@ pub fn scanFastaReader(
         if (comptime Dedup == SourceAdapter) {
             if (dedup_ptr) |seen| seen.source_names.setChunk(read_buf[0..n], file_offset);
         }
-        try processChunkBytes(
-            &state,
-            read_buf[0..n],
-            file_offset,
-            options.max_name_len,
-            dedup_ptr,
-            ctx,
-            emitRecord,
-            &record_count,
-        );
+        try state.processChunk(read_buf[0..n], file_offset, max_name_len, &emitter, @TypeOf(emitter).emit);
         file_offset = next_offset;
     }
 
     if (state.active) {
-        try state.emitRecordIfReady(ctx, dedup_ptr, emitRecord, &record_count);
+        try state.emitRecord(&emitter, @TypeOf(emitter).emit);
     }
 
     return record_count;
@@ -272,9 +265,6 @@ const IndexRecord = index_format.IndexRecord;
 const ZfiHeader = index_format.ZfiHeader;
 const ZFI_MAGIC = index_format.ZFI_MAGIC;
 
-const STRIDE_VECTOR_LEN = std.simd.suggestVectorLength(u8) orelse 1;
-const STRIDE_VALIDATION_BLOCK_LINES = 256;
-
 const FILE_IO_BUF_SIZE = 8 * 1024;
 const INDEX_OUTPUT_BUFFER_SIZE = 64 * 1024;
 const INDEX_PATH_BUFFER_SIZE = std.Io.Dir.max_path_bytes;
@@ -315,7 +305,7 @@ const Diagnostics = struct {
         return diag.fail(diagnostics.readFailure(requested, received), .read, source, cause, legacy);
     }
 
-    fn fail(self: @This(), details: diagnostics.Details, stage: diagnostics.Stage, source: diagnostics.SourceId, cause: ?anyerror, legacy: anyerror) anyerror {
+    pub fn fail(self: @This(), details: diagnostics.Details, stage: diagnostics.Stage, source: diagnostics.SourceId, cause: ?anyerror, legacy: anyerror) anyerror {
         @branchHint(.cold);
         const failure = self.failure orelse return legacy;
         var at = self.at;
@@ -329,7 +319,7 @@ const Diagnostics = struct {
         return failure.fail(diagnostic);
     }
 
-    fn oom(self: @This(), role: diagnostics.AllocationRole, bytes: ?u64) error{OutOfMemory} {
+    pub fn oom(self: @This(), role: diagnostics.AllocationRole, bytes: ?u64) error{OutOfMemory} {
         @branchHint(.cold);
         if (self.failure) |failure| {
             switch (failure.fail(.{ .details = .{ .@"resource.out_of_memory" = .{ .allocation_role = role, .requested_bytes = bytes } }, .stage = .allocate, .at = self.at.reference(), .cause = .{ .zig = error.OutOfMemory } })) {
@@ -339,19 +329,23 @@ const Diagnostics = struct {
         return error.OutOfMemory;
     }
 
-    fn capacity(self: @This(), role: diagnostics.CapacityRole, limit: u128, required: u128, legacy: anyerror) anyerror {
+    pub fn capacity(self: @This(), role: diagnostics.CapacityRole, limit: u128, required: u128, legacy: anyerror) anyerror {
         return self.fail(.{ .@"resource.capacity_limit_exceeded" = .{ .capacity_role = role, .limit = limit, .required = .{ .exact = required } } }, .allocate, self.at.source orelse .fasta, null, legacy);
     }
 
-    fn consistency(self: @This(), check: diagnostics.Check, legacy: anyerror) anyerror {
+    pub fn consistency(self: @This(), check: diagnostics.Check, legacy: anyerror) anyerror {
         return self.fail(.{ .@"internal.consistency_failed" = .{ .component = .indexer, .check = check } }, .scan, self.at.source orelse .fasta, null, legacy);
     }
 
-    fn lineLimit(self: @This(), field: diagnostics.IndexField, observed: u64, width_role: diagnostics.LineWidthRole) anyerror {
+    pub fn identifierTooLong(self: @This(), observed: u128, limit: usize) anyerror {
+        return self.fail(.{ .@"index.identifier_too_long" = .{ .observed_bytes = .{ .at_least = observed }, .limit_bytes = limit, .format = self.format } }, .scan, .fasta, null, error.HeaderTooLong);
+    }
+
+    pub fn lineLimit(self: @This(), field: diagnostics.IndexField, observed: u64, width_role: diagnostics.LineWidthRole) anyerror {
         return self.fail(.{ .@"index.sequence_line_too_long" = .{ .field = field, .observed = .{ .exact = observed }, .limit = std.math.maxInt(u32), .width_role = width_role, .format = self.format } }, .scan, .fasta, null, error.SequenceLineTooLong);
     }
 
-    fn recordLimit(self: @This(), count: u64) anyerror {
+    pub fn recordLimit(self: @This(), count: u64) anyerror {
         return self.fail(.{ .@"index.record_count_limit_exceeded" = .{ .record_count = .{ .exact = count }, .max_records = std.math.maxInt(u32), .format = self.format, .limit_role = .scanner_count } }, .scan, .fasta, null, error.TooManySequences);
     }
 
@@ -487,180 +481,66 @@ fn NameDedupWith(comptime Context: type) type {
     };
 }
 
-const LineMetrics = struct {
-    seq_len: u64 = 0,
-    line_bases: u32 = 0,
-    line_bytes: u32 = 0,
-    is_uniform_width: bool = true,
-    line_count: u64 = 0,
-    first_content_dense: bool = false,
-};
+const RecordScanner = fasta.RecordScannerWith(Diagnostics);
 
-const SequenceLengthInfo = struct {
-    seq_len: u64,
-    uses_uniform_formula: bool,
-};
-
-fn hasLineSeparatorAt(data: []const u8, pos: usize, sep_len: u32) bool {
-    return switch (sep_len) {
-        1 => pos < data.len and data[pos] == '\n',
-        2 => pos + 1 < data.len and data[pos] == '\r' and data[pos + 1] == '\n',
-        else => false,
-    };
-}
-
-fn firstLineIsDense(line_bases: u32, line_bytes: u32) bool {
-    if (line_bases == 0 or line_bytes <= line_bases) return false;
-    const sep_len = line_bytes - line_bases;
-    return (sep_len == 1 or sep_len == 2) and line_bases + sep_len == line_bytes;
-}
-
-fn validatedStrideBlock(
-    comptime vector_len: usize,
-    data: []const u8,
-    start: usize,
-    line_count: usize,
-    line_bases: usize,
-    line_bytes: usize,
-) usize {
-    const sep_len = line_bytes - line_bases;
-    var line_index: usize = 0;
-    while (line_index < line_count) : (line_index += 1) {
-        const line_start = start + line_index * line_bytes;
-        if (data[line_start] == '>') break;
-        if (!hasLineSeparatorAt(data, line_start + line_bases, @intCast(sep_len))) {
-            break;
-        }
+comptime {
+    if (@sizeOf(fasta.LineEntry) != @sizeOf(index_format.SideTableLine)) @compileError("side-table line layout differs");
+    for (.{ "base_start", "byte_offset", "line_bytes", "line_bases" }) |field| {
+        if (@offsetOf(fasta.LineEntry, field) != @offsetOf(index_format.SideTableLine, field)) @compileError("side-table line layout differs");
     }
-    const candidate_lines = line_index;
-    if (candidate_lines == 0) return 0;
-    const block_end = start + candidate_lines * line_bytes;
-    if (fasta.countWhitespace(vector_len, data[start..block_end]) == candidate_lines * sep_len) {
-        return candidate_lines;
-    }
-
-    line_index = 0;
-    while (line_index < candidate_lines) : (line_index += 1) {
-        const line_start = start + line_index * line_bytes;
-        if (fasta.countWhitespace(vector_len, data[line_start .. line_start + line_bases]) != 0) {
-            return line_index;
-        }
-    }
-    return 0;
 }
 
-fn validatedStrideRun(
-    comptime vector_len: usize,
-    data: []const u8,
-    start: usize,
-    line_bases_u32: u32,
-    line_bytes_u32: u32,
-) usize {
-    const line_bases: usize = line_bases_u32;
-    const line_bytes: usize = line_bytes_u32;
-    if (line_bases == 0 or line_bytes <= line_bases) return 0;
-    const sep_len = line_bytes - line_bases;
-    if (sep_len != 1 and sep_len != 2) return 0;
+/// Applies the duplicate policy and the record limit to each scanned record, then emits it as an
+/// index record.
+fn IndexEmitter(comptime Ctx: type, comptime emitRecord: fn (Ctx, FastaRecordEmit) anyerror!void, comptime Seen: type) type {
+    return struct {
+        ctx: Ctx,
+        seen_names: Seen,
+        record_count: *u32,
+        diag: Diagnostics,
 
-    var cursor = start;
-    var accepted_lines: usize = 0;
-    while (data.len - cursor >= line_bytes) {
-        const available_lines = (data.len - cursor) / line_bytes;
-        const block_lines = @min(available_lines, STRIDE_VALIDATION_BLOCK_LINES);
-        const valid_lines = validatedStrideBlock(
-            vector_len,
-            data,
-            cursor,
-            block_lines,
-            line_bases,
-            line_bytes,
-        );
-        accepted_lines += valid_lines;
-        if (valid_lines != block_lines) return accepted_lines;
-        cursor += block_lines * line_bytes;
-    }
-    return accepted_lines;
-}
-
-fn findNextNewline(data: []const u8, start: usize, end: usize) usize {
-    const relative = std.mem.findScalar(u8, data[start..end], '\n') orelse return end;
-    return start + relative;
-}
-
-const LineMetricsBuilder = struct {
-    metrics: LineMetrics = .{},
-    nonuniform_reason: diagnostics.NonuniformReason = .nonuniform_layout,
-    first_actual_bytes: u32 = 0,
-    first_content_len: u32 = 0,
-    pending_bases: u32 = 0,
-    pending_actual_bytes: u32 = 0,
-    pending_content_len: u32 = 0,
-    have_pending: bool = false,
-    blank_after_bases: bool = false,
-
-    fn ingestLine(self: *LineMetricsBuilder, bases: u32, actual_bytes: u32, has_lf: bool, content_len: u32) void {
-        if (bases == 0) {
-            if (self.metrics.line_count > 0) {
-                self.blank_after_bases = true;
+        fn emit(self: *@This(), info: fasta.ScannedRecord) anyerror!void {
+            var name_embedded = false;
+            var name_offset: u64 = info.header_offset + 1;
+            var out_name_len: u16 = @intCast(info.name.len);
+            var name_pad: [6]u8 = .{0} ** 6;
+            if (self.seen_names) |seen| {
+                if (try seen.observeAt(info.name, info.header_offset + 1)) return;
+                if (comptime @hasField(@TypeOf(seen.*), "last_offset")) {
+                    if (seen.bindsToBlob()) {
+                        name_offset = seen.last_offset;
+                        out_name_len = seen.last_len;
+                        name_pad[0] = index_format.NAME_IN_ZFI_FLAG;
+                        name_embedded = true;
+                    }
+                }
             }
-            return;
-        }
-        if (self.blank_after_bases) {
-            self.metrics.is_uniform_width = false;
-            self.nonuniform_reason = .interior_blank_line;
-            self.blank_after_bases = false;
-        }
-        self.metrics.seq_len += bases;
-        self.metrics.line_count += 1;
-        if (bases != content_len) {
-            if (self.metrics.is_uniform_width) self.nonuniform_reason = .sequence_whitespace;
-            self.metrics.is_uniform_width = false;
-        }
-
-        if (self.metrics.line_count == 1) {
-            self.first_actual_bytes = actual_bytes;
-            self.first_content_len = content_len;
-            self.metrics.line_bases = bases;
-            self.metrics.line_bytes = if (has_lf) actual_bytes else actual_bytes + 1;
-            const sep_len = if (has_lf) actual_bytes -| content_len else @as(u32, 1);
-            self.metrics.first_content_dense = bases == content_len and (sep_len == 1 or sep_len == 2);
-        } else if (self.have_pending) {
-            if (self.pending_bases != self.metrics.line_bases or
-                self.pending_actual_bytes != self.first_actual_bytes)
-            {
-                if (self.metrics.is_uniform_width) self.nonuniform_reason = if (self.pending_bases < self.metrics.line_bases) .interior_short_line else if (self.pending_bases > self.metrics.line_bases) .wider_line else .mixed_line_endings;
-                self.metrics.is_uniform_width = false;
+            if (self.record_count.* == std.math.maxInt(u32)) {
+                @branchHint(.cold);
+                var diag = self.diag;
+                diag.at.location.offset = info.header_offset;
+                diag.at.record = info.reference.record;
+                return diag.recordLimit(@as(u64, self.record_count.*) + 1);
             }
+            try emitRecord(self.ctx, .{
+                .record = .{
+                    .name_offset = name_offset,
+                    .name_len = out_name_len,
+                    .seq_offset = info.seq_offset,
+                    .seq_len = info.seq_len,
+                    .line_bases = info.line_bases,
+                    .line_bytes = info.line_bytes,
+                    .flags_and_offset = name_pad,
+                },
+                .name = info.name,
+                .source_reference = info.reference,
+                .nonuniform_reason = info.nonuniform_reason,
+                .uses_uniform_formula = info.uses_uniform_formula,
+                .side_table = info.side_table,
+                .name_embedded = name_embedded,
+            });
+            self.record_count.* += 1;
         }
-
-        self.pending_bases = bases;
-        self.pending_actual_bytes = actual_bytes;
-        self.pending_content_len = content_len;
-        self.have_pending = true;
-    }
-
-    fn finish(self: *LineMetricsBuilder) LineMetrics {
-        self.blank_after_bases = false;
-        if (self.metrics.line_count > 1 and self.have_pending) {
-            if (self.pending_bases > self.metrics.line_bases or
-                self.pending_content_len > self.first_content_len)
-            {
-                if (self.metrics.is_uniform_width) self.nonuniform_reason = .wider_line;
-                self.metrics.is_uniform_width = false;
-            }
-        }
-        return self.metrics;
-    }
-};
-
-fn sequenceLengthInfoFromMetrics(metrics: LineMetrics) SequenceLengthInfo {
-    if (metrics.seq_len == 0) return .{ .seq_len = 0, .uses_uniform_formula = false };
-    if (!metrics.is_uniform_width or metrics.line_bases == 0 or !metrics.first_content_dense) {
-        return .{ .seq_len = metrics.seq_len, .uses_uniform_formula = false };
-    }
-    return .{
-        .seq_len = metrics.seq_len,
-        .uses_uniform_formula = firstLineIsDense(metrics.line_bases, metrics.line_bytes),
     };
 }
 
@@ -716,513 +596,6 @@ fn serializeZfiIndex(allocator: std.mem.Allocator, index: *const ZfiIndex, sourc
 
 fn checkedZfiRecordCount(count: usize, diag: Diagnostics) !u32 {
     return std.math.cast(u32, count) orelse return diag.fail(.{ .@"index.record_count_limit_exceeded" = .{ .record_count = .{ .exact = count }, .max_records = std.math.maxInt(u32), .format = .zfi, .limit_role = .zfi_header } }, .write, .zfi, null, error.TooManySequences);
-}
-
-const ChunkParseState = struct {
-    diag: Diagnostics = .{},
-    allocator: std.mem.Allocator,
-    collect_side_tables: bool = false,
-    active: bool = false,
-    in_header: bool = false,
-    parsing_name: bool = false,
-    at_line_start: bool = true,
-    header_start_offset: u64 = 0,
-    source_record: u64 = 0,
-    source_reference: diagnostics.Reference = .{ .source = .fasta },
-    name: std.ArrayList(u8) = .empty,
-    seq_offset: u64 = 0,
-    seq_offset_set: bool = false,
-    line_builder: LineMetricsBuilder = .{},
-    in_pending_line: bool = false,
-    pending_line_bases: u32 = 0,
-    pending_line_bytes: u32 = 0,
-    pending_pre_lf_bytes: u32 = 0,
-    pending_pre_lf_ends_with_cr: bool = false,
-    pending_line_file_offset: u64 = 0,
-    side_table: std.ArrayList(u8) = .empty,
-    side_base_start: u64 = 0,
-    side_table_active: bool = false,
-    deferred_side_line: ?struct {
-        bases: u32,
-        actual_bytes: u32,
-        line_file_offset: u64,
-    } = null,
-    deferred_short_tail: ?struct {
-        bases: u32,
-        actual_bytes: u32,
-        line_file_offset: u64,
-    } = null,
-
-    fn recordDiagnostics(self: *const ChunkParseState) Diagnostics {
-        var diag = self.diag;
-        diag.at.location.offset = self.header_start_offset;
-        diag.at.record = if (self.source_record == 0) null else self.source_record;
-        return diag;
-    }
-
-    fn ensureSideTableHeader(self: *ChunkParseState) !void {
-        if (self.side_table.items.len >= @sizeOf(u64)) return;
-        var line_count: u64 = 0;
-        self.side_table.appendSlice(self.allocator, std.mem.asBytes(&line_count)) catch return self.recordDiagnostics().oom(.side_tables, @sizeOf(u64));
-    }
-
-    fn activateSideTable(self: *ChunkParseState, lines_to_materialize: u64) !void {
-        if (self.side_table_active) return;
-        self.side_table_active = true;
-        try self.ensureSideTableHeader();
-        if (lines_to_materialize == 0) {
-            self.deferred_side_line = null;
-            return;
-        }
-        const first = self.deferred_side_line orelse return self.recordDiagnostics().consistency(.missing_side_table, error.MissingSideTable);
-        var i: u64 = 0;
-        while (i < lines_to_materialize) : (i += 1) {
-            const off = first.line_file_offset + i * @as(u64, first.actual_bytes);
-            try self.appendSideTableLine(first.bases, first.actual_bytes, off);
-        }
-        self.deferred_side_line = null;
-    }
-
-    fn startHeader(self: *ChunkParseState, header_start_offset: u64) !void {
-        self.active = true;
-        self.in_header = true;
-        self.parsing_name = true;
-        self.at_line_start = false;
-        self.header_start_offset = header_start_offset;
-        self.source_record += 1;
-        self.source_reference.location.offset = header_start_offset;
-        self.source_reference.record = self.source_record;
-        self.name.clearRetainingCapacity();
-        self.seq_offset = 0;
-        self.seq_offset_set = false;
-        self.line_builder = .{};
-        self.in_pending_line = false;
-        self.pending_line_bases = 0;
-        self.pending_line_bytes = 0;
-        self.pending_pre_lf_bytes = 0;
-        self.pending_pre_lf_ends_with_cr = false;
-        self.pending_line_file_offset = 0;
-        self.side_base_start = 0;
-        self.side_table.clearRetainingCapacity();
-        self.side_table_active = false;
-        self.deferred_side_line = null;
-        self.deferred_short_tail = null;
-    }
-
-    fn appendSideTableLine(
-        self: *ChunkParseState,
-        bases: u32,
-        actual_bytes: u32,
-        line_file_offset: u64,
-    ) !void {
-        const entry = index_format.SideTableLine{
-            .base_start = self.side_base_start,
-            .byte_offset = line_file_offset,
-            .line_bytes = actual_bytes,
-            .line_bases = bases,
-        };
-        self.side_table.appendSlice(self.allocator, std.mem.asBytes(&entry)) catch return self.recordDiagnostics().oom(.side_tables, @sizeOf(index_format.SideTableLine));
-        self.side_base_start += bases;
-    }
-
-    fn flushDeferredShortTailThen(
-        self: *ChunkParseState,
-        metrics_line_count: u64,
-        bases: u32,
-        actual_bytes: u32,
-        line_file_offset: u64,
-    ) !void {
-        const short = self.deferred_short_tail orelse return self.recordDiagnostics().consistency(.missing_side_table, error.MissingSideTable);
-        self.deferred_short_tail = null;
-        if (metrics_line_count < 2) return self.recordDiagnostics().consistency(.missing_side_table, error.MissingSideTable);
-        try self.activateSideTable(metrics_line_count - 2);
-        try self.appendSideTableLine(short.bases, short.actual_bytes, short.line_file_offset);
-        try self.appendSideTableLine(bases, actual_bytes, line_file_offset);
-    }
-
-    fn recordSequenceLine(
-        self: *ChunkParseState,
-        bases: u32,
-        actual_bytes: u32,
-        has_lf: bool,
-        content_len: u32,
-        line_file_offset: u64,
-    ) !void {
-        self.line_builder.ingestLine(bases, actual_bytes, has_lf, content_len);
-
-        if (!self.collect_side_tables) return;
-
-        if (bases == 0) return;
-
-        const metrics = self.line_builder.metrics;
-        const matches_stride = metrics.line_bases > 0 and
-            bases == metrics.line_bases and
-            actual_bytes == self.line_builder.first_actual_bytes;
-        const dense = metrics.first_content_dense and firstLineIsDense(metrics.line_bases, metrics.line_bytes);
-        const can_use_formula = metrics.is_uniform_width and matches_stride and dense;
-
-        if (can_use_formula) {
-            if (metrics.line_count == 1) {
-                self.deferred_side_line = .{
-                    .bases = bases,
-                    .actual_bytes = actual_bytes,
-                    .line_file_offset = line_file_offset,
-                };
-            }
-            return;
-        }
-
-        if (self.deferred_short_tail != null) {
-            try self.flushDeferredShortTailThen(metrics.line_count, bases, actual_bytes, line_file_offset);
-            return;
-        }
-
-        const short_ok_if_final = metrics.is_uniform_width and
-            metrics.line_bases > 0 and
-            dense and
-            bases <= metrics.line_bases and
-            content_len <= self.line_builder.first_content_len and
-            actual_bytes <= self.line_builder.first_actual_bytes + 1;
-        if (short_ok_if_final) {
-            self.deferred_short_tail = .{
-                .bases = bases,
-                .actual_bytes = actual_bytes,
-                .line_file_offset = line_file_offset,
-            };
-            return;
-        }
-
-        try self.activateSideTable(metrics.line_count - 1);
-        try self.appendSideTableLine(bases, actual_bytes, line_file_offset);
-    }
-
-    fn noteSeqOffset(self: *ChunkParseState, line_file_offset: u64) void {
-        if (self.seq_offset_set) return;
-        self.seq_offset = line_file_offset;
-        self.seq_offset_set = true;
-    }
-
-    fn strideEligible(self: *const ChunkParseState) bool {
-        if (!self.active or self.in_header or self.in_pending_line) return false;
-        if (self.side_table_active or self.deferred_short_tail != null) return false;
-        if (self.line_builder.blank_after_bases) return false;
-        const m = self.line_builder.metrics;
-        if (m.line_count == 0 or !m.is_uniform_width) return false;
-        if (!m.first_content_dense or !firstLineIsDense(m.line_bases, m.line_bytes)) return false;
-        if (self.line_builder.first_actual_bytes != m.line_bytes) return false;
-        if (self.line_builder.have_pending and
-            (self.line_builder.pending_bases != m.line_bases or
-                self.line_builder.pending_actual_bytes != self.line_builder.first_actual_bytes))
-        {
-            return false;
-        }
-        return true;
-    }
-
-    fn ingestStrideRun(self: *ChunkParseState, n_lines: u64) void {
-        std.debug.assert(n_lines >= 1);
-        std.debug.assert(self.line_builder.metrics.line_count >= 1);
-        const bases = self.line_builder.metrics.line_bases;
-        const line_bytes = self.line_builder.metrics.line_bytes;
-        self.line_builder.metrics.seq_len += n_lines * @as(u64, bases);
-        self.line_builder.metrics.line_count += n_lines;
-        self.line_builder.pending_bases = bases;
-        self.line_builder.pending_actual_bytes = line_bytes;
-        self.line_builder.pending_content_len = self.line_builder.first_content_len;
-        self.line_builder.have_pending = true;
-        self.at_line_start = true;
-    }
-
-    fn ingestSequenceLine(
-        self: *ChunkParseState,
-        data: []const u8,
-        line_start: usize,
-        line_end: usize,
-        has_lf: bool,
-        line_file_offset: u64,
-    ) !void {
-        var content_end = line_end;
-        if (content_end > line_start and data[content_end - 1] == '\r') {
-            content_end -= 1;
-        }
-
-        const actual_bytes: u32 = @intCast((if (has_lf) line_end + 1 else line_end) - line_start);
-        const content_len: u32 = @intCast(content_end - line_start);
-        const bases = fasta.countBasesInLineSlice(data, line_start, content_end);
-        if (bases > 0) self.noteSeqOffset(line_file_offset);
-
-        try self.recordSequenceLine(bases, actual_bytes, has_lf, content_len, line_file_offset);
-        self.at_line_start = has_lf;
-        self.in_pending_line = false;
-        self.pending_line_bases = 0;
-        self.pending_line_bytes = 0;
-        self.pending_pre_lf_bytes = 0;
-        self.pending_pre_lf_ends_with_cr = false;
-    }
-
-    fn appendPendingFragment(self: *ChunkParseState, fragment: []const u8, fragment_file_offset: u64) !void {
-        if (!self.in_pending_line) {
-            self.in_pending_line = true;
-            self.pending_line_bases = 0;
-            self.pending_line_bytes = 0;
-            self.pending_pre_lf_bytes = 0;
-            self.pending_pre_lf_ends_with_cr = false;
-            self.pending_line_file_offset = fragment_file_offset;
-        }
-        const fragment_bases = fasta.countBasesInLineSlice(fragment, 0, fragment.len);
-        var diag = self.recordDiagnostics();
-        diag.at.location.offset = self.pending_line_file_offset;
-        const next_bases = std.math.add(u32, self.pending_line_bases, fragment_bases) catch
-            return diag.lineLimit(.line_bases, @as(u64, self.pending_line_bases) + fragment_bases, .index_geometry);
-        const next_bytes = std.math.add(u32, self.pending_line_bytes, @intCast(fragment.len)) catch
-            return diag.lineLimit(.line_bytes, @as(u64, self.pending_line_bytes) + fragment.len, .index_geometry);
-        self.pending_line_bases = next_bases;
-        self.pending_line_bytes = next_bytes;
-        self.pending_pre_lf_bytes = next_bytes;
-        if (fragment.len > 0) {
-            self.pending_pre_lf_ends_with_cr = fragment[fragment.len - 1] == '\r';
-        }
-    }
-
-    fn commitPendingLine(self: *ChunkParseState, has_lf: bool) !void {
-        if (!self.in_pending_line and self.pending_line_bytes == 0) return;
-        var diag = self.recordDiagnostics();
-        diag.at.location.offset = self.pending_line_file_offset;
-        if (!has_lf and self.pending_line_bytes == std.math.maxInt(u32)) {
-            return diag.lineLimit(.line_bytes, @as(u64, self.pending_line_bytes) + 1, .synthetic_separator);
-        }
-        if (self.pending_line_bases > 0) self.noteSeqOffset(self.pending_line_file_offset);
-        var content_len = if (has_lf) self.pending_pre_lf_bytes else self.pending_line_bytes;
-        if (content_len > 0 and self.pending_pre_lf_ends_with_cr) {
-            content_len -= 1;
-        }
-        try self.recordSequenceLine(
-            self.pending_line_bases,
-            self.pending_line_bytes,
-            has_lf,
-            content_len,
-            self.pending_line_file_offset,
-        );
-        self.at_line_start = has_lf;
-        self.in_pending_line = false;
-        self.pending_line_bases = 0;
-        self.pending_line_bytes = 0;
-        self.pending_pre_lf_bytes = 0;
-        self.pending_pre_lf_ends_with_cr = false;
-    }
-
-    fn finalizeHeader(self: *ChunkParseState) void {
-        self.in_header = false;
-        self.at_line_start = true;
-    }
-
-    fn emitRecordIfReady(
-        self: *ChunkParseState,
-        ctx: anytype,
-        seen_names: anytype,
-        comptime emitRecord: fn (@TypeOf(ctx), FastaRecordEmit) anyerror!void,
-        record_count: *u32,
-    ) !void {
-        try self.commitPendingLine(false);
-        const metrics = self.line_builder.finish();
-        const seq_info = sequenceLengthInfoFromMetrics(metrics);
-        if (seq_info.seq_len == 0) {
-            self.deferred_short_tail = null;
-            return;
-        }
-
-        var name_embedded = false;
-        var name_offset: u64 = self.header_start_offset + 1;
-        var out_name_len: u16 = @intCast(self.name.items.len);
-        var name_pad: [6]u8 = .{0} ** 6;
-        if (seen_names) |seen| {
-            if (try seen.observeAt(self.name.items, self.header_start_offset + 1)) {
-                self.deferred_short_tail = null;
-                return;
-            }
-            if (comptime @hasField(@TypeOf(seen.*), "last_offset")) {
-                if (seen.bindsToBlob()) {
-                    name_offset = seen.last_offset;
-                    out_name_len = seen.last_len;
-                    name_pad[0] = index_format.NAME_IN_ZFI_FLAG;
-                    name_embedded = true;
-                }
-            }
-        }
-
-        if (record_count.* == std.math.maxInt(u32)) {
-            @branchHint(.cold);
-            return self.recordDiagnostics().recordLimit(@as(u64, record_count.*) + 1);
-        }
-
-        var side_table_slice: []const u8 = &.{};
-        if (seq_info.uses_uniform_formula) {
-            self.deferred_short_tail = null;
-        } else if (self.collect_side_tables) {
-            if (self.deferred_short_tail) |short| {
-                if (!self.side_table_active) {
-                    if (metrics.line_count < 1) return self.recordDiagnostics().consistency(.missing_side_table, error.MissingSideTable);
-                    try self.activateSideTable(metrics.line_count - 1);
-                    try self.appendSideTableLine(short.bases, short.actual_bytes, short.line_file_offset);
-                }
-                self.deferred_short_tail = null;
-            } else if (!self.side_table_active) {
-                try self.activateSideTable(metrics.line_count);
-            }
-            if (!self.side_table_active) {
-                return self.recordDiagnostics().consistency(.missing_side_table, error.MissingSideTable);
-            }
-            @memcpy(self.side_table.items[0..@sizeOf(u64)], std.mem.asBytes(&metrics.line_count));
-            side_table_slice = self.side_table.items;
-        }
-        try emitRecord(ctx, .{
-            .record = .{
-                .name_offset = name_offset,
-                .name_len = out_name_len,
-                .seq_offset = self.seq_offset,
-                .seq_len = seq_info.seq_len,
-                .line_bases = metrics.line_bases,
-                .line_bytes = metrics.line_bytes,
-                .flags_and_offset = name_pad,
-            },
-            .name = self.name.items,
-            .source_reference = &self.source_reference,
-            .nonuniform_reason = if (!metrics.first_content_dense) .sequence_whitespace else self.line_builder.nonuniform_reason,
-            .uses_uniform_formula = seq_info.uses_uniform_formula,
-            .side_table = side_table_slice,
-            .name_embedded = name_embedded,
-        });
-        record_count.* += 1;
-    }
-};
-
-fn processChunkBytes(
-    state: *ChunkParseState,
-    data: []const u8,
-    file_offset: u64,
-    max_name_len: ?usize,
-    seen_names: anytype,
-    ctx: anytype,
-    comptime emitRecord: fn (@TypeOf(ctx), FastaRecordEmit) anyerror!void,
-    record_count: *u32,
-) !void {
-    var i: usize = 0;
-
-    if (state.in_pending_line) {
-        const nl = findNextNewline(data, 0, data.len);
-        if (nl >= data.len) {
-            try state.appendPendingFragment(data, file_offset);
-            return;
-        }
-
-        try state.appendPendingFragment(data[0..nl], file_offset);
-        state.pending_line_bytes = std.math.add(u32, state.pending_line_bytes, 1) catch {
-            var diag = state.diag;
-            diag.at.location.offset = state.pending_line_file_offset;
-            return diag.lineLimit(.line_bytes, @as(u64, state.pending_line_bytes) + 1, .index_geometry);
-        };
-        try state.commitPendingLine(true);
-        i = nl + 1;
-    }
-
-    while (i < data.len) {
-        const byte_offset = file_offset + @as(u64, @intCast(i));
-        const byte = data[i];
-
-        if (state.at_line_start and byte == '>') {
-            if (state.active) {
-                try state.emitRecordIfReady(ctx, seen_names, emitRecord, record_count);
-            }
-            try state.startHeader(byte_offset);
-            i += 1;
-            continue;
-        }
-
-        if (state.in_header) {
-            if (state.parsing_name) {
-                const name_end = fasta.findNameDelimiter(data, i);
-
-                const fragment = data[i..name_end];
-                if (state.name.items.len > MAX_INDEX_NAME_LEN or
-                    fragment.len > MAX_INDEX_NAME_LEN - state.name.items.len)
-                {
-                    return state.recordDiagnostics().fail(.{ .@"index.identifier_too_long" = .{ .observed_bytes = .{ .at_least = state.name.items.len + fragment.len }, .limit_bytes = MAX_INDEX_NAME_LEN, .format = state.diag.format } }, .scan, .fasta, null, error.HeaderTooLong);
-                }
-                if (max_name_len) |limit| {
-                    if (state.name.items.len > limit or fragment.len > limit - state.name.items.len) {
-                        return state.recordDiagnostics().fail(.{ .@"index.identifier_too_long" = .{ .observed_bytes = .{ .at_least = state.name.items.len + fragment.len }, .limit_bytes = limit, .format = state.diag.format } }, .scan, .fasta, null, error.HeaderTooLong);
-                    }
-                }
-                state.name.appendSlice(state.allocator, fragment) catch return state.diag.oom(.names, fragment.len);
-                i = name_end;
-                if (i >= data.len) return;
-                if (data[i] == '\n') {
-                    state.finalizeHeader();
-                    i += 1;
-                    continue;
-                }
-                state.parsing_name = false;
-            }
-
-            const header_end = findNextNewline(data, i, data.len);
-            if (header_end >= data.len) return;
-            state.finalizeHeader();
-            i = header_end + 1;
-            continue;
-        }
-
-        if (!state.active) {
-            state.at_line_start = byte == '\n';
-            i += 1;
-            continue;
-        }
-
-        if (state.at_line_start and state.strideEligible()) {
-            const line_bases = state.line_builder.metrics.line_bases;
-            const line_bytes = state.line_builder.metrics.line_bytes;
-            const run_lines = validatedStrideRun(
-                STRIDE_VECTOR_LEN,
-                data,
-                i,
-                line_bases,
-                line_bytes,
-            );
-            if (run_lines > 0) {
-                state.ingestStrideRun(run_lines);
-                i += run_lines * @as(usize, line_bytes);
-            }
-            if (i >= data.len) return;
-            if (data[i] == '>') continue;
-            if (data.len - i < line_bytes) {
-                if (findNextNewline(data, i, data.len) >= data.len) {
-                    try state.appendPendingFragment(
-                        data[i..],
-                        file_offset + @as(u64, @intCast(i)),
-                    );
-                    return;
-                }
-            }
-        }
-
-        const line_start = i;
-        const nl = findNextNewline(data, i, data.len);
-        if (nl >= data.len) {
-            try state.appendPendingFragment(
-                data[line_start..],
-                file_offset + @as(u64, @intCast(line_start)),
-            );
-            return;
-        }
-
-        try state.ingestSequenceLine(
-            data,
-            line_start,
-            nl,
-            true,
-            file_offset + @as(u64, @intCast(line_start)),
-        );
-        i = nl + 1;
-    }
 }
 
 fn checkReadBufferSize(len: usize, failure: ?*diagnostics.Failure) !void {
@@ -1651,489 +1024,11 @@ fn runIndexLarge(allocator: std.mem.Allocator, io: std.Io, environ: std.process.
     return count;
 }
 
-const PackedNames = struct {
-    diag: Diagnostics = .{},
-    allocator: std.mem.Allocator,
-    blocks: std.ArrayList([]u8) = .empty,
-    position: usize = 0,
-    map: Map,
-    const BLOCK_BYTES = 128 * 1024;
-    const Ref = struct { offset: u32, len: u32 };
-    const Context = struct {
-        owner: *PackedNames,
-        pub fn hash(self: @This(), ref: Ref) u64 {
-            return std.hash_map.hashString(self.owner.bytes(ref));
-        }
-        pub fn eql(self: @This(), a: Ref, b: Ref) bool {
-            return a.len == b.len and std.mem.eql(u8, self.owner.bytes(a), self.owner.bytes(b));
-        }
-    };
-    const Lookup = struct {
-        owner: *PackedNames,
-        pub fn hash(_: @This(), name: []const u8) u64 {
-            return std.hash_map.hashString(name);
-        }
-        pub fn eql(self: @This(), name: []const u8, ref: Ref) bool {
-            return name.len == ref.len and std.mem.eql(u8, name, self.owner.bytes(ref));
-        }
-    };
-    const Map = std.HashMap(Ref, void, Context, std.hash_map.default_max_load_percentage);
-
-    fn init(allocator: std.mem.Allocator) @This() {
-        return .{ .allocator = allocator, .map = Map.initContext(allocator, .{ .owner = undefined }) };
-    }
-
-    fn ensureCapacity(self: *@This(), capacity: u32) !void {
-        self.map.ctx.owner = self;
-        self.map.ensureTotalCapacity(capacity) catch return self.diag.oom(.dedup_table, null);
-    }
-
-    fn deinit(self: *@This()) void {
-        self.map.deinit();
-        for (self.blocks.items) |block| self.allocator.free(block);
-        self.blocks.deinit(self.allocator);
-    }
-
-    fn bytes(self: *@This(), ref: Ref) []const u8 {
-        if (ref.len == 0) return &.{};
-        return self.blocks.items[ref.offset / BLOCK_BYTES][ref.offset % BLOCK_BYTES ..][0..ref.len];
-    }
-
-    fn observeAt(self: *@This(), name: []const u8, source_offset: u64) !bool {
-        _ = source_offset;
-        self.map.ctx.owner = self;
-        const entry = self.map.getOrPutAdapted(name, Lookup{ .owner = self }) catch return self.diag.oom(.dedup_table, null);
-        if (entry.found_existing) return true;
-        errdefer self.map.removeByPtr(entry.key_ptr);
-        const remaining = BLOCK_BYTES - self.position % BLOCK_BYTES;
-        if (name.len > remaining) {
-            self.position = std.math.add(usize, self.position, remaining) catch return self.diag.capacity(.name_offset, std.math.maxInt(usize), @as(u128, self.position) + remaining, error.OutOfMemory);
-        }
-        const offset = std.math.cast(u32, self.position) orelse return self.diag.capacity(.name_offset, std.math.maxInt(u32), self.position, error.OutOfMemory);
-        const next_position = std.math.add(usize, self.position, name.len) catch return self.diag.capacity(.name_offset, std.math.maxInt(usize), @as(u128, self.position) + name.len, error.OutOfMemory);
-        if (name.len != 0 and self.position / BLOCK_BYTES == self.blocks.items.len) {
-            const block = self.allocator.alloc(u8, BLOCK_BYTES) catch return self.diag.oom(.names, BLOCK_BYTES);
-            self.blocks.append(self.allocator, block) catch {
-                self.allocator.free(block);
-                return self.diag.oom(.names, null);
-            };
-        }
-        const reference = Ref{ .offset = offset, .len = @intCast(name.len) };
-        if (name.len != 0) @memcpy(self.blocks.items[self.position / BLOCK_BYTES][self.position % BLOCK_BYTES ..][0..name.len], name);
-        self.position = next_position;
-        entry.key_ptr.* = reference;
-        return false;
-    }
-};
-
-const CACHE_BYTES = 512 * 1024;
-const CACHE_BLOCK_BYTES: usize = 128 * 1024;
-
-const SourceDedup = struct {
-    diag: Diagnostics = .{},
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    file: std.Io.File,
-    tables: union(enum) { narrow: Tables(u32), wide: Tables(u64) },
-    chunk: []const u8 = &.{},
-    chunk_offset: u64 = 0,
-    cache: std.ArrayList(u8) = .empty,
-    scratch: std.ArrayList(u8) = .empty,
-    cache_full: bool = false,
-    allocation_failed: bool = false,
-    source_match: bool = false,
-    source_name_hits: u32 = 0,
-    hydrated: bool = false,
-    hot_blocks: std.ArrayList([]u8) = .empty,
-    hot_len: usize = 0,
-    replay_file: ?std.Io.File = null,
-    replay_context: ?*anyopaque = null,
-    replay_fn: ?*const fn (*anyopaque, *SourceDedup) anyerror!void = null,
-    read_failed: bool = false,
-
-    fn init(allocator: std.mem.Allocator, io: std.Io, file: std.Io.File, size: u64) @This() {
-        return .{
-            .allocator = allocator,
-            .io = io,
-            .file = file,
-            .tables = if (size <= std.math.maxInt(u31) - CACHE_BYTES) .{ .narrow = Tables(u32).init(allocator) } else .{ .wide = Tables(u64).init(allocator) },
-        };
-    }
-
-    fn deinit(self: *@This()) void {
-        switch (self.tables) {
-            .narrow => |*set| set.deinit(),
-            .wide => |*set| set.deinit(),
-        }
-        self.cache.deinit(self.allocator);
-        self.scratch.deinit(self.allocator);
-        for (self.hot_blocks.items) |block| self.allocator.free(block);
-        self.hot_blocks.deinit(self.allocator);
-    }
-
-    fn setChunk(self: *@This(), data: []const u8, offset: u64) void {
-        self.chunk = data;
-        self.chunk_offset = offset;
-    }
-
-    fn observe(self: *@This(), name: []const u8, offset: u64) !bool {
-        return switch (self.tables) {
-            .narrow => |*set| if (offset >= Tables(u32).CACHE_FLAG)
-                self.diag.capacity(.name_cache_offset, Tables(u32).CACHE_FLAG - 1, offset, error.SourceChanged)
-            else
-                set.observe(self, name, @intCast(offset)),
-            .wide => |*set| if (offset >= Tables(u64).CACHE_FLAG)
-                self.diag.capacity(.name_cache_offset, Tables(u64).CACHE_FLAG - 1, offset, error.SourceChanged)
-            else
-                set.observe(self, name, offset),
-        };
-    }
-
-    const CacheEncoding = struct { header: [7]u8, size: usize, middle: []const u8 };
-
-    fn encodeCacheName(name: []const u8, prefix: usize, suffix: usize) CacheEncoding {
-        const middle = name[prefix .. name.len - suffix];
-        const short = prefix <= 255 and suffix <= 255 and middle.len <= 255;
-        const header_size: usize = if (short) 4 else 7;
-        var header: [7]u8 = undefined;
-        if (name.len <= 253 and name.len + 1 <= header_size + middle.len) {
-            header[0] = @intCast(name.len);
-            return .{ .header = header, .size = 1, .middle = name };
-        }
-        if (short) {
-            header[0] = 254;
-            header[1] = @intCast(prefix);
-            header[2] = @intCast(suffix);
-            header[3] = @intCast(middle.len);
-        } else {
-            header[0] = 255;
-            std.mem.writeInt(u16, header[1..3], @intCast(prefix), .little);
-            std.mem.writeInt(u16, header[3..5], @intCast(suffix), .little);
-            std.mem.writeInt(u16, header[5..7], @intCast(middle.len), .little);
-        }
-        return .{ .header = header, .size = header_size, .middle = middle };
-    }
-
-    fn cacheAnchor(self: *@This(), base: usize) []const u8 {
-        return switch (self.cache.items[base]) {
-            0...253 => |len| self.cache.items[base + 1 ..][0..len],
-            254 => self.cache.items[base + 4 ..][0..self.cache.items[base + 3]],
-            255 => self.cache.items[base + 7 ..][0..std.mem.readInt(u16, self.cache.items[base + 5 ..][0..2], .little)],
-        };
-    }
-
-    fn remember(self: *@This(), name: []const u8, offset: u64, flag: u64) !u64 {
-        if (self.cache_full or self.cache.items.len >= CACHE_BYTES) return offset;
-        var prefix: usize = 0;
-        var suffix: usize = 0;
-        if (name.len >= 16 and self.cache.items.len % CACHE_BLOCK_BYTES != 0) {
-            const base = (self.cache.items.len - 1) & ~(CACHE_BLOCK_BYTES - 1);
-            const anchor = self.cacheAnchor(base);
-            prefix = commonPrefix(name, anchor);
-            suffix = commonSuffix(name, anchor, prefix);
-        }
-        var encoded = encodeCacheName(name, prefix, suffix);
-        var start = self.cache.items.len;
-        const remaining = CACHE_BLOCK_BYTES - (start % CACHE_BLOCK_BYTES);
-        if (encoded.size + encoded.middle.len > remaining) {
-            start += remaining;
-            encoded = encodeCacheName(name, 0, 0);
-        }
-        if (start + encoded.size + encoded.middle.len > CACHE_BYTES) {
-            self.cache_full = true;
-            return offset;
-        }
-        if (self.cache.capacity == 0) self.cache.ensureTotalCapacity(self.allocator, CACHE_BYTES) catch return self.diag.oom(.name_cache, CACHE_BYTES);
-        self.cache.items.len = start;
-        self.cache.appendSliceAssumeCapacity(encoded.header[0..encoded.size]);
-        self.cache.appendSliceAssumeCapacity(encoded.middle);
-        return flag | start;
-    }
-
-    fn sameCached(self: *@This(), name: []const u8, start: usize) bool {
-        const tag = self.cache.items[start];
-        if (tag <= 253) {
-            return name.len == tag and std.mem.eql(u8, name, self.cache.items[start + 1 ..][0..tag]);
-        }
-        const prefix: usize = if (tag == 254) self.cache.items[start + 1] else std.mem.readInt(u16, self.cache.items[start + 1 ..][0..2], .little);
-        const suffix: usize = if (tag == 254) self.cache.items[start + 2] else std.mem.readInt(u16, self.cache.items[start + 3 ..][0..2], .little);
-        const middle_len: usize = if (tag == 254) self.cache.items[start + 3] else std.mem.readInt(u16, self.cache.items[start + 5 ..][0..2], .little);
-        const header_len: usize = if (tag == 254) 4 else 7;
-        if (name.len != prefix + suffix + middle_len) return false;
-        const anchor = self.cacheAnchor(start & ~(CACHE_BLOCK_BYTES - 1));
-        return std.mem.eql(u8, name[0..prefix], anchor[0..prefix]) and
-            std.mem.eql(u8, name[prefix..][0..middle_len], self.cache.items[start + header_len ..][0..middle_len]) and
-            std.mem.eql(u8, name[name.len - suffix ..], anchor[anchor.len - suffix ..]);
-    }
-
-    fn retainAt(self: *@This(), ordinal: u32, name: []const u8) !void {
-        switch (self.tables) {
-            .narrow => |*set| try set.retainAt(self, ordinal, name),
-            .wide => |*set| try set.retainAt(self, ordinal, name),
-        }
-    }
-
-    fn uniqueCount(self: *const @This()) u32 {
-        return switch (self.tables) {
-            .narrow => |*set| set.count(),
-            .wide => |*set| set.count(),
-        };
-    }
-
-    fn appendHot(self: *@This(), input: []const u8) !void {
-        var remaining = input;
-        while (remaining.len != 0) {
-            const block_index = self.hot_len / CACHE_BLOCK_BYTES;
-            const within = self.hot_len % CACHE_BLOCK_BYTES;
-            if (block_index == self.hot_blocks.items.len) {
-                const block = self.allocator.alloc(u8, CACHE_BLOCK_BYTES) catch return self.diag.oom(.retained_names, CACHE_BLOCK_BYTES);
-                errdefer self.allocator.free(block);
-                self.hot_blocks.append(self.allocator, block) catch return self.diag.oom(.retained_names, null);
-            }
-            const n = @min(remaining.len, CACHE_BLOCK_BYTES - within);
-            @memcpy(self.hot_blocks.items[block_index][within..][0..n], remaining[0..n]);
-            self.hot_len += n;
-            remaining = remaining[n..];
-        }
-    }
-
-    fn rememberHot(self: *@This(), name: []const u8, flag: u64) !u64 {
-        if (self.hot_len % CACHE_BLOCK_BYTES == CACHE_BLOCK_BYTES - 1) try self.appendHot(&.{0});
-        const start = self.hot_len;
-        if (@as(u128, CACHE_BYTES) + start >= flag) return self.diag.capacity(.name_cache_offset, flag - 1, @as(u128, CACHE_BYTES) + start, error.OutOfMemory);
-        var header: [2]u8 = undefined;
-        std.mem.writeInt(u16, &header, @intCast(name.len), .little);
-        try self.appendHot(&header);
-        try self.appendHot(name);
-        return flag | (CACHE_BYTES + start);
-    }
-
-    fn sameHot(self: *@This(), name: []const u8, start: usize) bool {
-        const header_block = self.hot_blocks.items[start / CACHE_BLOCK_BYTES];
-        const len = std.mem.readInt(u16, header_block[start % CACHE_BLOCK_BYTES ..][0..2], .little);
-        if (len != name.len) return false;
-        if (name.len == 0) return true;
-        const bytes_start = start + 2;
-        const within = bytes_start % CACHE_BLOCK_BYTES;
-        const n = @min(name.len, CACHE_BLOCK_BYTES - within);
-        const block_index = bytes_start / CACHE_BLOCK_BYTES;
-        if (!std.mem.eql(u8, name[0..n], self.hot_blocks.items[block_index][within..][0..n])) return false;
-        return n == name.len or std.mem.eql(u8, name[n..], self.hot_blocks.items[block_index + 1][0 .. name.len - n]);
-    }
-
-    fn sameName(self: *@This(), name: []const u8, offset: u64, flag: u64) bool {
-        if (offset & flag != 0) {
-            const start: usize = @intCast(offset & ~flag);
-            return if (start < CACHE_BYTES) self.sameCached(name, start) else self.sameHot(name, start - CACHE_BYTES);
-        }
-        const needed = name.len + 1;
-        if (offset >= self.chunk_offset and offset - self.chunk_offset <= self.chunk.len) {
-            const start: usize = @intCast(offset - self.chunk_offset);
-            if (needed <= self.chunk.len - start) return sameBytes(name, self.chunk[start..][0..needed]);
-        }
-        self.scratch.resize(self.allocator, needed) catch {
-            switch (self.diag.oom(.retained_names, needed)) {
-                else => {},
-            }
-            self.allocation_failed = true;
-            return false;
-        };
-        const read = self.file.readPositionalAll(self.io, self.scratch.items[0..needed], offset) catch |err| {
-            var diag = self.diag;
-            diag.at.location.offset = offset;
-            switch (diag.fail(diagnostics.readFailure(needed, null), .read, .fasta, err, error.SourceReadFailed)) {
-                else => {},
-            }
-            self.read_failed = true;
-            return false;
-        };
-        if (read != needed) {
-            for (self.scratch.items[0..read]) |byte| {
-                if (fasta.isNameDelimiter(byte)) return false;
-            }
-            var diag = self.diag;
-            diag.at.location.offset = offset;
-            switch (diag.fail(diagnostics.readFailure(needed, read), .read, .fasta, null, error.SourceReadFailed)) {
-                else => {},
-            }
-            self.read_failed = true;
-            return false;
-        }
-        const matches = sameBytes(name, self.scratch.items[0..needed]);
-        if (matches) self.source_match = true;
-        return matches;
-    }
-
-    fn sameBytes(name: []const u8, bytes: []const u8) bool {
-        return fasta.isNameDelimiter(bytes[name.len]) and std.mem.eql(u8, name, bytes[0..name.len]);
-    }
-};
-
-fn commonPrefix(a: []const u8, b: []const u8) usize {
-    const Vec = @Vector(16, u8);
-    const limit = @min(a.len, b.len);
-    var position: usize = 0;
-    while (limit - position >= 16) : (position += 16) {
-        const av: Vec = a[position..][0..16].*;
-        const bv: Vec = b[position..][0..16].*;
-        if (std.simd.firstTrue(av != bv)) |different| return position + different;
-    }
-    while (position < limit and a[position] == b[position]) : (position += 1) {}
-    return position;
-}
-
-fn commonSuffix(a: []const u8, b: []const u8, prefix: usize) usize {
-    const Vec = @Vector(16, u8);
-    const limit = @min(a.len, b.len) - prefix;
-    var matched: usize = 0;
-    while (limit - matched >= 16) : (matched += 16) {
-        const av: Vec = a[a.len - matched - 16 ..][0..16].*;
-        const bv: Vec = b[b.len - matched - 16 ..][0..16].*;
-        if (std.simd.lastTrue(av != bv)) |different| return matched + 15 - different;
-    }
-    while (matched < limit and a[a.len - matched - 1] == b[b.len - matched - 1]) : (matched += 1) {}
-    return matched;
-}
+const PackedNames = fasta.PackedNamesWith(Diagnostics);
+const SourceDedup = fasta.SourceDedupWith(Diagnostics);
 
 fn Tables(comptime Offset: type) type {
-    return struct {
-        const CACHE_FLAG: u64 = @as(u64, 1) << (@bitSizeOf(Offset) - 1);
-        const Key = struct { fingerprint: u32, offset: Offset };
-        const BLOCK_ENTRIES = 4096;
-        const Vec = @Vector(16, u8);
-        allocator: std.mem.Allocator,
-        buckets: []u32 = &.{},
-        metadata: []u8 = &.{},
-        blocks: std.ArrayList([]Key) = .empty,
-        len: u32 = 0,
-
-        fn init(allocator: std.mem.Allocator) @This() {
-            return .{ .allocator = allocator };
-        }
-
-        fn deinit(self: *@This()) void {
-            self.allocator.free(self.buckets);
-            self.allocator.free(self.metadata);
-            for (self.blocks.items) |block| self.allocator.free(block);
-            self.blocks.deinit(self.allocator);
-        }
-
-        fn count(self: *const @This()) u32 {
-            return self.len;
-        }
-
-        fn keyAt(self: *@This(), index: u32) *Key {
-            return &self.blocks.items[index / BLOCK_ENTRIES][index % BLOCK_ENTRIES];
-        }
-
-        fn tag(fingerprint: u32) u8 {
-            return 0x80 | @as(u8, @truncate(fingerprint >> 25));
-        }
-
-        fn emptySlot(metadata: []const u8, fingerprint: u32) usize {
-            const mask = metadata.len - 1;
-            var group = spread(fingerprint) & mask & ~@as(usize, 15);
-            while (true) : (group = (group + 16) & mask) {
-                const bytes: Vec = metadata[group..][0..16].*;
-                if (std.simd.firstTrue(bytes == @as(Vec, @splat(0)))) |index| return group + index;
-            }
-        }
-
-        fn grow(self: *@This(), diag: Diagnostics) !void {
-            var required: u128 = if (self.buckets.len == 0) 512 else @as(u128, self.buckets.len) * 2;
-            while ((@as(u128, self.len) + 1) * 5 > required * 4) required *= 2;
-            const capacity = std.math.cast(usize, required) orelse return diag.capacity(.name_map, std.math.maxInt(usize), required, error.OutOfMemory);
-            if (required * @sizeOf(u32) > std.math.maxInt(usize)) return diag.capacity(.name_map, std.math.maxInt(usize), required * @sizeOf(u32), error.OutOfMemory);
-            self.allocator.free(self.buckets);
-            self.allocator.free(self.metadata);
-            self.buckets = &.{};
-            self.metadata = &.{};
-            const metadata = self.allocator.alloc(u8, capacity) catch return diag.oom(.dedup_table, capacity);
-            errdefer self.allocator.free(metadata);
-            @memset(metadata, 0);
-            const buckets = self.allocator.alloc(u32, capacity) catch return diag.oom(.dedup_table, capacity * @sizeOf(u32));
-            for (0..self.len) |entry_index| {
-                const key = self.keyAt(@intCast(entry_index));
-                const position = emptySlot(metadata, key.fingerprint);
-                buckets[position] = @intCast(entry_index + 1);
-                metadata[position] = tag(key.fingerprint);
-            }
-            self.buckets = buckets;
-            self.metadata = metadata;
-        }
-
-        fn observe(self: *@This(), source: *SourceDedup, name: []const u8, offset: Offset) !bool {
-            return self.observeWithFingerprint(source, name, offset, @truncate(std.hash_map.hashString(name)));
-        }
-
-        fn observeWithFingerprint(self: *@This(), source: *SourceDedup, name: []const u8, offset: Offset, fingerprint: u32) !bool {
-            if (self.buckets.len == 0) try self.grow(source.diag);
-            const mask = self.buckets.len - 1;
-            var group = spread(fingerprint) & mask & ~@as(usize, 15);
-            const wanted: Vec = @splat(tag(fingerprint));
-            source.source_match = false;
-            var position: usize = undefined;
-            while (true) : (group = (group + 16) & mask) {
-                const bytes: Vec = self.metadata[group..][0..16].*;
-                var matches: u16 = @bitCast(bytes == wanted);
-                while (matches != 0) {
-                    const candidate = group + @ctz(matches);
-                    matches &= matches - 1;
-                    const key = self.keyAt(self.buckets[candidate] - 1);
-                    if (key.fingerprint != fingerprint) continue;
-                    if (source.sameName(name, key.offset, CACHE_FLAG)) {
-                        if (source.source_match) {
-                            key.offset = @intCast(try source.rememberHot(name, CACHE_FLAG));
-                            source.source_name_hits += 1;
-                            if (!source.hydrated and source.source_name_hits >= 64) {
-                                if (source.replay_fn) |replay| {
-                                    source.hydrated = true;
-                                    try replay(source.replay_context.?, source);
-                                }
-                            }
-                        }
-                        return true;
-                    }
-                    if (source.read_failed) return error.SourceReadFailed;
-                    if (source.allocation_failed) return error.OutOfMemory;
-                }
-                if (std.simd.firstTrue(bytes == @as(Vec, @splat(0)))) |empty| {
-                    position = group + empty;
-                    break;
-                }
-            }
-            if (self.len == std.math.maxInt(u32)) {
-                @branchHint(.cold);
-                return source.diag.recordLimit(@as(u64, self.len) + 1);
-            }
-            if ((@as(u64, self.len) + 1) * 5 > @as(u64, self.buckets.len) * 4) {
-                try self.grow(source.diag);
-                position = emptySlot(self.metadata, fingerprint);
-            }
-            if (self.len == self.blocks.items.len * BLOCK_ENTRIES) {
-                const block = self.allocator.alloc(Key, BLOCK_ENTRIES) catch return source.diag.oom(.dedup_table, BLOCK_ENTRIES * @sizeOf(Key));
-                errdefer self.allocator.free(block);
-                self.blocks.append(self.allocator, block) catch return source.diag.oom(.dedup_table, null);
-            }
-            const reference = try source.remember(name, offset, CACHE_FLAG);
-            self.keyAt(self.len).* = .{ .fingerprint = fingerprint, .offset = @intCast(reference) };
-            self.buckets[position] = self.len + 1;
-            self.metadata[position] = tag(fingerprint);
-            self.len += 1;
-            return false;
-        }
-
-        fn retainAt(self: *@This(), source: *SourceDedup, ordinal: u32, name: []const u8) !void {
-            if (ordinal >= self.len) return source.diag.consistency(.record_ordinal, error.SourceReadFailed);
-            const key = self.keyAt(ordinal);
-            if (key.offset & CACHE_FLAG != 0) return;
-            key.offset = @intCast(try source.rememberHot(name, CACHE_FLAG));
-        }
-
-        fn spread(fingerprint: u32) usize {
-            return @truncate(@as(u64, fingerprint) *% 0x9e3779b97f4a7c15);
-        }
-    };
+    return SourceDedup.Tables(Offset);
 }
 
 const CatalogBytes = struct {
@@ -2225,8 +1120,8 @@ const CompressedNames = struct {
         var prefix: usize = 0;
         var suffix: usize = 0;
         if (self.count != 0) {
-            prefix = commonPrefix(name, self.anchor[0..self.anchor_len]);
-            suffix = commonSuffix(name, self.anchor[0..self.anchor_len], prefix);
+            prefix = fasta.commonPrefix(name, self.anchor[0..self.anchor_len]);
+            suffix = fasta.commonSuffix(name, self.anchor[0..self.anchor_len], prefix);
         }
         var middle = name[prefix .. name.len - suffix];
         if (self.count == 0 or self.block_bytes + 6 + middle.len > 128 * 1024) {
@@ -2491,8 +1386,8 @@ const StagedNames = struct {
                     self.estimated_bytes = 6 + name.len;
                 } else {
                     const anchor = self.compressed.anchor[0..self.compressed.anchor_len];
-                    const prefix = commonPrefix(name, anchor);
-                    const suffix = commonSuffix(name, anchor, prefix);
+                    const prefix = fasta.commonPrefix(name, anchor);
+                    const suffix = fasta.commonSuffix(name, anchor, prefix);
                     self.estimated_bytes += 6 + name.len - prefix - suffix;
                 }
                 self.sample_lengths[self.sample_count] = @intCast(name.len);
@@ -2678,79 +1573,6 @@ fn checkCollectedIndexAllocations(allocator: std.mem.Allocator) !void {
     try std.testing.expect(failure.primary() == null);
 }
 
-test "[property] - [fasta scanner]: matches scalar structural boundaries" {
-    const line_bases: u32 = 4;
-    const line_count = 520;
-    const target_line = 256;
-    const cases = [_][]const u8{
-        "AAAA\n",
-        "AAAA\r\n",
-    };
-    const mutations = [_]u8{ ' ', '\t', '\r', '\n', 0, '>' };
-
-    var storage: [line_count * 6]u8 = undefined;
-    for (cases) |line| {
-        const line_bytes: u32 = @intCast(line.len);
-        const block = storage[0 .. line_count * line.len];
-        for (0..line_count) |line_index| {
-            @memcpy(block[line_index * line.len ..][0..line.len], line);
-        }
-
-        for (0..line.len + 1) |line_offset| {
-            const mutation_offset = target_line * line.len + line_offset;
-            const original = block[mutation_offset];
-            for (mutations) |mutation| {
-                block[mutation_offset] = mutation;
-
-                const native = validatedStrideRun(
-                    STRIDE_VECTOR_LEN,
-                    block,
-                    0,
-                    line_bases,
-                    line_bytes,
-                );
-                const scalar = reference: {
-                    for (0..line_count) |line_index| {
-                        const row = block[line_index * line.len ..][0..line.len];
-                        if (row[0] == '>') break :reference line_index;
-                        for (row[0..line_bases]) |byte| {
-                            if (byte <= ' ') break :reference line_index;
-                        }
-                        if (!std.mem.eql(u8, row[line_bases..], line[line_bases..])) break :reference line_index;
-                    }
-                    break :reference line_count;
-                };
-
-                try std.testing.expectEqual(scalar, native);
-                const at_next_line = line_offset == line.len;
-                const invalid = if (line_offset < line_bases)
-                    mutation <= ' ' or (line_offset == 0 and mutation == '>')
-                else if (!at_next_line)
-                    mutation != line[line_offset]
-                else
-                    mutation <= ' ' or mutation == '>';
-                const stop_line = target_line + @as(usize, @intFromBool(at_next_line));
-                try std.testing.expectEqual(if (invalid) stop_line else line_count, native);
-            }
-            block[mutation_offset] = original;
-        }
-    }
-}
-
-test "[regression] - [fasta scanner]: checks whitespace before a later structural stop" {
-    const cases = [_][]const u8{
-        "AAAA\nAA A\n>b x\n",
-        "AAAA\nAA A\nAAAAx",
-        "AAAA\r\nAA A\r\n>b x\r\n",
-        "AAAA\r\nAA A\r\nAAAAx\n",
-    };
-    for (cases) |data| {
-        const line_bytes: u32 = if (data[4] == '\r') 6 else 5;
-        try std.testing.expectEqual(@as(usize, 1), validatedStrideRun(1, data, 0, 4, line_bytes));
-        try std.testing.expectEqual(@as(usize, 1), validatedStrideRun(STRIDE_VECTOR_LEN, data, 0, 4, line_bytes));
-    }
-}
-
 test "[property] - [fai output]: matches standard formatting at integer boundaries" {
     const cases = [_]IndexRecord{
         .{
@@ -2835,57 +1657,61 @@ test "[unit] - [fasta scanner]: gates initial-header validation by option" {
 }
 
 test "[failure] - [fasta scanner]: rejects sequence lines above u32 geometry" {
-    var state = ChunkParseState{
+    var state = RecordScanner{
         .allocator = std.testing.allocator,
         .in_pending_line = true,
         .pending_line_bases = std.math.maxInt(u32),
     };
-    try std.testing.expectError(error.SequenceLineTooLong, state.appendPendingFragment("A", 0));
-
-    state.pending_line_bases = 0;
-    state.pending_line_bytes = std.math.maxInt(u32);
     const Ctx = struct {
-        fn emit(_: *@This(), _: FastaRecordEmit) !void {
+        fn emit(_: *@This(), _: fasta.ScannedRecord) !void {
             unreachable;
         }
     };
     var ctx = Ctx{};
-    var record_count: u32 = 0;
-    try std.testing.expectError(
-        error.SequenceLineTooLong,
-        processChunkBytes(&state, "\n", 0, null, null, &ctx, Ctx.emit, &record_count),
-    );
+    try std.testing.expectError(error.SequenceLineTooLong, state.processChunk("A", 0, null, &ctx, Ctx.emit));
+
+    state.pending_line_bases = 0;
+    state.pending_line_bytes = std.math.maxInt(u32);
+    try std.testing.expectError(error.SequenceLineTooLong, state.processChunk("\n", 0, null, &ctx, Ctx.emit));
 
     state.pending_line_bases = 1;
-    try std.testing.expectError(error.SequenceLineTooLong, state.commitPendingLine(false));
+    try std.testing.expectError(error.SequenceLineTooLong, state.emitRecord(&ctx, Ctx.emit));
 }
 
 test "[edge] - [fasta scanner]: rejects excess records before emitting" {
-    var state = ChunkParseState{ .allocator = std.testing.allocator };
-    defer state.name.deinit(std.testing.allocator);
-    defer state.side_table.deinit(std.testing.allocator);
-    try state.name.appendSlice(std.testing.allocator, "limit");
-    try state.recordSequenceLine(1, 2, true, 1, 7);
     const Ctx = struct {
         count: usize = 0,
         fn emit(self: *@This(), _: FastaRecordEmit) !void {
             self.count += 1;
         }
     };
+    const reference = diagnostics.Reference{ .source = .fasta, .location = .{ .offset = 0 }, .record = 1 };
+    const record = fasta.ScannedRecord{
+        .name = "limit",
+        .header_offset = 0,
+        .reference = &reference,
+        .seq_offset = 7,
+        .seq_len = 1,
+        .line_bases = 1,
+        .line_bytes = 2,
+        .uses_uniform_formula = true,
+        .side_table = &.{},
+        .nonuniform_reason = .nonuniform_layout,
+    };
     var ctx = Ctx{};
     var count: u32 = std.math.maxInt(u32) - 1;
-    try state.emitRecordIfReady(&ctx, null, Ctx.emit, &count);
+    var plain = IndexEmitter(*Ctx, Ctx.emit, ?*NameDedup){ .ctx = &ctx, .seen_names = null, .record_count = &count, .diag = .{} };
+    try plain.emit(record);
     try std.testing.expectEqual(std.math.maxInt(u32), count);
-    try std.testing.expectError(error.TooManySequences, state.emitRecordIfReady(&ctx, null, Ctx.emit, &count));
+    try std.testing.expectError(error.TooManySequences, plain.emit(record));
     try std.testing.expectEqual(@as(usize, 1), ctx.count);
     try std.testing.expectEqual(std.math.maxInt(u32), count);
 
     var seen = NameDedup.init(std.testing.allocator);
     defer seen.deinit();
     try std.testing.expect(!try seen.observe("limit"));
-    try state.emitRecordIfReady(&ctx, @as(?*NameDedup, &seen), Ctx.emit, &count);
-    state.line_builder = .{};
-    try state.emitRecordIfReady(&ctx, null, Ctx.emit, &count);
+    var deduped = IndexEmitter(*Ctx, Ctx.emit, ?*NameDedup){ .ctx = &ctx, .seen_names = &seen, .record_count = &count, .diag = .{} };
+    try deduped.emit(record);
     try std.testing.expectEqual(@as(usize, 1), ctx.count);
     try std.testing.expectEqual(std.math.maxInt(u32), count);
 }
@@ -3271,10 +2097,19 @@ test "[failure] - [name catalog]: oversized offsets roll back the insertion" {
 
 test "[failure] - [index diagnostics]: retains scanner limit operands and source positions" {
     var failure: diagnostics.Failure = undefined;
-    var state = ChunkParseState{ .allocator = std.testing.allocator, .diag = .{ .failure = &failure } };
+    var state = RecordScanner{ .allocator = std.testing.allocator, .diag = .{ .failure = &failure } };
     defer state.name.deinit(std.testing.allocator);
     defer state.side_table.deinit(std.testing.allocator);
     const max = std.math.maxInt(u32);
+    const Ctx = struct {
+        fn emit(_: *@This(), _: FastaRecordEmit) !void {
+            unreachable;
+        }
+    };
+    var ctx = Ctx{};
+    var count: u32 = max;
+    var emitter = IndexEmitter(*Ctx, Ctx.emit, ?*NameDedup){ .ctx = &ctx, .seen_names = null, .record_count = &count, .diag = state.diag };
+    const Emitter = @TypeOf(emitter);
     for (0..3) |i| {
         failure.reset(.index);
         state.in_pending_line = true;
@@ -3282,9 +2117,9 @@ test "[failure] - [index diagnostics]: retains scanner limit operands and source
         state.pending_line_bases = if (i == 0) max else 0;
         state.pending_line_bytes = if (i == 0) 0 else max;
         if (i == 2) {
-            try std.testing.expectError(error.InvalidIndex, state.commitPendingLine(false));
+            try std.testing.expectError(error.InvalidIndex, state.emitRecord(&emitter, Emitter.emit));
         } else {
-            try std.testing.expectError(error.InvalidIndex, state.appendPendingFragment("A", 700));
+            try std.testing.expectError(error.InvalidIndex, state.processChunk("A", 700, null, &emitter, Emitter.emit));
         }
         const primary = failure.primary().?;
         const details = primary.details.@"index.sequence_line_too_long";
@@ -3297,17 +2132,8 @@ test "[failure] - [index diagnostics]: retains scanner limit operands and source
     state.in_pending_line = false;
     state.pending_line_bytes = 0;
     state.pending_line_bases = 0;
-    try state.startHeader(42);
-    try state.name.appendSlice(std.testing.allocator, "name");
-    try state.recordSequenceLine(1, 2, true, 1, 48);
-    const Ctx = struct {
-        fn emit(_: *@This(), _: FastaRecordEmit) !void {
-            unreachable;
-        }
-    };
-    var ctx = Ctx{};
-    var count: u32 = max;
-    try std.testing.expectError(error.InvalidIndex, state.emitRecordIfReady(&ctx, null, Ctx.emit, &count));
+    try state.processChunk(">name\nA\n", 42, null, &emitter, Emitter.emit);
+    try std.testing.expectError(error.InvalidIndex, state.emitRecord(&emitter, Emitter.emit));
     const primary = failure.primary().?;
     try std.testing.expectEqual(@as(u128, max) + 1, primary.details.@"index.record_count_limit_exceeded".record_count.exact);
     try std.testing.expectEqual(@as(?u64, 42), primary.at.location.offset);
