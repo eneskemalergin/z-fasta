@@ -54,7 +54,8 @@ const HELP_STDOUT =
     \\  --schema NAME            Header schema: uniprot or refseq
     \\  --custom-alphabet CHARS  Override nucleotide/protein alphabet checks
     \\  --max-header-len N       Warn on headers longer than N bytes (default: 1024)
-    \\  Retain 10000 examples; scan/count all input (error without --fix).
+    \\  --report v1|v2           Report version (default: v1); v2 counts every occurrence
+    \\  v1 retains 10000 examples; scan/count all input (error without --fix).
     \\
     \\Examples:
     \\  z-fasta index genome.fa                  Create .zfi binary index

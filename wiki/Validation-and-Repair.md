@@ -14,7 +14,7 @@ Clean input prints:
 OK: no issues found
 ```
 
-Findings go to stdout. Operational command, mapping and write failures go to stderr. `--error-format=json` selects coded operational reports; it leaves v1 findings and warning statuses unchanged. See [Error diagnostics](Error-Diagnostics).
+Findings go to stdout. Operational command, mapping and write failures go to stderr. `--error-format=json` selects coded operational reports; it leaves v1 findings and warning statuses unchanged. See [Error diagnostics](Error-Diagnostics). `--report v2` selects the [v2 report](#report-v2), with exact counts and reversible identifiers; v1 stays the default.
 
 ## What validate checks
 
@@ -73,7 +73,7 @@ The default header warning threshold is 1024 bytes after `>`, including descript
 z-fasta validate --json genome.fa
 ```
 
-Each retained event becomes one `schema_version: v1` JSON object. Invalid UTF-8 header bytes are escaped so the output remains valid UTF-8 JSON. This legacy escaping is not a reversible encoding of arbitrary original bytes; use v2 opaque-byte objects for operational diagnostic previews.
+Each retained event becomes one `schema_version: v1` JSON object. Invalid UTF-8 header bytes are escaped so the output remains valid UTF-8 JSON. This legacy escaping is not a reversible encoding of arbitrary original bytes; the [v2 report](#report-v2) keeps identifiers reversible.
 
 ## One JSON summary
 
@@ -101,6 +101,82 @@ The object contains event-kind counts, first examples, truncation state, sequenc
 The real `counts` object contains every validation kind, including zero counts.
 
 </details>
+
+## Report v2
+
+```bash
+z-fasta validate --report v2 genome.fa
+z-fasta validate --report v2 --json genome.fa
+```
+
+Report v2 counts every occurrence of each finding code in the code's unit (byte, line, record, or file) and the distinct records it affects. Each code keeps its first occurrence: location, record, identifier, and the code's facts. There is no event cap, so the counts are exact and never change the exit status. v1 stays the default, with its own output, counts, and exit statuses.
+
+```text
+INVALID sample.fa: 2 error codes, 0 warning codes; 2 of 3 records with errors, 0 with warnings
+error [fasta.duplicate_identifier] 1 record; first at line 3 column 2, record 2 "chr1": Identifier duplicates an earlier record. First defined at line 1 column 2.
+error [sequence.invalid_symbol] 2 bytes in 2 records; first at line 2 column 5, record 1 "chr1": Sequence byte is outside the selected alphabet. byte=0x3f
+complete: examined 35 bytes, 6 lines, 3 records, 14 symbols; protein alphabet chosen from 14 symbols
+```
+
+v2 reads FASTA as `index` does, so the two agree on what a symbol and an identifier are:
+
+- A symbol is any byte above space. Spaces and tabs in a sequence line are skipped; each such line is one `format.sequence_whitespace` warning that records its whitespace byte count.
+- Other bytes below 0x20 are control bytes, errors counted one per byte: `fasta.header_control_byte` and `fasta.sequence_control_byte`. Tab is allowed in headers. A line ends with LF or CRLF; any other CR is a control byte.
+- An identifier runs from `>` to the first space, tab, or CR. An empty identifier (`>` or `> desc`) is an error and is not checked for duplicates.
+- An empty line inside a record is a `format.blank_sequence_line` warning. A line before the first header that holds anything but spaces, tabs, or CR is `fasta.content_before_header`.
+- Line widths count symbols. Every line with symbols but the last must match the first such line; the last may be shorter.
+- The alphabet is chosen from the first 100,000 symbols, or set with `--custom-alphabet`; spaces, tabs, and control bytes are never alphabet symbols.
+- Empty input reports `fasta.no_records` only.
+
+| Code | Severity | Counted per |
+| --- | --- | --- |
+| `fasta.no_records` | error | file |
+| `fasta.content_before_header` | error | line |
+| `fasta.header_control_byte` | error | byte |
+| `fasta.sequence_control_byte` | error | byte |
+| `fasta.empty_record` | warning | record |
+| `fasta.empty_identifier` | error | record |
+| `fasta.duplicate_identifier` | error | record after the first |
+| `fasta.long_header` | warning | record |
+| `header.convention_mismatch` | warning | record (`--schema`) |
+| `sequence.invalid_symbol` | error | byte |
+| `format.sequence_whitespace` | warning | line |
+| `format.blank_sequence_line` | warning | line |
+| `format.inconsistent_wrapping` | warning | record |
+| `format.leading_bom` | warning | file |
+| `format.missing_terminal_newline` | warning | file |
+| `format.mixed_line_endings` | warning | file |
+
+`--json` prints one JSON object: the envelope described in [Error diagnostics](Error-Diagnostics), with `validation` filled. It holds `completion`, the selected `policy`, what was `examined`, the records with errors and with warnings, one entry per code that occurred, and the occurrences of each byte outside the alphabet. Identifiers are `encoding` (`utf8` or `base64`), `value`, `truncated`, and `original_bytes`; decoding a value gives the original bytes, and a truncated value is only a prefix, never an identifier to compare. `--summary` changes nothing under v2.
+
+<details>
+<summary>One code entry</summary>
+
+```json
+{
+  "code": "fasta.duplicate_identifier",
+  "category": "identifiers",
+  "severity": "error",
+  "unit": "record",
+  "occurrences": "1",
+  "records": "1",
+  "first": {
+    "offset": "13",
+    "line": "3",
+    "column": "2",
+    "record": "2",
+    "identifier": {"encoding": "utf8", "value": "chr1", "truncated": false, "original_bytes": "4"},
+    "related": {"offset": "1", "line": "1", "column": "2", "record": null},
+    "data": {"identifier": null}
+  }
+}
+```
+
+</details>
+
+`completion` is `complete` when every check ran over the whole input. It is `interrupted` when an operational failure, such as running out of memory for identifiers, stopped the scan: the report covers the lines before the failing one, whole-file findings are not decided, the failure goes to stderr, and the exit status is 1. `incomplete` is reserved for a check that cannot finish within a budget; no current check produces it.
+
+Exit statuses follow v1: 0 clean, 2 warnings only, 1 for errors, for warnings with `--strict`, or for a report that is not complete. `--fix` cannot be combined with `--report v2`; the rewrite keeps v1's rules and blockers.
 
 ## Write a normalized copy
 
@@ -146,11 +222,11 @@ After a successful fix, the exit code ignores only the five warnings the rewrite
 
 ## Event cap
 
-At most 10000 event objects are retained. Scanning, kind counts, late fix blockers, and rewrite-width collection continue after that cap.
+At most 10000 v1 event objects are retained. Scanning, kind counts, late fix blockers, and rewrite-width collection continue after that cap. Report v2 has no event cap.
 
 Without `--fix`, truncation returns exit 1 under the existing cap policy. With `--fix`, a permitted complete rewrite can finish, and remaining findings select its status. Text mode reports capped examples without claiming scanning stopped. Machine error mode omits that prose notice; v1 JSON retains `truncated: true`.
 
-Counts keep their legacy units: invalid-symbol events count distinct invalid byte values across the input, not every occurrence; null-byte events count at most once per affected line. Empty input reports the legacy no-sequences error and missing-terminal-newline warning. These reports do not claim full header-schema validation or a fixed total memory bound.
+v1 counts keep their legacy units: invalid-symbol events count distinct invalid byte values across the input, not every occurrence; null-byte events count at most once per affected line. Empty input reports the legacy no-sequences error and missing-terminal-newline warning. Report v2 counts every occurrence. These reports do not claim full header-schema validation or a fixed total memory bound.
 
 ## Safe normalization workflow
 

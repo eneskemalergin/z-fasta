@@ -1,5 +1,6 @@
-//! Renders a `Failure` as text or as one NDJSON object. Never allocates or flushes; a failed write
-//! is returned and the original failure is left unchanged.
+//! Renders a `Failure` as text or as one NDJSON object, and a v2 validation report inside that
+//! object or as text. Never allocates or flushes; a failed write is returned and the original
+//! failure is left unchanged.
 
 const std = @import("std");
 const diagnostics = @import("diagnostics");
@@ -14,6 +15,66 @@ pub const Options = struct {
     version: ?[]const u8 = null,
     accepted: bool = false,
     metrics: ?GetMetrics = null,
+    validation: ?*const Validation = null,
+};
+
+/// What `validate --report v2` found. Counts are exact; each code keeps only its first occurrence.
+pub const Validation = struct {
+    completion: Completion,
+    strict: bool,
+    alphabet: diagnostics.AlphabetPolicy,
+    max_header_bytes: u64,
+    convention: ?diagnostics.Convention,
+    examined: Examined,
+    records_with_errors: u64,
+    records_with_warnings: u64,
+    /// In report order; a code that did not occur has no occurrences and no first occurrence.
+    findings: []const Finding,
+    /// Occurrences of each byte value outside the selected alphabet.
+    invalid_symbols: *const [256]u64,
+
+    pub const Completion = enum { complete, incomplete, interrupted };
+    pub const Examined = struct { bytes: u64 = 0, lines: u64 = 0, records: u64 = 0, symbols: u64 = 0 };
+
+    pub fn codes(self: *const Validation, severity: diagnostics.Severity) u64 {
+        var count: u64 = 0;
+        for (self.findings) |finding| {
+            if (finding.occurrences != 0 and diagnostics.metadata(finding.code).severity == severity) count += 1;
+        }
+        return count;
+    }
+};
+
+pub const Finding = struct {
+    code: diagnostics.Code,
+    occurrences: u64 = 0,
+    /// Distinct records with an occurrence; file-level and preamble occurrences belong to none.
+    records: u64 = 0,
+    first: ?Occurrence = null,
+};
+
+pub const Occurrence = struct {
+    details: diagnostics.Details,
+    at: diagnostics.Reference,
+    related: ?diagnostics.Reference = null,
+    identifier: ?Identifier = null,
+};
+
+/// A copied identifier prefix and the identifier's full length.
+pub const Identifier = struct {
+    bytes: [diagnostics.PREVIEW_BYTES]u8,
+    len: u16,
+    original_bytes: u64,
+
+    pub fn init(identifier: []const u8) Identifier {
+        var value: Identifier = .{ .bytes = undefined, .len = @intCast(@min(identifier.len, diagnostics.PREVIEW_BYTES)), .original_bytes = identifier.len };
+        @memcpy(value.bytes[0..value.len], identifier[0..value.len]);
+        return value;
+    }
+
+    pub fn slice(self: *const Identifier) []const u8 {
+        return self.bytes[0..self.len];
+    }
 };
 
 pub const Bootstrap = enum { argv_oom, missing_command, unknown_command, invalid_format };
@@ -55,7 +116,8 @@ pub fn writeJson(writer: *std.Io.Writer, failure: *const diagnostics.Failure, op
     try field(&json, "work_complete", failure.work_complete);
     try json.endObject();
     try field(&json, "accepted", options.accepted and failure.complete and !failure.has_primary);
-    try field(&json, "validation", null);
+    try json.objectField("validation");
+    if (options.validation) |validation| try jsonValidation(&json, failure, validation) else try json.write(null);
     try json.objectField("sources");
     try json.beginArray();
     const sources = sourceMask(failure);
@@ -116,6 +178,30 @@ pub fn writeText(writer: *std.Io.Writer, failure: *const diagnostics.Failure) st
     for (failure.secondaryItems()) |secondary| try textDiagnostic(writer, failure, &secondary, "secondary");
     if (failure.secondary_truncated) try writer.writeAll("Further secondary failures were omitted.\n");
     try writer.print("hint: {s}\n", .{actionText(diagnostics.metadata(primary.code()).action)});
+}
+
+pub fn writeValidationText(writer: *std.Io.Writer, failure: *const diagnostics.Failure, validation: *const Validation) std.Io.Writer.Error!void {
+    const errors = validation.codes(.@"error");
+    const warnings = validation.codes(.warning);
+    try writer.writeAll(switch (validation.completion) {
+        .interrupted => "INTERRUPTED ",
+        .incomplete => "INCOMPLETE ",
+        .complete => if (errors != 0) "INVALID " else if (warnings != 0) "WARNINGS " else "OK ",
+    });
+    try writeEscapedBytes(writer, failure.sourceLabel(.fasta) orelse "input");
+    if (errors + warnings == 0) {
+        try writer.writeAll(": no findings\n");
+    } else {
+        try writer.print(": {d} error code{s}, {d} warning code{s}; {d} of {d} record{s} with errors, {d} with warnings\n", .{ errors, plural(errors), warnings, plural(warnings), validation.records_with_errors, validation.examined.records, plural(validation.examined.records), validation.records_with_warnings });
+    }
+    for (validation.findings) |finding| {
+        if (finding.occurrences != 0) try textFinding(writer, failure, finding);
+    }
+    const examined = validation.examined;
+    try writer.print("{s}: examined {d} byte{s}, {d} line{s}, {d} record{s}, {d} symbol{s}; ", .{ @tagName(validation.completion), examined.bytes, plural(examined.bytes), examined.lines, plural(examined.lines), examined.records, plural(examined.records), examined.symbols, plural(examined.symbols) });
+    if (validation.alphabet.sample) |sample| {
+        try writer.print("{s} alphabet chosen from {d} symbol{s}\n", .{ @tagName(validation.alphabet.alphabet), sample.symbols, plural(sample.symbols) });
+    } else try writer.print("{s} alphabet\n", .{@tagName(validation.alphabet.alphabet)});
 }
 
 /// Printable ASCII as is; controls, non-ASCII bytes, quotes, and backslashes escaped.
@@ -285,6 +371,67 @@ fn writeOpaque(json: *std.json.Stringify, bytes: []const u8, original: u128, low
     try json.endObject();
 }
 
+fn jsonValidation(json: *std.json.Stringify, failure: *const diagnostics.Failure, validation: *const Validation) std.Io.Writer.Error!void {
+    try json.beginObject();
+    try field(json, "completion", @tagName(validation.completion));
+    try json.objectField("policy");
+    try json.beginObject();
+    try field(json, "strict", validation.strict);
+    try jsonNamedValue(json, failure, "alphabet", validation.alphabet);
+    try jsonNamedValue(json, failure, "max_header_bytes", validation.max_header_bytes);
+    try jsonNamedValue(json, failure, "header_convention", validation.convention);
+    try json.endObject();
+    try jsonNamedValue(json, failure, "examined", validation.examined);
+    try jsonNamedValue(json, failure, "records_with_errors", validation.records_with_errors);
+    try jsonNamedValue(json, failure, "records_with_warnings", validation.records_with_warnings);
+    try json.objectField("codes");
+    try json.beginArray();
+    for (validation.findings) |finding| {
+        if (finding.occurrences == 0) continue;
+        const metadata = diagnostics.metadata(finding.code);
+        try json.beginObject();
+        try field(json, "code", metadata.name);
+        try field(json, "category", @tagName(metadata.category));
+        try field(json, "severity", @tagName(metadata.severity));
+        try field(json, "unit", @tagName(metadata.unit));
+        try jsonNamedValue(json, failure, "occurrences", finding.occurrences);
+        try jsonNamedValue(json, failure, "records", finding.records);
+        try json.objectField("first");
+        if (finding.first) |first| {
+            try json.beginObject();
+            try jsonStructFields(json, failure, first.at.location);
+            try jsonNamedValue(json, failure, "record", first.at.record);
+            try json.objectField("identifier");
+            if (first.identifier) |identifier| {
+                try writeOpaque(json, identifier.slice(), identifier.original_bytes, false, identifier.len != identifier.original_bytes);
+            } else try json.write(null);
+            try json.objectField("related");
+            if (first.related) |related| {
+                try json.beginObject();
+                try jsonStructFields(json, failure, related.location);
+                try jsonNamedValue(json, failure, "record", related.record);
+                try json.endObject();
+            } else try json.write(null);
+            try json.objectField("data");
+            try jsonDetails(json, failure, first.details);
+            try json.endObject();
+        } else try json.write(null);
+        try json.endObject();
+    }
+    try json.endArray();
+    try json.objectField("invalid_symbols");
+    try json.beginArray();
+    for (validation.invalid_symbols, 0..) |count, byte| {
+        if (count == 0) continue;
+        try json.beginObject();
+        try field(json, "byte", @as(u8, @intCast(byte)));
+        try jsonNamedValue(json, failure, "occurrences", count);
+        try json.endObject();
+    }
+    try json.endArray();
+    try json.endObject();
+}
+
 fn jsonReference(json: *std.json.Stringify, failure: *const diagnostics.Failure, reference: diagnostics.Reference) std.Io.Writer.Error!void {
     try json.beginObject();
     try jsonStructFields(json, failure, reference);
@@ -307,10 +454,14 @@ fn jsonDiagnostic(json: *std.json.Stringify, failure: *const diagnostics.Failure
     try json.endArray();
     try jsonField(json, failure, "cause", diagnostic.cause);
     try json.objectField("data");
-    switch (diagnostic.details) {
+    try jsonDetails(json, failure, diagnostic.details);
+    try json.endObject();
+}
+
+fn jsonDetails(json: *std.json.Stringify, failure: *const diagnostics.Failure, details: diagnostics.Details) std.Io.Writer.Error!void {
+    switch (details) {
         inline else => |facts| try jsonValue(json, failure, facts),
     }
-    try json.endObject();
 }
 
 const Label = struct { bytes: []const u8, original: u128, lower_bound: bool, truncated: bool };
@@ -490,14 +641,7 @@ fn textDiagnostic(writer: *std.Io.Writer, failure: *const diagnostics.Failure, d
         try writer.writeAll(": ");
     }
     try writer.writeAll(message(diagnostic.code()));
-    switch (diagnostic.details) {
-        inline else => |facts| {
-            if (@TypeOf(facts) != void) {
-                try writer.writeByte(' ');
-                try textValue(writer, failure, facts);
-            }
-        },
-    }
+    try textDetails(writer, failure, diagnostic.details);
     if (diagnostic.related) |related| {
         try writer.writeAll("; related: ");
         try textReference(writer, failure, related);
@@ -507,6 +651,61 @@ fn textDiagnostic(writer: *std.Io.Writer, failure: *const diagnostics.Failure, d
         try textValue(writer, failure, cause);
     }
     try writer.writeByte('\n');
+}
+
+fn plural(count: u64) []const u8 {
+    return if (count == 1) "" else "s";
+}
+
+fn textLocation(writer: *std.Io.Writer, reference: diagnostics.Reference) std.Io.Writer.Error!void {
+    if (reference.location.line) |line| try writer.print("line {d}", .{line});
+    if (reference.location.column) |column| try writer.print(" column {d}", .{column});
+}
+
+fn textFinding(writer: *std.Io.Writer, failure: *const diagnostics.Failure, finding: Finding) std.Io.Writer.Error!void {
+    const metadata = diagnostics.metadata(finding.code);
+    try writer.print("{s} [{s}]", .{ @tagName(metadata.severity), metadata.name });
+    if (metadata.unit != .file) {
+        try writer.print(" {d} {s}{s}", .{ finding.occurrences, @tagName(metadata.unit), plural(finding.occurrences) });
+        if (metadata.unit != .record and finding.records != 0) try writer.print(" in {d} record{s}", .{ finding.records, plural(finding.records) });
+    }
+    const first = finding.first orelse {
+        try writer.print(": {s}\n", .{message(finding.code)});
+        return;
+    };
+    if (first.at.location.line != null) {
+        try writer.writeAll(if (metadata.unit == .file) " at " else "; first at ");
+        try textLocation(writer, first.at);
+    }
+    if (first.at.record) |record| try writer.print(", record {d}", .{record});
+    if (first.identifier) |identifier| {
+        try writer.writeByte(' ');
+        const shown = identifier.slice()[0..@min(identifier.len, 32)];
+        try textOpaque(writer, shown, identifier.original_bytes, false, shown.len != identifier.original_bytes);
+    }
+    try writer.print(": {s}", .{message(finding.code)});
+    switch (first.details) {
+        .@"fasta.duplicate_identifier" => {},
+        .@"sequence.invalid_symbol" => |facts| try writer.print(" byte=0x{x:0>2}", .{facts.byte}),
+        else => try textDetails(writer, failure, first.details),
+    }
+    if (first.related) |related| {
+        try writer.writeAll(" First defined at ");
+        try textLocation(writer, related);
+        try writer.writeByte('.');
+    }
+    try writer.writeByte('\n');
+}
+
+fn textDetails(writer: *std.Io.Writer, failure: *const diagnostics.Failure, details: diagnostics.Details) std.Io.Writer.Error!void {
+    switch (details) {
+        inline else => |facts| {
+            if (@TypeOf(facts) != void) {
+                try writer.writeByte(' ');
+                try textValue(writer, failure, facts);
+            }
+        },
+    }
 }
 
 fn actionText(action: diagnostics.Action) []const u8 {
@@ -565,8 +764,18 @@ fn message(code: diagnostics.Code) []const u8 {
         .@"fasta.content_before_header" => "Content appears before the first FASTA header.",
         .@"fasta.header_control_byte" => "Header contains a prohibited control byte.",
         .@"fasta.sequence_control_byte" => "Sequence contains a prohibited control byte.",
+        .@"fasta.empty_record" => "FASTA record contains no sequence symbols.",
+        .@"fasta.empty_identifier" => "Header has an empty identifier.",
         .@"fasta.duplicate_identifier" => "Identifier duplicates an earlier record.",
+        .@"fasta.long_header" => "Header exceeds the selected length limit.",
+        .@"header.convention_mismatch" => "Header does not match the selected convention.",
         .@"sequence.invalid_symbol" => "Sequence byte is outside the selected alphabet.",
+        .@"format.sequence_whitespace" => "Sequence line contains whitespace.",
+        .@"format.blank_sequence_line" => "Blank line occurs inside a FASTA record.",
+        .@"format.inconsistent_wrapping" => "Sequence line width differs from the record's wrap width.",
+        .@"format.leading_bom" => "File starts with a UTF-8 BOM.",
+        .@"format.missing_terminal_newline" => "Nonempty file has no terminal newline.",
+        .@"format.mixed_line_endings" => "File mixes LF and CRLF line endings.",
         .@"index.initial_header_required" => "Indexing requires a FASTA header at byte zero.",
         .@"index.no_indexable_records" => "No nonempty records remain under the selected naming policy.",
         .@"index.identifier_too_long" => "Identifier exceeds the selected index limit.",

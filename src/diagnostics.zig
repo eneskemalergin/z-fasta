@@ -41,6 +41,7 @@ pub const Category = enum {
     structure,
     identifiers,
     alphabet,
+    format,
     index_compatibility,
     index_integrity,
     index_match,
@@ -202,11 +203,12 @@ pub const Argument = enum {
     schema,
     custom_alphabet,
     max_header_len,
+    report,
     error_format,
     read_buffer,
 };
 pub const Arguments = std.EnumSet(Argument);
-pub const Expected = enum { path, request_source, schema, alphabet, positive_usize, error_format, nonempty_buffer };
+pub const Expected = enum { path, request_source, schema, alphabet, positive_usize, report_version, error_format, nonempty_buffer };
 pub const Requirement = enum { bed, transform_or_strand, json, fix, output };
 pub const AllocationRole = enum {
     argv,
@@ -232,6 +234,7 @@ pub const AllocationRole = enum {
     traversal_order,
     validation_identifiers,
     validation_events,
+    validation_report,
     line_widths,
     rewrite_bytes,
     serialized_index,
@@ -315,7 +318,8 @@ pub const SourceChange = struct {
 
 pub const Format = enum { zfi, fai };
 pub const NamingPolicy = enum { first_nonempty, all_nonempty };
-pub const Grammar = enum { legacy_nul_only };
+/// `controls_except_tab`: every byte below 0x20 except tab.
+pub const Grammar = enum { legacy_nul_only, controls_except_tab };
 pub const Alphabet = enum { dna, rna, nucleotide, protein, custom };
 pub const AlphabetSelection = enum { explicit, automatic, custom };
 pub const ClassifierRule = enum { nucleotide_above_90_percent };
@@ -410,7 +414,12 @@ pub const LineBuffer = struct { buffer_bytes: u64, observed_bytes: Measurement }
 pub const Preamble = struct { content_bytes: Measurement };
 pub const ControlByte = struct { byte: u8, grammar: Grammar };
 pub const Duplicate = struct { identifier: ?Preview = null };
+pub const LongHeader = struct { observed_bytes: u64, limit_bytes: u64 };
+pub const Convention = enum { uniprot, refseq };
+pub const ConventionMismatch = struct { convention: Convention };
 pub const InvalidSymbol = struct { byte: u8, policy: AlphabetPolicy };
+pub const SequenceWhitespace = struct { whitespace_bytes: u64 };
+pub const Wrapping = struct { expected_width: u64, actual_width: u64 };
 pub const IdentifierLimit = struct { observed_bytes: Measurement, limit_bytes: u64, format: Format };
 pub const LineWidthRole = enum { index_geometry, synthetic_separator, validator_width };
 pub const LineLimit = struct { field: IndexField, observed: Measurement, limit: u64, width_role: LineWidthRole, format: ?Format = null };
@@ -521,8 +530,18 @@ pub const Details = union(enum(u8)) {
     @"fasta.content_before_header": Preamble,
     @"fasta.header_control_byte": ControlByte,
     @"fasta.sequence_control_byte": ControlByte,
+    @"fasta.empty_record": void,
+    @"fasta.empty_identifier": void,
     @"fasta.duplicate_identifier": Duplicate,
+    @"fasta.long_header": LongHeader,
+    @"header.convention_mismatch": ConventionMismatch,
     @"sequence.invalid_symbol": InvalidSymbol,
+    @"format.sequence_whitespace": SequenceWhitespace,
+    @"format.blank_sequence_line": void,
+    @"format.inconsistent_wrapping": Wrapping,
+    @"format.leading_bom": void,
+    @"format.missing_terminal_newline": void,
+    @"format.mixed_line_endings": void,
     @"index.initial_header_required": struct { byte: u8, required_offset: u64 = 0 },
     @"index.no_indexable_records": struct { naming_policy: NamingPolicy, seen_records: ?u64 = null, empty_records: ?u64 = null, duplicate_records: ?u64 = null },
     @"index.identifier_too_long": IdentifierLimit,
@@ -811,6 +830,12 @@ fn describe(code: Code, category: Category, kind: Kind, unit: Unit, action: Acti
     return .{ .code = code, .name = @tagName(code), .category = category, .kind = kind, .severity = .@"error", .unit = unit, .action = action, .returned_error = returned_error };
 }
 
+fn warning(code: Code, category: Category, unit: Unit) Metadata {
+    var entry = describe(code, category, .finding, unit, .correct_data, error.InvalidFasta);
+    entry.severity = .warning;
+    return entry;
+}
+
 fn describeCode(code: Code) Metadata {
     return switch (code) {
         .@"usage.command_required" => describe(code, .usage, .failure, .none, .correct_arguments, error.InvalidArgument),
@@ -848,8 +873,18 @@ fn describeCode(code: Code) Metadata {
         .@"fasta.content_before_header" => describe(code, .structure, .finding, .line, .correct_data, error.InvalidFasta),
         .@"fasta.header_control_byte" => describe(code, .structure, .finding, .byte, .correct_data, error.InvalidFasta),
         .@"fasta.sequence_control_byte" => describe(code, .structure, .finding, .byte, .correct_data, error.InvalidFasta),
+        .@"fasta.empty_record" => warning(code, .structure, .record),
+        .@"fasta.empty_identifier" => describe(code, .identifiers, .finding, .record, .correct_data, error.InvalidFasta),
         .@"fasta.duplicate_identifier" => describe(code, .identifiers, .finding, .record, .correct_data, error.InvalidFasta),
+        .@"fasta.long_header" => warning(code, .identifiers, .record),
+        .@"header.convention_mismatch" => warning(code, .identifiers, .record),
         .@"sequence.invalid_symbol" => describe(code, .alphabet, .finding, .byte, .correct_data, error.InvalidFasta),
+        .@"format.sequence_whitespace" => warning(code, .format, .line),
+        .@"format.blank_sequence_line" => warning(code, .format, .line),
+        .@"format.inconsistent_wrapping" => warning(code, .format, .record),
+        .@"format.leading_bom" => warning(code, .format, .file),
+        .@"format.missing_terminal_newline" => warning(code, .format, .file),
+        .@"format.mixed_line_endings" => warning(code, .format, .file),
         .@"index.initial_header_required" => describe(code, .index_compatibility, .finding, .file, .correct_data, error.InvalidIndex),
         .@"index.no_indexable_records" => describe(code, .index_compatibility, .finding, .file, .correct_data, error.InvalidIndex),
         .@"index.identifier_too_long" => describe(code, .index_compatibility, .finding, .record, .correct_data, error.InvalidIndex),

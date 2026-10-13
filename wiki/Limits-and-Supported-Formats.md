@@ -37,9 +37,9 @@ FASTQ is coming as a separate project, z-fastq, built around the same priorities
 - Names file identifier: 65535 bytes.
 - BED chromosome or identifier: 65535 bytes.
 - BED or names line reader: 69631 bytes before newline is required.
-- Retained validate events: 10000.
+- Retained validate events: 10000 in report v1; report v2 keeps the first occurrence of each code and exact counts.
 - Default validate header warning threshold: 1024 bytes.
-- Validate type sample: first 100000 sequence bytes across the file.
+- Validate type sample: first 100000 sequence bytes across the file (report v2: symbols).
 - GET complement type sample: up to 256 requested bases per record.
 
 ## Streaming batches

@@ -147,7 +147,7 @@ z-fasta validate --strict genome.fa
 
 Scanning and legacy kind counts continued, but additional event examples were omitted. JSON includes `truncated: true`. Without fix, the existing cap policy returns exit 1. With fix, a permitted rewrite can finish and the remaining findings select the status.
 
-Text mode says the retained examples were capped. Machine error mode omits that prose notice; inspect the v1 report's truncation field and the actual status. This is not a new coded biological failure.
+Text mode says the retained examples were capped. Machine error mode omits that prose notice; inspect the v1 report's truncation field and the actual status. This is not a new coded biological failure. `--report v2` keeps exact counts without an event cap, so its status depends only on the findings.
 
 ## Fix refuses the file
 

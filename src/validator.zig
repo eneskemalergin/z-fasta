@@ -1,8 +1,9 @@
 //! Validates FASTA structure, alphabet, and headers for `z-fasta validate`, and rewrites the file
 //! with `--fix`. The whole input is mapped; event names borrow it.
-//! At most `MAX_VALIDATE_EVENTS` events are kept, but counts and fix blockers continue past it.
-//! Reports are legacy v1: `invalid_character` counts distinct byte values, not occurrences, and
-//! invalid UTF-8 in names is escaped in a way that cannot be reversed.
+//! Report v1 keeps at most `MAX_VALIDATE_EVENTS` events, but counts and fix blockers continue past
+//! it; `invalid_character` counts distinct byte values, and invalid UTF-8 in names is escaped in a
+//! way that cannot be reversed. Report v2 (`Report`) is a separate scan under `fasta.zig`'s rules:
+//! exact counts per finding code, each code's first occurrence, and no event list.
 //! The alphabet is chosen from a 100,000-base sample through `fasta.detectType`.
 //! `--fix` refuses content before the first header and an output that is the input, and writes
 //! through atomic replacement.
@@ -30,7 +31,9 @@ pub const Schema = enum {
     refseq,
 };
 
-/// Not validated here: `fix_format_only` and `output_path` require `fix`.
+pub const ReportVersion = enum { v1, v2 };
+
+/// Not validated here: `fix_format_only` and `output_path` require `fix`; report v2 ignores `fix`.
 pub const Options = struct {
     strict: bool = false,
     output_mode: OutputMode = .text,
@@ -40,6 +43,9 @@ pub const Options = struct {
     schema: Schema = .none,
     custom_alphabet: ?[]const u8 = null,
     max_header_len: usize = DEFAULT_MAX_HEADER_LEN,
+    report: ReportVersion = .v1,
+    /// Producer version in a v2 JSON report: trusted UTF-8 of at most 32 bytes.
+    producer_version: ?[]const u8 = null,
 };
 
 pub const Level = enum {
@@ -134,6 +140,48 @@ pub const Summary = struct {
 
 pub const Result = struct { status: u8, truncated: bool, fix_written: bool };
 
+/// Owns one input's v2 counts and first occurrences; `validation` returns a view that borrows it.
+pub const Report = struct {
+    completion: reporting.Validation.Completion = .complete,
+    findings: [REPORT_CODES.len]reporting.Finding = blk: {
+        var findings: [REPORT_CODES.len]reporting.Finding = undefined;
+        for (REPORT_CODES, &findings) |code, *entry| entry.* = .{ .code = code };
+        break :blk findings;
+    },
+    examined: reporting.Validation.Examined = .{},
+    alphabet: diagnostics.AlphabetPolicy,
+    records_with_errors: u64 = 0,
+    records_with_warnings: u64 = 0,
+    invalid_symbols: [256]u64 = @splat(0),
+
+    pub fn validation(self: *const Report, options: Options) reporting.Validation {
+        return .{
+            .completion = self.completion,
+            .strict = options.strict,
+            .alphabet = self.alphabet,
+            .max_header_bytes = options.max_header_len,
+            .convention = convention(options.schema),
+            .examined = self.examined,
+            .records_with_errors = self.records_with_errors,
+            .records_with_warnings = self.records_with_warnings,
+            .findings = &self.findings,
+            .invalid_symbols = &self.invalid_symbols,
+        };
+    }
+
+    pub fn finding(self: *const Report, comptime code: diagnostics.Code) *const reporting.Finding {
+        return &self.findings[comptime reportSlot(code)];
+    }
+
+    /// 0 clean, 2 warnings only, 1 for errors, warnings under `strict`, or an unfinished report.
+    pub fn status(self: *const Report, options: Options) u8 {
+        const view = self.validation(options);
+        if (self.completion != .complete or view.codes(.@"error") != 0) return 1;
+        if (view.codes(.warning) != 0) return if (options.strict) 1 else 2;
+        return 0;
+    }
+};
+
 pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, options: Options, failure: *diagnostics.Failure) diagnostics.Error!Result {
     failure.reset(.validate);
     failure.sources.set(.fasta, .{ .label = .{ .borrowed = fasta_path }, .kind = .path });
@@ -155,6 +203,10 @@ pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const
         break :blk fasta_map.?.memory;
     };
     if (fasta_map) |*map| platform.adviseSequential(map.memory);
+    var out_buf: [65536]u8 = undefined;
+    var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
+    errdefer stdout_fw.interface.end = 0;
+    if (options.report == .v2) return writeReport(allocator, data, options, &stdout_fw, failure, &diag);
     var summary = try scanData(allocator, data, options, &diag);
     defer summary.deinit(allocator);
     failure.work_complete = true;
@@ -165,9 +217,6 @@ pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const
         try checkFixAllowed(&summary, options, failure);
         try writeFixed(io, data, summary.record_widths.items, output_path, file, stat, failure);
     }
-    var out_buf: [65536]u8 = undefined;
-    var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
-    errdefer stdout_fw.interface.end = 0;
     failure.outputs.stdout.state = .streaming;
     failure.outputs.stdout.may_be_partial = true;
     writeSummary(&stdout_fw.interface, &summary, options) catch |err| return diag.fail(.{ .@"io.write_failed" = {} }, .report, .stdout, stdout_fw.err orelse err);
@@ -184,6 +233,15 @@ pub fn validateData(allocator: std.mem.Allocator, data: []const u8, options: Opt
     const result = try scanData(allocator, data, options, &diag);
     failure.succeed();
     return result;
+}
+
+/// After a failure, `report` covers the lines before the failing one and is `interrupted`.
+pub fn reportData(allocator: std.mem.Allocator, data: []const u8, options: Options, report: *Report, failure: *diagnostics.Failure) diagnostics.Error!void {
+    failure.reset(.validate);
+    failure.sources.set(.fasta, .{ .label = .{ .borrowed = "validated input" }, .kind = .memory });
+    var diag = Diagnostics{ .failure = failure };
+    try scanReport(allocator, data, options, report, &diag);
+    failure.succeed();
 }
 
 pub fn exitCode(error_count: usize, warning_count: usize, strict: bool) u8 {
@@ -215,11 +273,7 @@ pub fn checkFixAllowed(summary: *const Summary, options: Options, failure: *diag
         .null_byte => if (event.control_place == .header) .{ .header_control_byte = .{ .byte = 0, .grammar = .legacy_nul_only } } else if (event.control_place == .sequence) .{ .sequence_control_byte = .{ .byte = 0, .grammar = .legacy_nul_only } } else .{ .content_before_header = .{ .content_bytes = .{ .at_least = 1 } } },
         .invalid_character => blk: {
             var policy = diagnostics.AlphabetPolicy{ .alphabet = if (options.custom_alphabet != null) .custom else if (summary.sequence_type == .nucleotide) .nucleotide else .protein, .selection = if (options.custom_alphabet != null) .custom else .automatic, .sample = if (options.custom_alphabet == null) .{ .symbols = @intCast(summary.type_bases_sampled), .rule = .nucleotide_above_90_percent } else null };
-            if (options.custom_alphabet) |custom| {
-                var bits: [32]u8 = .{0} ** 32;
-                for (custom) |byte| bits[byte / 8] |= @as(u8, 1) << @intCast(byte % 8);
-                policy.custom_symbols = bits;
-            }
+            if (options.custom_alphabet) |custom| policy.custom_symbols = customSymbols(custom);
             break :blk .{ .invalid_symbol = .{ .byte = event.byte, .policy = policy } };
         },
         else => return failure.fail(.{ .details = .{ .@"internal.consistency_failed" = .{ .component = .validator, .check = .codec_state } }, .stage = .scan, .at = eventReference(event) }),
@@ -276,6 +330,10 @@ const Diagnostics = struct {
 };
 
 const UTF8_BOM = "\xEF\xBB\xBF";
+
+const NUCLEOTIDE_SYMBOLS = "ACGTUNRYWSMKHBVDacgtunrywsmkhbvd";
+
+const PROTEIN_SYMBOLS = "ACDEFGHIKLMNPQRSTVWYBZJXUO*-acdefghiklmnpqrstvwybzjxuo";
 
 const DEFAULT_MAX_HEADER_LEN = 1024;
 
@@ -743,8 +801,8 @@ fn appendInvalidCharacterEvents(
     const alphabet = if (options.custom_alphabet) |custom|
         buildAlphabet(custom)
     else switch (sequence_type) {
-        .nucleotide => buildAlphabet("ACGTUNRYWSMKHBVDacgtunrywsmkhbvd"),
-        .protein => buildAlphabet("ACDEFGHIKLMNPQRSTVWYBZJXUO*-acdefghiklmnpqrstvwybzjxuo"),
+        .nucleotide => buildAlphabet(NUCLEOTIDE_SYMBOLS),
+        .protein => buildAlphabet(PROTEIN_SYMBOLS),
     };
 
     for (byte_counts, 0..) |count, i| {
@@ -769,6 +827,12 @@ fn buildAlphabet(chars: []const u8) [256]bool {
     var table = [_]bool{false} ** 256;
     for (chars) |byte| table[byte] = true;
     return table;
+}
+
+fn customSymbols(custom: []const u8) [32]u8 {
+    var bits: [32]u8 = @splat(0);
+    for (custom) |byte| bits[byte / 8] |= @as(u8, 1) << @intCast(byte % 8);
+    return bits;
 }
 
 fn trimSequenceRight(line: []const u8) []const u8 {
@@ -1232,6 +1296,368 @@ fn firstKind(summary: *const Summary, kind: Kind) ?Event {
         if (event.kind == kind) return event;
     }
     return null;
+}
+
+// --- Report v2 ---
+
+const REPORT_CODES = [_]diagnostics.Code{
+    .@"fasta.no_records",
+    .@"fasta.content_before_header",
+    .@"fasta.header_control_byte",
+    .@"fasta.sequence_control_byte",
+    .@"fasta.empty_record",
+    .@"fasta.empty_identifier",
+    .@"fasta.duplicate_identifier",
+    .@"fasta.long_header",
+    .@"header.convention_mismatch",
+    .@"sequence.invalid_symbol",
+    .@"format.sequence_whitespace",
+    .@"format.blank_sequence_line",
+    .@"format.inconsistent_wrapping",
+    .@"format.leading_bom",
+    .@"format.missing_terminal_newline",
+    .@"format.mixed_line_endings",
+};
+
+// Sequence byte classes; bit `n` marks a symbol outside candidate alphabet `n`.
+const WHITESPACE: u8 = 1 << 2;
+const CONTROL: u8 = 1 << 3;
+
+fn outsideBit(candidate: usize) u8 {
+    return @as(u8, 1) << @intCast(candidate);
+}
+
+fn reportSlot(comptime code: diagnostics.Code) usize {
+    return std.mem.indexOfScalar(diagnostics.Code, &REPORT_CODES, code) orelse @compileError("not a report v2 code: " ++ @tagName(code));
+}
+
+const REPORT_SLOTS = blk: {
+    var slots: [std.enums.values(diagnostics.Code).len]?u8 = @splat(null);
+    for (REPORT_CODES, 0..) |code, slot| slots[@intFromEnum(code)] = slot;
+    break :blk slots;
+};
+
+fn convention(schema: Schema) ?diagnostics.Convention {
+    return switch (schema) {
+        .none => null,
+        .uniprot => .uniprot,
+        .refseq => .refseq,
+    };
+}
+
+fn alphabetPolicy(options: Options, candidate: usize, sampled: u64) diagnostics.AlphabetPolicy {
+    if (options.custom_alphabet) |custom| return .{ .alphabet = .custom, .selection = .custom, .custom_symbols = customSymbols(custom) };
+    return .{ .alphabet = if (candidate == 0) .nucleotide else .protein, .selection = .automatic, .sample = .{ .symbols = @intCast(sampled), .rule = .nucleotide_above_90_percent } };
+}
+
+fn writeReport(allocator: std.mem.Allocator, data: []const u8, options: Options, stdout_fw: *std.Io.File.Writer, failure: *diagnostics.Failure, diag: *Diagnostics) diagnostics.Error!Result {
+    const report = allocator.create(Report) catch |err| return diag.oom(.validation_report, err);
+    defer allocator.destroy(report);
+    const scanned = scanReport(allocator, data, options, report, diag);
+    if (scanned) |_| failure.succeed() else |_| {}
+    const view = report.validation(options);
+    failure.outputs.stdout.state = .streaming;
+    failure.outputs.stdout.may_be_partial = true;
+    const written = switch (options.output_mode) {
+        .text => reporting.writeValidationText(&stdout_fw.interface, failure, &view),
+        .json_lines, .json_summary => reporting.writeJson(&stdout_fw.interface, failure, .{ .version = options.producer_version, .accepted = report.status(options) != 1, .validation = &view }),
+    };
+    written catch |err| return diag.fail(.{ .@"io.write_failed" = {} }, .report, .stdout, stdout_fw.err orelse err);
+    if (diagnostics.flushOutput(stdout_fw, &failure.outputs.stdout)) |cause| return diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .stdout, cause);
+    try scanned;
+    return .{ .status = report.status(options), .truncated = false, .fix_written = false };
+}
+
+fn scanReport(allocator: std.mem.Allocator, data: []const u8, options: Options, report: *Report, diag: *Diagnostics) diagnostics.Error!void {
+    report.* = .{ .completion = .interrupted, .alphabet = alphabetPolicy(options, 0, 0) };
+    const scan = allocator.create(ReportScan) catch |err| return diag.oom(.validation_report, err);
+    defer allocator.destroy(scan);
+    scan.* = .init(report, options, data);
+    defer scan.names.deinit(allocator);
+    scan.run(allocator, data, diag) catch |err| {
+        scan.finishScan(data, .interrupted);
+        return err;
+    };
+    scan.finishScan(data, .complete);
+}
+
+const Where = struct { offset: u64, line: u64, column: u64 };
+
+const LineEnding = enum { lf, crlf };
+
+const Definition = struct { line: u64, offset: u64 };
+
+const SymbolLine = struct { symbols: u64, at: diagnostics.Reference };
+
+const Candidate = struct {
+    records: u64 = 0,
+    records_with_errors: u64 = 0,
+    first: ?reporting.Occurrence = null,
+};
+
+const ReportRecord = struct {
+    ordinal: u64 = 0,
+    identifier: []const u8 = "",
+    header: diagnostics.Reference = .{},
+    symbols: u64 = 0,
+    width: ?u64 = null,
+    last_line: ?SymbolLine = null,
+    wrapping_reported: bool = false,
+    classes: u8 = 0,
+    has_error: bool = false,
+    has_warning: bool = false,
+};
+
+const ReportScan = struct {
+    report: *Report,
+    options: Options,
+    classes: [256]u8,
+    byte_counts: [256]u64 = @splat(0),
+    sample_counts: [256]u64 = @splat(0),
+    sample_total: u64 = 0,
+    candidates: [2]Candidate = .{ .{}, .{} },
+    last_records: [REPORT_CODES.len]u64 = @splat(0),
+    names: std.StringHashMapUnmanaged(Definition) = .empty,
+    record: ReportRecord = .{},
+    first_ending: ?LineEnding = null,
+    end: Where,
+
+    fn init(report: *Report, options: Options, data: []const u8) ReportScan {
+        const alphabets: [2][256]bool = if (options.custom_alphabet) |custom|
+            .{ buildAlphabet(custom), buildAlphabet(custom) }
+        else
+            .{ buildAlphabet(NUCLEOTIDE_SYMBOLS), buildAlphabet(PROTEIN_SYMBOLS) };
+        var classes: [256]u8 = undefined;
+        for (&classes, 0..) |*class, index| {
+            const byte: u8 = @intCast(index);
+            class.* = if (byte == ' ' or byte == '\t') WHITESPACE else if (byte < ' ') CONTROL else @as(u8, @intFromBool(!alphabets[0][index])) | @as(u8, @intFromBool(!alphabets[1][index])) << 1;
+        }
+        const start: u64 = if (std.mem.startsWith(u8, data, UTF8_BOM)) UTF8_BOM.len else 0;
+        return .{ .report = report, .options = options, .classes = classes, .end = .{ .offset = start, .line = 1, .column = start + 1 } };
+    }
+
+    fn run(self: *ReportScan, allocator: std.mem.Allocator, data: []const u8, diag: *Diagnostics) diagnostics.Error!void {
+        var pos: usize = 0;
+        if (std.mem.startsWith(u8, data, UTF8_BOM)) {
+            self.count(.{ .@"format.leading_bom" = {} }, fileReference(.{ .offset = 0, .line = 1, .column = 1 }), null);
+            pos = UTF8_BOM.len;
+        }
+        var line_number: u64 = 1;
+        while (pos < data.len) : (line_number += 1) {
+            const line_end = findNextNewline(data, pos);
+            const has_lf = line_end < data.len;
+            const crlf = has_lf and line_end > pos and data[line_end - 1] == '\r';
+            const line = data[pos .. line_end - @intFromBool(crlf)];
+            const where = Where{ .offset = pos, .line = line_number, .column = if (line_number == 1) pos + 1 else 1 };
+            if (line.len != 0 and line[0] == '>') {
+                try self.checkHeader(allocator, line, where, diag);
+            } else if (self.record.ordinal != 0) {
+                self.checkSequenceLine(line, where);
+            } else self.checkPreambleLine(line, where);
+            const after: Where = .{ .offset = pos + line.len, .line = line_number, .column = where.column + @as(u64, line.len) };
+            if (has_lf) {
+                self.checkLineEnding(if (crlf) .crlf else .lf, after);
+                pos = line_end + 1;
+            } else {
+                self.end = after;
+                pos = data.len;
+            }
+            self.report.examined.bytes = pos;
+            self.report.examined.lines = line_number;
+        }
+    }
+
+    fn checkHeader(self: *ReportScan, allocator: std.mem.Allocator, line: []const u8, where: Where, diag: *Diagnostics) diagnostics.Error!void {
+        const identifier = line[1..fasta.findNameDelimiter(line, 1)];
+        var first_definition: ?Definition = null;
+        if (identifier.len != 0) {
+            diag.at = fileReference(where);
+            const entry = self.names.getOrPut(allocator, identifier) catch |err| return diag.oom(.validation_identifiers, err);
+            if (entry.found_existing) first_definition = entry.value_ptr.* else entry.value_ptr.* = .{ .line = where.line, .offset = where.offset + 1 };
+        }
+        self.finishRecord();
+        self.report.examined.records += 1;
+        self.record = .{ .ordinal = self.report.examined.records, .identifier = identifier };
+        self.record.header = self.reference(where, 0);
+        if (identifier.len == 0) self.count(.{ .@"fasta.empty_identifier" = {} }, self.reference(where, 1), null);
+        if (first_definition) |first| {
+            const column = if (first.line == 1) first.offset + 1 else 2;
+            self.count(.{ .@"fasta.duplicate_identifier" = .{} }, self.reference(where, 1), .{ .source = .fasta, .location = .{ .offset = first.offset, .line = first.line, .column = column } });
+        }
+        for (line[1..], 1..) |byte, index| {
+            if (byte < ' ' and byte != '\t') self.count(.{ .@"fasta.header_control_byte" = .{ .byte = byte, .grammar = .controls_except_tab } }, self.reference(where, index), null);
+        }
+        if (line.len - 1 > self.options.max_header_len) self.count(.{ .@"fasta.long_header" = .{ .observed_bytes = @as(u64, line.len) - 1, .limit_bytes = self.options.max_header_len } }, self.record.header, null);
+        if (convention(self.options.schema)) |selected| {
+            if (!matchesSchema(self.options.schema, line)) self.count(.{ .@"header.convention_mismatch" = .{ .convention = selected } }, self.record.header, null);
+        }
+    }
+
+    fn checkPreambleLine(self: *ReportScan, line: []const u8, where: Where) void {
+        for (line, 0..) |byte, index| {
+            if (byte != ' ' and byte != '\t' and byte != '\r') {
+                return self.count(.{ .@"fasta.content_before_header" = .{ .content_bytes = .{ .exact = line.len } } }, self.reference(where, index), null);
+            }
+        }
+    }
+
+    fn checkSequenceLine(self: *ReportScan, line: []const u8, where: Where) void {
+        if (line.len == 0) return self.count(.{ .@"format.blank_sequence_line" = {} }, self.reference(where, 0), null);
+        var classes: u8 = 0;
+        for (line) |byte| {
+            self.byte_counts[byte] += 1;
+            classes |= self.classes[byte];
+        }
+        const symbols: u64 = if (classes & (WHITESPACE | CONTROL) == 0) line.len else self.checkIrregularBytes(line, where);
+        if (self.sample_total < TYPE_SAMPLE_BASES) self.addSample(line);
+        inline for (0..2) |candidate| {
+            if (classes & outsideBit(candidate) != 0 and self.candidates[candidate].first == null) {
+                self.candidates[candidate].first = self.firstOutside(line, where, outsideBit(candidate));
+            }
+        }
+        self.record.classes |= classes;
+        self.record.symbols += symbols;
+        self.report.examined.symbols += symbols;
+        if (symbols != 0) self.checkWrapping(symbols, where);
+    }
+
+    fn checkIrregularBytes(self: *ReportScan, line: []const u8, where: Where) u64 {
+        var whitespace: u64 = 0;
+        var first_whitespace: usize = 0;
+        var controls: u64 = 0;
+        for (line, 0..) |byte, index| {
+            if (self.classes[byte] == WHITESPACE) {
+                if (whitespace == 0) first_whitespace = index;
+                whitespace += 1;
+            } else if (self.classes[byte] == CONTROL) {
+                controls += 1;
+                self.count(.{ .@"fasta.sequence_control_byte" = .{ .byte = byte, .grammar = .controls_except_tab } }, self.reference(where, index), null);
+            }
+        }
+        if (whitespace != 0) self.count(.{ .@"format.sequence_whitespace" = .{ .whitespace_bytes = whitespace } }, self.reference(where, first_whitespace), null);
+        return @as(u64, line.len) - whitespace - controls;
+    }
+
+    fn addSample(self: *ReportScan, line: []const u8) void {
+        for (line) |byte| {
+            if (!fasta.isBase(byte)) continue;
+            if (self.sample_total == TYPE_SAMPLE_BASES) return;
+            self.sample_counts[byte] += 1;
+            self.sample_total += 1;
+        }
+    }
+
+    fn firstOutside(self: *const ReportScan, line: []const u8, where: Where, bit: u8) reporting.Occurrence {
+        const index = for (line, 0..) |byte, index| {
+            if (self.classes[byte] & bit != 0) break index;
+        } else unreachable;
+        return .{
+            .details = .{ .@"sequence.invalid_symbol" = .{ .byte = line[index], .policy = self.report.alphabet } },
+            .at = self.reference(where, index),
+            .identifier = reporting.Identifier.init(self.record.identifier),
+        };
+    }
+
+    fn checkWrapping(self: *ReportScan, symbols: u64, where: Where) void {
+        if (self.record.last_line) |previous| {
+            const width = self.record.width orelse previous.symbols;
+            self.record.width = width;
+            if (previous.symbols != width) self.reportWrapping(width, previous);
+        }
+        self.record.last_line = .{ .symbols = symbols, .at = self.reference(where, 0) };
+    }
+
+    fn reportWrapping(self: *ReportScan, width: u64, line: SymbolLine) void {
+        if (self.record.wrapping_reported) return;
+        self.record.wrapping_reported = true;
+        self.count(.{ .@"format.inconsistent_wrapping" = .{ .expected_width = width, .actual_width = line.symbols } }, line.at, null);
+    }
+
+    fn checkLineEnding(self: *ReportScan, ending: LineEnding, after: Where) void {
+        const first = self.first_ending orelse {
+            self.first_ending = ending;
+            return;
+        };
+        if (ending != first and self.report.finding(.@"format.mixed_line_endings").occurrences == 0) {
+            self.count(.{ .@"format.mixed_line_endings" = {} }, fileReference(after), null);
+        }
+    }
+
+    fn finishRecord(self: *ReportScan) void {
+        const record = &self.record;
+        if (record.ordinal == 0) return;
+        if (record.last_line) |last| {
+            if (record.width) |width| {
+                if (last.symbols > width) self.reportWrapping(width, last);
+            }
+        }
+        if (record.symbols == 0) self.count(.{ .@"fasta.empty_record" = {} }, record.header, null);
+        inline for (0..2) |candidate| {
+            const outside = record.classes & outsideBit(candidate) != 0;
+            if (outside) self.candidates[candidate].records += 1;
+            if (outside or record.has_error) self.candidates[candidate].records_with_errors += 1;
+        }
+        if (record.has_warning) self.report.records_with_warnings += 1;
+    }
+
+    fn finishScan(self: *ReportScan, data: []const u8, completion: reporting.Validation.Completion) void {
+        const report = self.report;
+        report.completion = completion;
+        if (completion == .complete) {
+            self.finishRecord();
+            if (report.examined.records == 0) self.count(.{ .@"fasta.no_records" = {} }, .{ .source = .fasta }, null);
+            if (data.len != 0 and data[data.len - 1] != '\n') self.count(.{ .@"format.missing_terminal_newline" = {} }, fileReference(self.end), null);
+        }
+        const chosen: usize = if (self.options.custom_alphabet != null) 0 else @intFromBool(fasta.detectType(&self.sample_counts, self.sample_total) == .protein);
+        report.alphabet = alphabetPolicy(self.options, chosen, self.sample_total);
+        var occurrences: u64 = 0;
+        for (self.byte_counts, &report.invalid_symbols, self.classes) |seen, *invalid, class| {
+            if (class & outsideBit(chosen) == 0) continue;
+            invalid.* = seen;
+            occurrences += seen;
+        }
+        const invalid = &report.findings[comptime reportSlot(.@"sequence.invalid_symbol")];
+        invalid.occurrences = occurrences;
+        invalid.records = self.candidates[chosen].records;
+        invalid.first = self.candidates[chosen].first;
+        if (invalid.first) |*first| first.details.@"sequence.invalid_symbol".policy = report.alphabet;
+        report.records_with_errors = self.candidates[chosen].records_with_errors;
+    }
+
+    fn count(self: *ReportScan, details: diagnostics.Details, at: diagnostics.Reference, related: ?diagnostics.Reference) void {
+        const code = std.meta.activeTag(details);
+        const slot = REPORT_SLOTS[@intFromEnum(code)].?;
+        const finding = &self.report.findings[slot];
+        finding.occurrences += 1;
+        if (at.record) |record| {
+            if (self.last_records[slot] != record) {
+                self.last_records[slot] = record;
+                finding.records += 1;
+            }
+            switch (diagnostics.metadata(code).severity) {
+                .@"error" => self.record.has_error = true,
+                .warning => self.record.has_warning = true,
+            }
+        }
+        if (finding.first == null) finding.first = .{
+            .details = details,
+            .at = at,
+            .related = related,
+            .identifier = if (at.record != null) reporting.Identifier.init(self.record.identifier) else null,
+        };
+    }
+
+    fn reference(self: *const ReportScan, where: Where, index: usize) diagnostics.Reference {
+        return .{
+            .source = .fasta,
+            .location = .{ .offset = where.offset + @as(u64, index), .line = where.line, .column = where.column + @as(u64, index) },
+            .record = if (self.record.ordinal == 0) null else self.record.ordinal,
+        };
+    }
+};
+
+fn fileReference(where: Where) diagnostics.Reference {
+    return .{ .source = .fasta, .location = .{ .offset = where.offset, .line = where.line, .column = where.column } };
 }
 
 test "[failure] - [validate fix]: keeps original preamble location and identity cause" {

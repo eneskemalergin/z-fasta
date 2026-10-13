@@ -71,6 +71,10 @@ z-fasta validate --strict genome.fa
 z-fasta validate --json genome.fa
 z-fasta validate --json --summary genome.fa
 
+# Report v2: exact counts per code, reversible identifiers
+z-fasta validate --report v2 genome.fa
+z-fasta validate --report v2 --json genome.fa
+
 # Header policies
 z-fasta validate --schema refseq genome.fa
 z-fasta validate --max-header-len 200 genome.fa

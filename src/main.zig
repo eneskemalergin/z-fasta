@@ -71,7 +71,8 @@ const USAGE =
     \\  --schema NAME            Header schema: uniprot or refseq
     \\  --custom-alphabet CHARS  Override nucleotide/protein alphabet checks
     \\  --max-header-len N       Warn on headers longer than N bytes (default: 1024)
-    \\  Retain 10000 examples; scan/count all input (error without --fix).
+    \\  --report v1|v2           Report version (default: v1); v2 counts every occurrence
+    \\  v1 retains 10000 examples; scan/count all input (error without --fix).
     \\
     \\Examples:
     \\  z-fasta index genome.fa                  Create .zfi binary index
@@ -141,7 +142,7 @@ fn selectErrorFormat(args: std.process.Args.Iterator, operation: diagnostics.Ope
 fn takesValue(operation: diagnostics.Operation, arg: []const u8) bool {
     return switch (operation) {
         .get => std.mem.eql(u8, arg, "--bed") or std.mem.eql(u8, arg, "--names"),
-        .validate => std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--schema") or std.mem.eql(u8, arg, "--custom-alphabet") or std.mem.eql(u8, arg, "--max-header-len"),
+        .validate => std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--schema") or std.mem.eql(u8, arg, "--custom-alphabet") or std.mem.eql(u8, arg, "--max-header-len") or std.mem.eql(u8, arg, "--report"),
         else => false,
     };
 }
@@ -393,7 +394,7 @@ fn runStatsCmd(cli: *Cli) diagnostics.Error!u8 {
 
 fn runValidateCmd(cli: *Cli) diagnostics.Error!u8 {
     var path: ?[]const u8 = null;
-    var options = validator.Options{};
+    var options = validator.Options{ .producer_version = VERSION };
     var saw_json = false;
     var saw_summary = false;
     while (cli.next()) |arg| {
@@ -412,6 +413,9 @@ fn runValidateCmd(cli: *Cli) diagnostics.Error!u8 {
             const width = std.fmt.parseInt(usize, raw, 10) catch return invalidWidth(cli, raw);
             if (width == 0) return invalidWidth(cli, raw);
             options.max_header_len = width;
+        } else if (std.mem.eql(u8, arg, "--report")) {
+            const raw = try cli.value(.report, .report_version);
+            options.report = std.meta.stringToEnum(validator.ReportVersion, raw) orelse return cli.fail(.{ .@"usage.invalid_option_value" = .{ .option = .report, .expected = .report_version, .value = cli.failure.retain(raw, 32) } });
         } else {
             try cli.positional(arg);
             if (path != null) return cli.fail(.{ .@"usage.extra_argument" = .{ .argument = .fasta_path, .allowed_count = 1 } });
@@ -421,6 +425,12 @@ fn runValidateCmd(cli: *Cli) diagnostics.Error!u8 {
     if (saw_summary and !saw_json) return cli.fail(.{ .@"usage.option_requires" = .{ .option = .summary, .required = .json } });
     if (options.fix_format_only and !options.fix) return cli.fail(.{ .@"usage.option_requires" = .{ .option = .fix_format_only, .required = .fix } });
     if (options.output_path != null and !options.fix) return cli.fail(.{ .@"usage.option_requires" = .{ .option = .output, .required = .fix } });
+    if (options.report == .v2 and options.fix) {
+        var arguments = diagnostics.Arguments.initEmpty();
+        arguments.insert(.fix);
+        arguments.insert(.report);
+        return cli.fail(.{ .@"usage.conflicting_options" = .{ .arguments = arguments } });
+    }
     const fasta_path = path orelse return cli.fail(.{ .@"usage.missing_argument" = .{ .argument = .fasta_path } });
     const result = try validator.runValidate(std.heap.page_allocator, cli.io, fasta_path, options, cli.failure);
     if (result.truncated and cli.format == .text) try writeNotice(cli, .{ .cap = result.fix_written });
