@@ -28,6 +28,7 @@ GROUP_LABELS = {
     "fixture": "Messy fixtures",
     "variant": "Messy proteome variants",
     "real": "REAL datasets",
+    "flags": "Options on REAL data",
 }
 
 
@@ -154,6 +155,23 @@ def md_correctness(tests: list[dict]) -> str:
         "",
         "\n".join(verdict_lines),
     ]
+    flags = [row for row in checked if row["group"] == "flags"]
+    if flags:
+        parts += [
+            "",
+            "### Options on REAL data",
+            "",
+            "Each option runs on the REAL datasets, and the expected value comes from another tool: bytes outside the alphabet counted with `grep` and `tr`, headers and identifiers checked with `awk`, and a repaired copy compared record for record after joining its lines.",
+            "",
+        ]
+        for dataset in DATASETS:
+            items = [row for row in flags if row["case"] == dataset]
+            if not items:
+                continue
+            parts.append(f"- {dataset}:")
+            for row in items:
+                verdict = f"{row['observed']}, as expected" if row["status"] == "pass" else f"expected {row['expected']}, observed {row['observed']}; **failed**"
+                parts.append(f"  - `{row['check']}`: {verdict}.")
     if differences:
         parts += [
             "",

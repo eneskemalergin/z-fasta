@@ -834,6 +834,36 @@ test "[cli] - [validate]: returns exact status and text for each outcome" {
     try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", invalid }, 1, error_text, "");
 }
 
+test "[cli] - [validate]: each option reaches its rule" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const path = try writeFastaArtifact(allocator, "cli-validate-options", ">ab x\nACGT\n>cd\nAC\n");
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const cases = [_]struct { options: []const []const u8, code: []const u8, occurrences: []const u8 }{
+        .{ .options = &.{ "--type", "rna" }, .code = "sequence.invalid_symbol", .occurrences = "1" },
+        .{ .options = &.{ "--custom-alphabet", "ACG" }, .code = "sequence.invalid_symbol", .occurrences = "1" },
+        .{ .options = &.{ "--schema", "uniprot" }, .code = "header.convention_mismatch", .occurrences = "2" },
+        .{ .options = &.{ "--max-header-len", "2" }, .code = "fasta.long_header", .occurrences = "1" },
+    };
+    for (cases) |case| {
+        const argv = try std.mem.concat(allocator, []const u8, &.{ &.{ ZFASTA_BIN, "validate", "--json" }, case.options, &.{path} });
+        const result = try std.process.run(allocator, threaded.io(), .{ .argv = argv });
+        const validation = (try std.json.parseFromSlice(std.json.Value, allocator, result.stdout, .{})).value.object.get("validation").?.object;
+        const codes = validation.get("codes").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), codes.len);
+        try std.testing.expectEqualStrings(case.code, codes[0].object.get("code").?.string);
+        try std.testing.expectEqualStrings(case.occurrences, codes[0].object.get("occurrences").?.string);
+    }
+    const budget = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "validate", "--json", "--max-name-memory", "1", path } });
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, budget.term);
+    const report = (try std.json.parseFromSlice(std.json.Value, allocator, budget.stdout, .{})).value.object.get("validation").?.object;
+    try std.testing.expectEqualStrings("incomplete", report.get("completion").?.string);
+    try std.testing.expectEqualStrings("1", report.get("name_budget").?.object.get("stopped_at_record").?.string);
+}
+
 test "[cli] - [validate json]: writes one report object with the status" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

@@ -773,6 +773,37 @@ verify_edge_paths() {
     fi
 }
 
+# The REAL datasets: the oracle's exact report on the transcriptome and proteome (the genome is too
+# large for it, so its `.zfi` and `.fai` reports are compared instead), and a JSON failure for an
+# index older than its FASTA.
+verify_real() {
+    section_hdr real "REAL datasets"
+    ensure_real_data
+    local ds source dir view code
+    for ds in Genome Transcriptome Proteome; do
+        source="${REAL_DATASETS[$ds]:-}"
+        [[ -n "$source" ]] || continue
+        dir="$TMPDIR/real_$ds"
+        mkdir -p "$dir"
+        view="$dir/${source##*/}"
+        ln -sfn "$source" "$view"
+        ensure_index "$view" || { fail "[real:$ds] index setup" "$TMPDIR/faidx.err"; continue; }
+        if [[ "$ds" == Genome ]]; then
+            run_stats "$view" "$dir/zfi.txt" "$dir/zfi.err" || fail "[real:$ds] stats through .zfi" "$dir/zfi.err"
+            mv "$view.zfi" "$dir/stash.zfi"
+            run_stats "$view" "$dir/fai.txt" "$dir/fai.err" || fail "[real:$ds] stats through .fai" "$dir/fai.err"
+            mv "$dir/stash.zfi" "$view.zfi"
+            check_oracle "[real:$ds] .zfi == .fai" same "$dir/zfi.txt" "$dir/fai.txt"
+        else
+            oracle expected "$view" > "$dir/expected.json"
+            verify_formats "real" "real_$ds" "$view" "$dir/expected.json"
+        fi
+        touch -d '2000-01-01' "$view.zfi"
+        code="$("$ZFASTA" stats --error-format=json "$view" 2>&1 > /dev/null | "$PYTHON" -c 'import json, sys; print(json.load(sys.stdin)["failure"]["primary"]["code"])')"
+        [[ "$code" == index.older_than_source ]] && pass "[real:$ds] an older index fails as JSON" || fail "[real:$ds] an older index fails as JSON ($code)" /dev/null
+    done
+}
+
 run_tests() {
     PASS=0
     FAIL=0
@@ -824,6 +855,8 @@ run_tests() {
     if ! $SKIP_DEDUP; then
         verify_dedup_stats
     fi
+
+    verify_real
 
     if ! $SKIP_EDGE; then
         verify_edge_paths

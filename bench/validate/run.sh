@@ -241,6 +241,84 @@ for name, data in cases.items():
 PY
 }
 
+# Bytes of sequence lines outside the byte set $2 (line ends and spaces excluded), by tr.
+outside_count() {
+    LC_ALL=C grep -v '^>' "$1" | LC_ALL=C tr -d "$2"$'\n\r \t' | wc -c | tr -d ' '
+}
+
+# One value from validate's JSON report: the Python expression $2 over `v` (the validation object).
+validate_value() {
+    local file="$1" expr="$2"; shift 2
+    "$ZFASTA" validate --json "$@" "$file" 2>/dev/null | "$PYTHON" -c '
+import json, sys
+v = json.loads(sys.stdin.read())["validation"]
+codes = {c["code"]: c for c in v["codes"]}
+occ = lambda code: int(codes[code]["occurrences"]) if code in codes else 0
+print(eval(sys.argv[1]))' "$expr"
+}
+
+# Each record joined onto one line after its header, so two layouts of the same records compare equal.
+joined_records() {
+    LC_ALL=C tr -d '\r \t' < "$1" | awk '/^>/ { if (n) print seq; print; seq = ""; n = 1; next } { seq = seq $0 } END { if (n) print seq }'
+}
+
+check_real_flags() {
+    local ds="$1" file="$2"
+    local dna='ACGTNRYWSMKHBVDacgtnrywsmkhbvd' rna='ACGUNRYWSMKHBVDacgunrywsmkhbvd'
+    local protein='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz*-'
+    case "$ds" in
+        Genome)
+            record flags "$ds" "--type dna (tr)" "$(outside_count "$file" "$dna")" "$(validate_value "$file" 'occ("sequence.invalid_symbol")' --type dna)"
+            ;;
+        Transcriptome)
+            record flags "$ds" "--type dna (tr)" "$(outside_count "$file" "$dna")" "$(validate_value "$file" 'occ("sequence.invalid_symbol")' --type dna)"
+            record flags "$ds" "--type rna (tr)" "$(outside_count "$file" "$rna")" "$(validate_value "$file" 'occ("sequence.invalid_symbol")' --type rna)"
+            record flags "$ds" "--custom-alphabet (tr)" "$(outside_count "$file" ACGT)" "$(validate_value "$file" 'occ("sequence.invalid_symbol")' --custom-alphabet ACGT)"
+            record flags "$ds" "--schema refseq (awk)" \
+                "$(awk '/^>/ { id = substr($1, 2); if (id !~ /^(NC|NM|NR|NP|NW|NG|NT|NZ|XM|XR|XP)_/) n++ } END { print n + 0 }' "$file")" \
+                "$(validate_value "$file" 'occ("header.convention_mismatch")' --schema refseq)"
+            record flags "$ds" "--max-name-memory" "incomplete; identifiers incomplete" \
+                "$(validate_value "$file" 'v["completion"] + "; identifiers " + v["checks"]["identifiers"]' --max-name-memory 2000000)"
+            ;;
+        Proteome)
+            record flags "$ds" "--type protein (tr)" "$(outside_count "$file" "$protein")" "$(validate_value "$file" 'occ("sequence.invalid_symbol")' --type protein)"
+            record flags "$ds" "--schema uniprot (awk)" \
+                "$(awk '/^>/ { id = substr($1, 2); if (id !~ /^(sp|tr|db)\|[^|]+\|./) n++ } END { print n + 0 }' "$file")" \
+                "$(validate_value "$file" 'occ("header.convention_mismatch")' --schema uniprot)"
+            record flags "$ds" "--max-header-len (awk)" \
+                "$(LC_ALL=C awk '/^>/ { if (length($0) - 1 > 100) n++ } END { print n + 0 }' "$file")" \
+                "$(validate_value "$file" 'occ("fasta.long_header")' --max-header-len 100)"
+            ;;
+    esac
+    record flags "$ds" "--type any" 0 "$(validate_value "$file" 'occ("sequence.invalid_symbol")' --type any)"
+
+    # A repaired copy keeps every record, wraps at the width, and is clean.
+    if [[ "$ds" != Genome ]]; then
+        local fixed="$WORK_DIR/fixed_$ds.fa"
+        "$ZFASTA" validate --fix --width 80 -o "$fixed" "$file" > /dev/null 2>&1 || true
+        local same=no widest
+        cmp -s <(joined_records "$file") <(joined_records "$fixed") && same=yes
+        widest="$(LC_ALL=C awk '!/^>/ { if (length($0) > w) w = length($0) } END { print w + 0 }' "$fixed")"
+        record flags "$ds" "--fix --width (awk)" "same records; widest 80; exit 0" \
+            "$( [[ "$same" == yes ]] && echo same || echo different ) records; widest $widest; exit $("$ZFASTA" validate --strict "$fixed" > /dev/null 2>&1; echo $?)"
+    fi
+
+    # --index=PATH checks the named .fai although a .zfi sits beside the FASTA.
+    local view="$WORK_DIR/explicit_$ds.fa"
+    ln -sfn "$file" "$view"
+    TMPDIR="$WORK_DIR" "$ZFASTA" index "$view" > /dev/null 2>&1
+    TMPDIR="$WORK_DIR" "$ZFASTA" index --emit-fai "$view" > "$WORK_DIR/explicit_$ds.fai" 2> /dev/null
+    record flags "$ds" "--index=PATH" "fai; passed" \
+        "$(validate_value "$view" 'v["index"]["format"] + "; " + v["checks"]["index_match"]' "--index=$WORK_DIR/explicit_$ds.fai")"
+
+    # A refused repair is a JSON failure on stderr and leaves the input as it was.
+    local before after code
+    before="$(stat -c '%s %Y' "$file")"
+    code="$("$ZFASTA" validate --error-format=json --fix -o "$file" "$file" 2>&1 > /dev/null | "$PYTHON" -c 'import json, sys; print(json.load(sys.stdin)["failure"]["primary"]["code"])')"
+    after="$(stat -c '%s %Y' "$file")"
+    record flags "$ds" "--error-format=json" "repair.output_is_input; unchanged" "$code; $( [[ "$before" == "$after" ]] && echo unchanged || echo changed )"
+}
+
 run_tests() {
     PASS=0
     FAIL=0
@@ -353,6 +431,12 @@ run_tests() {
     for name in rna_u dot_gap space_inside tab_at_end; do
         file="$c/difference_$name.fasta"
         observe "$name" "alphabet (seqkit, validate)" "$(seqkit_verdict "$file" dna)" "$(alphabet_verdict "$file")"
+    done
+
+    section_hdr flags "validate's options on the REAL datasets, against counts from tr and awk"
+    for ds in "${DATASETS[@]}"; do
+        file="${REAL_DATASETS[$ds]:-}"
+        [[ -n "$file" ]] && check_real_flags "$ds" "$file"
     done
 
     echo ""

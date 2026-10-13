@@ -601,6 +601,66 @@ PY
     run_messy_case "$MESSY_TEST_DIR/blank_lines.fasta" zfasta-only side-table
     run_messy_case "$MESSY_TEST_DIR/mixed_crlf.fasta" zfasta-only side-table
 
+    # The REAL datasets: `--emit-fai` against samtools byte for byte, the `.zfi` decoded on its own
+    # against samtools' `.fai`, and a JSON failure where `--emit-fai` must refuse a layout.
+    run_real_case() {
+        local label="$1" expected="$2" observed="$3"
+        total=$((total + 1))
+        if [[ "$expected" == "$observed" ]]; then
+            pass=$((pass + 1)); mark="pass"
+        else
+            fail=$((fail + 1)); mark="fail"
+            echo "FAILURE: $label (expected $expected, got $observed)" >> "$fail_log"
+        fi
+        printf '  %s  %s: %s\n' "$mark" "$label" "$observed"
+    }
+
+    echo ""
+    echo "REAL datasets (correctness):"
+    ensure_real_data
+    local real_dir="$EDGE_DIR/real" ds source view PYTHON
+    PYTHON="$(report_python)"
+    mkdir -p "$real_dir"
+    for ds in Genome Transcriptome Proteome; do
+        source="${REAL_DATASETS[$ds]:-}"
+        [[ -n "$source" ]] || continue
+        view="$real_dir/${source##*/}"
+        ln -sfn "$source" "$view"
+        rm -f "$view.fai" "$view.zfi"
+        "$SAMTOOLS" faidx "$source" --fai-idx "$real_dir/$ds.samtools.fai"
+        "$ZFASTA" index --emit-fai "$view" > "$real_dir/$ds.emit.fai" 2>/dev/null
+        run_real_case "$ds --emit-fai (samtools)" same "$(cmp -s "$real_dir/$ds.samtools.fai" "$real_dir/$ds.emit.fai" && echo same || echo different)"
+        TMPDIR="$real_dir" "$ZFASTA" index "$view" > /dev/null 2>&1
+        run_real_case "$ds .zfi entries (samtools)" same "$("$PYTHON" - "$view.zfi" "$real_dir/$ds.samtools.fai" <<'PY'
+import struct, sys
+data = open(sys.argv[1], "rb").read()
+magic, count, _size = struct.unpack_from("<4sIQ", data, 0)
+assert magic == b"ZFI\x01", magic
+footer, blob_len = struct.unpack_from("<4sQ", data, len(data) - 12)
+assert footer == b"ZFNM", footer
+payload_end = len(data) - 12
+if data[payload_end - 12:payload_end - 8] == b"ZFID":
+    payload_end -= 12
+blob = payload_end - blob_len
+rows = []
+for i in range(count):
+    name_offset, name_len, flags, seq_offset, seq_len, line_bases, line_bytes = struct.unpack_from("<QH6sQQII", data, 16 + 40 * i)
+    name = data[blob + name_offset:blob + name_offset + name_len].decode()
+    rows.append("\t".join(map(str, (name, seq_len, seq_offset, line_bases, line_bytes))))
+expected = [line.rstrip("\n") for line in open(sys.argv[2])]
+print("same" if rows == expected else f"different ({len(rows)} entries, {len(expected)} in samtools)")
+PY
+)"
+    done
+    ensure_messy_perf
+    local messy="$MESSY_ZEBRAC_DIR/mixed_widths.fasta"
+    if [[ -f "$messy" ]]; then
+        local code out_bytes
+        code="$("$ZFASTA" index --emit-fai --error-format=json "$messy" 2>&1 > "$real_dir/messy.out" | "$PYTHON" -c 'import json, sys; print(json.load(sys.stdin)["failure"]["primary"]["code"])')"
+        out_bytes="$(wc -c < "$real_dir/messy.out" | tr -d ' ')"
+        run_real_case "mixed_widths --error-format=json" "index.nonuniform_fai; 0 bytes" "$code; $out_bytes bytes"
+    fi
+
     echo ""
     echo "  Correctness: $pass / $((total - review)) match ($fail diff, $review review)"
     echo "  CSV: $csv"

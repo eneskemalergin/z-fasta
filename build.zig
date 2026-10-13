@@ -247,6 +247,19 @@ pub fn build(b: *std.Build) void {
     diagnostics_step.dependOn(&run_test_diagnostics.step);
     diagnostics_step.dependOn(&run_diagnostics_caller.step);
 
+    const library_bench = b.addExecutable(.{
+        .name = "z-fasta-library",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/get/library.zig"),
+            .target = target,
+            .optimize = optimize,
+            .strip = strip,
+            .imports = &.{.{ .name = "z-fasta", .module = library_module }},
+        }),
+    });
+    const library_bench_step = b.step("bench-library", "Build the package lane of the GET benchmark");
+    library_bench_step.dependOn(&b.addInstallArtifact(library_bench, .{}).step);
+
     const prepare_fixtures = b.addRunArtifact(b.addExecutable(.{
         .name = "prepare-test-fixtures",
         .root_module = b.createModule(.{

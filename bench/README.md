@@ -40,6 +40,8 @@ bash bench/stats/run.sh --skip-benchmarks --skip-messy --skip-report
 bash bench/validate/run.sh --skip-benchmarks --skip-report
 ```
 
+The GET suite also times the package: `bench/get/library.zig`, which `run.sh` builds with `zig build bench-library`, opens a reference once with `IndexedReader` and fetches the same multi-region and BED sets. It must print what `z-fasta get` prints for each set before that set is timed.
+
 Each suite has one entrypoint: `bash bench/<index|get|stats|validate>/run.sh`. It runs correctness first, then optional zebrac measurements, then writes `REPORT.md`. The suites have different default sample counts and warmups, so check `--help` or the generated report when those details matter.
 
 The benchmark scripts resolve commands from `tools/bin/` by default. Set `SAMTOOLS`, `BEDTOOLS`, `SEQKIT`, or another tool variable when you intentionally want to compare a different executable. `bench/shared/install_tools.sh` only verifies the local bundle and pinned versions; it does not silently fall back to a command found elsewhere on `PATH`.
@@ -73,6 +75,44 @@ ZEBRAC=$(command -v zebrac) bash bench/validate/run.sh --runs 5 --warmup 3 --dur
 Check each command's exit status before starting the next suite. Review its manifest, output checks, complete workload set and report before updating README or Wiki summaries. Keep units and measured populations consistent between tables and figures. Do not relabel an older report as the new version. If executable code or the measurement method changes afterward, repeat the affected checks and measurements before regenerating its report.
 
 The correctness-only commands above disable both ordinary and messy measurements and report generation. They cannot supply timing, RSS, allocation, stack or binary-size evidence for a report refresh.
+
+## Feature coverage
+
+Every CLI option and package call, with the Zig tests that cover it (file and test target) and its check on the REAL datasets (suite and section). The REAL checks compare with another tool or an independent count, and run in each suite's correctness pass.
+
+- **Every command**
+  - `--help`, `-h`, `--version`, `-V`: `tests/test_diagnostics.zig` (`dispatch`). No REAL check: they print fixed text.
+  - `--error-format=json`: `tests/test_diagnostics.zig` and each command's test file (`diagnostics`). REAL: one failure per command, with its code read from the JSON: `index --emit-fai` on a non-uniform layout (`index.nonuniform_fai`), a `get` start past a record (`request.start_after_sequence`) and `--rc` on the proteome (`transform.complement_on_protein`), `stats` with an index older than its FASTA (`index.older_than_source`), and `validate --fix` onto its input (`repair.output_is_input`).
+  - `--error-format=text`: `tests/test_diagnostics.zig`. No separate REAL check: the same failures render through the text encoder.
+- **index**
+  - Default `.zfi`: `tests/test_index.zig` (`index`, `zfi writer`, `zfi loader`). REAL: index suite, a `.zfi` reader written from the format compares every entry with `samtools faidx`.
+  - `--emit-fai`: `tests/test_index.zig` (`fai output`). REAL: index suite, byte-identical to `samtools faidx`.
+  - `--no-dedup`: `tests/test_index.zig`, `tests/test_library.zig`. No REAL check: the REAL datasets have no duplicate identifiers. The stats suite checks it on a fixture with duplicates (`--no-dedup` keeps more records than the default).
+  - `--dedup`: accepted as the default's name since the first release, but not in `--help`, and no test or check covers it.
+- **get**
+  - Positional regions: `tests/test_get.zig` (`get extraction`, `region resolution`). REAL: GET suite section 6, 100 regions against `samtools faidx`, through `.zfi` and `.fai`.
+  - `--names FILE` and `--names -`: `tests/test_get.zig` (`get names`). REAL: section 6, against `samtools faidx -r`, and the same output from standard input.
+  - `--bed FILE` and `--bed -`: `tests/test_get.zig` (`get bed`, `bed parser`). REAL: section 6, 1,000 rows against `bedtools getfasta`, and the same output from standard input.
+  - `--strand-aware`, `--honor-strand`: `tests/test_get.zig` (`get bed`). REAL: section 6, against `bedtools getfasta -s` on alternating strands.
+  - `--rc`: `tests/test_get.zig` (`get`, `get orientation`). REAL: section 6, against `samtools faidx -i`.
+  - `--complement-only`, `--reverse-only`: `tests/test_get.zig` (`get`, `get orientation`). REAL: section 6, the complement table and the reversal applied to output already checked against samtools.
+  - `--annotate-rc`: `tests/test_get.zig` (`get`, `get bed`). REAL: section 6, every header names the orientation.
+  - `--summary`: `tests/test_get.zig`. REAL: section 6, the region count and base total.
+- **stats**
+  - The report: `tests/test_stats.zig` (`stats`, `stats report`, `sequence type`). REAL: stats suite, the exact oracle on the transcriptome and the proteome through `.zfi` and `.fai`; on the genome, which is too large for the oracle, the `.zfi` and `.fai` reports are identical.
+- **validate**
+  - The report and exit status: `tests/test_validate.zig` (`validate`, `validate scan`, `validate report`). REAL: validate suite, findings on crafted copies and messy variants, and acceptance agreeing with `index`, samtools, and SeqKit.
+  - `--strict`, `--json`: `tests/test_validate.zig` (`validate`, `validate json`). REAL: validate suite, every check reads `--json`; `--strict` on a crafted copy.
+  - `--type`, `--custom-alphabet`: `tests/test_validate.zig` (`validate alphabet`, `validate`). REAL: validate suite, the count of bytes outside each alphabet from `grep` and `tr`.
+  - `--schema`, `--max-header-len`: `tests/test_validate.zig` (`validate schemas`, `validate scan`, `validate`). REAL: validate suite, mismatching identifiers and long headers counted with `awk`.
+  - `--max-name-memory`: `tests/test_validate.zig` (`validate scan`, `validate`). REAL: validate suite, an incomplete report on the transcriptome.
+  - `--fix`, `-o`, `--width`: `tests/test_validate.zig` (`validate fix`), `src/validator.zig`. REAL: validate suite, the copy has the same records, lines no wider than the width, and a clean strict validation.
+  - `--index`, `--index=PATH`: `tests/test_validate.zig` (`validate index`), `tests/test_index.zig` (`index loader`). REAL: validate suite, every index `index` writes matches, and the named `.fai` is the one compared.
+  - `-` (standard input): `tests/test_validate.zig` (`validate`). REAL: validate suite, the same codes and status as from the file.
+- **Package**
+  - `IndexedReader` (`open`, `recordCount`, `record`, `lookup`, `fetchInto`): `tests/test_library.zig` (`indexed reader`). REAL: GET suite, the package lane prints what `z-fasta get` prints for every multi-region and BED set before it is timed.
+  - `RecordReader` (`init`, `next`): `tests/test_library.zig` (`record reader`). REAL: GET suite section 6, every record equals `z-fasta get --names` over every name.
+  - `validation.validate`, `validation.repair`: `tests/test_library.zig` (`validation`), `tests/test_validate.zig`. No separate REAL check: `validate` runs the same scan, and the validate suite checks it.
 
 ## Source and executable records
 

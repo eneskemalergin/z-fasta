@@ -61,6 +61,7 @@ BED_ROW_ORDER = [10, 100, 1000, 10000]
 BED_HEADLINE_TOOLS = [
     "z-fasta-default",
     "z-fasta-fai",
+    "z-fasta-library",
     "noodles",
     "rustbio-custom-get",
     "samtools",
@@ -70,6 +71,7 @@ BED_HEADLINE_TOOLS = [
 MULTI_HEADLINE_TOOLS = [
     "z-fasta-default",
     "z-fasta-fai",
+    "z-fasta-library",
     "noodles",
     "rustbio-custom-get",
     "samtools",
@@ -205,6 +207,7 @@ GET_COLORS = {
     "z-fasta-messy": "#F7A41D",
     "z-fasta-fai": "#FFC45C",
     "z-fasta-fai-rc": "#FFC45C",
+    "z-fasta-library": "#B8860B",
     # RC transform modes: darker / mid / pale shades of brand gold (#F7A41D).
     "z-fasta-rc": "#C67A00",
     "z-fasta-complement-only": "#F5B041",
@@ -225,6 +228,7 @@ GET_DISPLAY = {
     "z-fasta-uniform": "z-fasta (uniform)",
     "z-fasta-messy": "z-fasta (messy)",
     "z-fasta-fai": "z-fasta (.fai)",
+    "z-fasta-library": "z-fasta package (.zfi)",
     "z-fasta-fai-rc": "z-fasta (.fai) --rc",
     "z-fasta-rc": "z-fasta (.zfi) --rc",
     "z-fasta-complement-only": "z-fasta (.zfi) --complement-only",
@@ -2137,6 +2141,11 @@ def md_overview(manifest: dict | None) -> str:
         "GET pairs on verify fixtures.",
         "**Correctness:** `bench/get/run.sh` (not timed here) checks byte-identical output "
         "against golden fixtures.",
+        "**Package lane:** `z-fasta package (.zfi)` is `bench/get/library.zig`, built by "
+        "`zig build bench-library`: it opens the reference once with the package's "
+        "`IndexedReader` and fetches every region of the same multi-region or BED set, reading "
+        "the regions from a file. Before each set is timed, `run.sh` checks that it prints "
+        "exactly what `z-fasta get` prints (BED sets: the same bases).",
         "**Tool order in charts:** z-fasta (.zfi), then z-fasta (.fai) when captured, "
         "followed by noodles, rust-bio, samtools, fastahack (on "
         "`full seq`), then reference lanes (seqtk positional; multi seqtk/fastahack loops "

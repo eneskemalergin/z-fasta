@@ -253,6 +253,31 @@ multi_positional_get_cmd() {
     echo "$(multi_positional_get_core "$1" "$2" "$3") > /dev/null"
 }
 
+# The package lane: bench/get/library.zig opens a reference once with `IndexedReader` and fetches
+# every region in a file. `zig build bench-library` installs it beside the CLI.
+LIBRARY="$PROJECT_ROOT/zig-out/bin/z-fasta-library"
+
+build_library_lane() {
+    (cd "$PROJECT_ROOT" && zig build bench-library -Doptimize=ReleaseFast -Dstrip=true) \
+        || { echo "error: could not build the package lane" >&2; return 1; }
+}
+
+# The lane must print exactly what `z-fasta get` prints for the same regions before it is timed.
+check_library_positional() {
+    local fasta="$1" regions="$2"
+    local -a regs
+    mapfile -t regs < "$regions"
+    cmp -s <("$ZFASTA" get "$fasta" "${regs[@]}") <("$LIBRARY" "$fasta" "$regions") \
+        || { echo "error: the package lane differs from z-fasta get on $regions ($fasta)" >&2; return 1; }
+}
+
+# BED output names regions differently, so the lane and `get --bed` are compared on bases.
+check_library_bed() {
+    local fasta="$1" bed="$2" regions="$3"
+    cmp -s <("$ZFASTA" get "$fasta" --bed "$bed" | grep -v '^>') <("$LIBRARY" "$fasta" "$regions" | grep -v '^>') \
+        || { echo "error: the package lane differs from z-fasta get --bed on $bed ($fasta)" >&2; return 1; }
+}
+
 
 export_manifest_tool_versions() {
     export_manifest_core_versions
@@ -595,7 +620,7 @@ PY
 #  Correctness: z-fasta get vs oracles
 # ══════════════════════════════════════════════════════════════════════
 
-SKIP_INDEX=false SKIP_GET=false SKIP_MULTI=false SKIP_BED=false SKIP_RC=false SKIP_EDGE=false
+SKIP_INDEX=false SKIP_GET=false SKIP_MULTI=false SKIP_BED=false SKIP_RC=false SKIP_EDGE=false SKIP_REAL=false
 
 # Correctness fixture paths (distinct from perf MESSY_DIR=shared/cache/messy_perf)
 MESSY_TEST_DIR="$BENCH_ROOT/shared/cache/messy_fixtures"
@@ -1721,6 +1746,114 @@ section5() {
 }
 
 # --- run_tests ---
+# Sequences only, one per line, in order: compares tools that name regions differently.
+fasta_sequences() {
+    awk '/^>/ { if (n) print seq; seq = ""; n = 1; next } { gsub(/[ \t\r]/, ""); seq = seq $0 } END { if (n) print seq }' "$1"
+}
+
+same_sequences() {
+    cmp -s <(fasta_sequences "$1") <(fasta_sequences "$2")
+}
+
+# Every option on the REAL datasets, against samtools, bedtools, or a transform of output that
+# samtools has already checked; through the `.zfi` and the `.fai`.
+section6_real() {
+    section_hdr 6 "REAL datasets"
+    ensure_real_data
+    build_library_lane || { fail "[real] package lane build"; return; }
+    generate_get_fixtures multi > /dev/null
+    generate_get_fixtures bed > /dev/null
+    local ds source dir view kind regions bed strand_bed names first_name first_len total
+    local -a regs
+    for ds in Genome Transcriptome Proteome; do
+        source="${REAL_DATASETS[$ds]:-}"
+        [[ -n "$source" ]] || continue
+        regions="$REGIONS_DIR/${ds}_regions_N100.txt"
+        bed="$BED_DIR/${ds}_1000.bed"
+        [[ -f "$regions" && -f "$bed" ]] || { fail "[real:$ds] region fixtures missing"; continue; }
+        mapfile -t regs < "$regions"
+        dir="$TMPDIR/real_$ds"
+        mkdir -p "$dir/zfi" "$dir/fai"
+        ln -sfn "$source" "$dir/zfi/${source##*/}"
+        ln -sfn "$source" "$dir/fai/${source##*/}"
+        TMPDIR="$dir" "$ZFASTA" index "$dir/zfi/${source##*/}" > /dev/null 2>&1
+        "$SAMTOOLS" faidx "$dir/fai/${source##*/}"
+        "$SAMTOOLS" faidx "$dir/fai/${source##*/}" "${regs[@]}" > "$dir/samtools.fa"
+        sort -t$'\t' -k2,2n "$dir/fai/${source##*/}.fai" | head -5 | cut -f1 > "$dir/names.txt"
+        "$SAMTOOLS" faidx -r "$dir/names.txt" "$dir/fai/${source##*/}" > "$dir/samtools_names.fa"
+        "$BEDTOOLS" getfasta -fi "$dir/fai/${source##*/}" -bed "$bed" > "$dir/bedtools.fa"
+        IFS=$'\t' read -r first_name first_len _ < "$dir/fai/${source##*/}.fai"
+        total="$(awk -F'[:-]' '{ n += $(NF) - $(NF - 1) + 1 } END { print n }' "$regions")"
+        # The package's `RecordReader` streams every record as `get --names` prints them all.
+        cut -f1 "$dir/fai/${source##*/}.fai" > "$dir/all_names.txt"
+        cmp -s <("$LIBRARY" --records "$source" "$(awk -F'\t' '{ if ($2 > m) m = $2 } END { print m + 65536 }' "$dir/fai/${source##*/}.fai")") \
+            <("$ZFASTA" get "$dir/zfi/${source##*/}" --names "$dir/all_names.txt") \
+            && pass "[real:$ds] RecordReader vs get --names" || fail "[real:$ds] RecordReader vs get --names"
+        for kind in zfi fai; do
+            view="$dir/$kind/${source##*/}"
+            local label="[real:$ds .$kind]"
+            "$ZFASTA" get "$view" "${regs[@]}" > "$dir/got.fa" 2> "$dir/got.err" \
+                && diff_fasta_oracle "$dir/samtools.fa" "$dir/got.fa" "$label 100 regions vs samtools" \
+                || fail "$label 100 regions vs samtools"
+            "$ZFASTA" get "$view" "${regs[@]}" --summary > /dev/null 2> "$dir/summary.err" \
+                && grep -Eq "^summary: regions=100 total_bases=$total " "$dir/summary.err" \
+                && pass "$label --summary totals" || fail "$label --summary totals"
+            "$ZFASTA" get "$view" --names "$dir/names.txt" > "$dir/got_names.fa" 2> /dev/null \
+                && diff_fasta_oracle "$dir/samtools_names.fa" "$dir/got_names.fa" "$label --names vs samtools" \
+                || fail "$label --names vs samtools"
+            "$ZFASTA" get "$view" --bed "$bed" > "$dir/got_bed.fa" 2> /dev/null \
+                && same_sequences "$dir/bedtools.fa" "$dir/got_bed.fa" \
+                && pass "$label --bed vs bedtools" || fail "$label --bed vs bedtools"
+            "$ZFASTA" get "$view" --names - < "$dir/names.txt" 2> /dev/null | cmp -s "$dir/got_names.fa" - \
+                && pass "$label --names - (stdin)" || fail "$label --names - (stdin)"
+            "$ZFASTA" get "$view" --bed - < "$bed" 2> /dev/null | cmp -s "$dir/got_bed.fa" - \
+                && pass "$label --bed - (stdin)" || fail "$label --bed - (stdin)"
+            if [[ "$ds" == Proteome ]]; then
+                local code
+                code="$("$ZFASTA" get "$view" "${regs[0]}" --rc --error-format=json 2>&1 > /dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin)["failure"]["primary"]["code"])')"
+                [[ "$code" == transform.complement_on_protein ]] && pass "$label --rc on protein fails as JSON" || fail "$label --rc on protein fails as JSON ($code)"
+                continue
+            fi
+            "$SAMTOOLS" faidx -i "$dir/fai/${source##*/}" "${regs[@]}" > "$dir/samtools_rc.fa"
+            "$ZFASTA" get "$view" "${regs[@]}" --rc > "$dir/got_rc.fa" 2> /dev/null \
+                && same_sequences "$dir/samtools_rc.fa" "$dir/got_rc.fa" \
+                && pass "$label --rc vs samtools -i" || fail "$label --rc vs samtools -i"
+            "$ZFASTA" get "$view" "${regs[@]}" --rc --annotate-rc > "$dir/got_annotated.fa" 2> /dev/null \
+                && [[ "$(grep -c ' (reverse complement)$' "$dir/got_annotated.fa")" == 100 ]] \
+                && same_sequences "$dir/got_rc.fa" "$dir/got_annotated.fa" \
+                && pass "$label --annotate-rc headers" || fail "$label --annotate-rc headers"
+            "$ZFASTA" get "$view" "${regs[@]}" --complement-only > "$dir/got_comp.fa" 2> /dev/null
+            "$ZFASTA" get "$view" "${regs[@]}" --reverse-only > "$dir/got_rev.fa" 2> /dev/null
+            python3 - "$dir/got.fa" "$dir/got_comp.fa" "$dir/got_rev.fa" <<'PY' \
+                && pass "$label --complement-only and --reverse-only" || fail "$label --complement-only and --reverse-only"
+import sys
+table = str.maketrans("ACGTURYSWKMBDHVNacgturyswkmbdhvn", "TGCAAYRSWMKVHDBNtgcaayrswmkvhdbn")
+def sequences(path):
+    out, seq = [], None
+    for line in open(path):
+        if line.startswith(">"):
+            if seq is not None: out.append(seq)
+            seq = ""
+        else:
+            seq += line.strip()
+    return out + ([seq] if seq is not None else [])
+plain, comp, rev = (sequences(p) for p in sys.argv[1:])
+raise SystemExit(0 if comp == [s.translate(table) for s in plain] and rev == [s[::-1] for s in plain] and len(plain) == 100 else 1)
+PY
+            awk 'BEGIN { OFS = "\t" } /^#/ { next } { $6 = (NR % 2) ? "+" : "-"; print }' "$bed" > "$dir/strand.bed"
+            "$BEDTOOLS" getfasta -s -fi "$dir/fai/${source##*/}" -bed "$dir/strand.bed" > "$dir/bedtools_strand.fa"
+            for flag in --strand-aware --honor-strand; do
+                "$ZFASTA" get "$view" --bed "$dir/strand.bed" "$flag" > "$dir/got_strand.fa" 2> /dev/null \
+                    && same_sequences "$dir/bedtools_strand.fa" "$dir/got_strand.fa" \
+                    && pass "$label $flag vs bedtools -s" || fail "$label $flag vs bedtools -s"
+            done
+            local code
+            code="$("$ZFASTA" get "$view" "$first_name:$((first_len + 1))-$((first_len + 5))" --error-format=json 2>&1 > /dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin)["failure"]["primary"]["code"])')"
+            [[ "$code" == request.start_after_sequence ]] && pass "$label a start past the record fails as JSON" || fail "$label a start past the record fails as JSON ($code)"
+        done
+    done
+}
+
 run_tests() {
     PASS=0
     FAIL=0
@@ -1751,6 +1884,7 @@ run_tests() {
     ! $SKIP_BED   && section3
     ! $SKIP_RC    && section4
     ! $SKIP_EDGE  && section5
+    ! $SKIP_REAL  && section6_real
 
     echo ""
     echo "Results: $PASS passed, $FAIL failed"
@@ -2207,6 +2341,8 @@ run_perf_multi() {
         for n in "${multi_counts[@]}"; do
             path="$REGIONS_DIR/${ds}_regions_N${n}.txt"
             [[ -f "$path" ]] || continue
+            check_library_positional "$zfi_fa" "$path" || return 1
+            check_library_positional "$fai_fa" "$path" || return 1
             json="$out_dir/${ds}_N${n}.json"
             workload="${ds}/N=${n}"
             total_bases=$((n * 1000))
@@ -2221,6 +2357,7 @@ run_perf_multi() {
             zebrac_clear_commands
             get_add_command perf_multi "$workload" z-fasta-default z-fasta "$json" "$zf_cmd" "$nbytes" "$total_bases"
             get_add_command perf_multi "$workload" z-fasta-fai z-fasta "$json" "$zf_fai_cmd" "$nbytes" "$total_bases"
+            get_add_command perf_multi "$workload" z-fasta-library z-fasta "$json" "$(quote_arg "$LIBRARY") $qzfi $(quote_arg "$path") > /dev/null" "$nbytes" "$total_bases"
             bench_has_tool samtools && get_add_command perf_multi "$workload" samtools samtools "$json" "$st_cmd" "$nbytes" "$total_bases"
             bench_has_tool noodles && get_add_command perf_multi "$workload" noodles noodles "$json" "$nd_cmd" "$nbytes" "$total_bases"
             bench_has_tool rustbio && get_add_command perf_multi "$workload" rustbio-custom-get rustbio "$json" "$rb_cmd" "$nbytes" "$total_bases"
@@ -2264,6 +2401,8 @@ run_perf_bed() {
             bed="$BED_DIR/${ds}_${n}.bed"
             regions="$BED_DIR/${ds}_${n}.regions.txt"
             [[ -f "$bed" && -f "$regions" ]] || continue
+            check_library_bed "$zfi_fa" "$bed" "$regions" || return 1
+            check_library_bed "$fai_fa" "$bed" "$regions" || return 1
             json="$out_dir/${ds}_rows_${n}.json"
             workload="${ds}/rows=${n}"
             out_bases=$((n * 1000))
@@ -2276,6 +2415,8 @@ run_perf_bed() {
                 "$qz get $qzfi --bed $qbed > /dev/null" "$nbytes" "$out_bases"
             get_add_command perf_bed "$workload" z-fasta-fai z-fasta "$json" \
                 "$qz get $qfai --bed $qbed > /dev/null" "$nbytes" "$out_bases"
+            get_add_command perf_bed "$workload" z-fasta-library z-fasta "$json" \
+                "$(quote_arg "$LIBRARY") $qzfi $qreg > /dev/null" "$nbytes" "$out_bases"
             bench_has_tool bedtools && get_add_command perf_bed "$workload" bedtools bedtools "$json" \
                 "$qb getfasta -fi $qfai -bed $qbed > /dev/null" "$nbytes" "$out_bases"
             bench_has_tool samtools && get_add_command perf_bed "$workload" samtools samtools "$json" \
@@ -2491,6 +2632,7 @@ run_perf() {
 
     ensure_real_data
     prepare_benchmark_views
+    if ! $FOCUSED && { $DO_MULTI || $DO_BED; }; then build_library_lane || return 1; fi
 
     if $FOCUSED; then
         run_perf_focused

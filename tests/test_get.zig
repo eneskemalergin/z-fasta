@@ -678,6 +678,21 @@ test "[cli] - [get bed]: reports parser boundary errors" {
     );
 }
 
+test "[cli] - [get]: applies each orientation and names it on request" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const cases = [_]struct { flag: []const u8, bases: []const u8, note: []const u8 }{
+        .{ .flag = "--rc", .bases = "TACGT", .note = " (reverse complement)" },
+        .{ .flag = "--complement-only", .bases = "TGCAT", .note = " (complement)" },
+        .{ .flag = "--reverse-only", .bases = "ATGCA", .note = " (reverse)" },
+    };
+    for (cases) |case| {
+        try expectCliSuccess(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "seq1:1-5", case.flag }, try std.fmt.allocPrint(allocator, ">seq1:1-5\n{s}\n", .{case.bases}));
+        try expectCliSuccess(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "seq1:1-5", case.flag, "--annotate-rc" }, try std.fmt.allocPrint(allocator, ">seq1:1-5{s}\n{s}\n", .{ case.note, case.bases }));
+    }
+}
+
 test "[cli] - [get bed]: annotations describe the composed orientation" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
