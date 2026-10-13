@@ -15,6 +15,7 @@
 - [BED and strand workflows](BED-and-Strand-Workflows)
 - [Validation and repair](Validation-and-Repair)
 - [Statistics](Statistics)
+- [Zig package](Library)
 
 **Understand behavior**
 

@@ -33,6 +33,7 @@ The filter applies to Zig tests. Separate native callers still run when selected
 ## Source map
 
 - `src/main.zig`: CLI parsing, help, dispatch, diagnostics and checked final status.
+- `src/root.zig`: the Zig package: `IndexedReader`, `RecordReader`, and `validation`; [Zig package](Library) describes it.
 - `src/diagnostics.zig`: native codes, observed facts and caller-owned failure storage.
 - `src/reporting.zig`: text and JSON encoding without allocation or flushing.
 - `src/indexer.zig`: duplicate policy and index output.

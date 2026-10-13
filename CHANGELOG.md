@@ -32,6 +32,8 @@ All notable changes to z-fasta will be documented in this file.
 - `--index` checks, in the same pass, that the `.zfi` or `.fai` that `get` would load describes the FASTA (`--index=PATH` names the index, by its `.zfi` or `.fai` suffix): `index`'s scanner runs over the same buffer, and each record it would write is compared with its entry (identifier, sequence offset and length, line layout, side table). Six `pair.*` codes report the differences. The index is read in file order through fixed buffers.
 - `--max-name-memory BYTES` bounds the duplicate check; past it the check stops and the report is `incomplete`, never a clean pass.
 - Package calls `validation.validate` and `validation.repair` over any `std.Io.Reader`.
+- Package call `RecordReader`: streams whole records from any `std.Io.Reader` into caller storage, by `index`'s rules, without allocating.
+- The wiki's [Zig package](https://github.com/eneskemalergin/z-fasta/wiki/Library) page describes the package: adding it, `IndexedReader`, `RecordReader`, `validation`, and how its zero-based ordinals and intervals relate to the one-based numbers in diagnostics.
 
 ## [0.3.5]
 

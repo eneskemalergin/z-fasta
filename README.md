@@ -66,7 +66,7 @@ Work through the [five-minute example](https://github.com/eneskemalergin/z-fasta
 
 The Wiki holds the details that would otherwise bury this page:
 
-[Indexing](https://github.com/eneskemalergin/z-fasta/wiki/Indexing) | [Extraction](https://github.com/eneskemalergin/z-fasta/wiki/Extracting-Sequences) | [BED and strand](https://github.com/eneskemalergin/z-fasta/wiki/BED-and-Strand-Workflows) | [Validation](https://github.com/eneskemalergin/z-fasta/wiki/Validation-and-Repair) | [Statistics](https://github.com/eneskemalergin/z-fasta/wiki/Statistics)
+[Indexing](https://github.com/eneskemalergin/z-fasta/wiki/Indexing) | [Extraction](https://github.com/eneskemalergin/z-fasta/wiki/Extracting-Sequences) | [BED and strand](https://github.com/eneskemalergin/z-fasta/wiki/BED-and-Strand-Workflows) | [Validation](https://github.com/eneskemalergin/z-fasta/wiki/Validation-and-Repair) | [Statistics](https://github.com/eneskemalergin/z-fasta/wiki/Statistics) | [Zig package](https://github.com/eneskemalergin/z-fasta/wiki/Library)
 
 [Index formats](https://github.com/eneskemalergin/z-fasta/wiki/Index-Formats) | [Coordinates and names](https://github.com/eneskemalergin/z-fasta/wiki/Coordinates-and-Sequence-Names) | [Limits](https://github.com/eneskemalergin/z-fasta/wiki/Limits-and-Supported-Formats) | [Recipes](https://github.com/eneskemalergin/z-fasta/wiki/Recipes) | [Troubleshooting](https://github.com/eneskemalergin/z-fasta/wiki/Troubleshooting)
 
