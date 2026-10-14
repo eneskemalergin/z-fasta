@@ -162,6 +162,16 @@ pub fn build(b: *std.Build) void {
         }),
     }));
 
+    const run_test_index_format_unit = b.addRunArtifact(b.addTest(.{
+        .filters = test_filters,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/index_format.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "diagnostics", .module = diagnostics_module }},
+        }),
+    }));
+
     const run_test_platform_unit = b.addRunArtifact(b.addTest(.{
         .filters = test_filters,
         .root_module = b.createModule(.{
@@ -300,6 +310,7 @@ pub fn build(b: *std.Build) void {
     const index_step = b.step("test-index", "Run index tests");
     index_step.dependOn(&run_test_index.step);
     index_step.dependOn(&run_test_indexer_unit.step);
+    index_step.dependOn(&run_test_index_format_unit.step);
     const get_step = b.step("test-get", "Run GET tests");
     get_step.dependOn(&run_test_get.step);
     get_step.dependOn(&run_test_getter_unit.step);
@@ -327,6 +338,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_test_validate.step);
     test_step.dependOn(&run_test_validator_unit.step);
     test_step.dependOn(&run_test_fasta_unit.step);
+    test_step.dependOn(&run_test_index_format_unit.step);
     test_step.dependOn(&run_test_platform_unit.step);
     test_step.dependOn(&run_test_library.step);
 }
