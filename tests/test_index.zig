@@ -320,32 +320,21 @@ fn expectFaiLoaderModesAgree(allocator: std.mem.Allocator, fasta_path: []const u
     const names = try allocator.alloc([]const u8, full.records.len());
     defer allocator.free(names);
     for (names, 0..) |*name, i| name.* = full.recordName(i).?;
-    var positional = try utility.loadIndexGrouped(allocator, io, fasta_path, .{ .requested = names });
-    defer positional.deinit();
+    var requested = try utility.loadIndexGrouped(allocator, io, fasta_path, .{ .requested = names });
+    defer requested.deinit();
     var stats_scan = try utility.loadIndexGrouped(allocator, io, fasta_path, .stats_scan);
     defer stats_scan.deinit();
 
     try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.fai, full.source);
-    try std.testing.expectEqual(full.source, positional.source);
+    try std.testing.expectEqual(full.source, requested.source);
     try std.testing.expectEqual(full.source, stats_scan.source);
-    try std.testing.expectEqual(full.records.len(), positional.records.len());
+    try std.testing.expectEqual(full.records.len(), requested.records.len());
     try std.testing.expectEqual(full.records.len(), stats_scan.records.len());
-    try std.testing.expectEqual(@as(usize, 2), stats_scan.name_slices.len);
-
-    var shortest_index: usize = 0;
-    var longest_index: usize = 0;
-    for (1..full.records.len()) |i| {
-        const rec = try recordAt(&full, i);
-        if (rec.seq_len < (try recordAt(&full, shortest_index)).seq_len) shortest_index = i;
-        if (rec.seq_len > (try recordAt(&full, longest_index)).seq_len) longest_index = i;
-    }
-    try std.testing.expectEqual([2]usize{ shortest_index, longest_index }, stats_scan.stats_name_indices.?);
-    try std.testing.expectEqualStrings(full.recordName(shortest_index).?, stats_scan.recordName(shortest_index).?);
-    try std.testing.expectEqualStrings(full.recordName(longest_index).?, stats_scan.recordName(longest_index).?);
+    try std.testing.expectEqual(@as(usize, 0), stats_scan.name_slices.len);
 
     for (0..full.records.len()) |i| {
         const rec = try recordAt(&full, i);
-        const streamed = try recordAt(&positional, i);
+        const streamed = try recordAt(&requested, i);
         const scanned = try recordAt(&stats_scan, i);
 
         try std.testing.expectEqual(rec.seq_offset, streamed.seq_offset);
@@ -358,10 +347,8 @@ fn expectFaiLoaderModesAgree(allocator: std.mem.Allocator, fasta_path: []const u
         try std.testing.expectEqual(rec.line_bases, scanned.line_bases);
         try std.testing.expectEqual(rec.line_bytes, scanned.line_bytes);
 
-        try std.testing.expectEqualStrings(full.recordName(i).?, positional.recordName(i).?);
-        if (i != shortest_index and i != longest_index) {
-            try std.testing.expectEqual(null, stats_scan.recordName(i));
-        }
+        try std.testing.expectEqualStrings(full.recordName(i).?, requested.recordName(i).?);
+        try std.testing.expectEqual(null, stats_scan.recordName(i));
     }
 }
 
@@ -1759,7 +1746,7 @@ test "[failure] - [index loader]: release partial allocations" {
     try std.testing.expectEqual(@as(usize, 64), idx.records.len());
     try std.testing.expectEqual(@as(u64, last_offset), (try recordAt(&idx, 63)).seq_offset);
     try std.testing.expectEqual(@as(u64, 4), (try recordAt(&idx, 63)).seq_len);
-    try std.testing.expectEqualStrings("r0", idx.recordName(0).?);
+    try std.testing.expectEqual(@as(usize, 2), (try recordAt(&idx, 0)).name_len);
 }
 
 test "[property] - [zfi loader]: modes select the first duplicate" {
@@ -1860,8 +1847,6 @@ test "[failure] - [index loader]: rejects an invalid present ZFI despite valid F
 }
 
 test "[failure] - [index loader]: reports an inaccessible selected sidecar" {
-    if (comptime builtin.os.tag == .windows or builtin.os.tag == .wasi) return error.SkipZigTest;
-
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -2330,7 +2315,7 @@ test "[edge] - [fai loader]: streamed modes accept the maximum sequence name" {
         defer idx.deinit();
 
         try std.testing.expectEqual(@as(usize, 1), idx.records.len());
-        try std.testing.expectEqualStrings(name, idx.recordName(0).?);
+        try std.testing.expectEqual(name.len, (try recordAt(&idx, 0)).name_len);
     }
 }
 
@@ -2443,12 +2428,8 @@ test "[integration] - [fai output]: uses a separate spool and cleans it after su
     var source_dir = try std.Io.Dir.cwd().openDir(io, source_dir_path, .{ .iterate = true });
     defer source_dir.close(io);
     const source_permissions = (try source_dir.stat(io)).permissions;
-    if (comptime builtin.os.tag != .windows) {
-        try source_dir.setPermissions(io, source_permissions.setReadOnly(true));
-    }
-    defer if (comptime builtin.os.tag != .windows) {
-        source_dir.setPermissions(io, source_permissions) catch {};
-    };
+    try source_dir.setPermissions(io, source_permissions.setReadOnly(true));
+    defer source_dir.setPermissions(io, source_permissions) catch {};
 
     var env = try std.testing.environ.createMap(allocator);
     defer env.deinit();
@@ -3228,7 +3209,9 @@ test "[edge] - [fai loader]: accepts long decimal fields and ignored extra colum
         try std.testing.expectEqual(expected.seq_len, actual.seq_len);
     }
     try std.testing.checkAllAllocationFailures(allocator, loadAndDeinitForAllocationCheck, .{ paths.fasta_path, main.index_format.LoadMode{ .requested = &.{ "a", "b" } } });
-    try std.testing.expectError(error.CorruptIndex, utility.loadIndexGrouped(allocator, io, paths.fasta_path, .stats_scan));
+    var scanned = try utility.loadIndexGrouped(allocator, io, paths.fasta_path, .stats_scan);
+    defer scanned.deinit();
+    try std.testing.expectEqual(full.records.len(), scanned.records.len());
     var single = try utility.loadIndexGrouped(allocator, io, paths.fasta_path, .{ .requested = &.{"a"} });
     defer single.deinit();
     try std.testing.expectEqual(@as(usize, 1), single.records.len());
@@ -3305,11 +3288,12 @@ test "[regression] - [fai loader]: valid column positions retain decimal and tra
         defer std.Io.Dir.cwd().deleteFile(io, paths.fasta_path) catch {};
         defer std.Io.Dir.cwd().deleteFile(io, paths.fai_path) catch {};
         const names = [_][]const u8{case[1]};
-        for ([_]main.index_format.LoadMode{ .lookup_full_map, .{ .requested = &names }, .{ .requested = &names }, .stats_scan }) |mode| {
+        for ([_]main.index_format.LoadMode{ .lookup_full_map, .{ .requested = &names }, .stats_scan }) |mode| {
             var index = try utility.loadIndexGrouped(allocator, io, paths.fasta_path, mode);
             defer index.deinit();
             try std.testing.expectEqual(@as(usize, 1), index.records.len());
-            try std.testing.expectEqualStrings(case[1], index.recordName(0).?);
+            if (mode != .stats_scan) try std.testing.expectEqualStrings(case[1], index.recordName(0).?);
+            try std.testing.expectEqual(case[1].len, (try recordAt(&index, 0)).name_len);
             try std.testing.expectEqual(case[3], (try recordAt(&index, 0)).seq_len);
             try std.testing.expectEqual(case[4], (try recordAt(&index, 0)).seq_offset);
             try std.testing.expectEqual(case[5], (try recordAt(&index, 0)).line_bases);
@@ -3412,7 +3396,6 @@ test "[failure] - [index diagnostics]: FAI sequence extents retain wide products
             const facts = failure.primary().?.details.@"index.sequence_span_out_of_bounds";
             try std.testing.expectEqual(case.required_end, facts.required_end);
             try std.testing.expectEqual(@as(u64, 8), facts.source_bytes);
-            try std.testing.expectEqual(diagnostics.BoundSource.actual, facts.bound_source);
             try std.testing.expectEqual(@as(u64, 1), failure.primary().?.at.record.?);
         }
     }
@@ -3433,7 +3416,7 @@ test "[failure] - [index diagnostics]: long FAI fields retain original lengths a
         defer std.Io.Dir.cwd().deleteFile(io, paths.fasta_path) catch {};
         defer std.Io.Dir.cwd().deleteFile(io, paths.fai_path) catch {};
         const code: diagnostics.Code = if (invalid_byte) .@"index.fai.invalid_integer" else .@"index.fai.integer_out_of_range";
-        for ([_]main.index_format.LoadMode{ .catalog, .{ .requested = &.{"missing"} }, .{ .requested = &.{"a"} } }) |mode| {
+        for ([_]main.index_format.LoadMode{ .catalog, .stats_scan, .{ .requested = &.{"missing"} }, .{ .requested = &.{"a"} } }) |mode| {
             var failure: diagnostics.Failure = undefined;
             try expectIndexLoadCode(allocator, paths.fasta_path, mode, code, &failure);
             const primary = failure.primary().?;
@@ -3443,11 +3426,6 @@ test "[failure] - [index diagnostics]: long FAI fields retain original lengths a
             try std.testing.expect(value.truncated);
             try std.testing.expectEqual(@as(u64, 6), primary.at.location.offset.?);
             try std.testing.expectEqual(@as(u64, 7), primary.at.location.column.?);
-        }
-        for ([_]main.index_format.LoadMode{.stats_scan}) |mode| {
-            var failure: diagnostics.Failure = undefined;
-            try expectIndexLoadCode(allocator, paths.fasta_path, mode, .@"resource.line_buffer_exceeded", &failure);
-            try std.testing.expectEqual(@as(u64, 65_600), failure.primary().?.details.@"resource.line_buffer_exceeded".buffer_bytes);
         }
     }
 }
@@ -3528,12 +3506,10 @@ test "[failure] - [index diagnostics]: ZFI header and record facts agree in all 
                 .@"index.sequence_offset_out_of_bounds" => |facts| {
                     try std.testing.expectEqual(fasta.len, facts.sequence_offset);
                     try std.testing.expectEqual(fasta.len, facts.source_bytes);
-                    try std.testing.expectEqual(diagnostics.BoundSource.actual, facts.bound_source);
                 },
                 .@"index.sequence_span_out_of_bounds" => |facts| {
                     try std.testing.expectEqual(@as(u128, 5 << 46) + 1, facts.required_end);
                     try std.testing.expectEqual(fasta.len, facts.source_bytes);
-                    try std.testing.expectEqual(diagnostics.BoundSource.actual, facts.bound_source);
                     try std.testing.expect(facts.entry == null);
                 },
                 .@"index.invalid_line_geometry" => |facts| {
@@ -3627,7 +3603,6 @@ test "[failure] - [index diagnostics]: side tables retain wire offsets and opera
                 .@"index.sequence_span_out_of_bounds" => |facts| {
                     try std.testing.expectEqual(fasta.len + 3, facts.required_end);
                     try std.testing.expectEqual(fasta.len, facts.source_bytes);
-                    try std.testing.expectEqual(diagnostics.BoundSource.actual, facts.bound_source);
                     try std.testing.expectEqual(@as(?u64, 1), facts.entry);
                 },
                 .@"index.side_first_offset_mismatch" => |facts| {

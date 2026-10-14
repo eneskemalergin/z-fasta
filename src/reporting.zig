@@ -820,7 +820,6 @@ fn message(code: diagnostics.Code) []const u8 {
         .@"io.invalid_path" => "The selected path is invalid.",
         .@"io.open_failed" => "Could not open the required input.",
         .@"io.stat_failed" => "Could not read required file metadata.",
-        .@"io.seek_failed" => "Could not seek to the requested offset.",
         .@"io.read_failed" => "Could not read the required input.",
         .@"io.unexpected_eof" => "Required input ended early.",
         .@"io.map_failed" => "Could not map the required input.",

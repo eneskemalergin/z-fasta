@@ -79,7 +79,6 @@ const Diagnostics = struct {
         return self.fail(.{ .@"index.sequence_span_out_of_bounds" = .{
             .required_end = end,
             .source_bytes = size,
-            .bound_source = .actual,
             .entry = entry,
         } }, .scan, self.index_source, null, null);
     }
@@ -102,8 +101,6 @@ const LengthSummary = struct {
     total_symbols: u64,
     shortest_length: u64,
     longest_length: u64,
-    shortest_index: usize,
-    longest_index: usize,
     mean: u64,
     q1: u64,
     median: u64,
@@ -312,8 +309,6 @@ fn summarizeLengths(comptime T: type, lengths: []T, diag: *Diagnostics) diagnost
         .total_symbols = total,
         .shortest_length = shortest_length,
         .longest_length = longest_length,
-        .shortest_index = shortest_index,
-        .longest_index = longest_index,
         .mean = total / lengths.len,
         .q1 = q1,
         .median = medianSorted(T, lengths),
@@ -1087,7 +1082,6 @@ test "[failure] - [stats composition]: rejects invalid uniform geometry" {
             const detail = primary.details.@"index.sequence_span_out_of_bounds";
             try std.testing.expectEqual(@as(u128, 5), detail.required_end);
             try std.testing.expectEqual(@as(u64, 4), detail.source_bytes);
-            try std.testing.expectEqual(diagnostics.BoundSource.actual, detail.bound_source);
         } else {
             try std.testing.expectEqual(diagnostics.Check.traversal_position, primary.details.@"internal.consistency_failed".check);
         }
@@ -1235,8 +1229,6 @@ test "[failure] - [stats report]: propagates a full destination" {
         .total_symbols = 4,
         .shortest_length = 4,
         .longest_length = 4,
-        .shortest_index = 0,
-        .longest_index = 0,
         .mean = 4,
         .q1 = 4,
         .median = 4,

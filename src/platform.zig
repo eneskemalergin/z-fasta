@@ -1,28 +1,21 @@
-//! Read-only file mapping, sidecar opening, and memory advice, with the platform differences kept here.
+//! Read-only file mapping and sidecar opening: the POSIX calls the commands share.
 
 const std = @import("std");
 const builtin = @import("builtin");
 
+comptime {
+    if (builtin.os.tag == .windows) @compileError("z-fasta supports Linux and macOS; on Windows, run the Linux build through WSL");
+}
+
 pub const MappedBytes = []align(std.heap.page_size_min) const u8;
 
-/// Windows needs `.populate = true` (Zig 0.16 fails with `STATUS_INVALID_PARAMETER` otherwise).
+/// Pages load on first access: the loaders read only the parts they check.
 pub fn mapFileReadOnly(io: std.Io, file: std.Io.File, len: usize) std.Io.File.MemoryMap.CreateError!std.Io.File.MemoryMap {
     return file.createMemoryMap(io, .{
         .len = len,
         .protection = .{ .read = true, .write = false },
-        .populate = builtin.os.tag == .windows,
+        .populate = false,
     });
-}
-
-/// No-op on Windows.
-pub fn adviseSequential(memory: MappedBytes) void {
-    if (comptime builtin.os.tag == .windows) return;
-    if (memory.len == 0) return;
-    std.posix.madvise(
-        @constCast(memory.ptr),
-        memory.len,
-        std.posix.MADV.SEQUENTIAL,
-    ) catch {};
 }
 
 pub const OpenSidecarError = std.posix.OpenError || std.posix.UnexpectedError;
@@ -57,7 +50,6 @@ test "[integration] - [file mapping]: exposes file contents" {
 
     var map = try mapFileReadOnly(std.testing.io, file, contents.len);
     defer map.destroy(std.testing.io);
-    adviseSequential(map.memory);
 
     try std.testing.expectEqualStrings(contents, map.memory);
 }

@@ -110,14 +110,20 @@ fn allocationCheck(allocator: std.mem.Allocator) !void {
             .cause = .{ .zig = err },
         }) == error.OutOfMemory);
         try testing.expect(failure.primary().?.details.@"resource.out_of_memory".requested_bytes.? == 16);
-        const count = std.math.maxInt(u64);
-        try testing.expectError(error.OutOfMemory, diagnostics.oneBased(&failure, count, .{}));
+        try testing.expectError(error.OutOfMemory, failCountOverflow(&failure));
         try testing.expect(failure.secondaryItems()[0].code() == .@"resource.count_overflow");
         return err;
     };
     defer allocator.free(second);
     failure.succeed();
     try testing.expect(failure.primary() == null and failure.complete);
+}
+
+fn failCountOverflow(failure: *diagnostics.Failure) diagnostics.Error!void {
+    return failure.fail(.{
+        .details = .{ .@"resource.count_overflow" = .{ .counter = .total_symbols, .max_value = std.math.maxInt(u64), .current = std.math.maxInt(u64), .increment = 1 } },
+        .stage = .scan,
+    });
 }
 
 test "[unit] - [diagnostics]: copied source labels survive cleanup and failure moves" {
@@ -179,7 +185,6 @@ test "[failure] - [diagnostics]: deferred failure survives success and yields to
     var failure: diagnostics.Failure = undefined;
     failure.reset(.index);
     failure.deferFailure(writeFailure(.write, error.NoSpaceLeft));
-    try testing.expectEqual(@as(u64, 1), try diagnostics.oneBased(&failure, 0, .{}));
     try testing.expect(failure.primary_deferred);
     try testing.expectError(error.Io, failure.finishDeferred());
     try testing.expect(!failure.primary_deferred);
@@ -188,7 +193,7 @@ test "[failure] - [diagnostics]: deferred failure survives success and yields to
     failure.reset(.index);
     failure.deferFailure(writeFailure(.write, error.NoSpaceLeft));
     failure.deferFailure(writeFailure(.flush, error.WriteFailed));
-    try testing.expectError(error.CountOverflow, diagnostics.oneBased(&failure, std.math.maxInt(u64), .{}));
+    try testing.expectError(error.CountOverflow, failCountOverflow(&failure));
     try testing.expect(!failure.primary_deferred);
     try testing.expect(failure.primary().?.code() == .@"resource.count_overflow");
     try testing.expect(failure.secondaryItems()[0].cause.?.zig == error.NoSpaceLeft);
@@ -218,10 +223,6 @@ test "[edge] - [diagnostics]: zero and maximum offsets differ from unknown" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.get);
     const maximum = std.math.maxInt(u64);
-    try testing.expectEqual(@as(u64, 1), try diagnostics.oneBased(&failure, 0, .{}));
-    try testing.expectEqual(maximum, try diagnostics.oneBased(&failure, maximum - 1, .{}));
-    try testing.expect(failure.primary() == null);
-
     const diagnostic = diagnostics.Diagnostic{
         .details = .{ .@"io.unexpected_eof" = .{ .exact = .{ .requested_bytes = 1, .received_bytes = 0 } } },
         .stage = .read,
@@ -236,19 +237,6 @@ test "[edge] - [diagnostics]: zero and maximum offsets differ from unknown" {
     try testing.expect(failure.primary().?.at.request == null);
     try testing.expectEqual(maximum, failure.primary().?.related.?.location.offset.?);
     try testing.expectEqual(maximum, failure.primary().?.related.?.record.?);
-}
-
-test "[failure] - [diagnostics]: ordinal conversion cannot wrap to zero" {
-    var failure: diagnostics.Failure = undefined;
-    failure.reset(.get);
-    const maximum = std.math.maxInt(u64);
-    try testing.expectError(error.CountOverflow, diagnostics.oneBased(&failure, maximum, .{ .source = .zfi }));
-    const facts = failure.primary().?.details.@"resource.count_overflow";
-    try testing.expect(facts.counter == .report_ordinal);
-    try testing.expectEqual(@as(u128, maximum), facts.max_value);
-    try testing.expectEqual(@as(u128, maximum), facts.current.?);
-    try testing.expectEqual(@as(u128, 1), facts.increment.?);
-    try testing.expect(failure.primary().?.at.record == null);
 }
 
 test "[unit] - [diagnostics]: caller sources and static suffixes survive helper return" {

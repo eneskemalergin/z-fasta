@@ -252,7 +252,6 @@ const Diagnostics = struct {
         return self.fail(.{ .@"index.sequence_span_out_of_bounds" = .{
             .required_end = end,
             .source_bytes = size,
-            .bound_source = .actual,
         } }, .resolve, self.index_source, null, null);
     }
 

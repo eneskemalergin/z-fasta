@@ -139,7 +139,7 @@ pub const ByteLength = union(enum(u8)) { exact: u64, at_least: u64 };
 
 pub const Measurement = union(enum) { exact: u128, at_least: u128 };
 pub const NativeError = struct {
-    domain: enum { posix_errno, win32, ntstatus },
+    domain: enum { posix_errno },
     number: u32,
 };
 
@@ -149,7 +149,6 @@ pub const Stage = enum {
     arguments,
     open,
     stat,
-    seek,
     read,
     map,
     parse,
@@ -186,7 +185,6 @@ pub const Argument = enum {
     request_source,
     positional,
     emit_fai,
-    no_dedup,
     bed,
     names,
     strand_aware,
@@ -205,16 +203,13 @@ pub const Argument = enum {
     max_name_memory,
     width,
     index,
-    error_format,
     read_buffer,
 };
 pub const Arguments = std.EnumSet(Argument);
 /// `index_path`: a path ending in `.zfi` or `.fai`, which names its format.
-pub const Expected = enum { path, request_source, schema, alphabet, sequence_type, positive_usize, error_format, nonempty_buffer, index_path };
+pub const Expected = enum { path, request_source, schema, alphabet, sequence_type, positive_usize, nonempty_buffer, index_path };
 pub const Requirement = enum { bed, transform_or_strand, fix, output, fasta_file };
 pub const AllocationRole = enum {
-    argv,
-    arena,
     records,
     names,
     name_slices,
@@ -224,10 +219,7 @@ pub const AllocationRole = enum {
     retained_names,
     name_cache,
     catalog,
-    compressed_names,
-    spool_buffer,
     reader_buffer,
-    request_buffer,
     requests,
     resolved_requests,
     request_names,
@@ -251,25 +243,20 @@ pub const CapacityRole = enum {
     side_offset,
     positional_requests,
     request_names,
-    request_reservation,
     disk_span,
     reader_buffer,
 };
 pub const Counter = enum {
     source_bytes,
-    sequence_symbols,
     total_symbols,
     aun_numerator,
     physical_lines,
     records,
     requests,
-    composition_bin,
-    lowercase_symbols,
-    report_ordinal,
 };
-pub const PathReason = enum { rejected, too_long, directory };
+pub const PathReason = enum { too_long, directory };
 pub const TemporaryPurpose = enum { fai, names, side_tables, catalog };
-pub const TemporaryPlace = enum { output_directory, environment, system, current_directory };
+pub const TemporaryPlace = enum { environment, system, current_directory };
 pub const TemporaryReason = enum { randomness, directory_open, creation, collisions };
 pub const TempAttempt = struct {
     place: TemporaryPlace,
@@ -350,16 +337,13 @@ pub const IndexField = enum {
     side_count,
     side_byte_end,
     base_start,
-    sequence_span,
-    source_timestamp,
 };
 pub const FaiField = enum { name, length, offset, line_bases, line_bytes };
 pub const BedField = enum { chrom, start, end };
 pub const BedCoordinate = enum { start, end };
 pub const CoordinateSystem = enum { one_based_inclusive, zero_based_half_open };
-pub const Arithmetic = enum { add, subtract, multiply };
+pub const Arithmetic = enum { add, multiply };
 pub const Section = enum { header, records, side_table_count, side_table_entries, name_blob, name_table };
-pub const BoundSource = enum { declared, actual };
 pub const OffsetRole = enum { wire, retained, local };
 pub const CountLimitRole = enum { zfi_header, scanner_count };
 pub const GeometryConstraint = enum { bases_zero, bytes_zero, bytes_below_bases };
@@ -376,12 +360,10 @@ pub const LookupScope = enum { complete_catalog, retained_matches };
 /// `preserve_symbols`: the rewrite keeps every header byte and every symbol, and refuses otherwise.
 pub const RepairPolicy = enum { preserve_symbols };
 pub const IdentityComparison = enum { lexical_path, canonical_path };
-pub const Component = enum { cli, indexer, index_loader, getter, bed_parser, stats, validator, reporting, platform };
+pub const Component = enum { cli, indexer, index_loader, getter, stats, validator };
 pub const Check = enum {
     missing_side_table,
     retained_name,
-    retained_shortest_name,
-    retained_longest_name,
     record_reservation,
     composition_accounting,
     reader_buffer,
@@ -394,7 +376,6 @@ pub const Check = enum {
 pub const MissingValue = struct { option: Argument, expected: Expected };
 pub const InvalidValue = struct { option: Argument, expected: Expected, value: ?Preview = null };
 pub const InvalidPath = struct { reason: PathReason, limit_bytes: ?u64 = null };
-pub const Seek = struct { requested_offset: ?u64 = null };
 pub const Read = struct { requested_bytes: ?u64 = null };
 pub const Eof = union(enum) {
     exact: struct { requested_bytes: u64, received_bytes: u64 },
@@ -418,7 +399,7 @@ pub const InvalidSymbol = struct { byte: u8, policy: AlphabetPolicy };
 pub const SequenceWhitespace = struct { whitespace_bytes: u64 };
 pub const Wrapping = struct { expected_width: u64, actual_width: u64 };
 pub const IdentifierLimit = struct { observed_bytes: Measurement, limit_bytes: u64, format: Format };
-pub const LineWidthRole = enum { index_geometry, synthetic_separator, validator_width };
+pub const LineWidthRole = enum { index_geometry, synthetic_separator };
 pub const LineLimit = struct { field: IndexField, observed: Measurement, limit: u64, width_role: LineWidthRole, format: ?Format = null };
 pub const RecordLimit = struct { record_count: Measurement, max_records: u64, format: Format, limit_role: CountLimitRole };
 pub const SideOffsetLimit = struct { offset: u64, max_offset: u64, offset_role: OffsetRole };
@@ -431,8 +412,8 @@ pub const Truncation = struct { section: Section, required_end: u128, available_
 pub const NameBlob = struct { name_blob_bytes: u64, payload_end: u64, records_end: u64 };
 pub const NameExtent = struct { name_offset: u64, name_bytes: u64, blob_bytes: u64 };
 pub const InvalidGeometry = struct { geometry: Geometry, constraint: GeometryConstraint };
-pub const SequenceOffset = struct { sequence_offset: u64, source_bytes: u64, bound_source: BoundSource };
-pub const SequenceSpan = struct { required_end: u128, source_bytes: u64, bound_source: BoundSource, entry: ?u64 = null };
+pub const SequenceOffset = struct { sequence_offset: u64, source_bytes: u64 };
+pub const SequenceSpan = struct { required_end: u128, source_bytes: u64, entry: ?u64 = null };
 pub const ArithmeticOverflow = struct { field: IndexField, arithmetic: Arithmetic, lhs: u128, rhs: u128, max_value: u128 };
 pub const MissingFaiField = struct { field: FaiField, column_number: u8 };
 pub const FaiInteger = struct { field: FaiField, value: ?Preview = null };
@@ -509,7 +490,6 @@ pub const Details = union(enum(u8)) {
     @"io.invalid_path": InvalidPath,
     @"io.open_failed": void,
     @"io.stat_failed": void,
-    @"io.seek_failed": Seek,
     @"io.read_failed": Read,
     @"io.unexpected_eof": Eof,
     @"io.map_failed": Mapping,
@@ -790,22 +770,6 @@ pub const Failure = struct {
     }
 };
 
-pub fn oneBased(failure: *Failure, zero_based: u64, at: Reference) Error!u64 {
-    return std.math.add(u64, zero_based, 1) catch {
-        @branchHint(.cold);
-        return failure.fail(.{
-            .details = .{ .@"resource.count_overflow" = .{
-                .counter = .report_ordinal,
-                .max_value = std.math.maxInt(u64),
-                .current = zero_based,
-                .increment = 1,
-            } },
-            .stage = .report,
-            .at = at,
-        });
-    };
-}
-
 pub fn openFailure(err: anyerror) Details {
     return switch (err) {
         error.FileNotFound => .{ .@"io.file_not_found" = {} },
@@ -868,7 +832,6 @@ fn describeCode(code: Code) Metadata {
         .@"io.invalid_path" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
         .@"io.open_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
         .@"io.stat_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
-        .@"io.seek_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
         .@"io.read_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
         .@"io.unexpected_eof" => describe(code, .io, .failure, .none, .inspect_io, error.Io),
         .@"io.map_failed" => describe(code, .io, .failure, .none, .inspect_io, error.Io),

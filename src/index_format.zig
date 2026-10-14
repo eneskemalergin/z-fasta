@@ -285,7 +285,7 @@ pub const LoadMode = union(enum) {
     lookup_full_map,
     /// Checks every record and the `.zfi` name table, without a `.fai` lookup map.
     catalog,
-    /// Checks every record; a streamed `.fai` keeps only the two names a report prints.
+    /// Checks every record and keeps no names; a `.fai` is streamed.
     stats_scan,
     /// A `.zfi` read on demand; from a `.fai`, only the first line for each name, checked. The
     /// index borrows `names`, which must outlive it.
@@ -309,7 +309,6 @@ pub const LoadedIndex = struct {
     records: Records,
     name_map: ?std.StringHashMapUnmanaged(u32) = null,
     name_slices: []const []const u8 = &.{},
-    stats_name_indices: ?[2]usize = null,
     name_blob: ?[]const u8 = null,
     fai_data: ?platform.MappedBytes = null,
     fasta_size: u64,
@@ -420,11 +419,6 @@ pub const LoadedIndex = struct {
     /// Null when the load mode did not keep this record's name.
     pub fn recordName(self: *const LoadedIndex, rec_idx: usize) ?[]const u8 {
         if (rec_idx >= self.records.len() or self.on_demand != null) return null;
-        if (self.stats_name_indices) |indices| {
-            if (rec_idx == indices[0]) return self.name_slices[0];
-            if (rec_idx == indices[1]) return self.name_slices[1];
-            return null;
-        }
         if (self.name_slices.len > 0) {
             return self.name_slices[rec_idx];
         }
@@ -481,13 +475,6 @@ pub const LoadedIndex = struct {
         if (self.name_map) |name_map| {
             const rec_idx = name_map.get(name) orelse return null;
             return rec_idx;
-        }
-
-        if (self.stats_name_indices) |indices| {
-            for (self.name_slices, indices) |retained, rec_idx| {
-                if (std.mem.eql(u8, retained, name)) return rec_idx;
-            }
-            return null;
         }
 
         if (self.name_slices.len > 0) {
@@ -1101,7 +1088,7 @@ pub const EntryStream = struct {
                 try checkUniformGeometry(record, self.fasta_size, context);
             } else {
                 try checkSequenceStart(record, self.fasta_size, context);
-                const end = try loadZfiSideTable(&self.sides, record, self.records_end, self.blob_start, self.fasta_size, context);
+                const end = try checkSideTable(&self.sides, record, self.records_end, self.blob_start, self.fasta_size, context);
                 const table = record.sideTableOffset();
                 if (table < self.previous_side_end) {
                     context.at.location.offset = table;
@@ -1311,10 +1298,6 @@ const Diagnostics = struct {
         return self.failure.fail(diagnostic);
     }
 
-    fn deferFailure(self: *const Diagnostics, details: diagnostics.Details) void {
-        self.failure.deferFailure(.{ .details = details, .stage = failureStage(details), .at = self.at });
-    }
-
     const IoStage = enum { open, stat, read };
 
     fn ioFailure(self: *const Diagnostics, stage: IoStage, err: anyerror) diagnostics.Error {
@@ -1336,10 +1319,6 @@ const Diagnostics = struct {
         var at = self.at;
         at.location.offset = offset;
         return self.failure.fail(.{ .details = diagnostics.readFailure(requested, received), .stage = .read, .at = at, .cause = if (cause) |err| .{ .zig = err } else null });
-    }
-
-    fn lineBuffer(self: *const Diagnostics, observed: usize) diagnostics.Error {
-        return self.failure.fail(.{ .details = .{ .@"resource.line_buffer_exceeded" = .{ .buffer_bytes = FAI_READER_BUFFER_BYTES, .observed_bytes = .{ .at_least = observed } } }, .stage = .read, .at = self.at, .cause = .{ .zig = error.StreamTooLong } });
     }
 
     fn allocation(self: *const Diagnostics, role: diagnostics.AllocationRole, bytes: ?u64) diagnostics.Error {
@@ -1397,23 +1376,6 @@ fn zfiNameRegions(payload_end: usize, name_blob_len: u64, record_count: u32, rec
 fn zfiRecordsEnd(record_count: u32, context: *Diagnostics) diagnostics.Error!usize {
     const records_bytes = std.math.mul(usize, @as(usize, record_count), ZFI_INDEX_RECORD_BYTES) catch return context.overflow(.record_count, .multiply, record_count, ZFI_INDEX_RECORD_BYTES, std.math.maxInt(usize));
     return std.math.add(usize, @sizeOf(ZfiHeader), records_bytes) catch return context.overflow(.record_count, .add, @sizeOf(ZfiHeader), records_bytes, std.math.maxInt(usize));
-}
-
-fn buildNameMap(
-    allocator: std.mem.Allocator,
-    records: Records,
-    name_data: []const u8,
-    context: *Diagnostics,
-) diagnostics.Error!std.StringHashMapUnmanaged(u32) {
-    if (records.len() > std.math.maxInt(u32)) return context.capacity(.records, std.math.maxInt(u32), records.len());
-    var name_map: std.StringHashMapUnmanaged(u32) = .empty;
-    name_map.ensureTotalCapacity(allocator, @intCast(records.len())) catch return context.allocation(.name_map, null);
-    for (0..records.len()) |i| {
-        const name = records.get(i).getName(name_data);
-        const entry = name_map.getOrPutAssumeCapacity(name);
-        if (!entry.found_existing) entry.value_ptr.* = @intCast(i);
-    }
-    return name_map;
 }
 
 fn tryLoadZfi(
@@ -1637,7 +1599,7 @@ const SideTableValidation = struct {
         const geometry = diagnostics.Geometry{ .line_bases = line.line_bases, .line_bytes = line.line_bytes };
         if (geometryConstraint(geometry)) |constraint| return context.fail(.{ .@"index.side_line_geometry_invalid" = .{ .entry = entry, .geometry = geometry, .constraint = constraint } });
         const byte_end = std.math.add(u64, line.byte_offset, line.line_bytes) catch return context.overflow(.side_byte_end, .add, line.byte_offset, line.line_bytes, std.math.maxInt(u64));
-        if (byte_end > fasta_len) return context.fail(.{ .@"index.sequence_span_out_of_bounds" = .{ .required_end = byte_end, .source_bytes = fasta_len, .bound_source = .actual, .entry = entry } });
+        if (byte_end > fasta_len) return context.fail(.{ .@"index.sequence_span_out_of_bounds" = .{ .required_end = byte_end, .source_bytes = fasta_len, .entry = entry } });
         if (self.expected_base_start == 0) {
             if (line.byte_offset != rec.seq_offset) return context.fail(.{ .@"index.side_first_offset_mismatch" = .{ .first_byte_offset = line.byte_offset, .sequence_offset = rec.seq_offset } });
         } else if (line.byte_offset < self.previous_byte_end) return context.fail(.{ .@"index.side_line_order_invalid" = .{ .entry = entry, .byte_offset = line.byte_offset, .minimum_offset = self.previous_byte_end } });
@@ -1655,7 +1617,7 @@ fn geometryConstraint(geometry: diagnostics.Geometry) ?diagnostics.GeometryConst
 
 fn sequenceStartDefect(rec: IndexRecord, fasta_len: u64) ?diagnostics.Details {
     if (rec.seq_len == 0) return .{ .@"index.zero_sequence_length" = .{} };
-    if (rec.seq_offset >= fasta_len) return .{ .@"index.sequence_offset_out_of_bounds" = .{ .sequence_offset = rec.seq_offset, .source_bytes = fasta_len, .bound_source = .actual } };
+    if (rec.seq_offset >= fasta_len) return .{ .@"index.sequence_offset_out_of_bounds" = .{ .sequence_offset = rec.seq_offset, .source_bytes = fasta_len } };
     return null;
 }
 
@@ -1665,7 +1627,7 @@ fn uniformGeometryDefect(rec: IndexRecord, fasta_len: u64) ?diagnostics.Details 
     if (geometryConstraint(geometry)) |constraint| return .{ .@"index.invalid_line_geometry" = .{ .geometry = geometry, .constraint = constraint } };
     const last_index: u128 = rec.seq_len - 1;
     const required_end = rec.seq_offset + (last_index / rec.line_bases) * rec.line_bytes + (last_index % rec.line_bases) + 1;
-    if (required_end > fasta_len) return .{ .@"index.sequence_span_out_of_bounds" = .{ .required_end = required_end, .source_bytes = fasta_len, .bound_source = .actual } };
+    if (required_end > fasta_len) return .{ .@"index.sequence_span_out_of_bounds" = .{ .required_end = required_end, .source_bytes = fasta_len } };
     return null;
 }
 
@@ -1702,30 +1664,32 @@ fn sideTableExtent(rec: IndexRecord, side_start: usize, side_end: usize, count: 
     return end;
 }
 
-fn loadZfiSideTable(
-    window: *ZfiReadWindow,
-    rec: IndexRecord,
-    side_start: usize,
-    side_end: usize,
-    fasta_len: u64,
-    context: *Diagnostics,
-) diagnostics.Error!usize {
-    const record_at = context.at;
-    defer context.at = record_at;
+// Checks a side table read through `source`; returns its end, with the location at its start.
+fn checkSideTable(source: anytype, rec: IndexRecord, side_start: usize, side_end: usize, fasta_len: u64, context: *Diagnostics) diagnostics.Error!usize {
     const count_end = try sideTableExtent(rec, side_start, side_end, null, context);
     const offset: usize = @intCast(rec.sideTableOffset());
     context.at.location.offset = offset;
-    const count = std.mem.readInt(u64, (try window.take(offset, 8, context))[0..8], .little);
+    const count = std.mem.readInt(u64, (try source.take(offset, 8, context))[0..8], .little);
     const table_end = try sideTableExtent(rec, side_start, side_end, count, context);
     var validation = SideTableValidation{};
     for (0..@intCast(count)) |i| {
         context.at.location.offset = count_end + i * @sizeOf(SideTableLine);
-        const line = std.mem.bytesToValue(SideTableLine, try window.take(context.at.location.offset.?, @sizeOf(SideTableLine), context));
+        const line = std.mem.bytesToValue(SideTableLine, try source.take(context.at.location.offset.?, @sizeOf(SideTableLine), context));
         try validation.accept(line, rec, fasta_len, i + 1, context);
     }
     if (validation.expected_base_start != rec.seq_len) return context.fail(.{ .@"index.side_sequence_length_mismatch" = .{ .indexed_length = rec.seq_len, .side_table_bases = validation.expected_base_start } });
+    context.at.location.offset = offset;
     return table_end;
 }
+
+// Mapped bytes for `checkSideTable`, whose `sideTableExtent` checks bound every range first.
+const MappedSideTables = struct {
+    data: []const u8,
+
+    fn take(self: MappedSideTables, offset: u64, len: usize, _: *Diagnostics) diagnostics.Error![]const u8 {
+        return self.data[@intCast(offset)..][0..len];
+    }
+};
 
 // A streamed `.zfi` header: magic, source size, record count, and room for the records.
 fn checkZfiHeader(header: ZfiHeader, fasta_size: u64, zfi_size: usize, context: *Diagnostics) diagnostics.Error!usize {
@@ -1882,14 +1846,12 @@ fn tryLoadFai(
     }
 
     const loaded_records = records[0..record_count];
-    const name_map = if (mode == .catalog) null else try buildNameMap(allocator, .{ .owned = loaded_records }, fai_data, context);
 
     return LoadedIndex{
         .io = io,
         .fasta_file = fasta_file,
         .fai_map = fai_map,
         .records = .{ .owned = loaded_records },
-        .name_map = name_map,
         .name_slices = &.{},
         .fai_data = fai_data,
         .fasta_size = fasta_stat.size,
@@ -1933,12 +1895,6 @@ fn loadFaiLazy(allocator: std.mem.Allocator, data: []const u8, context: *Diagnos
     @memset(checked, 0);
     return .{ .lines = lines.items, .map = map, .checked = checked };
 }
-
-const FaiNameRef = struct {
-    offset: u64,
-    len: usize,
-    at: diagnostics.Reference,
-};
 
 const StreamedFaiMode = union(enum) {
     stats_scan,
@@ -1987,12 +1943,6 @@ fn loadFaiStreamed(
     var file_reader = fai_file.reader(io, &io_buf);
     var saw_record = false;
     var long_line_buffer: [FAI_READER_BUFFER_BYTES]u8 = undefined;
-    var shortest_ref: FaiNameRef = undefined;
-    var longest_ref: FaiNameRef = undefined;
-    var shortest_index: usize = 0;
-    var longest_index: usize = 0;
-    var shortest_len: u64 = 0;
-    var longest_len: u64 = 0;
 
     var row_number: u64 = 0;
     var record_number: u64 = 0;
@@ -2012,12 +1962,12 @@ fn loadFaiStreamed(
             break :buffered available[0..breaks.end];
         } else file_reader.interface.takeDelimiter('\n') catch |err| switch (err) {
             error.ReadFailed => return context.ioFailure(.read, file_reader.err orelse err),
-            error.StreamTooLong => if (mode == .requested) long: {
+            error.StreamTooLong => long: {
                 context.at.record = try context.nextOrdinal(record_number, .records);
                 const parsed = try takeLongFaiLine(&file_reader, &long_line_buffer, context);
                 long_fields = parsed.fields;
                 break :long parsed.name;
-            } else return context.lineBuffer(file_reader.interface.buffered().len),
+            },
         };
         const line = maybe_line orelse break;
         row_number += 1;
@@ -2055,19 +2005,7 @@ fn loadFaiStreamed(
                 slices_list.append(allocator, name) catch return context.allocation(.name_slices, null);
                 if (matched) |entry| entry.value_ptr.* = @intCast(rec_index);
             },
-            .stats_scan => {
-                const name_ref = FaiNameRef{ .offset = current_offset, .len = fields.name_end, .at = context.at };
-                if (rec_index == 0 or rec.seq_len < shortest_len) {
-                    shortest_ref = name_ref;
-                    shortest_index = rec_index;
-                    shortest_len = rec.seq_len;
-                }
-                if (rec_index == 0 or rec.seq_len > longest_len) {
-                    longest_ref = name_ref;
-                    longest_index = rec_index;
-                    longest_len = rec.seq_len;
-                }
-            },
+            .stats_scan => {},
         }
         records_list.append(records_allocator, rec) catch return context.allocation(.records, null);
         if (mode != .stats_scan and records_list.items.len == if (single_name != null) 1 else requested.count()) break;
@@ -2081,17 +2019,9 @@ fn loadFaiStreamed(
         allocator.dupe(IndexRecord, records_list.items) catch return context.allocation(.records, null)
     else
         records_list.toOwnedSlice(allocator) catch return context.allocation(.records, null);
-    const owned_slices = switch (mode) {
+    const owned_slices: []const []const u8 = switch (mode) {
         .requested => slices_list.toOwnedSlice(allocator) catch return context.allocation(.name_slices, null),
-        .stats_scan => blk: {
-            const names = allocator.alloc([]const u8, 2) catch return context.allocation(.name_slices, 2 * @sizeOf([]const u8));
-            names[0] = try readFaiName(allocator, io, fai_file, shortest_ref, context);
-            names[1] = if (shortest_index == longest_index)
-                names[0]
-            else
-                try readFaiName(allocator, io, fai_file, longest_ref, context);
-            break :blk names;
-        },
+        .stats_scan => &.{},
     };
 
     const name_map: ?std.StringHashMapUnmanaged(u32) = switch (mode) {
@@ -2105,32 +2035,12 @@ fn loadFaiStreamed(
         .records = .{ .owned = owned_records },
         .name_map = name_map,
         .name_slices = owned_slices,
-        .stats_name_indices = switch (mode) {
-            .requested => null,
-            .stats_scan => .{ shortest_index, longest_index },
-        },
         .fai_data = null,
         .fasta_size = fasta_stat.size,
         .zfi_data = null,
         .source = .fai,
         .arena = arena,
     };
-}
-
-fn readFaiName(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    fai_file: std.Io.File,
-    name_ref: FaiNameRef,
-    context: *Diagnostics,
-) diagnostics.Error![]const u8 {
-    var name_context = context.*;
-    name_context.at = name_ref.at;
-    const name = allocator.alloc(u8, name_ref.len) catch return name_context.allocation(.retained_names, name_ref.len);
-    if (name.len == 0) return name;
-    const got = std.Io.File.readPositionalAll(fai_file, io, name, name_ref.offset) catch |err| return name_context.read(name_ref.offset, name.len, null, err);
-    if (got != name.len) return name_context.read(name_ref.offset, name.len, got, null);
-    return name;
 }
 
 const FaiLineFields = struct {
@@ -2366,20 +2276,7 @@ fn checkZfiRecord(data: []const u8, rec: IndexRecord, index: usize, fasta_len: u
         return null;
     }
     try checkSequenceStart(rec, fasta_len, context);
-    const count_end = try sideTableExtent(rec, side_start, side_end, null, context);
-    const offset: usize = @intCast(rec.sideTableOffset());
-    context.at.location.offset = offset;
-    const count = std.mem.readInt(u64, data[offset..][0..8], .little);
-    const table_end = try sideTableExtent(rec, side_start, side_end, count, context);
-    var validation = SideTableValidation{};
-    for (0..@intCast(count)) |i| {
-        context.at.location.offset = count_end + i * @sizeOf(SideTableLine);
-        const line = std.mem.bytesToValue(SideTableLine, data[@intCast(context.at.location.offset.?)..][0..@sizeOf(SideTableLine)]);
-        try validation.accept(line, rec, fasta_len, i + 1, context);
-    }
-    if (validation.expected_base_start != rec.seq_len) return context.fail(.{ .@"index.side_sequence_length_mismatch" = .{ .indexed_length = rec.seq_len, .side_table_bases = validation.expected_base_start } });
-    context.at.location.offset = offset;
-    return table_end;
+    return try checkSideTable(MappedSideTables{ .data = data }, rec, side_start, side_end, fasta_len, context);
 }
 
 // Rebuilds the name table from the records and compares it with the stored one, slot by slot.

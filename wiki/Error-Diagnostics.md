@@ -145,7 +145,6 @@ A field ending in `offset` or describing a byte extent refers to bytes in its na
   - `io.invalid_path`: failure; fields `reason`, `limit_bytes`.
   - `io.open_failed`: failure; no fields.
   - `io.stat_failed`: failure; no fields.
-  - `io.seek_failed`: failure; fields `requested_offset`.
   - `io.read_failed`: failure; fields `requested_bytes`.
   - `io.unexpected_eof`: failure; fields `exact`, `delimiter`.
   - `io.map_failed`: failure; fields `map_bytes`.
@@ -204,8 +203,8 @@ A field ending in `offset` or describing a byte extent refers to bytes in its na
   - `index.name_out_of_bounds`: finding per record; fields `name_offset`, `name_bytes`, `blob_bytes`.
   - `index.zero_sequence_length`: finding per record; fields `sequence_length`.
   - `index.invalid_line_geometry`: finding per record; fields `geometry`, `constraint`.
-  - `index.sequence_offset_out_of_bounds`: finding per record; fields `sequence_offset`, `source_bytes`, `bound_source`.
-  - `index.sequence_span_out_of_bounds`: finding per record; fields `required_end`, `source_bytes`, `bound_source`, `entry`.
+  - `index.sequence_offset_out_of_bounds`: finding per record; fields `sequence_offset`, `source_bytes`.
+  - `index.sequence_span_out_of_bounds`: finding per record; fields `required_end`, `source_bytes`, `entry`.
   - `index.arithmetic_overflow`: finding per field; fields `field`, `arithmetic`, `lhs`, `rhs`, `max_value`.
   - `index.fai.field_missing`: finding per field; fields `field`, `column_number`.
   - `index.fai.invalid_integer`: finding per field; fields `field`, `value`.

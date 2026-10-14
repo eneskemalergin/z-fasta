@@ -1732,7 +1732,6 @@ fn checkPackedNameAllocations(allocator: std.mem.Allocator) !void {
     var names = PackedNames.init(allocator);
     names.diag = diag;
     defer names.deinit();
-    try names.ensureCapacity(16);
     var name = [_]u8{'A'} ** MAX_INDEX_NAME_BYTES;
     for (0..3) |i| {
         name[0] = @intCast('A' + i);

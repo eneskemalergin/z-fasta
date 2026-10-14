@@ -528,11 +528,6 @@ fn registerTemporaryPath(failure: *diagnostics.Failure, role: diagnostics.Source
     }
 }
 
-fn tryCreateFaiSpool(io: std.Io, dir: std.Io.Dir, close_dir: bool) ?FaiSpool {
-    var attempts: diagnostics.TempAttempts = .{};
-    return tryCreateSpool(io, dir, close_dir, .{}, .fai_spool, .current_directory, ".", &attempts);
-}
-
 // Spools hold FASTA names and offsets in shared temporary directories: owner-only.
 const SPOOL_PERMISSIONS: std.Io.File.Permissions = .fromMode(0o600);
 
@@ -584,27 +579,15 @@ fn tryOpenSpoolDir(io: std.Io, path: []const u8, diag: Diagnostics, role: diagno
     };
 }
 
-fn openFaiSpool(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, diag: Diagnostics, role: diagnostics.SourceId) !FaiSpool {
+fn openFaiSpool(io: std.Io, environ: std.process.Environ, diag: Diagnostics, role: diagnostics.SourceId) !FaiSpool {
     var attempts: diagnostics.TempAttempts = .{};
     const env_names = [_][]const u8{ "TMPDIR", "TEMP", "TMP" };
-    if (comptime @hasDecl(std.process.Environ.Block, "view")) {
-        for (env_names) |env_name| {
-            const path = std.process.Environ.getPosix(environ, env_name) orelse continue;
-            if (path.len == 0) continue;
-            if (tryOpenSpoolDir(io, path, diag, role, .environment, &attempts)) |spool| return spool;
-        }
-    } else {
-        var env_map = environ.createMap(allocator) catch return diag.oom(.arena, null);
-        defer env_map.deinit();
-        for (env_names) |env_name| {
-            const path = env_map.get(env_name) orelse continue;
-            if (path.len == 0) continue;
-            if (tryOpenSpoolDir(io, path, diag, role, .environment, &attempts)) |spool| return spool;
-        }
+    for (env_names) |env_name| {
+        const path = std.process.Environ.getPosix(environ, env_name) orelse continue;
+        if (path.len == 0) continue;
+        if (tryOpenSpoolDir(io, path, diag, role, .environment, &attempts)) |spool| return spool;
     }
-    if (builtin.os.tag != .windows) {
-        if (tryOpenSpoolDir(io, "/tmp", diag, role, .system, &attempts)) |spool| return spool;
-    }
+    if (tryOpenSpoolDir(io, "/tmp", diag, role, .system, &attempts)) |spool| return spool;
     if (tryCreateSpool(io, .cwd(), false, diag, role, .current_directory, ".", &attempts)) |spool| return spool;
     return diag.fail(.{ .@"io.temp_unavailable" = .{ .purpose = switch (role) {
         .name_spool => .names,
@@ -708,7 +691,7 @@ fn indexFai(
     read_buf: []u8,
     diag: Diagnostics,
 ) !u32 {
-    var spool = try openFaiSpool(allocator, io, environ, diag, .fai_spool);
+    var spool = try openFaiSpool(io, environ, diag, .fai_spool);
     defer spool.deinit(io);
     var tmp_io_buf: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
     var tmp_fw = spool.file.writer(io, &tmp_io_buf);
@@ -845,7 +828,7 @@ const CatalogBytes = struct {
             return;
         }
         if (self.spool == null) {
-            self.spool = try openFaiSpool(self.allocator, self.io, self.environ, self.diag, self.role);
+            self.spool = try openFaiSpool(self.io, self.environ, self.diag, self.role);
             self.spool.?.file.writePositionalAll(self.io, self.bytes.items, 0) catch |err| return self.diag.fail(.{ .@"io.write_failed" = {} }, .write, self.role, err, error.WriteFailed);
             self.bytes.deinit(self.allocator);
             self.bytes = .empty;
@@ -1060,7 +1043,7 @@ const StreamedCatalog = struct {
         }
         var buffer: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
         var output = file.writer(self.io, &buffer);
-        output.seekTo(@sizeOf(ZfiHeader) + self.record_bytes) catch |err| return self.diag.fail(.{ .@"io.seek_failed" = .{ .requested_offset = @sizeOf(ZfiHeader) + self.record_bytes } }, .seek, .zfi, if (output.seek_err) |cause| cause else err, error.ZfiWriteFailed);
+        output.pos = @sizeOf(ZfiHeader) + self.record_bytes;
         self.sides.copyTo(&output.interface) catch |err| {
             self.retainWriteCause(output.err);
             return err;
@@ -1394,10 +1377,11 @@ test "[integration] - [fai output]: uses exclusive owner-only files and cleans t
     defer tmp.cleanup();
 
     {
-        var first = tryCreateFaiSpool(std.testing.io, tmp.dir, false) orelse
+        var attempts: diagnostics.TempAttempts = .{};
+        var first = tryCreateSpool(std.testing.io, tmp.dir, false, .{}, .fai_spool, .current_directory, ".", &attempts) orelse
             return error.TestUnexpectedResult;
         defer first.deinit(std.testing.io);
-        var second = tryCreateFaiSpool(std.testing.io, tmp.dir, false) orelse
+        var second = tryCreateSpool(std.testing.io, tmp.dir, false, .{}, .fai_spool, .current_directory, ".", &attempts) orelse
             return error.TestUnexpectedResult;
         defer second.deinit(std.testing.io);
 

@@ -45,10 +45,12 @@ All notable changes to z-fasta will be documented in this file.
 - `index --dedup` and `--no-dedup`.
 - The fields of `index.no_indexable_records`, which now means that every record is empty.
 - `index.name_not_embedded` and the fields of `index.name_footer_missing`: every version 2 `.zfi` embeds its names and ends with its source identity.
+- `io.seek_failed` and the `seek` stage: no operation can fail to seek.
+- The `bound_source` field of `index.sequence_offset_out_of_bounds` and `index.sequence_span_out_of_bounds`, which was always `actual`, and 26 enumerated diagnostic values that no command produced (among them the `win32` and `ntstatus` cause domains and the `no_dedup` argument).
 
 ### Fixed
 
-- `get` resolves names through a `.fai` the same way for regions, names files, and BED files: a `.fai` row longer than 64 KiB no longer fails only for regions on the command line.
+- `get` resolves names through a `.fai` the same way for regions, names files, and BED files: a `.fai` row longer than 64 KiB no longer fails only for regions on the command line, or for `stats` on an index that lists records out of file order.
 - A directory where the `.zfi` or `.fai` should be fails with `io.map_failed` in every command, empty or not; an empty one reported `index.no_records` or `index.truncated`.
 - A FIFO where the `.zfi` or `.fai` should be fails at once as an empty index instead of waiting for a writer.
 - Temporary files that `index` writes while it works are readable only by their owner.

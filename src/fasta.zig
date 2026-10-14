@@ -1057,11 +1057,6 @@ pub fn PackedNamesWith(comptime Diag: type) type {
             return .{ .allocator = allocator, .map = Map.initContext(allocator, .{ .owner = undefined }) };
         }
 
-        pub fn ensureCapacity(self: *@This(), capacity: u32) !void {
-            self.map.ctx.owner = self;
-            self.map.ensureTotalCapacity(capacity) catch return self.diag.oom(.dedup_table, null);
-        }
-
         pub fn deinit(self: *@This()) void {
             self.map.deinit();
             for (self.blocks.items) |block| self.allocator.free(block);
