@@ -573,7 +573,7 @@ pub fn RecordScannerWith(comptime Diag: type) type {
             self.side_base_start += bases;
         }
 
-        fn flushDeferredShortTailThen(
+        fn appendDeferredTailAndLine(
             self: *Self,
             metrics_line_count: u64,
             bases: u32,
@@ -621,7 +621,7 @@ pub fn RecordScannerWith(comptime Diag: type) type {
             }
 
             if (self.deferred_short_tail != null) {
-                try self.flushDeferredShortTailThen(metrics.line_count, bases, actual_bytes, line_file_offset);
+                try self.appendDeferredTailAndLine(metrics.line_count, bases, actual_bytes, line_file_offset);
                 return;
             }
 

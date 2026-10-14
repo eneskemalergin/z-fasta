@@ -343,28 +343,28 @@ const Rewrite = struct {
     column: u64 = 0,
 
     fn startHeader(self: *Rewrite) std.Io.Writer.Error!void {
-        if (self.column != 0) try self.put("\n");
+        if (self.column != 0) try self.write("\n");
         self.column = 0;
-        try self.put(">");
+        try self.write(">");
     }
 
     fn header(self: *Rewrite, bytes: []const u8) std.Io.Writer.Error!void {
-        try self.put(bytes);
+        try self.write(bytes);
     }
 
     fn endHeader(self: *Rewrite) std.Io.Writer.Error!void {
-        try self.put("\n");
+        try self.write("\n");
     }
 
     fn symbols(self: *Rewrite, bytes: []const u8) std.Io.Writer.Error!void {
         var rest = bytes;
         while (rest.len != 0) {
             if (self.column == self.width) {
-                try self.put("\n");
+                try self.write("\n");
                 self.column = 0;
             }
             const take: usize = @intCast(@min(@as(u64, rest.len), self.width - self.column));
-            try self.put(rest[0..take]);
+            try self.write(rest[0..take]);
             self.column += take;
             rest = rest[take..];
         }
@@ -372,24 +372,24 @@ const Rewrite = struct {
 
     // `count` lines of `width` symbols, each followed by its ending, `line_bytes` apart. Lines already
     // at the output width with LF endings are copied as they are.
-    fn lines(self: *Rewrite, data: []const u8, width: usize, line_bytes: usize, count: usize) std.Io.Writer.Error!void {
+    fn wholeLines(self: *Rewrite, data: []const u8, width: usize, line_bytes: usize, count: usize) std.Io.Writer.Error!void {
         if (width != self.width or line_bytes != width + 1 or (self.column != 0 and self.column != width)) {
             for (0..count) |k| try self.symbols(data[k * line_bytes ..][0..width]);
             return;
         }
-        if (self.column == width) try self.put("\n");
-        try self.put(data[0 .. count * line_bytes - 1]);
+        if (self.column == width) try self.write("\n");
+        try self.write(data[0 .. count * line_bytes - 1]);
         self.column = width;
     }
 
     fn finish(self: *Rewrite) std.Io.Writer.Error!void {
-        if (self.column != 0) try self.put("\n");
+        if (self.column != 0) try self.write("\n");
         self.column = 0;
     }
 
     // Fills the buffer before each flush, so the file is written in whole buffers: a write that
     // ends inside a page costs a filesystem about twice as much as one that ends on a boundary.
-    fn put(self: *Rewrite, bytes: []const u8) std.Io.Writer.Error!void {
+    fn write(self: *Rewrite, bytes: []const u8) std.Io.Writer.Error!void {
         var rest = bytes;
         while (rest.len != 0) {
             var room = self.writer.unusedCapacitySlice();
@@ -448,7 +448,7 @@ fn scan(allocator: std.mem.Allocator, source: *std.Io.Reader, buffer: []u8, name
 
 const LineEnding = enum { lf, crlf };
 
-// Where a line or header starts. Plain numbers, so the per-line state is copied as words; `Scan.located`
+// Where a line or header starts. Plain numbers, so the per-line state is copied as words; `Scan.inRecord`
 // makes the reference when a finding needs one.
 const Position = struct { offset: u64, line: u64, column: u64 };
 
@@ -796,7 +796,7 @@ const Scan = struct {
             .names = .stopped,
             .budget = if (rules.max_name_bytes) |limit| .{ .child = allocator, .limit = limit } else null,
         };
-        if (rules.custom_alphabet != null or rules.alphabet != .auto) self.choose(0);
+        if (rules.custom_alphabet != null or rules.alphabet != .auto) self.chooseAlphabet(0);
         return self;
     }
 
@@ -849,12 +849,12 @@ const Scan = struct {
             try self.content("\r", self.offset - 1);
         }
         if (self.line.kind != .start) try self.endLine(null, self.offset);
-        try self.checkPendingName();
+        try self.checkPendingDuplicate();
         try self.finishPair();
         self.finishRecord();
         if (self.report.examined.records == 0) self.count(.{ .@"fasta.no_records" = {} }, .{ .source = .fasta });
         if (self.last_byte) |byte| {
-            if (byte != '\n') self.count(.{ .@"format.missing_terminal_newline" = {} }, self.where(self.offset));
+            if (byte != '\n') self.count(.{ .@"format.missing_terminal_newline" = {} }, self.fileAt(self.offset));
         }
         try self.resolveFirstDefinition();
     }
@@ -862,7 +862,7 @@ const Scan = struct {
     fn finish(self: *Scan, completion: reporting.Validation.Completion) void {
         const report = self.report;
         report.completion = if (completion == .complete and report.name_budget_stop != null) .incomplete else completion;
-        if (self.chosen == null) self.choose(@intFromBool(fasta.detectType(&self.sample_counts, self.sample_total) == .protein));
+        if (self.chosen == null) self.chooseAlphabet(@intFromBool(fasta.detectType(&self.sample_counts, self.sample_total) == .protein));
         const chosen = self.chosen.?;
         report.alphabet = alphabetPolicy(self.rules, chosen, self.sample_total);
         var occurrences: u64 = 0;
@@ -879,7 +879,7 @@ const Scan = struct {
         if (self.pair) |pair| report.index = .{ .format = pair.scanner.diag.format, .entries = pair.entriesRead(), .matched = pair.matched, .omitted_duplicates = pair.omitted };
     }
 
-    fn choose(self: *Scan, candidate: u1) void {
+    fn chooseAlphabet(self: *Scan, candidate: u1) void {
         self.chosen = candidate;
         self.fast = if (self.fast_after_choice == .plain_nucleotides and candidate == 1) .protein else self.fast_after_choice;
     }
@@ -965,7 +965,7 @@ const Scan = struct {
         self.record.width = width;
         const symbols_per_line: usize = @intCast(width);
         const line_bytes: usize = symbols_per_line + @as(usize, @intCast(self.endingBytes()));
-        if (self.rewrite) |sink| sink.lines(data, symbols_per_line, line_bytes, lines) catch |err| return self.writeFailed(err);
+        if (self.rewrite) |sink| sink.wholeLines(data, symbols_per_line, line_bytes, lines) catch |err| return self.writeFailed(err);
         const symbols = width * lines;
         self.record.symbols += symbols;
         self.report.examined.symbols += symbols;
@@ -984,7 +984,7 @@ const Scan = struct {
     }
 
     fn startHeader(self: *Scan, at: u64) diagnostics.Error!void {
-        try self.checkPendingName();
+        try self.checkPendingDuplicate();
         try self.advancePair(at + 1);
         self.finishRecord();
         self.report.examined.records += 1;
@@ -1072,7 +1072,7 @@ const Scan = struct {
             self.report.examined.symbols += bytes.len;
             if (self.rewrite) |sink| sink.symbols(bytes) catch |err| return self.writeFailed(err);
         }
-        if (self.chosen == null and self.sample_total == TYPE_SAMPLE_SYMBOLS) self.choose(@intFromBool(fasta.detectType(&self.sample_counts, self.sample_total) == .protein));
+        if (self.chosen == null and self.sample_total == TYPE_SAMPLE_SYMBOLS) self.chooseAlphabet(@intFromBool(fasta.detectType(&self.sample_counts, self.sample_total) == .protein));
     }
 
     fn irregularContent(self: *Scan, bytes: []const u8, at: u64, outside: u8) diagnostics.Error!void {
@@ -1088,7 +1088,7 @@ const Scan = struct {
                     if (self.line.whitespace == 0) self.line.first_whitespace = self.line.len + index;
                     self.line.whitespace += 1;
                 } else {
-                    self.count(.{ .@"fasta.sequence_control_byte" = .{ .byte = byte, .grammar = .controls_except_tab } }, self.reference(at + index));
+                    self.count(.{ .@"fasta.sequence_control_byte" = .{ .byte = byte, .grammar = .controls_except_tab } }, self.recordAt(at + index));
                 }
                 continue;
             }
@@ -1116,7 +1116,7 @@ const Scan = struct {
     fn keepFirstOutside(self: *Scan, comptime candidate: u1, byte: u8, offset: u64) void {
         self.candidates[candidate].first = .{
             .details = .{ .@"sequence.invalid_symbol" = .{ .byte = byte, .policy = self.report.alphabet } },
-            .at = self.reference(offset),
+            .at = self.recordAt(offset),
             .identifier = self.identifierPreview(),
         };
     }
@@ -1124,13 +1124,13 @@ const Scan = struct {
     fn endLine(self: *Scan, ending: ?LineEnding, at: u64) diagnostics.Error!void {
         if (ending) |kind| {
             if (self.first_ending) |first| {
-                if (kind != first and self.report.finding(.@"format.mixed_line_endings").occurrences == 0) self.count(.{ .@"format.mixed_line_endings" = {} }, self.where(at));
+                if (kind != first and self.report.finding(.@"format.mixed_line_endings").occurrences == 0) self.count(.{ .@"format.mixed_line_endings" = {} }, self.fileAt(at));
             } else self.first_ending = kind;
         }
         switch (self.line.kind) {
             .start => unreachable,
             .preamble => if (self.line.content_at) |index| {
-                self.count(.{ .@"fasta.content_before_header" = .{ .content_bytes = .{ .exact = self.line.len } } }, self.where(self.line.start + index));
+                self.count(.{ .@"fasta.content_before_header" = .{ .content_bytes = .{ .exact = self.line.len } } }, self.fileAt(self.line.start + index));
             },
             .header => try self.endHeader(),
             .sequence => self.endSequenceLine(ending),
@@ -1150,21 +1150,21 @@ const Scan = struct {
         self.record.named = true;
         self.record.identifier_bytes = self.line.identifier_bytes;
         if (identifier.len == 0) {
-            self.count(.{ .@"fasta.empty_identifier" = {} }, self.reference(start + 1));
+            self.count(.{ .@"fasta.empty_identifier" = {} }, self.recordAt(start + 1));
         } else if (self.line.identifier_bytes > MAX_INDEX_NAME_BYTES) {
             // No index can hold it, so it takes no part in the duplicate check.
-            self.count(.{ .@"fasta.identifier_too_long" = .{ .observed_bytes = self.line.identifier_bytes, .limit_bytes = MAX_INDEX_NAME_BYTES } }, self.reference(start + 1));
+            self.count(.{ .@"fasta.identifier_too_long" = .{ .observed_bytes = self.line.identifier_bytes, .limit_bytes = MAX_INDEX_NAME_BYTES } }, self.recordAt(start + 1));
         } else switch (self.names) {
             .stopped => {},
             .source => |*set| self.pending_name = set.prefetch(identifier),
             .copied => self.pending_name = 0,
         }
         if (self.line.first_control) |control| {
-            self.countMany(.{ .@"fasta.header_control_byte" = .{ .byte = control.byte, .grammar = .controls_except_tab } }, self.reference(start + 1 + control.index), self.line.controls);
+            self.countMany(.{ .@"fasta.header_control_byte" = .{ .byte = control.byte, .grammar = .controls_except_tab } }, self.recordAt(start + 1 + control.index), self.line.controls);
         }
-        if (self.line.len > self.rules.max_header_bytes) self.count(.{ .@"fasta.long_header" = .{ .observed_bytes = self.line.len, .limit_bytes = self.rules.max_header_bytes } }, self.located(self.record.header));
+        if (self.line.len > self.rules.max_header_bytes) self.count(.{ .@"fasta.long_header" = .{ .observed_bytes = self.line.len, .limit_bytes = self.rules.max_header_bytes } }, self.inRecord(self.record.header));
         if (convention(self.rules.schema)) |selected| {
-            if (!matchesSchema(self.rules.schema, identifier)) self.count(.{ .@"header.convention_mismatch" = .{ .convention = selected } }, self.located(self.record.header));
+            if (!matchesSchema(self.rules.schema, identifier)) self.count(.{ .@"header.convention_mismatch" = .{ .convention = selected } }, self.inRecord(self.record.header));
         }
         if (self.rewrite) |sink| sink.endHeader() catch |err| return self.writeFailed(err);
     }
@@ -1179,15 +1179,15 @@ const Scan = struct {
 
     // The duplicate check `endHeader` deferred, so the table slots it prefetched have arrived. It
     // runs before anything reads `record.duplicate`: the next header, or the end of input.
-    fn checkPendingName(self: *Scan) diagnostics.Error!void {
+    fn checkPendingDuplicate(self: *Scan) diagnostics.Error!void {
         const fingerprint = self.pending_name orelse return;
         self.pending_name = null;
         const identifier = self.name_buf.items;
         const header = self.record.header;
-        const at: diagnostics.Reference = .{ .source = .fasta, .location = .{ .offset = header.offset + 1, .line = header.line, .column = header.column + 1 }, .record = self.record.ordinal };
+        const at = self.inRecord(.{ .offset = header.offset + 1, .line = header.line, .column = header.column + 1 });
         if (!try self.seenBefore(identifier, fingerprint, at)) return;
         self.record.duplicate = true;
-        if (self.first_duplicate == null) self.first_duplicate = self.allocator.dupe(u8, identifier) catch return self.outOfMemoryAt(.validation_identifiers, self.located(header));
+        if (self.first_duplicate == null) self.first_duplicate = self.allocator.dupe(u8, identifier) catch return self.outOfMemoryAt(.validation_identifiers, self.inRecord(header));
         self.count(.{ .@"fasta.duplicate_identifier" = .{} }, at);
     }
 
@@ -1211,8 +1211,8 @@ const Scan = struct {
 
     fn endSequenceLine(self: *Scan, ending: ?LineEnding) void {
         const line = self.line;
-        if (line.len == 0) return self.count(.{ .@"format.blank_sequence_line" = {} }, self.reference(line.start));
-        if (line.whitespace != 0) self.count(.{ .@"format.sequence_whitespace" = .{ .whitespace_bytes = line.whitespace } }, self.reference(line.start + line.first_whitespace));
+        if (line.len == 0) return self.count(.{ .@"format.blank_sequence_line" = {} }, self.recordAt(line.start));
+        if (line.whitespace != 0) self.count(.{ .@"format.sequence_whitespace" = .{ .whitespace_bytes = line.whitespace } }, self.recordAt(line.start + line.first_whitespace));
         if (line.symbols == 0) return;
         self.record.symbols += line.symbols;
         if (self.record.last_line) |previous| {
@@ -1226,7 +1226,7 @@ const Scan = struct {
     fn reportWrapping(self: *Scan, width: u64, line: SymbolLine) void {
         if (self.record.wrapping_reported) return;
         self.record.wrapping_reported = true;
-        self.count(.{ .@"format.inconsistent_wrapping" = .{ .expected_width = width, .actual_width = line.symbols } }, self.located(line.start));
+        self.count(.{ .@"format.inconsistent_wrapping" = .{ .expected_width = width, .actual_width = line.symbols } }, self.inRecord(line.start));
     }
 
     fn finishRecord(self: *Scan) void {
@@ -1237,7 +1237,7 @@ const Scan = struct {
                 if (last.symbols > width) self.reportWrapping(width, last);
             }
         }
-        if (record.symbols == 0) self.count(.{ .@"fasta.empty_record" = {} }, self.located(record.header));
+        if (record.symbols == 0) self.count(.{ .@"fasta.empty_record" = {} }, self.inRecord(record.header));
         inline for (0..2) |candidate| {
             const outside = record.classes & outsideBit(candidate) != 0;
             if (outside) self.candidates[candidate].records += 1;
@@ -1357,7 +1357,7 @@ const Scan = struct {
     fn compareRecord(self: *Scan, record: fasta.ScannedRecord) anyerror!void {
         const pair = self.pair.?;
         const current = self.record.ordinal != 0 and self.record.header.offset == record.header_offset;
-        const at: diagnostics.Reference = if (current) self.located(self.record.header) else .{ .source = .fasta, .location = .{ .offset = record.header_offset } };
+        const at: diagnostics.Reference = if (current) self.inRecord(self.record.header) else .{ .source = .fasta, .location = .{ .offset = record.header_offset } };
         const entry = switch (try pair.associate(record.name, current and self.record.duplicate)) {
             .entry => |entry| entry,
             .omitted => {
@@ -1389,9 +1389,9 @@ const Scan = struct {
         return .{ .offset = offset, .line = self.line_number, .column = offset - self.origin + 1 };
     }
 
-    // A `position` in the current record.
-    fn located(self: *const Scan, start: Position) diagnostics.Reference {
-        return .{ .source = .fasta, .location = .{ .offset = start.offset, .line = start.line, .column = start.column }, .record = self.record.ordinal };
+    // `start` in the current record, or in no record before the first header.
+    fn inRecord(self: *const Scan, start: Position) diagnostics.Reference {
+        return .{ .source = .fasta, .location = .{ .offset = start.offset, .line = start.line, .column = start.column }, .record = if (self.record.ordinal == 0) null else self.record.ordinal };
     }
 
     fn identifierPreview(self: *const Scan) ?reporting.Identifier {
@@ -1401,17 +1401,20 @@ const Scan = struct {
         return preview;
     }
 
-    fn reference(self: *const Scan, offset: u64) diagnostics.Reference {
-        return .{ .source = .fasta, .location = .{ .offset = offset, .line = self.line_number, .column = offset - self.origin + 1 }, .record = if (self.record.ordinal == 0) null else self.record.ordinal };
+    // `offset` on the current line, in the current record.
+    fn recordAt(self: *const Scan, offset: u64) diagnostics.Reference {
+        return self.inRecord(self.position(offset));
     }
 
-    fn where(self: *const Scan, offset: u64) diagnostics.Reference {
-        return fileReference(offset, self.line_number, offset - self.origin + 1);
+    // `offset` on the current line, for a finding about the whole file.
+    fn fileAt(self: *const Scan, offset: u64) diagnostics.Reference {
+        const at = self.position(offset);
+        return fileReference(at.offset, at.line, at.column);
     }
 
     fn outOfMemory(self: *Scan, role: diagnostics.AllocationRole, offset: u64) diagnostics.Error {
         @branchHint(.cold);
-        return self.outOfMemoryAt(role, self.reference(offset));
+        return self.outOfMemoryAt(role, self.recordAt(offset));
     }
 
     fn outOfMemoryAt(self: *Scan, role: diagnostics.AllocationRole, at: diagnostics.Reference) diagnostics.Error {
