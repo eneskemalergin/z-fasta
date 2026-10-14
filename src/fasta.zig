@@ -1085,6 +1085,7 @@ pub fn PackedNamesWith(comptime Diag: type) type {
             }
             const offset = std.math.cast(u32, self.position) orelse return self.diag.capacity(.name_offset, std.math.maxInt(u32), self.position, error.OutOfMemory);
             const next_position = std.math.add(usize, self.position, name.len) catch return self.diag.capacity(.name_offset, std.math.maxInt(usize), @as(u128, self.position) + name.len, error.OutOfMemory);
+            if (next_position > std.math.maxInt(u32)) return self.diag.capacity(.name_offset, std.math.maxInt(u32), next_position, error.OutOfMemory);
             if (name.len != 0 and self.position / BLOCK_BYTES == self.blocks.items.len) {
                 const block = self.allocator.alloc(u8, BLOCK_BYTES) catch return self.diag.oom(.names, BLOCK_BYTES);
                 self.blocks.append(self.allocator, block) catch {
@@ -1105,10 +1106,12 @@ pub fn PackedNamesWith(comptime Diag: type) type {
 
 const CACHE_BYTES = 512 * 1024;
 const CACHE_BLOCK_BYTES: usize = 128 * 1024;
+/// The longest name the set takes: cached names store their length in two bytes.
+pub const MAX_NAME_BYTES = std.math.maxInt(u16);
 
 /// Exact identifier set over a seekable source: a fingerprint and a source offset per name, with
 /// early names cached. Names are re-read from the source only on a fingerprint match. `Diag` as
-/// for `PackedNamesWith`.
+/// for `PackedNamesWith`. Caller assumes every name is at most `MAX_NAME_BYTES` long.
 pub fn SourceDedupWith(comptime Diag: type) type {
     return struct {
         diag: Diag = .{},
@@ -1217,6 +1220,7 @@ pub fn SourceDedupWith(comptime Diag: type) type {
         }
 
         fn remember(self: *@This(), name: []const u8, offset: u64, flag: u64) !u64 {
+            std.debug.assert(name.len <= MAX_NAME_BYTES);
             if (self.cache_full or self.cache.items.len >= CACHE_BYTES) return offset;
             var prefix: usize = 0;
             var suffix: usize = 0;
@@ -1278,6 +1282,7 @@ pub fn SourceDedupWith(comptime Diag: type) type {
         }
 
         fn rememberHot(self: *@This(), name: []const u8, flag: u64) !u64 {
+            std.debug.assert(name.len <= MAX_NAME_BYTES);
             if (self.hot_len % CACHE_BLOCK_BYTES == CACHE_BLOCK_BYTES - 1) try self.appendHot(&.{0});
             const start = self.hot_len;
             if (@as(u128, CACHE_BYTES) + start >= flag) return self.diag.capacity(.name_cache_offset, flag - 1, @as(u128, CACHE_BYTES) + start, error.OutOfMemory);

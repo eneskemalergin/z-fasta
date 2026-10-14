@@ -199,6 +199,7 @@ const REPORT_CODES = [_]diagnostics.Code{
     .@"fasta.empty_record",
     .@"fasta.empty_identifier",
     .@"fasta.duplicate_identifier",
+    .@"fasta.identifier_too_long",
     .@"fasta.long_header",
     .@"header.convention_mismatch",
     .@"sequence.invalid_symbol",
@@ -468,8 +469,9 @@ const Candidate = struct {
 
 const Record = struct {
     ordinal: u64 = 0,
-    // The identifier is complete in `Scan.name_buf` until the next header.
+    // `Scan.name_buf` holds the identifier, up to `MAX_INDEX_NAME_BYTES`, until the next header.
     named: bool = false,
+    identifier_bytes: u64 = 0,
     header: Position = .{ .offset = 0, .line = 0, .column = 0 },
     symbols: u64 = 0,
     width: ?u64 = null,
@@ -487,6 +489,8 @@ const Line = struct {
     len: u64 = 0,
     content_at: ?u64 = null,
     in_identifier: bool = false,
+    /// The whole identifier's length; `Scan.name_buf` keeps at most `MAX_INDEX_NAME_BYTES` of it.
+    identifier_bytes: u64 = 0,
     controls: u64 = 0,
     first_control: ?struct { byte: u8, index: u64 } = null,
     symbols: u64 = 0,
@@ -593,6 +597,9 @@ const SourceNames = fasta.SourceDedupWith(ScanDiag);
 const PackedNames = fasta.PackedNamesWith(ScanDiag);
 
 const MAX_INDEX_NAME_BYTES = std.math.maxInt(@FieldType(index_format.IndexRecord, "name_len"));
+comptime {
+    std.debug.assert(MAX_INDEX_NAME_BYTES <= fasta.MAX_NAME_BYTES);
+}
 const NO_ENTRY = std.math.maxInt(u32);
 
 // The `--index` comparison: `index`'s scanner runs on the same windows, and each record it would
@@ -1022,7 +1029,9 @@ const Scan = struct {
     fn headerContent(self: *Scan, bytes: []const u8, at: u64) diagnostics.Error!void {
         if (self.line.in_identifier) {
             const stop = fasta.findNameDelimiter(bytes, 0);
-            self.name_buf.appendSlice(self.allocator, bytes[0..stop]) catch return self.outOfMemory(.validation_identifiers, at);
+            const kept = @min(stop, MAX_INDEX_NAME_BYTES - self.name_buf.items.len);
+            self.name_buf.appendSlice(self.allocator, bytes[0..kept]) catch return self.outOfMemory(.validation_identifiers, at);
+            self.line.identifier_bytes += stop;
             if (stop < bytes.len) self.line.in_identifier = false;
         }
         for (bytes, 0..) |byte, index| {
@@ -1151,8 +1160,12 @@ const Scan = struct {
         const identifier = self.name_buf.items;
         const start = self.line.start;
         self.record.named = true;
+        self.record.identifier_bytes = self.line.identifier_bytes;
         if (identifier.len == 0) {
             self.count(.{ .@"fasta.empty_identifier" = {} }, self.reference(start + 1));
+        } else if (self.line.identifier_bytes > MAX_INDEX_NAME_BYTES) {
+            // No index can hold it, so it takes no part in the duplicate check.
+            self.count(.{ .@"fasta.identifier_too_long" = .{ .observed_bytes = self.line.identifier_bytes, .limit_bytes = MAX_INDEX_NAME_BYTES } }, self.reference(start + 1));
         } else switch (self.names) {
             .stopped => {},
             .source => |*set| self.pending_name = set.prefetch(identifier),
@@ -1394,7 +1407,10 @@ const Scan = struct {
     }
 
     fn identifierPreview(self: *const Scan) ?reporting.Identifier {
-        return if (self.record.named) .init(self.name_buf.items) else null;
+        if (!self.record.named) return null;
+        var preview = reporting.Identifier.init(self.name_buf.items);
+        preview.original_bytes = self.record.identifier_bytes;
+        return preview;
     }
 
     fn reference(self: *const Scan, offset: u64) diagnostics.Reference {

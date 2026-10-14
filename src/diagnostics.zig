@@ -411,6 +411,7 @@ pub const Preamble = struct { content_bytes: Measurement };
 pub const ControlByte = struct { byte: u8, grammar: Grammar };
 pub const Duplicate = struct { identifier: ?Preview = null };
 pub const LongHeader = struct { observed_bytes: u64, limit_bytes: u64 };
+pub const LongIdentifier = struct { observed_bytes: u64, limit_bytes: u64 };
 pub const Convention = enum { uniprot, refseq };
 pub const ConventionMismatch = struct { convention: Convention };
 pub const InvalidSymbol = struct { byte: u8, policy: AlphabetPolicy };
@@ -531,6 +532,7 @@ pub const Details = union(enum(u8)) {
     @"fasta.empty_record": void,
     @"fasta.empty_identifier": void,
     @"fasta.duplicate_identifier": Duplicate,
+    @"fasta.identifier_too_long": LongIdentifier,
     @"fasta.long_header": LongHeader,
     @"header.convention_mismatch": ConventionMismatch,
     @"sequence.invalid_symbol": InvalidSymbol,
@@ -889,6 +891,7 @@ fn describeCode(code: Code) Metadata {
         .@"fasta.empty_record" => warning(code, .structure, .record),
         .@"fasta.empty_identifier" => describe(code, .identifiers, .finding, .record, .correct_data, error.InvalidFasta),
         .@"fasta.duplicate_identifier" => describe(code, .identifiers, .finding, .record, .correct_data, error.InvalidFasta),
+        .@"fasta.identifier_too_long" => describe(code, .identifiers, .finding, .record, .correct_data, error.InvalidFasta),
         .@"fasta.long_header" => warning(code, .identifiers, .record),
         .@"header.convention_mismatch" => warning(code, .identifiers, .record),
         .@"sequence.invalid_symbol" => describe(code, .alphabet, .finding, .byte, .correct_data, error.InvalidFasta),

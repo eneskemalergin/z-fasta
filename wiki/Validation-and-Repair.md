@@ -51,6 +51,7 @@ Validate reads FASTA the way `index` does, so the two agree on what a symbol and
   - `fasta.content_before_header`, per line;
   - `fasta.header_control_byte` and `fasta.sequence_control_byte`, per byte;
   - `fasta.empty_identifier`, per record;
+  - `fasta.identifier_too_long`, per record: an identifier over 65,535 bytes, which no `.zfi` or `.fai` can hold; it takes no part in the duplicate check;
   - `fasta.duplicate_identifier`, per record after the first;
   - `sequence.invalid_symbol`, per byte.
 - Warnings:

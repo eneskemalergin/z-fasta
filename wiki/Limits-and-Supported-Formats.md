@@ -37,6 +37,7 @@ FASTQ is coming as a separate project, z-fastq, built around the same priorities
 - Names file identifier: 65535 bytes.
 - BED chromosome or identifier: 65535 bytes.
 - BED or names line reader: 69631 bytes before newline is required.
+- Validate identifier: 65535 bytes; a longer one is reported as `fasta.identifier_too_long`.
 - Validate examples: the first occurrence of each finding code; counts are exact and uncapped.
 - Validate read buffer: 256 KiB.
 - Validate duplicate check: unbounded unless `--max-name-memory` sets a budget; on a file it reserves about 1 MiB before its first name.

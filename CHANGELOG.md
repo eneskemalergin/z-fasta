@@ -15,6 +15,7 @@ All notable changes to z-fasta will be documented in this file.
 - `validate -` reads standard input.
 - `--index` checks, in the same pass, that the `.zfi` or `.fai` that `get` would load describes the FASTA (`--index=PATH` names the index, by its `.zfi` or `.fai` suffix): `index`'s scanner runs over the same buffer, and each record it would write is compared with its entry (identifier, sequence offset and length, line layout, side table). Six `pair.*` codes report the differences. The index is read in file order through fixed buffers.
 - `--max-name-memory BYTES` bounds the duplicate check; past it the check stops and the report is `incomplete`, never a clean pass.
+- `fasta.identifier_too_long`: an identifier over 65,535 bytes, which no `.zfi` or `.fai` can hold, is an error, and `validate` keeps at most that many bytes of any identifier.
 - `resource.out_of_memory` names `output_buffer` when the buffer `--fix` writes through cannot be allocated.
 - Package calls `validation.validate` and `validation.repair` over any `std.Io.Reader`.
 - Package call `RecordReader`: streams whole records from any `std.Io.Reader` into caller storage, by `index`'s rules, without allocating.

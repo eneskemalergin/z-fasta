@@ -171,6 +171,7 @@ A field ending in `offset` or describing a byte extent refers to bytes in its na
   - `fasta.empty_record`: finding per record; no fields.
   - `fasta.empty_identifier`: finding per record; no fields.
   - `fasta.duplicate_identifier`: finding per record; fields `identifier`.
+  - `fasta.identifier_too_long`: finding per record; fields `observed_bytes`, `limit_bytes`.
   - `fasta.long_header`: finding per record; fields `observed_bytes`, `limit_bytes`.
 - `header`
   - `header.convention_mismatch`: finding per record; fields `convention`.

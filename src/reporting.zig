@@ -843,6 +843,7 @@ fn message(code: diagnostics.Code) []const u8 {
         .@"fasta.empty_record" => "FASTA record contains no sequence symbols.",
         .@"fasta.empty_identifier" => "Header has an empty identifier.",
         .@"fasta.duplicate_identifier" => "Identifier duplicates an earlier record.",
+        .@"fasta.identifier_too_long" => "Identifier is longer than an index can hold.",
         .@"fasta.long_header" => "Header exceeds the selected length limit.",
         .@"header.convention_mismatch" => "Header does not match the selected convention.",
         .@"sequence.invalid_symbol" => "Sequence byte is outside the selected alphabet.",

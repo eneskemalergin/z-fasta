@@ -366,6 +366,41 @@ test "[edge] - [validate report]: a duplicate points at its first definition" {
     try std.testing.expectEqual(@as(?u64, 1), related.record);
 }
 
+test "[edge] - [validate report]: compares identifiers up to 65,535 bytes and reports longer ones" {
+    const allocator = std.testing.allocator;
+    const at_limit = "N" ** 65_535;
+    const over = "N" ** 70_000;
+    const data = ">" ++ at_limit ++ "\nAC\n>b\nAC\n>" ++ at_limit ++ "\nAC\n>" ++ over ++ "\nAC\n>" ++ over ++ "x\nAC\n>" ++ at_limit ++ "N\nAC\n";
+    const copied = try reportBytes(allocator, data, .{});
+    defer allocator.destroy(copied);
+
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(io, .{ .sub_path = "long.fa", .data = data });
+    const file = try temporary.dir.openFile(io, "long.fa", .{});
+    defer file.close(io);
+    var buffer: [4096]u8 = undefined;
+    var file_reader = file.reader(io, &.{});
+    const from_file = try allocator.create(validator.Report);
+    defer allocator.destroy(from_file);
+    var failure: diagnostics.Failure = undefined;
+    try validator.validate(allocator, &file_reader.interface, &buffer, .{ .io = io, .file = file, .size = data.len }, .{}, from_file, &failure);
+
+    for ([_]*const validator.Report{ copied, from_file }) |report| {
+        const duplicate = report.finding(.@"fasta.duplicate_identifier");
+        try std.testing.expectEqual(@as(u64, 1), duplicate.occurrences);
+        try std.testing.expectEqual(@as(?u64, 3), duplicate.first.?.at.record);
+        const long = report.finding(.@"fasta.identifier_too_long");
+        try std.testing.expectEqual(@as(u64, 3), long.occurrences);
+        try std.testing.expectEqual(@as(?u64, 4), long.first.?.at.record);
+        const facts = long.first.?.details.@"fasta.identifier_too_long";
+        try std.testing.expectEqual(@as(u64, 70_000), facts.observed_bytes);
+        try std.testing.expectEqual(@as(u64, 65_535), facts.limit_bytes);
+        try std.testing.expectEqual(@as(u64, 70_000), long.first.?.identifier.?.original_bytes);
+        try std.testing.expectEqual(@as(u8, 1), report.status(false, false));
+    }
+}
+
 test "[edge] - [validate report]: layout does not change symbol and alphabet counts" {
     const layouts = [_][]const u8{
         ">a\nACGTNACGTN\nACG*\n>b\nMKV?\n",
