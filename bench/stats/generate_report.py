@@ -119,7 +119,7 @@ def load_index_report():
 def resolve_verify_status(manifest: dict, results_dir: Path) -> tuple[bool, str | None]:
     """Return (skipped, pass_count). New manifests require recorded identity.
 
-    Resume with `--skip-tests` (alias `--skip-verify`) can rewrite the manifest and clear `verify_pass`
+    Resume with `--skip-tests` can rewrite the manifest and clear `verify_pass`
     even when `verify_<timestamp>.log` already recorded a green correctness run.
     """
     if "verification_identity" in manifest:
@@ -896,7 +896,7 @@ def md_combined_metric_figure(
 def md_overview(manifest: dict, results_dir: Path) -> str:
     verify_skipped, verify = resolve_verify_status(manifest, results_dir)
     if verify_skipped:
-        verify_line = "Verify was skipped for this run (`--skip-tests` / `--skip-verify`)."
+        verify_line = "Verify was skipped for this run (`--skip-tests`)."
     elif verify is not None:
         verify_line = (
             f"Correctness reported **{verify}** passing checks before perf "

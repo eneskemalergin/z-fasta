@@ -7,15 +7,13 @@
 # Defaults: correctness first, then perf (--runs 5, --warmup 1, --duration 5000).
 # Report generation: python3 bench/stats/generate_report.py
 #   (run.sh calls this after perf; --allow-incomplete for drafts)
-# Use --skip-tests (alias --skip-verify) to run perf/report only. Correctness failure aborts before perf or report.
+# Use --skip-tests to run perf/report only. Correctness failure aborts before perf or report.
 # --skip-messy is accepted for suite parity (messy zebrac perf); stats has no messy perf section today.
 #
 # Canonical flags (index-aligned): --skip-tests --skip-benchmarks --skip-messy --skip-report
-# Deprecated aliases (one release cycle): --skip-verify --skip-perf
 #
 #   bash bench/stats/run.sh
 #   bash bench/stats/run.sh --skip-tests --skip-report   # perf only
-#   bash bench/stats/run.sh --skip-verify --skip-perf    # same via aliases
 #   bash bench/stats/run.sh --skip-full                   # scaling only
 #   bash bench/stats/run.sh --skip-scale                  # REAL data only
 #   bash bench/stats/run.sh --skip-size                   # skip file-size sweep only
@@ -79,8 +77,8 @@ while [[ $# -gt 0 ]]; do
         --runs) RUNS="$2"; shift 2 ;;
         --warmup) WARMUP="$2"; shift 2 ;;
         --duration) ZEBRAC_DURATION_MS="$2"; shift 2 ;;
-        --skip-tests|--skip-verify) DO_TESTS=false; shift ;;
-        --skip-benchmarks|--skip-perf) DO_BENCHMARKS=false; shift ;;
+        --skip-tests) DO_TESTS=false; shift ;;
+        --skip-benchmarks) DO_BENCHMARKS=false; shift ;;
         --skip-full) DO_FULL=false; shift ;;
         --skip-scale) DO_SCALE=false; shift ;;
         --skip-size) DO_SCALE_SIZE=false; shift ;;

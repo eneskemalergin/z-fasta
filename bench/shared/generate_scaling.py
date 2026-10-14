@@ -54,7 +54,7 @@ def write_size(mb: int, path: Path) -> None:
     with path.open("w", encoding="ascii") as handle:
         for i in range(1, SIZE_SEQ_COUNT + 1):
             handle.write(f">seq{i}\n")
-            # -50 matches legacy inline generator (100 seqs, ~target MiB on disk)
+            # -50 keeps the sizes of the published scaling files (100 sequences, about `mb` MiB on disk)
             write_wrapped(handle, max(MIN_SEQ_LEN, total // SIZE_SEQ_COUNT - 50))
 
 
@@ -96,23 +96,11 @@ def outputs_ready(mode: str) -> bool:
     return all(p.is_file() for p in expected_paths(mode))
 
 
-def clean_legacy() -> None:
-    """Remove pre-budget seqs_*.fasta names that are neither budget nor fixed."""
-    if not OUT_DIR.is_dir():
-        return
-    for path in OUT_DIR.glob("seqs_*.fasta"):
-        if path.name.startswith(("seqs_budget_", "seqs_fixed_")):
-            continue
-        path.unlink()
-
-
-def generate(*, mode: str, force: bool, do_clean_legacy: bool) -> None:
+def generate(*, mode: str, force: bool) -> None:
     if mode not in ("all", "size", "seq", "budget", "fixed"):
         raise SystemExit(f"error: mode must be all|size|seq|budget|fixed, got {mode!r}")
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    if do_clean_legacy:
-        clean_legacy()
 
     if outputs_ready(mode) and not force:
         print(f"scaling cache ok: {OUT_DIR} ({mode})")
@@ -148,13 +136,8 @@ def main() -> None:
         help="which fixture families to ensure (seq=budget+fixed; default: all)",
     )
     ap.add_argument("--force", action="store_true", help="rebuild even if present")
-    ap.add_argument(
-        "--clean-legacy",
-        action="store_true",
-        help="delete obsolete seqs_*.fasta that are not budget/fixed",
-    )
     args = ap.parse_args()
-    generate(mode=args.mode, force=args.force, do_clean_legacy=args.clean_legacy)
+    generate(mode=args.mode, force=args.force)
 
 
 if __name__ == "__main__":

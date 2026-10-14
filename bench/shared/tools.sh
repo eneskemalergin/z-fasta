@@ -117,7 +117,7 @@ bench_ensure_messy() {
 }
 
 # Generate synthetic scaling FASTAs into bench/shared/cache/scaling/.
-# Usage: bench_ensure_scaling [--force] [--clean-legacy] [--mode all|size|seq]
+# Usage: bench_ensure_scaling [--force] [--mode all|size|seq]
 bench_ensure_scaling() {
     local py
     if [[ -x "$TOOLS_VENV_DIR/bin/python" ]]; then

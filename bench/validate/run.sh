@@ -24,7 +24,6 @@
 # Skip flags:
 #   --skip-tests --skip-benchmarks --skip-messy --skip-report
 #   --skip-messy is accepted for suite parity; this suite has no messy performance section.
-#   --skip-verify and --skip-perf are aliases.
 #
 # Outputs:
 #   results/run_<ts>.json          run settings, tool versions, and sections
@@ -64,8 +63,8 @@ while [[ $# -gt 0 ]]; do
         --runs) RUNS="$2"; shift 2 ;;
         --warmup) WARMUP="$2"; shift 2 ;;
         --duration) ZEBRAC_DURATION_MS="$2"; shift 2 ;;
-        --skip-tests|--skip-verify) DO_TESTS=false; shift ;;
-        --skip-benchmarks|--skip-perf) DO_BENCHMARKS=false; shift ;;
+        --skip-tests) DO_TESTS=false; shift ;;
+        --skip-benchmarks) DO_BENCHMARKS=false; shift ;;
         --skip-messy) shift ;;
         --skip-report) DO_REPORT=false; shift ;;
         -h|--help)

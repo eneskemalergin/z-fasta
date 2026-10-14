@@ -10,16 +10,14 @@
 # cost grows linearly and duplicates positional seqtk reference data). Set
 # GET_MULTI_REFERENCE=1 to re-enable them for a one-off reference sweep.
 # Use --skip-* for partial re-runs; resume with GET_RUN_TIMESTAMP=<ts> and GET_MULTI_COUNTS.
-# Use --skip-tests (alias --skip-verify) to run perf/report only. Correctness failure aborts before perf or report.
+# Use --skip-tests to run perf/report only. Correctness failure aborts before perf or report.
 # --skip-messy skips messy zebrac perf only (never skips messy cases inside run_tests).
 # --focused runs the complete development benchmark without regenerating the checked report.
 #
 # Canonical flags (index-aligned): --skip-tests --skip-benchmarks --skip-messy --skip-report
-# Deprecated aliases (one release cycle): --skip-verify --skip-perf
 #
 #   bash bench/get/run.sh
 #   bash bench/get/run.sh --skip-tests --skip-report   # perf only
-#   bash bench/get/run.sh --skip-verify --skip-perf    # same via aliases
 #   bash bench/get/run.sh --skip-messy --skip-bed
 #   bash bench/get/run.sh --focused --skip-tests --runs 5 --warmup 5
 #   bash bench/get/run.sh --regenerate-fixtures
@@ -163,8 +161,8 @@ while [[ $# -gt 0 ]]; do
         --messy-runs) MESSY_RUNS="$2"; shift 2 ;;
         --messy-warmup) MESSY_WARMUP="$2"; shift 2 ;;
         --messy-duration) MESSY_DURATION_MS="$2"; shift 2 ;;
-        --skip-tests|--skip-verify) DO_TESTS=false; shift ;;
-        --skip-benchmarks|--skip-perf) DO_BENCHMARKS=false; shift ;;
+        --skip-tests) DO_TESTS=false; shift ;;
+        --skip-benchmarks) DO_BENCHMARKS=false; shift ;;
         --skip-pos) DO_POS=false; shift ;;
         --skip-multi) DO_MULTI=false; shift ;;
         --skip-bed) DO_BED=false; shift ;;

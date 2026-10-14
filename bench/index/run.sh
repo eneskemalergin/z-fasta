@@ -25,11 +25,9 @@
 #   bash bench/index/run.sh --skip-size
 #   bash bench/index/run.sh --scaling-only
 #   bash bench/index/run.sh --regenerate-fixtures
-#   bash bench/index/run.sh --clean-legacy
 #
 # Skip flags:
 #   --skip-tests --skip-benchmarks --skip-messy --skip-report
-#   --skip-verify and --skip-perf are deprecated aliases.
 #
 # Outputs:
 #   results/run_<ts>.json          result-file index and run settings
@@ -76,7 +74,6 @@ SKIP_SCALING=false
 SKIP_SIZE=false
 SCALING_ONLY=false
 REGENERATE_FIXTURES=false
-CLEAN_LEGACY=false
 MERGE_BASE=""
 INDEX_CORRECTNESS_STATUS="not_run"
 INDEX_CORRECTNESS_CHECKS=0
@@ -91,8 +88,8 @@ while [[ $# -gt 0 ]]; do
         --runs)              RUNS="$2"; shift 2 ;;
         --warmup)            WARMUP="$2"; shift 2 ;;
         --duration)          ZEBRAC_DURATION_MS="$2"; shift 2 ;;
-        --skip-tests|--skip-verify) DO_TESTS=false; shift ;;
-        --skip-benchmarks|--skip-perf) DO_BENCHMARKS=false; shift ;;
+        --skip-tests) DO_TESTS=false; shift ;;
+        --skip-benchmarks) DO_BENCHMARKS=false; shift ;;
         --skip-messy)        DO_MESSY=false; shift ;;
         --skip-report)       DO_REPORT=false; shift ;;
         --skip-real)         SKIP_REAL=true; shift ;;
@@ -109,7 +106,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --merge-base)        MERGE_BASE="$2"; shift 2 ;;
         --regenerate-fixtures) REGENERATE_FIXTURES=true; shift ;;
-        --clean-legacy)      CLEAN_LEGACY=true; REGENERATE_FIXTURES=true; shift ;;
         -h|--help)
             awk '
                 NR == 1 { next }
@@ -141,9 +137,7 @@ fi
 
 ensure_scaling() {
     local args=(--mode all)
-    if $CLEAN_LEGACY; then
-        args+=(--clean-legacy --force)
-    elif $REGENERATE_FIXTURES; then
+    if $REGENERATE_FIXTURES; then
         args+=(--force)
     fi
     bench_ensure_scaling "${args[@]}"
