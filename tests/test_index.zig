@@ -455,6 +455,16 @@ fn discardIndexStdout(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io
     }
 }
 
+fn runIndexForAllocationCheck(allocator: std.mem.Allocator, path: []const u8, emit_fai: bool) !void {
+    var vtable = io.vtable.*;
+    vtable.operate = discardIndexStdout;
+    var failure: diagnostics.Failure = undefined;
+    _ = main.indexer.runIndex(allocator, .{ .userdata = io.userdata, .vtable = &vtable }, .empty, path, .{ .emit_fai = emit_fai }, &failure) catch |err| {
+        if (err == error.OutOfMemory) try std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", failure.primary().?.code());
+        return err;
+    };
+}
+
 fn failIndexStdout(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
     switch (operation) {
         .file_write_streaming => return .{ .file_write_streaming = error.BrokenPipe },
@@ -3830,6 +3840,39 @@ test "[failure] - [index diagnostics]: retains source, write, publish and compar
                 try std.testing.expectEqual(@as(?diagnostics.FileSnapshot, null), changed.after);
             }
         }
+    }
+}
+
+test "[failure] - [index]: every allocation failure is reported and released" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    // Side tables for `.zfi`; uniform lines, which `--emit-fai` needs.
+    for ([_][]const u8{ ">a\nACGT\nAC\n>b\nGG\nG\nGG\n", ">a\nACGT\nAC\n>b\nGGG\n" }, [_]bool{ false, true }) |data, emit_fai| {
+        const path = try writeFastaArtifact(allocator, "index-allocation", data);
+        defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+        const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{path});
+        defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, runIndexForAllocationCheck, .{ path, emit_fai });
+    }
+}
+
+test "[failure] - [index]: a large input reports and releases its first allocation failures" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const line = "ACGT" ** 15 ++ "\n";
+    var data: std.ArrayList(u8) = .empty;
+    try data.appendSlice(allocator, ">large\n");
+    while (data.items.len <= 33 * 1024 * 1024) try data.appendSlice(allocator, line);
+    const path = try writeFastaArtifact(allocator, "index-large-allocation", data.items);
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{path});
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+    for (0..4) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        try std.testing.expectError(error.OutOfMemory, runIndexForAllocationCheck(failing.allocator(), path, false));
+        try std.testing.expect(failing.has_induced_failure);
     }
 }
 

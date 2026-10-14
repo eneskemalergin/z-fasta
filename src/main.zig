@@ -20,8 +20,14 @@ pub const std_options: std.Options = .{
     .signal_stack_size = if (std.debug.default_enable_segfault_handler) 1 << 18 else null,
 };
 
+// Debug builds check every command's memory for leaks, double frees, and use after free.
+var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+const command_allocator = if (builtin.mode == .Debug) debug_allocator.allocator() else std.heap.page_allocator;
+const LEAK_STATUS = 3;
+
 pub fn main(init: std.process.Init.Minimal) void {
     const status = runCli(init);
+    if (builtin.mode == .Debug and debug_allocator.deinit() == .leak) std.process.exit(LEAK_STATUS);
     if (status != 0) std.process.exit(status);
 }
 
@@ -327,7 +333,7 @@ fn runIndex(cli: *Cli, environ: std.process.Environ) diagnostics.Error!u8 {
         }
     }
     const fasta_path = path orelse return cli.fail(.{ .@"usage.missing_argument" = .{ .argument = .fasta_path } });
-    const result = try indexer.runIndex(std.heap.page_allocator, cli.io, environ, fasta_path, .{ .emit_fai = emit_fai }, cli.failure);
+    const result = try indexer.runIndex(command_allocator, cli.io, environ, fasta_path, .{ .emit_fai = emit_fai }, cli.failure);
     if (!emit_fai and cli.format == .text) try writeNotice(cli, .{ .index = .{ .path = fasta_path, .count = result.record_count } });
     return 0;
 }
@@ -381,7 +387,7 @@ fn runGetCmd(cli: *Cli) diagnostics.Error!u8 {
     };
     if (transform.annotate_transform and transform.orientation.isIdentity() and !honor_strand) return cli.fail(.{ .@"usage.option_requires" = .{ .option = .annotate_rc, .required = .transform_or_strand } });
     const source: getter.RequestSource = if (bed_path) |bed| .{ .bed = bed } else if (names_path) |names| .{ .names = names } else .{ .positional = regions[0..count] };
-    const result = try getter.runGet(std.heap.page_allocator, cli.io, path, .{ .source = source, .honor_strand = honor_strand, .measure_elapsed = summary, .orientation = transform.orientation, .annotate_transform = transform.annotate_transform }, cli.failure);
+    const result = try getter.runGet(command_allocator, cli.io, path, .{ .source = source, .honor_strand = honor_strand, .measure_elapsed = summary, .orientation = transform.orientation, .annotate_transform = transform.annotate_transform }, cli.failure);
     if (summary) try writeNotice(cli, .{ .get = result });
     return 0;
 }
@@ -395,7 +401,7 @@ fn runStatsCmd(cli: *Cli) diagnostics.Error!u8 {
         path = arg;
     }
     const fasta_path = path orelse return cli.fail(.{ .@"usage.missing_argument" = .{ .argument = .fasta_path } });
-    try stats.runStats(std.heap.page_allocator, cli.io, fasta_path, cli.failure);
+    try stats.runStats(command_allocator, cli.io, fasta_path, cli.failure);
     return 0;
 }
 
@@ -437,7 +443,7 @@ fn runValidateCmd(cli: *Cli) diagnostics.Error!u8 {
     }
     const fasta_path = path orelse return cli.fail(.{ .@"usage.missing_argument" = .{ .argument = .fasta_path } });
     if (options.index != null and std.mem.eql(u8, fasta_path, "-")) return cli.fail(.{ .@"usage.option_requires" = .{ .option = .index, .required = .fasta_file } });
-    const result = try validator.runValidate(std.heap.page_allocator, cli.io, fasta_path, options, cli.failure);
+    const result = try validator.runValidate(command_allocator, cli.io, fasta_path, options, cli.failure);
     return result.status;
 }
 

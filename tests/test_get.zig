@@ -22,10 +22,10 @@ const captureExtractRegion = support.captureExtractRegion;
 
 const GET_USAGE_STDERR = "error [usage.missing_argument] get: A required argument is missing. argument=request_source\nhint: Correct the command arguments; use --help for accepted options.\n";
 
-fn checkGetOperationAllocations(allocator: std.mem.Allocator, source: main.getter.RequestSource) !void {
+fn checkGetOperationAllocations(allocator: std.mem.Allocator, fasta_path: []const u8, source: main.getter.RequestSource) !void {
     const diagnostics = main.index_format.diagnostics;
     var failure: diagnostics.Failure = undefined;
-    _ = main.getter.runGet(allocator, io, "tests/data/simple.fasta", .{ .source = source }, &failure) catch |err| {
+    _ = main.getter.runGet(allocator, io, fasta_path, .{ .source = source }, &failure) catch |err| {
         if (err == error.OutOfMemory) {
             try std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", failure.primary().?.code());
             return err;
@@ -1001,7 +1001,22 @@ test "[failure] - [get diagnostics]: releases allocation failures in positional 
         try std.Io.File.writeStreamingAll(file, io, fixture.bytes);
     }
     for ([_]main.getter.RequestSource{ .{ .positional = &.{"missing"} }, .{ .names = names }, .{ .bed = bed } }) |source|
-        try std.testing.checkAllAllocationFailures(allocator, checkGetOperationAllocations, .{source});
+        try std.testing.checkAllAllocationFailures(allocator, checkGetOperationAllocations, .{ "tests/data/simple.fasta", source });
+
+    // With only a `.fai`, the requested names are collected before the index loads.
+    const fasta = try writeFastaArtifact(allocator, "get-oom-fai", ">seq1\nACGT\n");
+    defer allocator.free(fasta);
+    defer std.Io.Dir.cwd().deleteFile(io, fasta) catch {};
+    const fai = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta});
+    defer allocator.free(fai);
+    defer std.Io.Dir.cwd().deleteFile(io, fai) catch {};
+    {
+        const file = try std.Io.Dir.cwd().createFile(io, fai, .{});
+        defer file.close(io);
+        try std.Io.File.writeStreamingAll(file, io, "seq1\t4\t6\t4\t5\n");
+    }
+    for ([_]main.getter.RequestSource{ .{ .names = names }, .{ .bed = bed } }) |source|
+        try std.testing.checkAllAllocationFailures(allocator, checkGetOperationAllocations, .{ fasta, source });
 }
 
 test "[failure] - [get diagnostics]: distinguishes writes from final flush and retains the backend cause" {
