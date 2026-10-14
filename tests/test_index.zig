@@ -4027,6 +4027,30 @@ test "[regression] - [index diagnostics]: leaves OS path limits unknown before o
     }
 }
 
+test "[failure] - [index loader]: a FIFO in place of a sidecar fails without waiting for a writer" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const fasta_path = try writeFastaArtifact(allocator, "fifo-sidecar", ">a\nACGT\n");
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+
+    const Case = struct { suffix: []const u8, code: diagnostics.Code };
+    for ([_]Case{
+        .{ .suffix = "zfi", .code = .@"index.truncated" },
+        .{ .suffix = "fai", .code = .@"index.no_records" },
+    }) |case| {
+        const sidecar = try std.fmt.allocPrintSentinel(allocator, "{s}.{s}", .{ fasta_path, case.suffix }, 0);
+        try std.testing.expectEqual(std.os.linux.E.SUCCESS, std.os.linux.errno(std.os.linux.mknodat(std.os.linux.AT.FDCWD, sidecar, std.os.linux.S.IFIFO | 0o600, 0)));
+        defer std.Io.Dir.cwd().deleteFile(io, sidecar) catch {};
+        for ([_]main.index_format.LoadMode{ .lookup_full_map, .catalog, .stats_scan, .on_access }) |mode| {
+            var failure: diagnostics.Failure = undefined;
+            try expectIndexLoadCode(std.testing.allocator, fasta_path, mode, case.code, &failure);
+        }
+        try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "validate", "--index", fasta_path }, case.code);
+    }
+}
+
 fn expectStreamMatchesCatalog(allocator: std.mem.Allocator, fasta_path: []const u8, selection: main.index_format.IndexSelection) !void {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.validate);

@@ -1,4 +1,4 @@
-//! Read-only file mapping and memory advice, with the platform differences kept here.
+//! Read-only file mapping, sidecar opening, and memory advice, with the platform differences kept here.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -23,6 +23,27 @@ pub fn adviseSequential(memory: MappedBytes) void {
         memory.len,
         std.posix.MADV.SEQUENTIAL,
     ) catch {};
+}
+
+pub const OpenSidecarError = std.posix.OpenError || std.posix.UnexpectedError;
+
+/// Opens an index path derived from the FASTA. A FIFO there opens without waiting for a writer;
+/// the returned descriptor blocks as `openFile` would.
+pub fn openSidecar(io: std.Io, path: []const u8) OpenSidecarError!std.Io.File {
+    const handle = try std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0);
+    const file = std.Io.File{ .handle = handle, .flags = .{ .nonblocking = false } };
+    errdefer file.close(io);
+    const status = std.posix.system.fcntl(handle, std.posix.F.GETFL, @as(usize, 0));
+    switch (std.posix.errno(status)) {
+        .SUCCESS => {},
+        else => |err| return std.posix.unexpectedErrno(err),
+    }
+    const blocking = @as(usize, @intCast(status)) & ~@as(usize, 1 << @bitOffsetOf(std.posix.O, "NONBLOCK"));
+    switch (std.posix.errno(std.posix.system.fcntl(handle, std.posix.F.SETFL, blocking))) {
+        .SUCCESS => {},
+        else => |err| return std.posix.unexpectedErrno(err),
+    }
+    return file;
 }
 
 test "[integration] - [file mapping]: exposes file contents" {

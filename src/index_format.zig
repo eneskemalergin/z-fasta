@@ -1029,7 +1029,7 @@ pub const EntryStream = struct {
     }
 
     fn start(self: *EntryStream, io: std.Io, path: []const u8, source: LoadedIndex.IndexSource, fasta_size: u64, context: *Diagnostics) diagnostics.Error!void {
-        const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| return context.ioFailure(.open, err);
+        const file = platform.openSidecar(io, path) catch |err| return context.ioFailure(.open, err);
         self.* = .{ .io = io, .file = file, .source = source, .context = context.*, .fasta_size = fasta_size, .reader = undefined };
         self.reader = file.reader(io, &self.buffers[0]);
     }
@@ -1425,7 +1425,7 @@ fn tryLoadZfi(
     mode: LoadMode,
     context: *Diagnostics,
 ) diagnostics.Error!?LoadedIndex {
-    const zfi_file = std.Io.Dir.cwd().openFile(io, zfi_path, .{}) catch |err| switch (err) {
+    const zfi_file = platform.openSidecar(io, zfi_path) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return context.ioFailure(.open, err),
     };
@@ -1776,7 +1776,7 @@ fn tryLoadFai(
     mode: LoadMode,
     context: *Diagnostics,
 ) diagnostics.Error!?LoadedIndex {
-    const fai_file = std.Io.Dir.cwd().openFile(io, fai_path, .{}) catch |err| switch (err) {
+    const fai_file = platform.openSidecar(io, fai_path) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return context.ioFailure(.open, err),
     };

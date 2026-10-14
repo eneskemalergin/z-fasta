@@ -49,6 +49,7 @@ All notable changes to z-fasta will be documented in this file.
 
 - `get` resolves names through a `.fai` the same way for regions, names files, and BED files: a `.fai` row longer than 64 KiB no longer fails only for regions on the command line.
 - A directory where the `.zfi` or `.fai` should be fails with `io.map_failed` in every command, empty or not; an empty one reported `index.no_records` or `index.truncated`.
+- A FIFO where the `.zfi` or `.fai` should be fails at once as an empty index instead of waiting for a writer.
 
 ## [0.3.5]
 
