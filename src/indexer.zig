@@ -533,6 +533,9 @@ fn tryCreateFaiSpool(io: std.Io, dir: std.Io.Dir, close_dir: bool) ?FaiSpool {
     return tryCreateSpool(io, dir, close_dir, .{}, .fai_spool, .current_directory, ".", &attempts);
 }
 
+// Spools hold FASTA names and offsets in shared temporary directories: owner-only.
+const SPOOL_PERMISSIONS: std.Io.File.Permissions = .fromMode(0o600);
+
 fn tryCreateSpool(io: std.Io, dir: std.Io.Dir, close_dir: bool, diag: Diagnostics, role: diagnostics.SourceId, place: diagnostics.TemporaryPlace, directory: []const u8, attempts: *diagnostics.TempAttempts) ?FaiSpool {
     for (0..FAI_SPOOL_CREATE_ATTEMPTS) |_| {
         var nonce: u128 = undefined;
@@ -543,7 +546,7 @@ fn tryCreateSpool(io: std.Io, dir: std.Io.Dir, close_dir: bool, diag: Diagnostic
 
         var name_buf: [FAI_SPOOL_NAME_BUFFER_SIZE]u8 = undefined;
         const name = std.fmt.bufPrint(&name_buf, "z-fasta-{x}.fai.tmp", .{nonce}) catch unreachable;
-        const file = dir.createFile(io, name, .{ .read = true, .exclusive = true }) catch |err| switch (err) {
+        const file = dir.createFile(io, name, .{ .read = true, .exclusive = true, .permissions = SPOOL_PERMISSIONS }) catch |err| switch (err) {
             error.PathAlreadyExists => continue,
             else => {
                 attempts.append(.{ .place = place, .stage = .create, .reason = .creation, .cause = .{ .zig = err } });
@@ -1386,7 +1389,7 @@ test "[failure] - [fai scanner]: maps writer failures to FaiSpoolWriteFailed" {
     );
 }
 
-test "[integration] - [fai output]: uses exclusive files and cleans them" {
+test "[integration] - [fai output]: uses exclusive owner-only files and cleans them" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
@@ -1403,6 +1406,8 @@ test "[integration] - [fai output]: uses exclusive files and cleans them" {
             first.name[0..first.name_len],
             second.name[0..second.name_len],
         ));
+        const permissions = (try first.file.stat(std.testing.io)).permissions;
+        try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), permissions.toMode() & 0o777);
     }
 
     var entries = tmp.dir.iterate();
