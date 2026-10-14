@@ -4,11 +4,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const diagnostics = @import("diagnostics");
-const caller = @import("diagnostics_caller.zig");
-const utility = @import("utility.zig");
+const consumer = @import("consumer_diagnostics.zig");
+const support = @import("support.zig");
 
 const testing = std.testing;
-const ZFASTA_BIN = utility.ZFASTA_BIN;
+const ZFASTA_BIN = support.ZFASTA_BIN;
 
 const HELP_STDOUT =
     \\usage: z-fasta <command> [options]
@@ -457,7 +457,7 @@ test "[edge] - [diagnostics]: temporary attempts and native causes are bounded" 
 
 test "[failure] - [diagnostics]: every partial allocation cleans up without diagnostic allocation" {
     try testing.checkAllAllocationFailures(testing.allocator, allocationCheck, .{});
-    try caller.exercise(testing.allocator);
+    try consumer.exercise(testing.allocator);
 }
 
 test "[unit] - [diagnostics]: maps open and read errors to their codes" {
@@ -502,6 +502,9 @@ test "[cli] - [dispatch]: writes help and rejects missing or unknown commands" {
     }
     try std.testing.expectEqual(@as(usize, 0), help.stderr.len);
     try std.testing.expectEqualStrings(HELP_STDOUT, help.stdout);
+    for ([_][]const u8{ "index", "get", "stats", "validate" }) |command| {
+        try support.expectCliSuccess(allocator, &.{ zfasta_bin, command, "--help" }, HELP_STDOUT);
+    }
 
     const cases = [_][]const []const u8{
         &.{zfasta_bin},

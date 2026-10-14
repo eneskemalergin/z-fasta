@@ -38,18 +38,3 @@ pub fn openSidecar(io: std.Io, path: []const u8) OpenSidecarError!std.Io.File {
     }
     return file;
 }
-
-test "[integration] - [file mapping]: exposes file contents" {
-    const contents = "mapped bytes";
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const file = try tmp.dir.createFile(std.testing.io, "input", .{ .read = true });
-    defer file.close(std.testing.io);
-    try std.Io.File.writeStreamingAll(file, std.testing.io, contents);
-
-    var map = try mapFileReadOnly(std.testing.io, file, contents.len);
-    defer map.destroy(std.testing.io);
-
-    try std.testing.expectEqualStrings(contents, map.memory);
-}

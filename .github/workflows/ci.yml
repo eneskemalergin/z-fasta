@@ -113,7 +113,7 @@ jobs:
 
       - name: Check diagnostic consumer
         shell: bash
-        run: bash tests/check_diagnostics.sh "${{ matrix.binary }}"
+        run: bash tests/consumer_json.sh "${{ matrix.binary }}"
 
       - name: Smoke test
         shell: bash

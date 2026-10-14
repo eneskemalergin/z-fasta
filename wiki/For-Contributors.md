@@ -52,10 +52,10 @@ The Wiki owns public behavior and workflow documentation. Source files and their
 ```bash
 zig build test-diagnostics
 zig build test-reporting
-bash tests/check_diagnostics.sh
+bash tests/consumer_json.sh
 ```
 
-The separate caller in `tests/diagnostics_commands_caller.zig` handles failures from the actual command functions and then calls them again successfully. It uses existing exports without running the CLI dispatcher. Preserve finite error unions, allocator cleanup, original causes and the primary failure when cleanup or reporting also fails. Reset `Failure` once at the owning operation entry; nested helpers retain facts before returning and must not reset them.
+The separate caller in `tests/consumer_commands.zig` handles failures from the actual command functions and then calls them again successfully. It uses existing exports without running the CLI dispatcher. Preserve finite error unions, allocator cleanup, original causes and the primary failure when cleanup or reporting also fails. Reset `Failure` once at the owning operation entry; nested helpers retain facts before returning and must not reset them.
 
 Borrowed source labels live through handling or reset. Retained preview views belong to their `Failure`. A validator `Report` copies the identifiers it keeps. Failure capture allocates no new message; preview exhaustion marks truncation and must not hide the original failure. See [Error diagnostics](Error-Diagnostics) for units, encoding and output states.
 

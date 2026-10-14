@@ -102,13 +102,13 @@ GET can write earlier valid records before a later request fails. Do not publish
 
 Validate needs a separate policy: exit 0 means no findings, exit 2 means warnings only, and exit 1 means errors, strict warning rejection, an unfinished report, or an operational failure. With `--json`, stdout is one envelope whose `validation` holds the findings: read `validation.outcome`, `validation.completion` and `accepted` together with the status. Allow exit 2 only if your job explicitly permits warnings. A report whose completion is `interrupted` also fills `failure`, and the same failure goes to stderr in the format `--error-format` selects. See [Validation and repair](Validation-and-Repair) for counting and repair rules.
 
-A local consumer example in `tests/check_diagnostics.sh` exercises these policies, including missing and truncated JSON. It does not establish integration with a workflow scheduler, HTTP service or telemetry system.
+A local consumer example in `tests/consumer_json.sh` exercises these policies, including missing and truncated JSON. It does not establish integration with a workflow scheduler, HTTP service or telemetry system.
 
 ## Native callers
 
 Core command functions return a finite `diagnostics.Error!T` and fill an explicit caller-owned `diagnostics.Failure`. They return after releasing their working resources. They do not select a renderer or terminate the process. Multiple codes share a Zig error tag, so handle the tag for propagation and inspect the captured code and facts for the exact reason.
 
-`tests/diagnostics_commands_caller.zig` is a compiled example using the existing command exports. It handles a missing-file failure from each of index, GET, stats and validate, then successfully calls each again without running the CLI dispatcher. Run it with `zig build test-diagnostics`. These are internal command APIs, not a newly published stable FASTA library.
+`tests/consumer_commands.zig` is a compiled example using the existing command exports. It handles a missing file and an overlong path from each of index, GET, stats and validate, then successfully calls each again without running the CLI dispatcher. Run it with `zig build test-diagnostics`. These are internal command APIs, not a newly published stable FASTA library.
 
 Failure construction allocates no message or growing chain. It retains previews in a shared 256-byte pool, up to two secondary diagnostics, and 16 source roles. Borrowed labels must live through handling or the next reset. Preview views borrow the owning `Failure` until reset or overwrite. A validator `Report` is a fixed-size value that copies its first-occurrence identifiers; `Report.validation` returns a view that borrows the report. These storage limits do not bound the validator's duplicate check, which grows with the number of distinct identifiers.
 

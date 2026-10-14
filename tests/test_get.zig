@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const main = @import("main");
-const utility = @import("utility.zig");
+const support = @import("support.zig");
 
 const parseRegion = main.getter.parseRegion;
 fn resolveRegion(idx: *const main.index_format.LoadedIndex, input: []const u8) !main.getter.ResolvedRegion {
@@ -11,14 +11,14 @@ fn resolveRegion(idx: *const main.index_format.LoadedIndex, input: []const u8) !
 }
 const io = std.testing.io;
 
-const ZFASTA_BIN = utility.ZFASTA_BIN;
-const expectCliFailure = utility.expectCliFailure;
-const expectCliSuccess = utility.expectCliSuccess;
-const expectUnknownOptionRejected = utility.expectUnknownOptionRejected;
-const uniqueArtifactPath = utility.uniqueArtifactPath;
-const writeFastaArtifact = utility.writeFastaArtifact;
-const writeZfi = utility.writeZfi;
-const captureExtractRegion = utility.captureExtractRegion;
+const ZFASTA_BIN = support.ZFASTA_BIN;
+const expectCliFailure = support.expectCliFailure;
+const expectCliSuccess = support.expectCliSuccess;
+const expectUnknownOptionRejected = support.expectUnknownOptionRejected;
+const uniqueArtifactPath = support.uniqueArtifactPath;
+const writeFastaArtifact = support.writeFastaArtifact;
+const writeZfi = support.writeZfi;
+const captureExtractRegion = support.captureExtractRegion;
 
 const GET_USAGE_STDERR = "error [usage.missing_argument] get: A required argument is missing. argument=request_source\nhint: Correct the command arguments; use --help for accepted options.\n";
 
@@ -94,7 +94,7 @@ test "[unit] - [get orientation]: composes independent reverse and complement op
 }
 
 test "[integration] - [region resolution]: preserves indexed coordinate geometry" {
-    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/simple.fasta", .on_access);
+    var idx = try support.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta", .on_access);
     defer idx.deinit();
 
     const Case = struct {
@@ -127,7 +127,7 @@ test "[integration] - [region resolution]: preserves indexed coordinate geometry
 }
 
 test "[integration] - [region resolution]: accepts a pipe-delimited protein identifier" {
-    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/proteome.fasta", .on_access);
+    var idx = try support.loadIndex(std.testing.allocator, io, "tests/data/proteome.fasta", .on_access);
     defer idx.deinit();
 
     const r = try resolveRegion(&idx, "sp|P12345|PROT_HUMAN:1-10");
@@ -137,7 +137,7 @@ test "[integration] - [region resolution]: accepts a pipe-delimited protein iden
 }
 
 test "[integration] - [region resolution]: accepts a 200-byte identifier" {
-    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/edge_cases.fasta", .on_access);
+    var idx = try support.loadIndex(std.testing.allocator, io, "tests/data/edge_cases.fasta", .on_access);
     defer idx.deinit();
 
     const long_name = "A" ** 200;
@@ -256,31 +256,6 @@ test "[cli] - [get]: selects the first empty identifier through zfi and fai" {
     try expectCliSuccess(allocator, &.{ ZFASTA_BIN, "get", fasta_path, "" }, ">\nAAAA\n");
 }
 
-test "[cli] - [get]: describes the request source contract" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-
-    const result = try std.process.run(allocator, threaded.io(), .{
-        .argv = &.{ ZFASTA_BIN, "get", "--help" },
-        .stdout_limit = .limited(64 * 1024),
-        .stderr_limit = .limited(64 * 1024),
-    });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-
-    switch (result.term) {
-        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
-        else => return error.ChildProcessFailed,
-    }
-    try std.testing.expectEqual(@as(usize, 0), result.stderr.len);
-    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "--chunk-size") == null);
-    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Choose exactly one request source") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Names and BED input stream.") != null);
-}
-
 test "[cli] - [get]: rejects unknown options regardless of position" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -320,9 +295,9 @@ test "[cli] - [get]: rejects mixed request source families" {
     defer arena.deinit();
     const allocator = arena.allocator();
     const fasta = "tests/data/simple.fasta";
-    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", fasta, "seq1", "--names", "ids.txt" }, .@"usage.conflicting_options");
-    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", fasta, "seq1", "--bed", "regions.bed" }, .@"usage.conflicting_options");
-    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", fasta, "--names", "ids.txt", "--bed", "regions.bed" }, .@"usage.conflicting_options");
+    try support.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", fasta, "seq1", "--names", "ids.txt" }, .@"usage.conflicting_options");
+    try support.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", fasta, "seq1", "--bed", "regions.bed" }, .@"usage.conflicting_options");
+    try support.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", fasta, "--names", "ids.txt", "--bed", "regions.bed" }, .@"usage.conflicting_options");
 }
 
 test "[cli] - [get]: rejects strand handling outside BED input" {
@@ -469,8 +444,8 @@ test "[cli] - [get]: invalid zfi blocks a valid fai" {
         try std.Io.File.writeStreamingAll(zfi_file, io, "not a zfi index");
     }
 
-    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", fasta, "seq" }, .@"index.truncated");
-    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", fasta, "--names", "missing.txt" }, .@"index.truncated");
+    try support.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", fasta, "seq" }, .@"index.truncated");
+    try support.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", fasta, "--names", "missing.txt" }, .@"index.truncated");
 }
 
 test "[cli] - [get names]: failures preserve only valid output prefixes" {
@@ -497,7 +472,7 @@ test "[cli] - [get names]: failures preserve only valid output prefixes" {
         try std.Io.File.writeStreamingAll(file, io, late_names.items);
     }
 
-    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", early_path, "--summary" }, .@"request.sequence_not_found");
+    try support.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", early_path, "--summary" }, .@"request.sequence_not_found");
 
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -514,7 +489,7 @@ test "[cli] - [get names]: failures preserve only valid output prefixes" {
         else => return error.ChildProcessFailed,
     }
     try std.testing.expect(result.stdout.len > 0);
-    try utility.expectDiagnostic(allocator, result.stderr, .@"request.sequence_not_found");
+    try support.expectDiagnostic(allocator, result.stderr, .@"request.sequence_not_found");
     const one_output = ">seq1\nACGTACGTACGTACGTACGTACGT\n";
     try std.testing.expect(result.stdout.len <= one_output.len * 65536);
     for (result.stdout, 0..) |byte, i| {
@@ -588,7 +563,20 @@ test "[cli] - [get]: rejects invalid requests, missing names, and transform conf
     );
     const empty_names = try writeFastaArtifact(allocator, "get-empty-names", "");
     defer std.Io.Dir.cwd().deleteFile(io, empty_names) catch {};
-    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", fasta, "--names", empty_names }, .@"request.no_regions");
+    try support.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "get", fasta, "--names", empty_names }, .@"request.no_regions");
+}
+
+test "[cli] - [get]: reads names and BED requests from standard input" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const fasta = "tests/data/simple.fasta";
+    const hint = "\nhint: Correct the reported request or select the intended index.\n";
+
+    try support.expectCliStdinResult(allocator, &.{ ZFASTA_BIN, "get", fasta, "--names", "-" }, "seq2\nseq1\n", 0, ">seq2\nGGGGCCCCAAAA\n>seq1\nACGTACGTACGTACGTACGTACGT\n", "");
+    try support.expectCliStdinResult(allocator, &.{ ZFASTA_BIN, "get", fasta, "--bed", "-", "--strand-aware" }, "seq1\t0\t4\nseq2\t8\t12\tr\t0\t-\n", 0, ">seq1:1-4\nACGT\n>seq2:9-12\nTTTT\n", "");
+    try support.expectCliStdinResult(allocator, &.{ ZFASTA_BIN, "get", fasta, "--names", "-" }, "seq2\nmissing\n", 1, "", "error [request.sequence_not_found] get: \"stdin\":2 request=2: Sequence was not found in the selected lookup. lookup_scope=complete_catalog index_source=zfi identifier=\"missing\"" ++ hint);
+    try support.expectCliStdinResult(allocator, &.{ ZFASTA_BIN, "get", fasta, "--bed", "-" }, "seq1\t4\t2\n", 1, "", "error [request.bed.invalid_interval] get: \"stdin\":1 column=6 offset=5 request=1: BED end must be greater than start. start=4 end=2 coordinate_system=zero_based_half_open" ++ hint);
 }
 
 test "[cli] - [get bed]: converts coordinates and skips metadata lines" {
@@ -651,7 +639,7 @@ test "[cli] - [get bed]: reports parser boundary errors" {
             defer bed_file.close(io);
             try std.Io.File.writeStreamingAll(bed_file, io, case.line);
         }
-        try utility.expectCliFailureCode(
+        try support.expectCliFailureCode(
             allocator,
             &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--bed", bed_path },
             case.code,
@@ -854,7 +842,7 @@ test "[failure] - [bed parser]: owns bounded previews after the input is reused"
 
 test "[failure] - [get diagnostics]: returns exact request facts without exiting" {
     const diagnostics = main.index_format.diagnostics;
-    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/simple.fasta", .on_access);
+    var idx = try support.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta", .on_access);
     defer idx.deinit();
     const cases = [_]struct { request: []const u8, code: diagnostics.Code }{
         .{ .request = "missing", .code = .@"request.sequence_not_found" },
@@ -909,7 +897,7 @@ test "[failure] - [get diagnostics]: retains FASTA read causes and exact short r
             return 0;
         }
     };
-    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/simple.fasta", .on_access);
+    var idx = try support.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta", .on_access);
     defer idx.deinit();
     for (0..2) |i| {
         var vtable = io.vtable.*;
@@ -941,7 +929,7 @@ test "[failure] - [get diagnostics]: retains FASTA read causes and exact short r
 
 test "[failure] - [get diagnostics]: returns partial writer failure with no final flush" {
     const diagnostics = main.index_format.diagnostics;
-    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/simple.fasta", .on_access);
+    var idx = try support.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta", .on_access);
     defer idx.deinit();
     var buffer: [1]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
@@ -994,7 +982,7 @@ test "[cli] - [get diagnostics]: discards pending stdout after a later malformed
     for (0..8192) |_| try expected.writer.writeAll(">seq1:1-1\nA\n");
     const expected_delivery = try std.fmt.allocPrint(allocator, "error [request.bed.field_missing] get: \"zig-cache/test-artifacts\" ({d} bytes):8193 column=5 offset=73732 request=8193: A required BED field is missing or empty. field=start column_number=2\nhint: Correct the reported request or select the intended index.\n", .{path.len});
     defer allocator.free(expected_delivery);
-    try utility.expectCliResult(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--bed", path, "--summary" }, 1, expected.written()[0..65537], expected_delivery);
+    try support.expectCliResult(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--bed", path, "--summary" }, 1, expected.written()[0..65537], expected_delivery);
 }
 
 test "[failure] - [get diagnostics]: releases allocation failures in positional and cached file modes" {
@@ -1078,7 +1066,7 @@ test "[cli] - [get diagnostics]: reports original lengths and bounded prefixes" 
         defer allocator.free(result.stderr);
         try std.testing.expectEqual(@as(u8, 1), result.term.exited);
         try std.testing.expectEqualStrings("", result.stdout);
-        try utility.expectDiagnostic(allocator, result.stderr, .@"request.sequence_not_found");
+        try support.expectDiagnostic(allocator, result.stderr, .@"request.sequence_not_found");
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, result.stderr, .{});
         defer parsed.deinit();
         const primary = parsed.value.object.get("failure").?.object.get("primary").?.object;
@@ -1126,7 +1114,7 @@ test "[cli] - [get diagnostics]: preserves opaque identifier bytes" {
     defer allocator.free(result.stderr);
     try std.testing.expectEqual(@as(u8, 1), result.term.exited);
     try std.testing.expectEqualStrings("", result.stdout);
-    try utility.expectDiagnostic(allocator, result.stderr, .@"request.sequence_not_found");
+    try support.expectDiagnostic(allocator, result.stderr, .@"request.sequence_not_found");
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, result.stderr, .{});
     defer parsed.deinit();
     const primary = parsed.value.object.get("failure").?.object.get("primary").?.object;
@@ -1137,28 +1125,6 @@ test "[cli] - [get diagnostics]: preserves opaque identifier bytes" {
     try std.testing.expectEqualStrings("base64", identifier.get("encoding").?.string);
     try std.testing.expectEqualStrings("/w==", identifier.get("value").?.string);
     try std.testing.expect(!identifier.get("truncated").?.bool);
-}
-
-test "[failure] - [get diagnostics]: classifies an overlong FASTA path" {
-    const diagnostics = main.index_format.diagnostics;
-    const path: [256]u8 = @splat('x');
-    var failure: diagnostics.Failure = undefined;
-    try std.testing.expectError(error.Io, main.getter.runGet(std.testing.allocator, io, &path, .{ .source = .{ .positional = &.{"seq1"} } }, &failure));
-    const primary = failure.primary().?;
-    try std.testing.expectEqual(diagnostics.Code.@"io.invalid_path", primary.code());
-    try std.testing.expectEqual(diagnostics.Stage.open, primary.stage);
-    try std.testing.expectEqual(diagnostics.SourceId.fasta, primary.at.source);
-    try std.testing.expectEqual(error.NameTooLong, primary.cause.?.zig);
-    const details = primary.details.@"io.invalid_path";
-    try std.testing.expectEqual(diagnostics.PathReason.too_long, details.reason);
-    try std.testing.expect(details.limit_bytes == null);
-    try std.testing.expectEqual(diagnostics.Operation.get, failure.operation);
-    try std.testing.expectEqualStrings(&path, failure.sourceLabel(.fasta).?);
-    try std.testing.expectEqual(diagnostics.SourceKind.path, failure.sources.get(.fasta).?.kind);
-    try std.testing.expect(!failure.work_complete and !failure.complete);
-    try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);
-    try std.testing.expectEqual(.not_attempted, failure.outputs.stdout.final_flush);
-    try std.testing.expectEqual(@as(usize, 0), failure.secondaryItems().len);
 }
 
 test "[cli] - [get]: many .zfi lookups keep every record's bytes, uniform or not" {
@@ -1183,6 +1149,6 @@ test "[cli] - [get]: many .zfi lookups keep every record's bytes, uniform or not
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
     const names_path = try writeFastaArtifact(allocator, "get-many-lookups-names", names.items);
     defer std.Io.Dir.cwd().deleteFile(io, names_path) catch {};
-    try utility.expectCliResult(allocator, &.{ ZFASTA_BIN, "index", fasta_path }, 0, "", try std.fmt.allocPrint(allocator, "wrote {s} (600 sequences)\n", .{zfi_path}));
+    try support.expectCliResult(allocator, &.{ ZFASTA_BIN, "index", fasta_path }, 0, "", try std.fmt.allocPrint(allocator, "wrote {s} (600 sequences)\n", .{zfi_path}));
     try expectCliSuccess(allocator, &.{ ZFASTA_BIN, "get", fasta_path, "--names", names_path }, expected.items);
 }

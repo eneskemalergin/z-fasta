@@ -2,19 +2,19 @@
 
 const std = @import("std");
 const main = @import("main");
-const utility = @import("utility.zig");
+const support = @import("support.zig");
 
 const io = std.testing.io;
 const validator = main.validator;
 const diagnostics = main.index_format.diagnostics;
 const reporting = main.reporting;
 
-const ZFASTA_BIN = utility.ZFASTA_BIN;
-const expectCliResult = utility.expectCliResult;
-const readTestFile = utility.readRequiredFile;
-const writeFastaArtifact = utility.writeFastaArtifact;
-const writeZfi = utility.writeZfi;
-const captureExtractRegion = utility.captureExtractRegion;
+const ZFASTA_BIN = support.ZFASTA_BIN;
+const expectCliResult = support.expectCliResult;
+const readTestFile = support.readRequiredFile;
+const writeFastaArtifact = support.writeFastaArtifact;
+const writeZfi = support.writeZfi;
+const captureExtractRegion = support.captureExtractRegion;
 
 const Expected = struct {
     code: diagnostics.Code,
@@ -939,13 +939,21 @@ test "[cli] - [validate fix]: writes the repaired copy and reports the input" {
     const allocator = arena.allocator();
     const input = try writeFastaArtifact(allocator, "validate-fix-input", ">a\r\nACGT ACGT\r\nAC\r\n>a\nAC?\n");
     defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
-    const output = try utility.uniqueArtifactPath(allocator, "validate-fix-output", "fa");
+    const output = try support.uniqueArtifactPath(allocator, "validate-fix-output", "fa");
     defer std.Io.Dir.cwd().deleteFile(io, output) catch {};
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const result = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "validate", "--fix", "--width", "3", "-o", output, input } });
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
-    try std.testing.expect(std.mem.startsWith(u8, result.stdout, "INVALID "));
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(allocator,
+        \\INVALID {s}: 2 errors in 2 codes, 2 warnings in 2 codes; 1 of 2 records with errors, 1 with warnings
+        \\error [fasta.duplicate_identifier] 1 record; first at line 4 column 2, record 2 "a": Identifier duplicates an earlier record. First defined at line 1 column 2.
+        \\error [sequence.invalid_symbol] 1 byte in 1 record; first at line 5 column 3, record 2 "a": Sequence byte is outside the selected alphabet. byte=0x3f
+        \\warning [format.sequence_whitespace] 1 line in 1 record; first at line 2 column 5, record 1 "a": Sequence line contains whitespace. whitespace_bytes=1
+        \\warning [format.mixed_line_endings] at line 4 column 3: File mixes LF and CRLF line endings.
+        \\complete: examined 26 bytes, 5 lines, 2 records, 13 symbols; nucleotide alphabet chosen from 13 symbols
+        \\
+    , .{input}), result.stdout);
     try std.testing.expectEqualStrings("", result.stderr);
     try std.testing.expectEqualStrings(">a\nACG\nTAC\nGTA\nC\n>a\nAC?\n", try readTestFile(allocator, output));
 
@@ -974,13 +982,41 @@ test "[cli] - [validate fix]: refuses blocked rewrites and keeps the destination
     defer std.Io.Dir.cwd().deleteFile(io, output) catch {};
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
-    for ([_][]const u8{ "junk\n>seq1\nACGT\n", ">a\x01\nAC\n", ">a\nA\x00C\n", "" }) |data| {
+    const Case = struct { data: []const u8, report: []const u8 };
+    const cases = [_]Case{
+        .{ .data = "junk\n>seq1\nACGT\n", .report =
+        \\1 error in 1 code, 0 warnings in 0 codes; 0 of 1 record with errors, 0 with warnings
+        \\error [fasta.content_before_header] 1 line; first at line 1 column 1: Content appears before the first FASTA header. content_bytes=4
+        \\complete: examined 16 bytes, 3 lines, 1 record, 4 symbols; nucleotide alphabet chosen from 4 symbols
+        \\
+        },
+        .{ .data = ">a\x01\nAC\n", .report =
+        \\1 error in 1 code, 0 warnings in 0 codes; 1 of 1 record with errors, 0 with warnings
+        \\error [fasta.header_control_byte] 1 byte in 1 record; first at line 1 column 3, record 1 "a\x01": Header contains a prohibited control byte. byte=0x01 grammar=controls_except_tab
+        \\complete: examined 7 bytes, 2 lines, 1 record, 2 symbols; nucleotide alphabet chosen from 2 symbols
+        \\
+        },
+        .{ .data = ">a\nA\x00C\n", .report =
+        \\1 error in 1 code, 0 warnings in 0 codes; 1 of 1 record with errors, 0 with warnings
+        \\error [fasta.sequence_control_byte] 1 byte in 1 record; first at line 2 column 2, record 1 "a": Sequence contains a prohibited control byte. byte=0x00 grammar=controls_except_tab
+        \\complete: examined 7 bytes, 2 lines, 1 record, 2 symbols; nucleotide alphabet chosen from 2 symbols
+        \\
+        },
+        .{ .data = "", .report =
+        \\1 error in 1 code, 0 warnings in 0 codes; 0 of 0 records with errors, 0 with warnings
+        \\error [fasta.no_records]: No FASTA records were found.
+        \\complete: examined 0 bytes, 0 lines, 0 records, 0 symbols; nucleotide alphabet chosen from 0 symbols
+        \\
+        },
+    };
+    for (cases) |case| {
+        const data = case.data;
         const input = try writeFastaArtifact(allocator, "validate-blocked-input", data);
         defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
         const result = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "validate", "--error-format=json", "--fix", "-o", output, input } });
         try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
-        try std.testing.expect(std.mem.startsWith(u8, result.stdout, "INVALID "));
-        try utility.expectDiagnostic(allocator, result.stderr, .@"repair.blocked");
+        try std.testing.expectEqualStrings(try std.fmt.allocPrint(allocator, "INVALID {s}: {s}", .{ input, case.report }), result.stdout);
+        try support.expectDiagnostic(allocator, result.stderr, .@"repair.blocked");
         try std.testing.expectEqualStrings("previous destination\n", try readTestFile(allocator, output));
         try std.testing.expectEqualStrings(data, try readTestFile(allocator, input));
     }
@@ -999,7 +1035,7 @@ test "[cli] - [validate fix]: rejects an aliased input path without modifying it
     const result = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "validate", "--error-format=json", "--fix", "-o", output_alias, in_path } });
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
     try std.testing.expectEqual(@as(usize, 0), result.stdout.len);
-    try utility.expectDiagnostic(allocator, result.stderr, .@"repair.output_is_input");
+    try support.expectDiagnostic(allocator, result.stderr, .@"repair.output_is_input");
     try std.testing.expectEqualStrings(broken, try readTestFile(allocator, in_path));
 }
 
@@ -1009,10 +1045,10 @@ test "[cli] - [validate fix]: rejects a symlink alias and safely replaces a sepa
     const input = try writeFastaArtifact(allocator, "validate-link-input", broken);
     defer allocator.free(input);
     defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
-    const hard = try utility.uniqueArtifactPath(allocator, "validate-hard-output", "fa");
+    const hard = try support.uniqueArtifactPath(allocator, "validate-hard-output", "fa");
     defer allocator.free(hard);
     defer std.Io.Dir.cwd().deleteFile(io, hard) catch {};
-    const sym = try utility.uniqueArtifactPath(allocator, "validate-sym-output", "fa");
+    const sym = try support.uniqueArtifactPath(allocator, "validate-sym-output", "fa");
     defer allocator.free(sym);
     defer std.Io.Dir.cwd().deleteFile(io, sym) catch {};
     const absolute_input = try std.Io.Dir.cwd().realPathFileAlloc(io, input, allocator);
@@ -1045,7 +1081,7 @@ test "[failure] - [validate fix]: refuses an output open failure before staging"
     const input = try writeFastaArtifact(allocator, "validate-identity-input", broken);
     defer allocator.free(input);
     defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
-    const output = try utility.uniqueArtifactPath(allocator, "validate-identity-loop", "fa");
+    const output = try support.uniqueArtifactPath(allocator, "validate-identity-loop", "fa");
     defer allocator.free(output);
     defer std.Io.Dir.cwd().deleteFile(io, output) catch {};
     const directory = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", allocator);
@@ -1164,39 +1200,21 @@ test "[cli] - [validate]: reads standard input" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const child_io = threaded.io();
     const data = ">a\nAC GT\n>a\nAC\n";
-    const output = try utility.uniqueArtifactPath(allocator, "validate-stdin-output", "fa");
+    const output = try support.uniqueArtifactPath(allocator, "validate-stdin-output", "fa");
     defer std.Io.Dir.cwd().deleteFile(io, output) catch {};
-    const Run = struct { argv: []const []const u8, status: u8, stdout: []const u8 };
-    const runs = [_]Run{
-        .{ .argv = &.{ ZFASTA_BIN, "validate", "-" }, .status = 1, .stdout =
+    const report =
         \\INVALID stdin: 1 error in 1 code, 1 warning in 1 code; 1 of 2 records with errors, 1 with warnings
         \\error [fasta.duplicate_identifier] 1 record; first at line 3 column 2, record 2 "a": Identifier duplicates an earlier record.
         \\warning [format.sequence_whitespace] 1 line in 1 record; first at line 2 column 3, record 1 "a": Sequence line contains whitespace. whitespace_bytes=1
         \\complete: examined 15 bytes, 4 lines, 2 records, 6 symbols; nucleotide alphabet chosen from 6 symbols
         \\
-        },
-        .{ .argv = &.{ ZFASTA_BIN, "validate", "--fix", "-o", output, "-" }, .status = 1, .stdout = "" },
+    ;
+    const runs = [_][]const []const u8{
+        &.{ ZFASTA_BIN, "validate", "-" },
+        &.{ ZFASTA_BIN, "validate", "--fix", "-o", output, "-" },
     };
-    for (runs) |run| {
-        var child = try std.process.spawn(child_io, .{ .argv = run.argv, .stdin = .pipe, .stdout = .pipe, .stderr = .pipe });
-        try child.stdin.?.writeStreamingAll(child_io, data);
-        child.stdin.?.close(child_io);
-        child.stdin = null;
-        var stdout_buffer: [4096]u8 = undefined;
-        var stdout_reader = child.stdout.?.readerStreaming(child_io, &stdout_buffer);
-        const stdout = try stdout_reader.interface.allocRemaining(allocator, .limited(64 * 1024));
-        var stderr_buffer: [4096]u8 = undefined;
-        var stderr_reader = child.stderr.?.readerStreaming(child_io, &stderr_buffer);
-        const stderr = try stderr_reader.interface.allocRemaining(allocator, .limited(64 * 1024));
-        const term = try child.wait(child_io);
-        try std.testing.expectEqual(std.process.Child.Term{ .exited = run.status }, term);
-        try std.testing.expectEqualStrings("", stderr);
-        if (run.stdout.len != 0) try std.testing.expectEqualStrings(run.stdout, stdout) else try std.testing.expect(std.mem.startsWith(u8, stdout, "INVALID stdin: "));
-    }
+    for (runs) |argv| try support.expectCliStdinResult(allocator, argv, data, 1, report, "");
     try std.testing.expectEqualStrings(">a\nACGT\n>a\nAC\n", try readTestFile(allocator, output));
 }
 
@@ -1243,7 +1261,7 @@ test "[failure] - [validate]: every allocation failure in a run is reported and 
     const path = try writeFastaArtifact(allocator, "validate-allocation", data);
     defer deletePair(allocator, path, ".zfi");
     try writeZfi(allocator, path, data);
-    const output = try utility.uniqueArtifactPath(allocator, "validate-allocation-output", "fa");
+    const output = try support.uniqueArtifactPath(allocator, "validate-allocation-output", "fa");
     defer std.Io.Dir.cwd().deleteFile(io, output) catch {};
     for ([_]validator.Options{
         .{},
@@ -1412,12 +1430,12 @@ test "[cli] - [validate index]: needs a file and a loadable index" {
 
     const unindexed = try writeFastaArtifact(allocator, "validate-index-none", ">a\nAC\n");
     defer std.Io.Dir.cwd().deleteFile(io, unindexed) catch {};
-    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "validate", "--index", unindexed }, .@"index.not_found");
+    try support.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "validate", "--index", unindexed }, .@"index.not_found");
 
     const stale = try writeFastaArtifact(allocator, "validate-index-stale", ">a\nACGT\n");
     defer deletePair(allocator, stale, ".zfi");
     try writeZfi(allocator, stale, ">a\nAC\n");
-    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "validate", "--index", stale }, .@"index.source_size_mismatch");
+    try support.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "validate", "--index", stale }, .@"index.source_size_mismatch");
 
     // A damaged entry stops the scan where the index stream reaches it.
     const damaged = try writeFastaArtifact(allocator, "validate-index-damaged", ">a\nACGT\n>b\nGG\n");
@@ -1438,8 +1456,8 @@ test "[cli] - [validate index]: needs a file and a loadable index" {
         \\interrupted: examined 14 bytes, 4 lines, 2 records (1 completed), 6 symbols; nucleotide alphabet chosen from 6 symbols; zfi index: 1 of 1 entry matched
         \\
     , .{damaged}), result.stdout);
-    try utility.expectDiagnostic(allocator, result.stderr, .@"index.invalid_line_geometry");
-    try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "validate", "--index=zig-cache/test-artifacts/definitely-missing.zfi", stale }, .@"io.file_not_found");
+    try support.expectDiagnostic(allocator, result.stderr, .@"index.invalid_line_geometry");
+    try support.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "validate", "--index=zig-cache/test-artifacts/definitely-missing.zfi", stale }, .@"io.file_not_found");
 
     const hint = "\nhint: Correct the command arguments; use --help for accepted options.\n";
     try expectCliResult(allocator, &.{ ZFASTA_BIN, "validate", "--index=sample.idx", stale }, 1, "", "error [usage.invalid_option_value] validate: Invalid option value. option=index expected=index_path value=\"sample.idx\"" ++ hint);

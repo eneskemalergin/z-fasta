@@ -1830,7 +1830,7 @@ test "[unit] - [name catalog]: exact comparisons use the current input chunk" {
     try std.testing.expect(try set.observeWithFingerprint(&source, "alpha", 20, 0));
 }
 
-test "[edge] - [name catalog]: retain offsets above four GiB" {
+test "[edge] - [name catalog]: retains offsets above four GiB" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     const io = std.testing.io;

@@ -8,7 +8,7 @@ const diagnostics = zfasta.diagnostics;
 const testing = std.testing;
 const io = testing.io;
 
-const ZFASTA_BIN = @import("utility.zig").ZFASTA_BIN;
+const ZFASTA_BIN = @import("support.zig").ZFASTA_BIN;
 
 const UNIFORM = ">a desc\nACGTA\nCGTAC\nGT\n>b\nTTTTT\nTT\n";
 const NONUNIFORM = ">a desc\nACG\nTACGT\nACGT\n>b\nTTT\nTTTT\n";

@@ -1744,6 +1744,27 @@ test "[edge] - [index diagnostics]: buffer width and ZFI count reject before nar
     }
 }
 
+test "[edge] - [index diagnostics]: side-table offsets stop at the encoded limit" {
+    var failure: diagnostics.Failure = undefined;
+    const diag = Diagnostics{ .failure = &failure };
+    for ([_]diagnostics.OffsetRole{ .local, .wire }) |role| {
+        failure.reset(.index);
+        var record = IndexRecord{ .name_offset = 0, .name_len = 1, .seq_offset = 3, .seq_len = 4, .line_bases = 2, .line_bytes = 3 };
+        try diag.markNonUniform(&record, index_format.MAX_SIDE_TABLE_OFFSET, role);
+        try std.testing.expectEqual(@as(u64, index_format.MAX_SIDE_TABLE_OFFSET), record.sideTableOffset());
+        try std.testing.expect(failure.primary() == null);
+
+        try std.testing.expectError(error.InvalidIndex, diag.markNonUniform(&record, index_format.MAX_SIDE_TABLE_OFFSET + 1, role));
+        const primary = failure.primary().?;
+        try std.testing.expectEqual(diagnostics.Code.@"index.side_table_offset_limit_exceeded", primary.code());
+        try std.testing.expectEqual(diagnostics.SourceId.zfi, primary.at.source);
+        const details = primary.details.@"index.side_table_offset_limit_exceeded";
+        try std.testing.expectEqual(@as(u64, index_format.MAX_SIDE_TABLE_OFFSET + 1), details.offset);
+        try std.testing.expectEqual(@as(u64, index_format.MAX_SIDE_TABLE_OFFSET), details.max_offset);
+        try std.testing.expectEqual(role, details.offset_role);
+    }
+}
+
 test "[failure] - [index diagnostics]: reports the known ZFI path buffer limit" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.index);

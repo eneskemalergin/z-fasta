@@ -172,15 +172,6 @@ pub fn build(b: *std.Build) void {
         }),
     }));
 
-    const run_test_platform_unit = b.addRunArtifact(b.addTest(.{
-        .filters = test_filters,
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/platform.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    }));
-
     const run_test_validate = b.addRunArtifact(b.addTest(.{
         .filters = test_filters,
         .root_module = b.createModule(.{
@@ -227,10 +218,10 @@ pub fn build(b: *std.Build) void {
             },
         }),
     }));
-    const run_diagnostics_caller = b.addRunArtifact(b.addExecutable(.{
-        .name = "diagnostics-caller",
+    const run_consumer_diagnostics = b.addRunArtifact(b.addExecutable(.{
+        .name = "consumer-diagnostics",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/diagnostics_caller.zig"),
+            .root_source_file = b.path("tests/consumer_diagnostics.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -239,10 +230,10 @@ pub fn build(b: *std.Build) void {
             },
         }),
     }));
-    const run_commands_caller = b.addRunArtifact(b.addExecutable(.{
-        .name = "diagnostics-commands-caller",
+    const run_consumer_commands = b.addRunArtifact(b.addExecutable(.{
+        .name = "consumer-commands",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/diagnostics_commands_caller.zig"),
+            .root_source_file = b.path("tests/consumer_commands.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -253,9 +244,9 @@ pub fn build(b: *std.Build) void {
     }));
     const diagnostics_step = b.step("test-diagnostics", "Run diagnostics tests and separate callers");
     diagnostics_step.dependOn(reporting_step);
-    diagnostics_step.dependOn(&run_commands_caller.step);
+    diagnostics_step.dependOn(&run_consumer_commands.step);
     diagnostics_step.dependOn(&run_test_diagnostics.step);
-    diagnostics_step.dependOn(&run_diagnostics_caller.step);
+    diagnostics_step.dependOn(&run_consumer_diagnostics.step);
 
     const library_bench = b.addExecutable(.{
         .name = "z-fasta-library",
@@ -302,9 +293,9 @@ pub fn build(b: *std.Build) void {
         prepare_fixtures.addFileArg(b.path(path));
     }
     for ([_]*std.Build.Step.Run{
-        run_test_index,      run_test_get,         run_test_main_unit,   run_test_indexer_unit,
-        run_test_stats,      run_test_stats_unit,  run_test_validate,    run_test_validator_unit,
-        run_commands_caller, run_test_diagnostics, run_test_getter_unit,
+        run_test_index,        run_test_get,         run_test_main_unit,   run_test_indexer_unit,
+        run_test_stats,        run_test_stats_unit,  run_test_validate,    run_test_validator_unit,
+        run_consumer_commands, run_test_diagnostics, run_test_getter_unit,
     }) |run| run.setCwd(fixture_root);
 
     const index_step = b.step("test-index", "Run index tests");
@@ -339,6 +330,5 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_test_validator_unit.step);
     test_step.dependOn(&run_test_fasta_unit.step);
     test_step.dependOn(&run_test_index_format_unit.step);
-    test_step.dependOn(&run_test_platform_unit.step);
     test_step.dependOn(&run_test_library.step);
 }

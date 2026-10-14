@@ -1679,7 +1679,7 @@ test "[edge] - [get requests]: retains the name crossing its byte target" {
     try std.testing.expect(workspace.names.capacity <= MAX_ACTIVE_NAME_BYTES);
 }
 
-test "[unit] - [get names]: handles line endings and a final unterminated line" {
+test "[unit] - [get names]: reads LF, CRLF, and a final unterminated line" {
     const test_io = std.testing.io;
     var idx = try loadTestIndex(test_io, "tests/data/simple.fasta");
     defer idx.deinit();
@@ -1929,7 +1929,7 @@ test "[failure] - [get requests]: detects metadata changes and finds uncollected
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
     _ = try processRequestReader(std.testing.allocator, &idx, &reader.interface, .{ .names = .{} }, 0, false, &output.writer, fastaSource(&idx), &context, opened, buffers);
-    try std.testing.expect(std.mem.startsWith(u8, output.written(), ">seq2\n"));
+    try std.testing.expectEqualStrings(">seq2\nGGGGCCCCAAAA\n", output.written());
 }
 
 test "[failure] - [get requests]: retains required read and comparison causes" {
