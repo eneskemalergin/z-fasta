@@ -951,7 +951,7 @@ const StreamedCatalog = struct {
         const atomic = &self.atomic_file.?;
         std.debug.assert(atomic.file_exists);
         const basename = std.fmt.hex(atomic.file_basename_hex);
-        return atomic.dir.openFile(self.io, &basename, .{ .mode = .read_only }) catch |err| return self.diag.fail(.{ .@"io.open_failed" = {} }, .open, .catalog_spool, err);
+        return atomic.dir.openFile(self.io, &basename, .{ .mode = .read_only }) catch |err| return self.diag.fail(diagnostics.openFailure(err), .open, .catalog_spool, err);
     }
 
     fn emit(self: *@This(), info: FastaRecordEmit) !void {
