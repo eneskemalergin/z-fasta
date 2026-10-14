@@ -1358,7 +1358,11 @@ test "[cli] - [validate index]: needs a file and a loadable index" {
     defer threaded.deinit();
     const result = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "validate", "--index", "--error-format=json", damaged } });
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
-    try std.testing.expect(std.mem.startsWith(u8, result.stdout, "INTERRUPTED "));
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(allocator,
+        \\INTERRUPTED {s}: no findings
+        \\interrupted: examined 14 bytes, 4 lines, 2 records (1 completed), 6 symbols; nucleotide alphabet chosen from 6 symbols; zfi index: 1 of 1 entry matched
+        \\
+    , .{damaged}), result.stdout);
     try utility.expectDiagnostic(allocator, result.stderr, .@"index.invalid_line_geometry");
     try utility.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "validate", "--index=zig-cache/test-artifacts/definitely-missing.zfi", stale }, .@"io.file_not_found");
 

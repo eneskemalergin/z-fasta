@@ -124,7 +124,7 @@ z-fasta validate --json genome.fa
 - `completion` and the selected `policy`;
 - `checks`: `passed`, `warnings`, `failed`, or `incomplete` for structure, identifiers, alphabet, and format;
 - what was `examined`, finding totals, totals by category, and the records with errors and with warnings;
-- with `--index`, an `index_match` check and category, and `index`: the `format`, its `entries`, how many `matched`, and the `omitted_duplicates`;
+- with `--index`, an `index_match` check and category, and `index`: the `format`, the `entries` read (all of them unless the scan stopped early), how many `matched`, and the `omitted_duplicates`;
 - one entry per code that occurred, and the occurrences of each byte outside the alphabet.
 
 <details>

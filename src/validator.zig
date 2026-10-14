@@ -612,7 +612,6 @@ const Pair = struct {
     scanner: fasta.RecordScannerWith(ScanDiag),
     fed: u64 = 0,
     taken_in_order: usize = 0,
-    entries: u64 = 0,
     matched: u64 = 0,
     omitted: u64 = 0,
 
@@ -653,6 +652,11 @@ const Pair = struct {
             lookup.taken.deinit(self.allocator);
         }
         if (self.catalog) |*catalog| catalog.deinit();
+    }
+
+    // Entries read so far: every entry once the scan completes, fewer when it stops early.
+    fn entriesRead(self: *const Pair) u64 {
+        return if (self.catalog) |*catalog| catalog.records.len() else self.stream.ordinal;
     }
 
     fn source(self: *const Pair) diagnostics.SourceId {
@@ -877,7 +881,7 @@ const Scan = struct {
         invalid.first = self.candidates[chosen].first;
         if (invalid.first) |*first| first.details.@"sequence.invalid_symbol".policy = report.alphabet;
         report.records_with_errors = self.candidates[chosen].records_with_errors;
-        if (self.pair) |pair| report.index = .{ .format = pair.scanner.diag.format, .entries = pair.entries, .matched = pair.matched, .omitted_duplicates = pair.omitted };
+        if (self.pair) |pair| report.index = .{ .format = pair.scanner.diag.format, .entries = pair.entriesRead(), .matched = pair.matched, .omitted_duplicates = pair.omitted };
     }
 
     fn choose(self: *Scan, candidate: u1) void {
@@ -1335,13 +1339,11 @@ const Scan = struct {
                 const offset = if (pair.source() == .zfi) @sizeOf(index_format.ZfiHeader) + entry * index_format.ZFI_INDEX_RECORD_BYTES else catalog.records.get(entry).name_offset;
                 self.countMissingEntry(offset, entry + 1, catalog.recordName(entry).?);
             }
-            pair.entries = catalog.records.len();
             return;
         }
         if (pair.head) |head| self.countMissingEntry(head.offset, head.ordinal, head.name);
         pair.head = null;
         while (try pair.stream.next()) |entry| self.countMissingEntry(entry.offset, entry.ordinal, entry.name);
-        pair.entries = pair.stream.ordinal;
     }
 
     fn countMissingEntry(self: *Scan, offset: u64, ordinal: u64, name: []const u8) void {
