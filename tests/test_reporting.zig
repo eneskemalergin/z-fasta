@@ -210,6 +210,7 @@ test "[property] - [reporting]: every code fits both budgets with full sources a
             return err;
         };
         for (text_writer.buffered()) |byte| try testing.expect(byte == '\n' or (byte >= 32 and byte < 127));
+        try testing.expect(std.mem.indexOf(u8, text_writer.buffered(), " ;") == null);
     }
 }
 

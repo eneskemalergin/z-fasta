@@ -1489,7 +1489,7 @@ fn tryLoadZfi(
     )[0..header.record_count];
 
     context.at = .{ .source = .zfi, .location = .{ .offset = zfi_data.len } };
-    const trailing = parseZfiTrailingMeta(zfi_data) orelse return context.fail(.{ .@"index.name_footer_missing" = .{} });
+    const trailing = parseZfiTrailingMeta(zfi_data) orelse return context.fail(.{ .@"index.name_footer_missing" = {} });
     const regions = switch (zfiNameRegions(trailing.payload_end, trailing.name_blob_len, header.record_count, records_end)) {
         .invalid => |details| return context.fail(details),
         .regions => |regions| regions,
@@ -1758,7 +1758,7 @@ const ZfiNameBlob = struct { regions: ZfiNameRegions, trailing: ZfiTrailingMeta 
 // `tail_start`). A trailer that cannot be followed comes back as `invalid`.
 fn locateZfiNameBlob(tail_bytes: []const u8, tail_start: usize, zfi_size: usize, record_count: u32, records_end: usize, context: *Diagnostics) union(enum) { blob: ZfiNameBlob, invalid: diagnostics.Details } {
     context.at.location.offset = zfi_size;
-    var trailing = parseZfiTrailingMeta(tail_bytes) orelse return .{ .invalid = .{ .@"index.name_footer_missing" = .{} } };
+    var trailing = parseZfiTrailingMeta(tail_bytes) orelse return .{ .invalid = .{ .@"index.name_footer_missing" = {} } };
     trailing.payload_end += tail_start;
     trailing.source_mtime_offset += tail_start;
     return switch (zfiNameRegions(trailing.payload_end, trailing.name_blob_len, record_count, records_end)) {

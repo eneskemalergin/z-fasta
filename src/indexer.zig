@@ -676,7 +676,7 @@ fn sourceTimestamp(stat: std.Io.File.Stat, diag: Diagnostics) !u64 {
 }
 
 fn noIndexableRecords(diag: Diagnostics) anyerror {
-    return diag.fail(.{ .@"index.no_indexable_records" = .{} }, .scan, .fasta, null, error.NoValidSequences);
+    return diag.fail(.{ .@"index.no_indexable_records" = {} }, .scan, .fasta, null, error.NoValidSequences);
 }
 
 fn zfiOutputPath(buffer: []u8, path: []const u8, diag: Diagnostics) ![]const u8 {
