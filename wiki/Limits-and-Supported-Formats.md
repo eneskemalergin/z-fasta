@@ -40,7 +40,7 @@ FASTQ is coming as a separate project, z-fastq, built around the same priorities
 - Validate identifier: 65535 bytes; a longer one is reported as `fasta.identifier_too_long`.
 - Validate examples: the first occurrence of each finding code; counts are exact and uncapped.
 - Validate read buffer: 256 KiB.
-- Validate duplicate check: unbounded unless `--max-name-memory` sets a budget; on a file it reserves about 1 MiB before its first name.
+- Validate duplicate check: unbounded unless `--max-name-memory` sets a budget; on a file it reserves about 1 MiB before its first name. On a file it holds 8 to 16 bytes per identifier (1,000,000 records: 15 MiB); from standard input it also holds a copy of each identifier (the same records: 31 MiB; 254,070 identifiers of 29 MB in all: 29 MiB).
 - Default validate header warning threshold: 1024 bytes.
 - Validate type sample: first 100000 symbols across the file, unless `--type` names the alphabet.
 - GET complement type sample: up to 256 requested bases per record.

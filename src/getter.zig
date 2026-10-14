@@ -173,8 +173,8 @@ pub fn runGet(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path: []co
     failure.reset(.get);
     failure.sources.set(.stdout, .{ .label = .{ .borrowed = "stdout" }, .kind = .stream });
     var context = Diagnostics{ .failure = failure };
-    var storage: GetBuffers = undefined;
-    const buffers = &storage;
+    const buffers = backing_allocator.create(GetBuffers) catch return context.oom(.reader_buffer);
+    defer backing_allocator.destroy(buffers);
     const start_ns = if (options.measure_elapsed) monotonicNs(io) else 0;
     switch (options.source) {
         .positional => {
@@ -291,7 +291,6 @@ const Diagnostics = struct {
 
 const MAX_REQUEST_NAME_BYTES = std.math.maxInt(u16);
 const REQUEST_LINE_READER_BUFFER_BYTES = MAX_REQUEST_NAME_BYTES + 4096;
-const REQUEST_NAME_STACK_BYTES = 8 * 1024;
 const ACTIVE_NAME_BYTES = 4 * 1024 * 1024;
 const MAX_ACTIVE_NAME_BYTES = ACTIVE_NAME_BYTES + MAX_REQUEST_NAME_BYTES;
 const NAMES_REQUEST_BATCH_SIZE = 65536;
@@ -531,12 +530,17 @@ fn fastaSource(idx: *const LoadedIndex) FastaSource {
 const FASTA_INPUT_BUFFER_BYTES: usize = 256 * 1024;
 const REGION_OUTPUT_BUFFER_BYTES: usize = 64 * 1024;
 const REVERSED_BUFFER_BYTES: usize = 64 * 1024;
+const STDOUT_BUFFER_BYTES: usize = 64 * 1024;
 
+// One allocation per command, so no stack frame holds these.
 const GetBuffers = struct {
     input: [FASTA_INPUT_BUFFER_BYTES]u8,
     output: [REGION_OUTPUT_BUFFER_BYTES]u8,
     /// Reverse output's bytes, reversed a piece at a time; touched only by reverse requests.
     reversed: [REVERSED_BUFFER_BYTES]u8,
+    stdout: [STDOUT_BUFFER_BYTES]u8,
+    /// Request lines from stdin or the request file.
+    request: [REQUEST_LINE_READER_BUFFER_BYTES]u8,
 };
 
 const DiskSpan = struct {
@@ -1184,23 +1188,29 @@ const StreamRequestSource = union(enum) {
 };
 
 const RequestedNames = struct {
-    arena: std.heap.ArenaAllocator,
-    stack_allocator: std.heap.StackFallbackAllocator(REQUEST_NAME_STACK_BYTES) = undefined,
+    allocator: std.mem.Allocator,
+    /// Names read from a stream are copied here; names from a buffered file borrow its bytes.
+    copies: std.heap.ArenaAllocator,
     names: std.ArrayList([]const u8) = .empty,
     set: std.StringHashMapUnmanaged(void) = .empty,
 
     fn init(allocator: std.mem.Allocator) RequestedNames {
-        return .{ .arena = std.heap.ArenaAllocator.init(allocator) };
+        return .{ .allocator = allocator, .copies = std.heap.ArenaAllocator.init(allocator) };
     }
 
     fn deinit(self: *RequestedNames) void {
-        self.arena.deinit();
+        self.set.deinit(self.allocator);
+        self.names.deinit(self.allocator);
+        self.copies.deinit();
     }
 
     fn collect(self: *RequestedNames, reader: *std.Io.Reader, source: StreamRequestSource, stable_input: bool) !bool {
-        self.stack_allocator = std.heap.stackFallback(REQUEST_NAME_STACK_BYTES, self.arena.allocator());
-        const allocator = self.stack_allocator.get();
-        const initial_capacity = if (stable_input) @min(128, 1 + std.mem.count(u8, reader.buffered(), "\n")) else 0;
+        const allocator = self.allocator;
+        if (stable_input) {
+            const lines = 1 + std.mem.count(u8, reader.buffered(), "\n");
+            try self.set.ensureTotalCapacity(allocator, @intCast(lines));
+            try self.names.ensureTotalCapacityPrecise(allocator, lines);
+        }
         var previous_name: ?[]const u8 = null;
         while (true) {
             const available = reader.buffered();
@@ -1224,11 +1234,7 @@ const RequestedNames = struct {
                 previous_name = existing;
                 continue;
             }
-            if (self.names.items.len == 0 and initial_capacity != 0) {
-                try self.set.ensureTotalCapacity(allocator, @intCast(initial_capacity));
-                try self.names.ensureTotalCapacityPrecise(allocator, initial_capacity);
-            }
-            const owned = if (stable_input) name else try allocator.dupe(u8, name);
+            const owned = if (stable_input) name else try self.copies.allocator().dupe(u8, name);
             try self.set.put(allocator, owned, {});
             try self.names.append(allocator, owned);
             previous_name = owned;
@@ -1356,8 +1362,7 @@ fn processRequestPath(
     buffers: *GetBuffers,
 ) diagnostics.Error!BatchStats {
     if (std.mem.eql(u8, path, "-")) {
-        var buffer: [REQUEST_LINE_READER_BUFFER_BYTES]u8 = undefined;
-        var reader = std.Io.File.stdin().reader(io, &buffer);
+        var reader = std.Io.File.stdin().reader(io, &buffers.request);
         diag.request_reader = &reader;
         return processRequestReader(allocator, idx, &reader.interface, source, 0, annotate_transform, writer, fasta_source, diag, null, buffers);
     }
@@ -1371,8 +1376,7 @@ fn processRequestPath(
         },
         .bed => 0,
     };
-    var buffer: [REQUEST_LINE_READER_BUFFER_BYTES]u8 = undefined;
-    var reader = file.reader(io, &buffer);
+    var reader = file.reader(io, &buffers.request);
     diag.request_reader = if (prepared_reader != null) prepared_file_reader else &reader;
     return processRequestReader(allocator, idx, prepared_reader orelse &reader.interface, source, name_reservation, annotate_transform, writer, fasta_source, diag, if (prepared_reader != null and prepared_file_reader == null) null else opened_file, buffers);
 }
@@ -1394,7 +1398,7 @@ fn runPositionalGet(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path
 fn runFileGet(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, request_path: []const u8, source: StreamRequestSource, options: Options, diag: *Diagnostics, buffers: *GetBuffers) diagnostics.Error!BatchStats {
     const request_file = openSeekableRequest(io, request_path);
     defer if (request_file) |opened| opened.file.close(io);
-    var request_buffer: [REQUEST_LINE_READER_BUFFER_BYTES]u8 = undefined;
+    const request_buffer = &buffers.request;
     const buffered_requests = if (request_file) |opened| buffered: {
         if (opened.size == 0 or opened.size > request_buffer.len) break :buffered null;
         const size: usize = @intCast(opened.size);
@@ -1403,7 +1407,7 @@ fn runFileGet(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path: []co
         break :buffered request_buffer[0..size];
     } else null;
     var small_reader = std.Io.Reader.fixed(buffered_requests orelse &.{});
-    var request_reader: ?std.Io.File.Reader = if (request_file != null and buffered_requests == null) request_file.?.file.reader(io, &request_buffer) else null;
+    var request_reader: ?std.Io.File.Reader = if (request_file != null and buffered_requests == null) request_file.?.file.reader(io, request_buffer) else null;
     // A `.fai` loaded for the requested names borrows them, so they live as long as the index.
     var requested = RequestedNames.init(backing_allocator);
     defer requested.deinit();
@@ -1422,7 +1426,7 @@ fn runFileGet(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path: []co
     diag.index_source = if (idx.source == .zfi) .zfi else .fai;
     if (idx.source == .zfi) diag.lookup_scope = .complete_catalog;
     if (buffered_requests) |bytes| small_reader = std.Io.Reader.fixed(bytes);
-    if (request_reader != null) request_reader = request_file.?.file.reader(io, &request_buffer);
+    if (request_reader != null) request_reader = request_file.?.file.reader(io, request_buffer);
     return emitGet(backing_allocator, io, &idx, options, &.{}, request_file, if (buffered_requests != null) &small_reader else if (request_reader) |*reader| &reader.interface else null, if (request_reader) |*reader| reader else null, diag, buffers);
 }
 
@@ -1446,8 +1450,7 @@ fn emitGet(
     buffers: *GetBuffers,
 ) diagnostics.Error!BatchStats {
     const fasta_source = fastaSource(idx);
-    var out_buf: [65536]u8 = undefined;
-    var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
+    var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &buffers.stdout);
     const writer = &stdout_fw.interface;
     errdefer {
         writer.end = 0;

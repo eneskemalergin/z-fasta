@@ -99,7 +99,7 @@ pub const Report = struct {
     pub fn status(self: *const Report, strict: bool, repaired: bool) u8 {
         if (self.completion != .complete) return 1;
         var warnings = false;
-        for (self.findings) |entry| {
+        for (&self.findings) |*entry| {
             if (entry.occurrences == 0) continue;
             const metadata = diagnostics.metadata(entry.code);
             if (metadata.severity == .@"error") return 1;
@@ -141,10 +141,11 @@ pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const
 
     const report = allocator.create(Report) catch return failure.fail(.{ .details = .{ .@"resource.out_of_memory" = .{ .allocation_role = .validation_report, .requested_bytes = @sizeOf(Report) } }, .stage = .allocate, .at = .{ .source = .fasta }, .cause = .{ .zig = error.OutOfMemory } });
     defer allocator.destroy(report);
-    const read_buf = allocator.alloc(u8, READ_BUFFER_BYTES) catch return failure.fail(.{ .details = .{ .@"resource.out_of_memory" = .{ .allocation_role = .reader_buffer, .requested_bytes = READ_BUFFER_BYTES } }, .stage = .allocate, .at = .{ .source = .fasta }, .cause = .{ .zig = error.OutOfMemory } });
-    defer allocator.free(read_buf);
-    var io_buf: [FILE_IO_BUFFER_BYTES]u8 = undefined;
-    var reader = if (from_stdin) file.readerStreaming(io, &io_buf) else file.reader(io, &io_buf);
+    const buffers = allocator.alloc(u8, READ_BUFFER_BYTES + FILE_IO_BUFFER_BYTES) catch return failure.fail(.{ .details = .{ .@"resource.out_of_memory" = .{ .allocation_role = .reader_buffer, .requested_bytes = READ_BUFFER_BYTES + FILE_IO_BUFFER_BYTES } }, .stage = .allocate, .at = .{ .source = .fasta }, .cause = .{ .zig = error.OutOfMemory } });
+    defer allocator.free(buffers);
+    const read_buf = buffers[0..READ_BUFFER_BYTES];
+    const io_buf = buffers[READ_BUFFER_BYTES..];
+    var reader = if (from_stdin) file.readerStreaming(io, io_buf) else file.reader(io, io_buf);
     const names: ?NameSource = if (before) |stat| .{ .io = io, .file = file, .size = stat.size } else null;
     const compared: ?*Pair = if (options.index != null) &pair else null;
     const scanned = if (rewrite) |*sink|
@@ -153,12 +154,12 @@ pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const
         scan(allocator, &reader.interface, read_buf, names, options.rules, null, compared, report, failure);
     scanned catch |err| {
         diagnostics.retainReaderCause(failure, &reader);
-        writeReportOutput(io, report, options, false, failure) catch {};
+        writeReportOutput(io, report, options, false, read_buf, failure) catch {};
         return err;
     };
     if (options.fix) try staged.publish(io, if (before) |stat| .{ .file = file, .before = stat } else null, failure);
     failure.succeed();
-    try writeReportOutput(io, report, options, options.fix, failure);
+    try writeReportOutput(io, report, options, options.fix, read_buf, failure);
     return .{ .status = report.status(options.strict, options.fix), .fix_written = options.fix };
 }
 
@@ -185,8 +186,6 @@ pub fn repair(allocator: std.mem.Allocator, source: *std.Io.Reader, buffer: []u8
 }
 
 const OUTPUT_BUFFER_BYTES = 64 * 1024;
-// A report is a few KiB; a longer one takes more than one write.
-const REPORT_BUFFER_BYTES = 16 * 1024;
 const FILE_IO_BUFFER_BYTES = 8 * 1024;
 const MAX_LINK_HOPS = 32;
 const UTF8_BOM = "\xEF\xBB\xBF";
@@ -268,9 +267,9 @@ fn customSymbols(custom: []const u8) [32]u8 {
 }
 
 // `repaired`: a `--fix` copy was published, as `Report.status` takes it.
-fn writeReportOutput(io: std.Io, report: *const Report, options: Options, repaired: bool, failure: *diagnostics.Failure) diagnostics.Error!void {
-    var buffer: [REPORT_BUFFER_BYTES]u8 = undefined;
-    var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &buffer);
+// `buffer` is the scan's read buffer, idle once the scan ends.
+fn writeReportOutput(io: std.Io, report: *const Report, options: Options, repaired: bool, buffer: []u8, failure: *diagnostics.Failure) diagnostics.Error!void {
+    var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, buffer);
     errdefer stdout_fw.interface.end = 0;
     failure.outputs.stdout.state = .streaming;
     failure.outputs.stdout.may_be_partial = true;

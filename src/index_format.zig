@@ -1206,14 +1206,14 @@ pub fn loadIndex(
         },
     }
 
-    var zfi_path_buf: [4096]u8 = undefined;
+    // One buffer serves both sidecar paths: neither load keeps its path.
+    var path_buf: [4096]u8 = undefined;
     context.at.source = .zfi;
-    const zfi_path = std.fmt.bufPrint(&zfi_path_buf, "{s}.zfi", .{fasta_path}) catch return context.pathLimit(zfi_path_buf.len);
+    const zfi_path = std.fmt.bufPrint(&path_buf, "{s}.zfi", .{fasta_path}) catch return context.pathLimit(path_buf.len);
     if (try tryLoadZfi(allocator, io, zfi_path, fasta_file, fasta_stat, mode, &context)) |loaded| return loaded;
 
-    var fai_path_buf: [4096]u8 = undefined;
     context.at.source = .fai;
-    const fai_path = std.fmt.bufPrint(&fai_path_buf, "{s}.fai", .{fasta_path}) catch return context.pathLimit(fai_path_buf.len);
+    const fai_path = std.fmt.bufPrint(&path_buf, "{s}.fai", .{fasta_path}) catch return context.pathLimit(path_buf.len);
     return (try tryLoadFai(allocator, io, fai_path, fasta_file, fasta_stat, mode, &context)) orelse context.fail(.{ .@"index.not_found" = .{ .zfi_source = .zfi, .fai_source = .fai } });
 }
 
@@ -1941,10 +1941,11 @@ fn loadFaiStreamed(
         .stats_scan => {},
     }
 
-    var io_buf: [FAI_READER_BUFFER_BYTES]u8 = undefined;
-    var file_reader = fai_file.reader(io, &io_buf);
+    const buffers = backing_allocator.alloc(u8, 2 * FAI_READER_BUFFER_BYTES) catch return context.allocation(.reader_buffer, 2 * FAI_READER_BUFFER_BYTES);
+    defer backing_allocator.free(buffers);
+    var file_reader = fai_file.reader(io, buffers[0..FAI_READER_BUFFER_BYTES]);
+    const long_line_buffer = buffers[FAI_READER_BUFFER_BYTES..][0..FAI_READER_BUFFER_BYTES];
     var saw_record = false;
-    var long_line_buffer: [FAI_READER_BUFFER_BYTES]u8 = undefined;
 
     var row_number: u64 = 0;
     var record_number: u64 = 0;
@@ -1966,7 +1967,7 @@ fn loadFaiStreamed(
             error.ReadFailed => return context.ioFailure(.read, file_reader.err orelse err),
             error.StreamTooLong => long: {
                 context.at.record = try context.nextOrdinal(record_number, .records);
-                const parsed = try takeLongFaiLine(&file_reader, &long_line_buffer, context);
+                const parsed = try takeLongFaiLine(&file_reader, long_line_buffer, context);
                 long_fields = parsed.fields;
                 break :long parsed.name;
             },

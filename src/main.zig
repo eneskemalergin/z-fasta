@@ -38,6 +38,7 @@ const RC_FLAG = "--rc";
 const COMPLEMENT_ONLY_FLAG = "--complement-only";
 const REVERSE_ONLY_FLAG = "--reverse-only";
 const ANNOTATE_RC_FLAG = "--annotate-rc";
+const MAX_POSITIONAL_REGIONS = 1024;
 
 const USAGE =
     \\usage: z-fasta <command> [options]
@@ -348,8 +349,8 @@ fn runGetCmd(cli: *Cli) diagnostics.Error!u8 {
     var complement_only = false;
     var reverse_only = false;
     var annotate_transform = false;
-    var regions: [1024][]const u8 = undefined;
-    var count: usize = 0;
+    var regions: std.ArrayList([]const u8) = .empty;
+    defer regions.deinit(command_allocator);
     while (cli.next()) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) return cli.stdout(USAGE);
         if (std.mem.eql(u8, arg, "--bed")) {
@@ -361,18 +362,17 @@ fn runGetCmd(cli: *Cli) diagnostics.Error!u8 {
         } else if (std.mem.eql(u8, arg, STRAND_AWARE_FLAG) or std.mem.eql(u8, arg, STRAND_AWARE_ALIAS)) honor_strand = true else if (std.mem.eql(u8, arg, "--summary")) summary = true else if (std.mem.eql(u8, arg, RC_FLAG)) rc = true else if (std.mem.eql(u8, arg, COMPLEMENT_ONLY_FLAG)) complement_only = true else if (std.mem.eql(u8, arg, REVERSE_ONLY_FLAG)) reverse_only = true else if (std.mem.eql(u8, arg, ANNOTATE_RC_FLAG)) annotate_transform = true else {
             try cli.positional(arg);
             if (fasta_path == null) fasta_path = arg else {
-                if (count == regions.len) return cli.fail(.{ .@"resource.capacity_limit_exceeded" = .{ .capacity_role = .positional_requests, .limit = regions.len, .required = .{ .exact = count + 1 } } });
-                regions[count] = arg;
-                count += 1;
+                if (regions.items.len == MAX_POSITIONAL_REGIONS) return cli.fail(.{ .@"resource.capacity_limit_exceeded" = .{ .capacity_role = .positional_requests, .limit = MAX_POSITIONAL_REGIONS, .required = .{ .exact = regions.items.len + 1 } } });
+                regions.append(command_allocator, arg) catch return cli.fail(.{ .@"resource.out_of_memory" = .{ .allocation_role = .requests } });
             }
         }
     }
     const path = fasta_path orelse return cli.fail(.{ .@"usage.missing_argument" = .{ .argument = .fasta_path } });
-    const source_count = @as(usize, @intFromBool(count != 0)) + @as(usize, @intFromBool(bed_path != null)) + @as(usize, @intFromBool(names_path != null));
+    const source_count = @as(usize, @intFromBool(regions.items.len != 0)) + @as(usize, @intFromBool(bed_path != null)) + @as(usize, @intFromBool(names_path != null));
     if (source_count == 0) return cli.fail(.{ .@"usage.missing_argument" = .{ .argument = .request_source } });
     if (source_count > 1) {
         var arguments = diagnostics.Arguments.initEmpty();
-        if (count != 0) arguments.insert(.positional);
+        if (regions.items.len != 0) arguments.insert(.positional);
         if (bed_path != null) arguments.insert(.bed);
         if (names_path != null) arguments.insert(.names);
         return cli.fail(.{ .@"usage.conflicting_options" = .{ .arguments = arguments } });
@@ -386,7 +386,7 @@ fn runGetCmd(cli: *Cli) diagnostics.Error!u8 {
         return cli.fail(.{ .@"usage.conflicting_options" = .{ .arguments = arguments } });
     };
     if (transform.annotate_transform and transform.orientation.isIdentity() and !honor_strand) return cli.fail(.{ .@"usage.option_requires" = .{ .option = .annotate_rc, .required = .transform_or_strand } });
-    const source: getter.RequestSource = if (bed_path) |bed| .{ .bed = bed } else if (names_path) |names| .{ .names = names } else .{ .positional = regions[0..count] };
+    const source: getter.RequestSource = if (bed_path) |bed| .{ .bed = bed } else if (names_path) |names| .{ .names = names } else .{ .positional = regions.items };
     const result = try getter.runGet(command_allocator, cli.io, path, .{ .source = source, .honor_strand = honor_strand, .measure_elapsed = summary, .orientation = transform.orientation, .annotate_transform = transform.annotate_transform }, cli.failure);
     if (summary) try writeNotice(cli, .{ .get = result });
     return 0;
