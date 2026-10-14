@@ -410,29 +410,7 @@ def _draw_metric_facet(
             if std_col and std_col in row.columns and pd.notna(row[std_col].iloc[0]):
                 std = max(float(row[std_col].iloc[0]), 0.0)
             xpos = di + (ti - len(tools) / 2 + 0.5) * width
-            bar_kw: dict = {
-                "width": width,
-                "color": color,
-                "alpha": 0.75 if is_ref else 0.88,
-                "zorder": 2,
-            }
-            if is_ref:
-                bar_kw["hatch"] = "///"
-                bar_kw["edgecolor"] = color
-                bar_kw["linewidth"] = 0.6
-            if std > 0:
-                bar_kw.update(
-                    {
-                        "yerr": std,
-                        "capsize": 2,
-                        "error_kw": {
-                            "elinewidth": 0.8,
-                            "capthick": 0.8,
-                            "ecolor": "#333333",
-                        },
-                    }
-                )
-            ax.bar(xpos, val, **bar_kw)
+            ir.draw_tool_bar(ax, xpos, val, std, width=width, color=color, styled=is_ref)
             bar_tops[(ds, tool)] = (xpos, val)
 
     if annotate and peers:

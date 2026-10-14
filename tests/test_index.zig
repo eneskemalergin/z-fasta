@@ -158,11 +158,13 @@ fn scanRecordsForTest(allocator: std.mem.Allocator, data: []const u8) !std.Array
     var reader = std.Io.Reader.fixed(data);
     var read_buf: [4096]u8 = undefined;
     var sink = Sink{ .records = &records, .allocator = allocator };
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.index);
     _ = try main.indexer.scanFastaReader(
         allocator,
         &reader,
         &read_buf,
-        .{},
+        .{ .failure = &failure },
         &sink,
         Sink.emit,
     );
@@ -215,31 +217,9 @@ fn scanFaiReaderForTest(
     read_buf: []u8,
     writer: *std.Io.Writer,
 ) !u32 {
-    const Sink = struct {
-        writer: *std.Io.Writer,
-
-        fn emit(ctx: *@This(), emit_info: main.indexer.FastaRecordEmit) !void {
-            if (!emit_info.uses_uniform_formula) return error.NonUniformFai;
-            const rec = emit_info.record;
-            try ctx.writer.print("{s}\t{d}\t{d}\t{d}\t{d}\n", .{
-                emit_info.name,
-                rec.seq_len,
-                rec.seq_offset,
-                rec.line_bases,
-                rec.line_bytes,
-            });
-        }
-    };
-
-    var sink = Sink{ .writer = writer };
-    return main.indexer.scanFastaReader(
-        allocator,
-        reader,
-        read_buf,
-        .{},
-        &sink,
-        Sink.emit,
-    );
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.index);
+    return main.indexer.scanFaiReader(allocator, reader, read_buf, writer, .{ .failure = &failure });
 }
 
 fn expectReaderMatchesProduction(
@@ -252,11 +232,13 @@ fn expectReaderMatchesProduction(
     defer baseline_index.deinit(allocator);
 
     var zfi_reader = std.Io.Reader.fixed(data);
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.index);
     var fragmented_index = try main.indexer.scanZfiReader(
         allocator,
         &zfi_reader,
         read_buf,
-        .{},
+        .{ .failure = &failure },
     );
     defer fragmented_index.deinit(allocator);
 
@@ -606,11 +588,13 @@ test "[cli] - [index]: large catalogs preserve both formats and duplicate names"
             var reader = file.reader(io, &buffer);
             try reader.seekTo(0);
             var read_buffer: [4096]u8 = undefined;
+            var failure: diagnostics.Failure = undefined;
+            failure.reset(.index);
             var expected_index = try main.indexer.scanZfiReader(
                 allocator,
                 &reader.interface,
                 &read_buffer,
-                .{},
+                .{ .failure = &failure },
             );
             defer expected_index.deinit(allocator);
             const expected_zfi = try zfiBytes(
@@ -1116,21 +1100,16 @@ test "[property] - [fasta scanner]: enforces the header limit across read fragme
     try fasta.insert(allocator, main.indexer.MAX_INDEX_NAME_LEN + 1, 'A');
     {
         var zfi_reader = std.Io.Reader.fixed(fasta.items);
-        try std.testing.expectError(
-            error.HeaderTooLong,
-            main.indexer.scanZfiReader(
-                allocator,
-                &zfi_reader,
-                &read_storage,
-                .{},
-            ),
-        );
+        var failure: diagnostics.Failure = undefined;
+        failure.reset(.index);
+        try std.testing.expectError(error.InvalidIndex, main.indexer.scanZfiReader(allocator, &zfi_reader, &read_storage, .{ .failure = &failure }));
+        try std.testing.expectEqual(diagnostics.Code.@"index.identifier_too_long", failure.primary().?.code());
 
         var fai = std.Io.Writer.Allocating.init(allocator);
         defer fai.deinit();
         var fai_reader = std.Io.Reader.fixed(fasta.items);
         try std.testing.expectError(
-            error.HeaderTooLong,
+            error.InvalidIndex,
             scanFaiReaderForTest(
                 allocator,
                 &fai_reader,
@@ -1200,10 +1179,7 @@ test "[failure] - [fasta scanner]: rejects names above the u16 limit" {
     var output = std.Io.Writer.Allocating.init(allocator);
     defer output.deinit();
 
-    try std.testing.expectError(
-        error.HeaderTooLong,
-        scanFaiData(allocator, fasta.items, &output.writer),
-    );
+    try std.testing.expectError(error.InvalidIndex, scanFaiData(allocator, fasta.items, &output.writer));
 }
 
 test "[edge] - [fasta scanner]: starts the sequence at the first base-bearing line after a blank" {
@@ -1251,7 +1227,7 @@ test "[failure] - [fasta scanner]: rejects trailing space as non-uniform for FAI
     var fai = std.Io.Writer.Allocating.init(allocator);
     defer fai.deinit();
     try std.testing.expectError(
-        error.NonUniformFai,
+        error.InvalidIndex,
         scanFaiData(allocator, data, &fai.writer),
     );
 }
@@ -1265,7 +1241,7 @@ test "[failure] - [fai scanner]: rejects a trailing tab as non-uniform" {
     var stream_fai = std.Io.Writer.Allocating.init(allocator);
     defer stream_fai.deinit();
     try std.testing.expectError(
-        error.NonUniformFai,
+        error.InvalidIndex,
         scanFaiData(allocator, data, &stream_fai.writer),
     );
 }
@@ -1298,7 +1274,7 @@ test "[integration] - [fasta scanner]: preserves whitespace before the next head
         try main.getter.extractRegion(&loaded, "a:9-11", &writer, &failure);
         try std.testing.expectEqualStrings(">a:9-11\nAAA\n", writer.buffered());
         var fai = std.Io.Writer.fixed(&output);
-        try std.testing.expectError(error.NonUniformFai, scanFaiData(allocator, data, &fai));
+        try std.testing.expectError(error.InvalidIndex, scanFaiData(allocator, data, &fai));
         try std.testing.expectEqual(@as(usize, 0), fai.buffered().len);
     }
 }
@@ -1333,7 +1309,7 @@ test "[failure] - [fasta scanner]: rejects mixed interior LF and CRLF as non-uni
     var fai = std.Io.Writer.Allocating.init(allocator);
     defer fai.deinit();
     try std.testing.expectError(
-        error.NonUniformFai,
+        error.InvalidIndex,
         scanFaiData(allocator, data, &fai.writer),
     );
 }
@@ -1416,16 +1392,10 @@ test "[integration] - [fai loader]: resolves an empty sequence name" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try writeFastaArtifact(allocator, "empty-name-fai", data);
+    const paths = try writeFastaAndFai(allocator, "empty-name-fai", data, "\t4\t2\t4\t5\n");
+    const fasta_path = paths.fasta_path;
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
-    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
-    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
-
-    {
-        const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{});
-        defer fai_file.close(io);
-        try std.Io.File.writeStreamingAll(fai_file, io, "\t4\t2\t4\t5\n");
-    }
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fai_path) catch {};
 
     var idx = try support.loadIndex(std.testing.allocator, io, fasta_path, .on_access);
     defer idx.deinit();
@@ -1923,14 +1893,10 @@ test "[property] - [fai loader]: modes select the first duplicate" {
     const allocator = arena.allocator();
 
     const fasta_data = ">dup\nAAAA\n>dup\nCCCCCC\n";
-    const fasta_path = try writeFastaArtifact(allocator, "duplicate-fai", fasta_data);
+    const paths = try writeFastaAndFai(allocator, "duplicate-fai", fasta_data, "dup\t4\t5\t4\t5\ndup\t6\t15\t6\t7\n");
+    const fasta_path = paths.fasta_path;
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
-    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
-    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
-
-    const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
-    defer fai_file.close(io);
-    try std.Io.File.writeStreamingAll(fai_file, io, "dup\t4\t5\t4\t5\ndup\t6\t15\t6\t7\n");
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fai_path) catch {};
 
     var full_map_idx = try support.loadIndex(std.testing.allocator, io, fasta_path, .on_access);
     defer full_map_idx.deinit();
@@ -2046,16 +2012,10 @@ test "[unit] - [fai loader]: full lookup borrows mapped names" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try writeFastaArtifact(allocator, "borrowed-fai-name", ">seq\nACGT\n");
+    const paths = try writeFastaAndFai(allocator, "borrowed-fai-name", ">seq\nACGT\n", "seq\t4\t5\t4\t5\n");
+    const fasta_path = paths.fasta_path;
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
-    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
-    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
-
-    {
-        const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
-        defer fai_file.close(io);
-        try std.Io.File.writeStreamingAll(fai_file, io, "seq\t4\t5\t4\t5\n");
-    }
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fai_path) catch {};
 
     var idx = try support.loadIndex(std.testing.allocator, io, fasta_path, .on_access);
     defer idx.deinit();
@@ -2073,16 +2033,10 @@ test "[integration] - [fai loader]: a requested-names load keeps the FASTA descr
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try writeFastaArtifact(allocator, "fai-source-descriptor", ">seq\nACGT\n");
+    const paths = try writeFastaAndFai(allocator, "fai-source-descriptor", ">seq\nACGT\n", "seq\t4\t5\t4\t5\n");
+    const fasta_path = paths.fasta_path;
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
-    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
-    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
-
-    {
-        const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{});
-        defer fai_file.close(io);
-        try std.Io.File.writeStreamingAll(fai_file, io, "seq\t4\t5\t4\t5\n");
-    }
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fai_path) catch {};
 
     const requested = [_][]const u8{"seq"};
     var idx = try support.loadIndex(std.testing.allocator, io, fasta_path, .{ .requested = &requested });
@@ -2106,16 +2060,10 @@ test "[integration] - [index loader]: keeps FASTA readable without mapping it" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try writeFastaArtifact(allocator, "fai-get-source", ">seq\nACGT\n");
+    const paths = try writeFastaAndFai(allocator, "fai-get-source", ">seq\nACGT\n", "seq\t4\t5\t4\t5\n");
+    const fasta_path = paths.fasta_path;
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
-    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
-    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
-
-    {
-        const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{});
-        defer fai_file.close(io);
-        try std.Io.File.writeStreamingAll(fai_file, io, "seq\t4\t5\t4\t5\n");
-    }
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fai_path) catch {};
 
     var fai_idx = try support.loadIndex(std.testing.allocator, io, fasta_path, .on_access);
     defer fai_idx.deinit();
@@ -2208,14 +2156,10 @@ test "[failure] - [fai loader]: a requested-names load rejects impossible geomet
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try writeFastaArtifact(allocator, "bad-fai-positional", ">seq1\nACGT\n");
+    const paths = try writeFastaAndFai(allocator, "bad-fai-positional", ">seq1\nACGT\n", "seq1\t4\t6\t0\t5\n");
+    const fasta_path = paths.fasta_path;
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
-    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
-    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
-
-    const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
-    defer fai_file.close(io);
-    try std.Io.File.writeStreamingAll(fai_file, io, "seq1\t4\t6\t0\t5\n");
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fai_path) catch {};
 
     try expectLoadFailure(std.testing.allocator, fasta_path, .{ .requested = &.{"seq1"} }, .@"index.invalid_line_geometry");
 }
@@ -2225,14 +2169,10 @@ test "[failure] - [fai loader]: stats mode rejects impossible geometry" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try writeFastaArtifact(allocator, "bad-fai-stats-scan", ">seq1\nACGT\n");
+    const paths = try writeFastaAndFai(allocator, "bad-fai-stats-scan", ">seq1\nACGT\n", "seq1\t4\t6\t4\t3\n");
+    const fasta_path = paths.fasta_path;
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
-    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
-    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
-
-    const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
-    defer fai_file.close(io);
-    try std.Io.File.writeStreamingAll(fai_file, io, "seq1\t4\t6\t4\t3\n");
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fai_path) catch {};
 
     try expectLoadFailure(std.testing.allocator, fasta_path, .stats_scan, .@"index.invalid_line_geometry");
 }
@@ -2242,19 +2182,14 @@ test "[failure] - [fai loader]: rejects names above the u16 limit" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const fasta_path = try writeFastaArtifact(allocator, "bad-fai-long-name", ">seq1\nACGT\n");
-    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
-    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
-    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
-
     var fai_buf: std.ArrayList(u8) = .empty;
     defer fai_buf.deinit(allocator);
     try fai_buf.appendNTimes(allocator, 'N', 65_600);
     try fai_buf.appendSlice(allocator, "\t4\t6\t4\t5\n");
-
-    const fai_file = try std.Io.Dir.cwd().createFile(io, fai_path, .{ .truncate = true });
-    defer fai_file.close(io);
-    try std.Io.File.writeStreamingAll(fai_file, io, fai_buf.items);
+    const paths = try writeFastaAndFai(allocator, "bad-fai-long-name", ">seq1\nACGT\n", fai_buf.items);
+    const fasta_path = paths.fasta_path;
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fai_path) catch {};
 
     for ([_]main.index_format.LoadMode{ .catalog, .{ .requested = &.{"seq1"} }, .stats_scan }) |mode| {
         try expectLoadFailure(std.testing.allocator, fasta_path, mode, .@"index.identifier_too_long");
@@ -2380,7 +2315,7 @@ test "[failure] - [fai scanner]: rejects non-uniform sequence layout without out
     var out = std.Io.Writer.Allocating.init(allocator);
     defer out.deinit();
     try std.testing.expectError(
-        error.NonUniformFai,
+        error.InvalidIndex,
         scanFaiData(allocator, data, &out.writer),
     );
     try std.testing.expectEqual(@as(usize, 0), out.written().len);
@@ -2773,7 +2708,7 @@ test "[edge] - [fasta scanner]: rejects an interior blank after a uniform stride
     var fai = std.Io.Writer.Allocating.init(allocator);
     defer fai.deinit();
     try std.testing.expectError(
-        error.NonUniformFai,
+        error.InvalidIndex,
         scanFaiData(allocator, data, &fai.writer),
     );
 }
@@ -3035,7 +2970,7 @@ test "[integration] - [fasta scanner]: enforces the header length boundary on th
     try std.testing.expectEqual(@as(u8, '>'), reject_data[0]);
     try std.testing.expectEqual(null, std.mem.findScalar(u8, reject_data, '\r'));
     try std.testing.expectEqual(main.indexer.MAX_INDEX_NAME_LEN + 1, std.mem.findScalar(u8, reject_data, '\n').? - 1);
-    try std.testing.expectError(error.HeaderTooLong, main.indexer.scanZfiData(allocator, reject_data));
+    try std.testing.expectError(error.InvalidIndex, main.indexer.scanZfiData(allocator, reject_data));
 }
 
 test "[integration] - [fasta scanner]: preserves invalid UTF-8 header bytes" {
@@ -4002,7 +3937,7 @@ test "[regression] - [fasta scanner]: empty buffers reject before reading or all
     try std.testing.expectEqual(diagnostics.Expected.nonempty_buffer, failure.primary().?.details.@"usage.invalid_option_value".expected);
     try std.testing.expectEqual(@as(usize, 0), reader.seek);
     try std.testing.expectEqual(@as(usize, 0), failing.allocations);
-    try std.testing.expectError(error.InvalidArgument, main.indexer.scanZfiReader(failing.allocator(), &reader, &buffer, .{}));
+    try std.testing.expectError(error.InvalidArgument, main.indexer.scanZfiReader(failing.allocator(), &reader, &buffer, .{ .failure = &failure }));
 }
 
 test "[edge] - [index diagnostics]: rejects a FASTA modified before 1970" {

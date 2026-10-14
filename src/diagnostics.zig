@@ -796,6 +796,46 @@ pub fn retainReaderCause(failure: *Failure, reader: *const std.Io.File.Reader) v
 }
 
 /// Flushes `writer` and records the outcome in `state`; returns the error to report when the flush fails.
+/// Labels a temporary file in role `role` as `directory/name`, unless the role has a label.
+pub fn registerTemporaryPath(failure: *Failure, role: SourceId, directory: []const u8, name: []const u8) void {
+    if (failure.sources.get(role) != null) return;
+    var prefix: [64]u8 = undefined;
+    var retained: usize = 0;
+    for ([_][]const u8{ directory, "/", name }) |part| {
+        const n = @min(part.len, prefix.len - retained);
+        @memcpy(prefix[retained..][0..n], part[0..n]);
+        retained += n;
+    }
+    failure.sources.set(role, .{ .label = .{ .retained = failure.retainPrefix(prefix[0..retained], .{ .exact = directory.len + 1 + name.len }, 64) }, .kind = .path });
+}
+
+/// Closes and deletes a staged file that was not published. A failed delete is recorded as
+/// `io.cleanup_failed`, labelled with the staged name in the directory of `owner`'s path.
+pub fn discardStaged(file: *std.Io.File.Atomic, io: std.Io, failure: ?*Failure, owner: SourceId) void {
+    if (file.file_open) {
+        file.file.close(io);
+        file.file_open = false;
+    }
+    if (file.file_exists) {
+        var removed = true;
+        const basename = std.fmt.hex(file.file_basename_hex);
+        file.dir.deleteFile(io, &basename) catch |err| {
+            removed = err == error.FileNotFound;
+            if (!removed) if (failure) |destination| {
+                registerTemporaryPath(destination, .staged_output, std.fs.path.dirname(destination.sourceLabel(owner) orelse "") orelse ".", &basename);
+                switch (destination.fail(.{ .details = .{ .@"io.cleanup_failed" = .{ .resource_role = .staged_output } }, .stage = .cleanup, .at = .{ .source = .staged_output }, .cause = .{ .zig = err } })) {
+                    else => {},
+                }
+            };
+        };
+        if (failure) |destination| {
+            if (destination.outputs.file.state == .staged) destination.outputs.file.state = if (removed) .aborted else .unknown;
+        }
+        file.file_exists = false;
+    }
+    file.deinit(io);
+}
+
 pub fn flushOutput(writer: *std.Io.File.Writer, state: ?*OutputState) ?anyerror {
     writer.flush() catch |err| {
         if (state) |output| output.final_flush = .failed;

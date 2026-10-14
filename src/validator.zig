@@ -312,7 +312,7 @@ const Staged = struct {
 
     fn cleanup(self: *Staged, io: std.Io, failure: *diagnostics.Failure) void {
         self.writer.interface.end = 0;
-        cleanupFixed(&self.atomic, io, failure);
+        diagnostics.discardStaged(&self.atomic, io, failure, .output);
         self.allocator.free(self.buffer);
     }
 };
@@ -502,15 +502,14 @@ const Line = struct {
 const FastSet = enum { none, plain_nucleotides, plain_dna, plain_rna, protein, any };
 
 const ScanDiag = struct {
-    failure: ?*diagnostics.Failure = null,
+    failure: *diagnostics.Failure,
     at: diagnostics.Reference = .{ .source = .fasta },
     budget: ?*const NameBudget = null,
     format: diagnostics.Format = .zfi,
 
-    pub fn fail(self: @This(), details: diagnostics.Details, stage: diagnostics.Stage, source: diagnostics.SourceId, cause: ?anyerror, legacy: anyerror) anyerror {
+    pub fn fail(self: @This(), details: diagnostics.Details, stage: diagnostics.Stage, source: diagnostics.SourceId, cause: ?anyerror) diagnostics.Error {
         @branchHint(.cold);
-        const failure = self.failure orelse return legacy;
-        return failure.fail(.{ .details = details, .stage = stage, .at = if (self.at.source == source) self.at else .{ .source = source }, .cause = if (cause) |err| .{ .zig = err } else null });
+        return self.failure.fail(.{ .details = details, .stage = stage, .at = if (self.at.source == source) self.at else .{ .source = source }, .cause = if (cause) |err| .{ .zig = err } else null });
     }
 
     pub fn oom(self: @This(), role: diagnostics.AllocationRole, bytes: ?u64) error{OutOfMemory} {
@@ -518,32 +517,24 @@ const ScanDiag = struct {
         if (self.budget) |budget| {
             if (budget.exhausted) return error.OutOfMemory;
         }
-        if (self.failure) |failure| switch (failure.fail(.{ .details = .{ .@"resource.out_of_memory" = .{ .allocation_role = role, .requested_bytes = bytes } }, .stage = .allocate, .at = self.at, .cause = .{ .zig = error.OutOfMemory } })) {
+        switch (self.failure.fail(.{ .details = .{ .@"resource.out_of_memory" = .{ .allocation_role = role, .requested_bytes = bytes } }, .stage = .allocate, .at = self.at, .cause = .{ .zig = error.OutOfMemory } })) {
             else => {},
-        };
+        }
         return error.OutOfMemory;
     }
 
-    pub fn capacity(self: @This(), role: diagnostics.CapacityRole, limit: u128, required: u128, legacy: anyerror) anyerror {
+    pub fn capacity(self: @This(), role: diagnostics.CapacityRole, limit: u128, required: u128) diagnostics.Error {
         @branchHint(.cold);
-        return self.fail(.{ .@"resource.capacity_limit_exceeded" = .{ .capacity_role = role, .limit = limit, .required = .{ .exact = required } } }, .allocate, .fasta, null, legacy);
+        return self.fail(.{ .@"resource.capacity_limit_exceeded" = .{ .capacity_role = role, .limit = limit, .required = .{ .exact = required } } }, .allocate, .fasta, null);
     }
 
-    pub fn consistency(self: @This(), check: diagnostics.Check, legacy: anyerror) anyerror {
+    pub fn consistency(self: @This(), check: diagnostics.Check) diagnostics.Error {
         @branchHint(.cold);
-        return self.fail(.{ .@"internal.consistency_failed" = .{ .component = .validator, .check = check } }, .scan, .fasta, null, legacy);
+        return self.fail(.{ .@"internal.consistency_failed" = .{ .component = .validator, .check = check } }, .scan, .fasta, null);
     }
 
-    pub fn recordLimit(self: @This(), count: u64) anyerror {
-        return self.capacity(.records, std.math.maxInt(u32), count, error.OutOfMemory);
-    }
-
-    pub fn lineLimit(self: @This(), field: diagnostics.IndexField, observed: u64, width_role: diagnostics.LineWidthRole) anyerror {
-        return self.fail(.{ .@"index.sequence_line_too_long" = .{ .field = field, .observed = .{ .exact = observed }, .limit = std.math.maxInt(u32), .width_role = width_role, .format = self.format } }, .scan, .fasta, null, error.SequenceLineTooLong);
-    }
-
-    pub fn identifierTooLong(self: @This(), observed: u128, limit: usize) anyerror {
-        return self.fail(.{ .@"index.identifier_too_long" = .{ .observed_bytes = .{ .at_least = observed }, .limit_bytes = limit, .format = self.format } }, .scan, .fasta, null, error.HeaderTooLong);
+    pub fn recordLimit(self: @This(), count: u64) diagnostics.Error {
+        return self.capacity(.records, std.math.maxInt(u32), count);
     }
 };
 
@@ -813,12 +804,8 @@ const Scan = struct {
     // The name set's allocator may point into `self`, so this runs once `self` has its final address.
     fn startNames(self: *Scan) void {
         const names_allocator = if (self.budget) |*budget| budget.allocator() else self.allocator;
-        self.names = if (self.file) |source| .{ .source = SourceNames.init(names_allocator, source.io, source.file, source.size) } else .{ .copied = PackedNames.init(names_allocator) };
         const diag = ScanDiag{ .failure = self.failure, .budget = if (self.budget) |*budget| budget else null };
-        switch (self.names) {
-            .stopped => unreachable,
-            inline else => |*set| set.diag = diag,
-        }
+        self.names = if (self.file) |source| .{ .source = SourceNames.init(names_allocator, diag, source.io, source.file, source.size) } else .{ .copied = PackedNames.init(names_allocator, diag) };
     }
 
     fn deinit(self: *Scan) void {
@@ -1475,28 +1462,6 @@ fn matchesRefseq(header: []const u8) bool {
     }
     return false;
 }
-fn cleanupFixed(file: *std.Io.File.Atomic, io: std.Io, failure: *diagnostics.Failure) void {
-    if (file.file_open) {
-        file.file.close(io);
-        file.file_open = false;
-    }
-    if (file.file_exists) {
-        var removed = true;
-        const basename = std.fmt.hex(file.file_basename_hex);
-        file.dir.deleteFile(io, &basename) catch |err| {
-            removed = err == error.FileNotFound;
-            if (!removed) {
-                failure.sources.set(.staged_output, .{ .label = .{ .retained = failure.retain(&basename, 32) }, .kind = .path });
-                switch (failure.fail(.{ .details = .{ .@"io.cleanup_failed" = .{ .resource_role = .staged_output } }, .stage = .cleanup, .at = .{ .source = .staged_output }, .cause = .{ .zig = err } })) {
-                    else => {},
-                }
-            }
-        };
-        if (failure.outputs.file.state == .staged) failure.outputs.file.state = if (removed) .aborted else .unknown;
-        file.file_exists = false;
-    }
-    file.deinit(io);
-}
 fn unknownOutputIdentity(failure: *diagnostics.Failure, source: diagnostics.SourceId, cause: anyerror) diagnostics.Error {
     return failure.fail(.{
         .details = .{ .@"repair.output_identity_unknown" = .{ .input = .fasta, .output = .output } },
@@ -1730,8 +1695,7 @@ fn checkPackedNameAllocations(allocator: std.mem.Allocator) !void {
         }
     }
 
-    var names = PackedNames.init(allocator);
-    names.diag = diag;
+    var names = PackedNames.init(allocator, diag);
     defer names.deinit();
     var name = [_]u8{'A'} ** MAX_INDEX_NAME_BYTES;
     for (0..3) |i| {
@@ -1760,8 +1724,7 @@ fn checkSourceNameAllocations(allocator: std.mem.Allocator, data: []const u8) !v
         }
     }
 
-    var names = SourceNames.init(allocator, std.testing.io, undefined, data.len);
-    names.diag = diag;
+    var names = SourceNames.init(allocator, diag, std.testing.io, undefined, data.len);
     defer names.deinit();
     names.setChunk(data, 0);
     for ([_]bool{ false, true }) |duplicate| {
@@ -1777,7 +1740,9 @@ fn checkSourceNameAllocations(allocator: std.mem.Allocator, data: []const u8) !v
 test "[edge] - [name catalog]: full source tables retain duplicate lookups" {
     inline for (.{ u32, u64 }) |Offset| {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        var source = SourceNames.init(failing.allocator(), std.testing.io, undefined, if (Offset == u32) 0 else std.math.maxInt(u32));
+        var failure: diagnostics.Failure = undefined;
+        failure.reset(.validate);
+        var source = SourceNames.init(failing.allocator(), .{ .failure = &failure }, std.testing.io, undefined, if (Offset == u32) 0 else std.math.maxInt(u32));
         defer source.deinit();
         source.cache_full = true;
         source.setChunk("alpha\nbeta\n", 0);
@@ -1786,7 +1751,8 @@ test "[edge] - [name catalog]: full source tables retain duplicate lookups" {
         set.len = std.math.maxInt(u32);
         failing.fail_index = failing.alloc_index;
         try std.testing.expect(try set.observeWithFingerprint(&source, "alpha", 0, 0));
-        try std.testing.expectError(error.OutOfMemory, set.observeWithFingerprint(&source, "beta", 6, 0));
+        try std.testing.expectError(error.CapacityExceeded, set.observeWithFingerprint(&source, "beta", 6, 0));
+        try std.testing.expectEqual(diagnostics.CapacityRole.records, failure.primary().?.details.@"resource.capacity_limit_exceeded".capacity_role);
         try std.testing.expect(!failing.has_induced_failure);
         try std.testing.expectEqual(std.math.maxInt(u32), set.len);
     }
@@ -1801,7 +1767,9 @@ test "[property] - [name catalog]: complete names resolve fingerprint collisions
     const long = "a-much-longer-different-name";
     const data = long ++ "\nalpha\nalphabet\nbeta\nalpha\n";
     try file.writePositionalAll(io, data, 0);
-    var source = SourceNames.init(std.testing.allocator, io, file, data.len);
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.validate);
+    var source = SourceNames.init(std.testing.allocator, .{ .failure = &failure }, io, file, data.len);
     defer source.deinit();
     source.cache_full = true;
     const set = &source.tables.narrow;
@@ -1820,7 +1788,9 @@ test "[unit] - [name catalog]: exact comparisons use the current input chunk" {
     const file = try temporary.dir.createFile(io, "names.fa", .{ .read = true });
     defer file.close(io);
     const data = "alpha\nalphabet\nbeta\nalpha\n";
-    var source = SourceNames.init(std.testing.allocator, io, file, data.len);
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.validate);
+    var source = SourceNames.init(std.testing.allocator, .{ .failure = &failure }, io, file, data.len);
     defer source.deinit();
     source.cache_full = true;
     source.setChunk(data, 0);
@@ -1838,7 +1808,9 @@ test "[edge] - [name catalog]: retains offsets above four GiB" {
     defer file.close(io);
     const offset: u64 = @as(u64, std.math.maxInt(u32)) + 64;
     const data = "alpha\nalphabet\nbeta\nalpha\n";
-    var source = SourceNames.init(std.testing.allocator, io, file, offset + data.len);
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.validate);
+    var source = SourceNames.init(std.testing.allocator, .{ .failure = &failure }, io, file, offset + data.len);
     defer source.deinit();
     source.cache_full = true;
     source.setChunk(data, offset);
@@ -1858,7 +1830,9 @@ test "[property] - [name catalog]: cached names resolve fingerprint collisions" 
     defer file.close(io);
     const data = "alpha\nalphabet\nbeta\nalpha\n";
     try file.writePositionalAll(io, data, 0);
-    var source = SourceNames.init(std.testing.allocator, io, file, data.len);
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.validate);
+    var source = SourceNames.init(std.testing.allocator, .{ .failure = &failure }, io, file, data.len);
     defer source.deinit();
     const set = &source.tables.narrow;
     try std.testing.expect(!try set.observeWithFingerprint(&source, "alpha", 0, 0));
@@ -1875,12 +1849,14 @@ test "[failure] - [name catalog]: read errors leave the insertion unfinished" {
     defer file.close(io);
     const data = "alpha\nbeta\n";
     try file.writePositionalAll(io, data, 0);
-    var source = SourceNames.init(std.testing.allocator, io, file, data.len);
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.validate);
+    var source = SourceNames.init(std.testing.allocator, .{ .failure = &failure }, io, file, data.len);
     defer source.deinit();
     source.cache_full = true;
     const set = &source.tables.narrow;
     try std.testing.expect(!try set.observeWithFingerprint(&source, "alpha", 0, 0));
-    try std.testing.expectError(error.SourceReadFailed, set.observeWithFingerprint(&source, "beta", 6, 0));
+    try std.testing.expectError(error.Io, set.observeWithFingerprint(&source, "beta", 6, 0));
     try std.testing.expectEqual(@as(u32, 1), set.count());
 }
 
@@ -1911,7 +1887,9 @@ test "[edge] - [name catalog]: maximum names cross copied and retained cache blo
         try file.writePositionalAll(io, &name, i * stride);
         try file.writePositionalAll(io, "\n", i * stride + name.len);
     }
-    var names = SourceNames.init(std.testing.allocator, io, file, 6 * stride);
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.validate);
+    var names = SourceNames.init(std.testing.allocator, .{ .failure = &failure }, io, file, 6 * stride);
     defer names.deinit();
     for ([_]bool{ false, true, true }) |duplicate| {
         for (0..6) |i| {
@@ -1930,43 +1908,25 @@ test "[failure] - [name catalog]: short reads distinguish collisions from trunca
     const file = try temporary.dir.createFile(io, "names.fa", .{ .read = true });
     defer file.close(io);
     try file.writePositionalAll(io, "alpha\n", 0);
-    var names = SourceNames.init(std.testing.allocator, io, file, 6);
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.validate);
+    var names = SourceNames.init(std.testing.allocator, .{ .failure = &failure }, io, file, 6);
     defer names.deinit();
     names.cache_full = true;
     const flag = SourceNames.Tables(u32).CACHE_FLAG;
     try std.testing.expect(!names.sameName("alphabet", 0, flag));
-    try std.testing.expect(!names.read_failed);
+    try std.testing.expect(names.read_failure == null);
     try file.setLength(io, 3);
     try std.testing.expect(!names.sameName("alpha", 0, flag));
-    try std.testing.expect(names.read_failed);
-}
-
-test "[failure] - [name catalog]: source offsets cannot overlap cache flags" {
-    var narrow = SourceNames.init(std.testing.allocator, std.testing.io, undefined, 0);
-    defer narrow.deinit();
-    try std.testing.expectError(error.SourceChanged, narrow.observe("name", SourceNames.Tables(u32).CACHE_FLAG));
-    try std.testing.expectEqual(@as(u32, 0), narrow.tables.narrow.count());
-    var wide = SourceNames.init(std.testing.allocator, std.testing.io, undefined, std.math.maxInt(u32));
-    defer wide.deinit();
-    try std.testing.expectError(error.SourceChanged, wide.observe("name", SourceNames.Tables(u64).CACHE_FLAG));
-    try std.testing.expectEqual(@as(u32, 0), wide.tables.wide.count());
-}
-
-test "[failure] - [name catalog]: oversized offsets roll back the insertion" {
-    if (comptime @bitSizeOf(usize) <= 32) return error.SkipZigTest;
-    var names = PackedNames.init(std.testing.allocator);
-    defer names.deinit();
-    names.position = @as(usize, std.math.maxInt(u32)) + 1;
-    try std.testing.expectError(error.OutOfMemory, names.observe("name"));
-    try std.testing.expectEqual(@as(u32, 0), names.map.count());
+    try std.testing.expectEqual(@as(?diagnostics.Error, error.Io), names.read_failure);
+    try std.testing.expectEqual(diagnostics.Code.@"io.unexpected_eof", failure.primary().?.code());
 }
 
 test "[failure] - [name catalog]: cache representation limits are capacity failures" {
     var failure: diagnostics.Failure = undefined;
     inline for (.{ u32, u64 }) |Offset| {
         failure.reset(.validate);
-        var names = SourceNames.init(std.testing.allocator, std.testing.io, undefined, if (Offset == u32) 0 else std.math.maxInt(u32));
-        names.diag = .{ .failure = &failure };
+        var names = SourceNames.init(std.testing.allocator, .{ .failure = &failure }, std.testing.io, undefined, if (Offset == u32) 0 else std.math.maxInt(u32));
         defer names.deinit();
         const limit = SourceNames.Tables(Offset).CACHE_FLAG;
         try std.testing.expectError(error.CapacityExceeded, names.observe("name", limit));
@@ -1974,11 +1934,11 @@ test "[failure] - [name catalog]: cache representation limits are capacity failu
         try std.testing.expectEqual(diagnostics.CapacityRole.name_cache_offset, details.capacity_role);
         try std.testing.expectEqual(@as(u128, limit - 1), details.limit);
         try std.testing.expectEqual(@as(u128, limit), details.required.exact);
+        try std.testing.expectEqual(@as(u32, 0), if (Offset == u32) names.tables.narrow.count() else names.tables.wide.count());
     }
     if (comptime @bitSizeOf(usize) > 32) {
         failure.reset(.validate);
-        var names = PackedNames.init(std.testing.allocator);
-        names.diag = .{ .failure = &failure };
+        var names = PackedNames.init(std.testing.allocator, .{ .failure = &failure });
         defer names.deinit();
         names.position = @as(usize, std.math.maxInt(u32)) + 1;
         try std.testing.expectError(error.CapacityExceeded, names.observe("name"));

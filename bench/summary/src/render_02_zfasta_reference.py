@@ -1,25 +1,15 @@
 #!/usr/bin/env python3
 
-import os
-from pathlib import Path
+from representation_common import (
+    BASELINE_TOOL, DATASETS, MARKERS, TASKS, TOOLS,
+    Theme, Y_LIMITS, clean_axis, draw_footer, draw_header, draw_row_labels,
+    main, plot_color, row_geometry, tool_legend,
+)
 
-MPL_CONFIG_DIR = Path(__file__).resolve().parents[3] / "tools" / "build" / "matplotlib"
-MPL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-os.environ.setdefault("MPLCONFIGDIR", str(MPL_CONFIG_DIR))
-
-import matplotlib
-
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FixedLocator, FuncFormatter
 import numpy as np
 
-from representation_common import (
-    BASELINE_TOOL, DATASETS, DATASET_DETAILS, DATASET_IDENTITIES, MARKERS, ROOT,
-    TASKS, TOOLS, Theme,
-    Y_LIMITS, clean_axis, configure, extract, plot_color, provenance,
-    row_geometry, save, tool_legend, tool_versions,
-)
 
 
 def render(frame, theme: Theme, meta, versions):
@@ -33,23 +23,7 @@ def render(frame, theme: Theme, meta, versions):
     rss = fig.add_subplot(grid[0, 2], sharey=wall)
     y_map, boundaries = row_geometry()
 
-    labels.set_xlim(0, 1)
-    labels.set_ylim(*Y_LIMITS)
-    labels.axis("off")
-    for task in TASKS:
-        center = np.mean([y_map[(task, dataset)] for dataset in DATASETS])
-        labels.text(
-            0.08, center, task, rotation=90, ha="center", va="center",
-            fontsize=11.5, fontweight="bold", color=theme.section,
-        )
-        labels.plot(
-            [0.19, 0.19], [center - 1.15, center + 1.15],
-            color=theme.grid, linewidth=0.8,
-        )
-        for dataset in DATASETS:
-            row_y = y_map[(task, dataset)]
-            labels.text(0.97, row_y, dataset, ha="right", va="center", fontsize=9.2)
-
+    draw_row_labels(labels, y_map, theme)
     ranges = {"wall": (0.8, 128), "rss": (0.06, 512)}
     ticks = {
         "wall": [1, 2, 4, 8, 16, 32, 64, 128],
@@ -93,71 +67,15 @@ def render(frame, theme: Theme, meta, versions):
     wall_box = wall.get_position()
     rss_box = rss.get_position()
     wall_one_x = fig.transFigure.inverted().transform(wall.transData.transform((1, 0)))[0]
-    fig.text(
-        0.145, 0.956, "Speed and memory across real FASTA shapes",
-        ha="left", va="top", fontsize=22, fontweight="bold", color=theme.ink,
-    )
-    fig.text(
-        0.145, 0.902,
-        "FASTA index construction | 1 kbp positional extraction | complete statistics output",
-        ha="left", va="top", fontsize=10.2, color=theme.muted,
-    )
-    fig.text(
-        0.985, 0.952, f"z-fasta v{meta.zfasta_version}",
-        ha="right", va="top", fontsize=10.5, fontweight="bold", color=theme.ink,
-    )
-    fig.text(
-        0.985, 0.925, "github.com/eneskemalergin/z-fasta",
-        ha="right", va="top", fontsize=7.2, fontweight="bold", color=theme.section,
-    )
-    fig.text(
-        0.985, 0.894, "REAL FASTA BENCHMARK SUMMARY",
-        ha="right", va="top", fontsize=7.4, fontweight="bold", color=theme.muted,
-    )
-    fig.add_artist(plt.Line2D(
-        [0.145, 0.985], [0.852, 0.852], transform=fig.transFigure,
-        color=theme.grid, linewidth=0.8,
-    ))
+    draw_header(fig, theme, meta)
     fig.text(wall_one_x, 0.805, "WALL TIME", ha="left", va="center", fontsize=13, fontweight="bold", color=theme.section)
     fig.text(wall_one_x, 0.768, "Right of 1x means z-fasta is faster", ha="left", va="center", fontsize=8.0, color=theme.muted)
     fig.text(rss_box.x1, 0.805, "PEAK RSS", ha="right", va="center", fontsize=13, fontweight="bold", color=theme.section)
     fig.text(rss_box.x1, 0.768, "Right of 1x means z-fasta uses less memory", ha="right", va="center", fontsize=8.0, color=theme.muted)
     tool_legend(fig, theme, x=0.565, y=0.803, loc="center", ncol=5, fontsize=6.7, versions=versions)
-    footer_top = 0.135
-    for x in (0.415, 0.705):
-        fig.add_artist(plt.Line2D(
-            [x, x], [0.027, footer_top], transform=fig.transFigure,
-            color=theme.grid, linewidth=0.8,
-        ))
-    fig.text(0.025, 0.116, "HUMAN DATASETS", ha="left", va="center", fontsize=7.0, fontweight="bold", color=theme.section)
-    for y, dataset in zip((0.087, 0.060, 0.033), DATASETS, strict=True):
-        details = DATASET_DETAILS[dataset].replace("  ·  ", " | ")
-        fig.text(
-            0.025, y, f"{dataset}  {DATASET_IDENTITIES[dataset]} | {details}",
-            ha="left", va="center", fontsize=6.6, color=theme.ink,
-        )
-    fig.text(0.560, 0.116, "RATIO REFERENCE", ha="center", va="center", fontsize=7.0, fontweight="bold", color=theme.section)
-    fig.text(0.560, 0.087, "INDEX  z-fasta .fai = 1x", ha="center", va="center", fontsize=6.8, fontweight="bold", color=theme.ink)
-    fig.text(0.560, 0.060, "GET + STATS  z-fasta .zfi = 1x", ha="center", va="center", fontsize=6.8, fontweight="bold", color=theme.ink)
-    fig.text(0.560, 0.033, "Open + dashed marks = reference or partial work", ha="center", va="center", fontsize=6.6, color=theme.muted)
-    fig.text(0.975, 0.116, "MEASUREMENT", ha="right", va="center", fontsize=7.0, fontweight="bold", color=theme.section)
-    fig.text(0.975, 0.087, f"zebrac {meta.zebrac_version} | {meta.samples} samples | {meta.warmups} warmups", ha="right", va="center", fontsize=6.8, fontweight="bold", color=theme.ink)
-    fig.text(0.975, 0.060, f"{meta.duration_ms} ms budget | Zig {meta.zig_version}", ha="right", va="center", fontsize=6.8, color=theme.ink)
-    fig.text(0.975, 0.033, f"Warm-cache benchmark | {meta.benchmark_date}", ha="right", va="center", fontsize=6.6, color=theme.muted)
+    draw_footer(fig, theme, meta, ("RATIO REFERENCE", "INDEX  z-fasta .fai = 1x", "GET + STATS  z-fasta .zfi = 1x", "Open + dashed marks = reference or partial work"))
     return fig
 
 
 if __name__ == "__main__":
-    data = extract()
-    run_meta = provenance()
-    peer_versions = tool_versions(run_meta.zfasta_version)
-    icon = ROOT / "assets/icon.svg"
-    for theme_name in ("light", "dark"):
-        active_theme = configure(theme_name)
-        save(
-            render(data, active_theme, run_meta, peer_versions),
-            f"02-zfasta-reference-{theme_name}",
-            embedded_svg=icon,
-            embedded_box=(51.84, 16.5, 88, 67.1),
-            render_png=False,
-        )
+    main(render, "02-zfasta-reference")

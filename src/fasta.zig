@@ -463,7 +463,15 @@ pub fn RecordScannerWith(comptime Diag: type) type {
     return struct {
         const Self = @This();
 
-        diag: Diag = .{},
+        fn lineLimit(diag: Diag, field: diagnostics.IndexField, observed: u64, width_role: diagnostics.LineWidthRole) diagnostics.Error {
+            return diag.fail(.{ .@"index.sequence_line_too_long" = .{ .field = field, .observed = .{ .exact = observed }, .limit = std.math.maxInt(u32), .width_role = width_role, .format = diag.format } }, .scan, .fasta, null);
+        }
+
+        fn identifierTooLong(diag: Diag, observed: u128, limit: usize) diagnostics.Error {
+            return diag.fail(.{ .@"index.identifier_too_long" = .{ .observed_bytes = .{ .at_least = observed }, .limit_bytes = limit, .format = diag.format } }, .scan, .fasta, null);
+        }
+
+        diag: Diag,
         allocator: std.mem.Allocator,
         collect_side_tables: bool = false,
         active: bool = false,
@@ -518,7 +526,7 @@ pub fn RecordScannerWith(comptime Diag: type) type {
                 self.deferred_side_line = null;
                 return;
             }
-            const first = self.deferred_side_line orelse return self.recordDiagnostics().consistency(.missing_side_table, error.MissingSideTable);
+            const first = self.deferred_side_line orelse return self.recordDiagnostics().consistency(.missing_side_table);
             var i: u64 = 0;
             while (i < lines_to_materialize) : (i += 1) {
                 const off = first.line_file_offset + i * @as(u64, first.actual_bytes);
@@ -572,9 +580,9 @@ pub fn RecordScannerWith(comptime Diag: type) type {
             actual_bytes: u32,
             line_file_offset: u64,
         ) !void {
-            const short = self.deferred_short_tail orelse return self.recordDiagnostics().consistency(.missing_side_table, error.MissingSideTable);
+            const short = self.deferred_short_tail orelse return self.recordDiagnostics().consistency(.missing_side_table);
             self.deferred_short_tail = null;
-            if (metrics_line_count < 2) return self.recordDiagnostics().consistency(.missing_side_table, error.MissingSideTable);
+            if (metrics_line_count < 2) return self.recordDiagnostics().consistency(.missing_side_table);
             try self.activateSideTable(metrics_line_count - 2);
             try self.appendSideTableLine(short.bases, short.actual_bytes, short.line_file_offset);
             try self.appendSideTableLine(bases, actual_bytes, line_file_offset);
@@ -714,9 +722,9 @@ pub fn RecordScannerWith(comptime Diag: type) type {
             var diag = self.recordDiagnostics();
             diag.at.location.offset = self.pending_line_file_offset;
             const next_bases = std.math.add(u32, self.pending_line_bases, fragment_bases) catch
-                return diag.lineLimit(.line_bases, @as(u64, self.pending_line_bases) + fragment_bases, .index_geometry);
+                return lineLimit(diag, .line_bases, @as(u64, self.pending_line_bases) + fragment_bases, .index_geometry);
             const next_bytes = std.math.add(u32, self.pending_line_bytes, @intCast(fragment.len)) catch
-                return diag.lineLimit(.line_bytes, @as(u64, self.pending_line_bytes) + fragment.len, .index_geometry);
+                return lineLimit(diag, .line_bytes, @as(u64, self.pending_line_bytes) + fragment.len, .index_geometry);
             self.pending_line_bases = next_bases;
             self.pending_line_bytes = next_bytes;
             self.pending_pre_lf_bytes = next_bytes;
@@ -730,7 +738,7 @@ pub fn RecordScannerWith(comptime Diag: type) type {
             var diag = self.recordDiagnostics();
             diag.at.location.offset = self.pending_line_file_offset;
             if (!has_lf and self.pending_line_bytes == std.math.maxInt(u32)) {
-                return diag.lineLimit(.line_bytes, @as(u64, self.pending_line_bytes) + 1, .synthetic_separator);
+                return lineLimit(diag, .line_bytes, @as(u64, self.pending_line_bytes) + 1, .synthetic_separator);
             }
             if (self.pending_line_bases > 0) self.noteSeqOffset(self.pending_line_file_offset);
             var content_len = if (has_lf) self.pending_pre_lf_bytes else self.pending_line_bytes;
@@ -769,7 +777,7 @@ pub fn RecordScannerWith(comptime Diag: type) type {
             } else if (self.collect_side_tables) {
                 if (self.deferred_short_tail) |short| {
                     if (!self.side_table_active) {
-                        if (metrics.line_count < 1) return self.recordDiagnostics().consistency(.missing_side_table, error.MissingSideTable);
+                        if (metrics.line_count < 1) return self.recordDiagnostics().consistency(.missing_side_table);
                         try self.activateSideTable(metrics.line_count - 1);
                         try self.appendSideTableLine(short.bases, short.actual_bytes, short.line_file_offset);
                     }
@@ -778,7 +786,7 @@ pub fn RecordScannerWith(comptime Diag: type) type {
                     try self.activateSideTable(metrics.line_count);
                 }
                 if (!self.side_table_active) {
-                    return self.recordDiagnostics().consistency(.missing_side_table, error.MissingSideTable);
+                    return self.recordDiagnostics().consistency(.missing_side_table);
                 }
                 @memcpy(self.side_table.items[0..@sizeOf(u64)], std.mem.asBytes(&metrics.line_count));
                 side_table_slice = self.side_table.items;
@@ -819,7 +827,7 @@ pub fn RecordScannerWith(comptime Diag: type) type {
                 state.pending_line_bytes = std.math.add(u32, state.pending_line_bytes, 1) catch {
                     var diag = state.diag;
                     diag.at.location.offset = state.pending_line_file_offset;
-                    return diag.lineLimit(.line_bytes, @as(u64, state.pending_line_bytes) + 1, .index_geometry);
+                    return lineLimit(diag, .line_bytes, @as(u64, state.pending_line_bytes) + 1, .index_geometry);
                 };
                 try state.commitPendingLine(true);
                 i = nl + 1;
@@ -845,7 +853,7 @@ pub fn RecordScannerWith(comptime Diag: type) type {
                         const fragment = data[i..name_end];
                         if (max_name_len) |limit| {
                             if (state.name.items.len > limit or fragment.len > limit - state.name.items.len) {
-                                return state.recordDiagnostics().identifierTooLong(@as(u128, state.name.items.len) + fragment.len, limit);
+                                return identifierTooLong(state.recordDiagnostics(), @as(u128, state.name.items.len) + fragment.len, limit);
                             }
                         }
                         state.name.appendSlice(state.allocator, fragment) catch return state.diag.oom(.names, fragment.len);
@@ -1019,7 +1027,7 @@ fn sequenceLengthInfoFromMetrics(metrics: LineMetrics) SequenceLengthInfo {
 /// `recordLimit` methods.
 pub fn PackedNamesWith(comptime Diag: type) type {
     return struct {
-        diag: Diag = .{},
+        diag: Diag,
         allocator: std.mem.Allocator,
         blocks: std.ArrayList([]u8) = .empty,
         position: usize = 0,
@@ -1046,8 +1054,8 @@ pub fn PackedNamesWith(comptime Diag: type) type {
         };
         const Map = std.HashMap(Ref, void, Context, std.hash_map.default_max_load_percentage);
 
-        pub fn init(allocator: std.mem.Allocator) @This() {
-            return .{ .allocator = allocator, .map = Map.initContext(allocator, .{ .owner = undefined }) };
+        pub fn init(allocator: std.mem.Allocator, diag: Diag) @This() {
+            return .{ .diag = diag, .allocator = allocator, .map = Map.initContext(allocator, .{ .owner = undefined }) };
         }
 
         pub fn deinit(self: *@This()) void {
@@ -1068,11 +1076,11 @@ pub fn PackedNamesWith(comptime Diag: type) type {
             errdefer self.map.removeByPtr(entry.key_ptr);
             const remaining = BLOCK_BYTES - self.position % BLOCK_BYTES;
             if (name.len > remaining) {
-                self.position = std.math.add(usize, self.position, remaining) catch return self.diag.capacity(.name_offset, std.math.maxInt(usize), @as(u128, self.position) + remaining, error.OutOfMemory);
+                self.position = std.math.add(usize, self.position, remaining) catch return self.diag.capacity(.name_offset, std.math.maxInt(usize), @as(u128, self.position) + remaining);
             }
-            const offset = std.math.cast(u32, self.position) orelse return self.diag.capacity(.name_offset, std.math.maxInt(u32), self.position, error.OutOfMemory);
-            const next_position = std.math.add(usize, self.position, name.len) catch return self.diag.capacity(.name_offset, std.math.maxInt(usize), @as(u128, self.position) + name.len, error.OutOfMemory);
-            if (next_position > std.math.maxInt(u32)) return self.diag.capacity(.name_offset, std.math.maxInt(u32), next_position, error.OutOfMemory);
+            const offset = std.math.cast(u32, self.position) orelse return self.diag.capacity(.name_offset, std.math.maxInt(u32), self.position);
+            const next_position = std.math.add(usize, self.position, name.len) catch return self.diag.capacity(.name_offset, std.math.maxInt(usize), @as(u128, self.position) + name.len);
+            if (next_position > std.math.maxInt(u32)) return self.diag.capacity(.name_offset, std.math.maxInt(u32), next_position);
             if (name.len != 0 and self.position / BLOCK_BYTES == self.blocks.items.len) {
                 const block = self.allocator.alloc(u8, BLOCK_BYTES) catch return self.diag.oom(.names, BLOCK_BYTES);
                 self.blocks.append(self.allocator, block) catch {
@@ -1101,7 +1109,7 @@ pub const MAX_NAME_BYTES = std.math.maxInt(u16);
 /// for `PackedNamesWith`. Caller assumes every name is at most `MAX_NAME_BYTES` long.
 pub fn SourceDedupWith(comptime Diag: type) type {
     return struct {
-        diag: Diag = .{},
+        diag: Diag,
         allocator: std.mem.Allocator,
         io: std.Io,
         file: std.Io.File,
@@ -1115,10 +1123,11 @@ pub fn SourceDedupWith(comptime Diag: type) type {
         source_match: bool = false,
         hot_blocks: std.ArrayList([]u8) = .empty,
         hot_len: usize = 0,
-        read_failed: bool = false,
+        read_failure: ?diagnostics.Error = null,
 
-        pub fn init(allocator: std.mem.Allocator, io: std.Io, file: std.Io.File, size: u64) @This() {
+        pub fn init(allocator: std.mem.Allocator, diag: Diag, io: std.Io, file: std.Io.File, size: u64) @This() {
             return .{
+                .diag = diag,
                 .allocator = allocator,
                 .io = io,
                 .file = file,
@@ -1159,11 +1168,11 @@ pub fn SourceDedupWith(comptime Diag: type) type {
         pub fn observeFingerprint(self: *@This(), name: []const u8, offset: u64, fingerprint: u32) !bool {
             return switch (self.tables) {
                 .narrow => |*set| if (offset >= Tables(u32).CACHE_FLAG)
-                    self.diag.capacity(.name_cache_offset, Tables(u32).CACHE_FLAG - 1, offset, error.SourceChanged)
+                    self.diag.capacity(.name_cache_offset, Tables(u32).CACHE_FLAG - 1, offset)
                 else
                     set.observeWithFingerprint(self, name, @intCast(offset), fingerprint),
                 .wide => |*set| if (offset >= Tables(u64).CACHE_FLAG)
-                    self.diag.capacity(.name_cache_offset, Tables(u64).CACHE_FLAG - 1, offset, error.SourceChanged)
+                    self.diag.capacity(.name_cache_offset, Tables(u64).CACHE_FLAG - 1, offset)
                 else
                     set.observeWithFingerprint(self, name, offset, fingerprint),
             };
@@ -1272,7 +1281,7 @@ pub fn SourceDedupWith(comptime Diag: type) type {
             std.debug.assert(name.len <= MAX_NAME_BYTES);
             if (self.hot_len % CACHE_BLOCK_BYTES == CACHE_BLOCK_BYTES - 1) try self.appendHot(&.{0});
             const start = self.hot_len;
-            if (@as(u128, CACHE_BYTES) + start >= flag) return self.diag.capacity(.name_cache_offset, flag - 1, @as(u128, CACHE_BYTES) + start, error.OutOfMemory);
+            if (@as(u128, CACHE_BYTES) + start >= flag) return self.diag.capacity(.name_cache_offset, flag - 1, @as(u128, CACHE_BYTES) + start);
             var header: [2]u8 = undefined;
             std.mem.writeInt(u16, &header, @intCast(name.len), .little);
             try self.appendHot(&header);
@@ -1313,10 +1322,7 @@ pub fn SourceDedupWith(comptime Diag: type) type {
             const read = self.file.readPositionalAll(self.io, self.scratch.items[0..needed], offset) catch |err| {
                 var diag = self.diag;
                 diag.at.location.offset = offset;
-                switch (diag.fail(diagnostics.readFailure(needed, null), .read, .fasta, err, error.SourceReadFailed)) {
-                    else => {},
-                }
-                self.read_failed = true;
+                self.read_failure = diag.fail(diagnostics.readFailure(needed, null), .read, .fasta, err);
                 return false;
             };
             if (read != needed) {
@@ -1325,10 +1331,7 @@ pub fn SourceDedupWith(comptime Diag: type) type {
                 }
                 var diag = self.diag;
                 diag.at.location.offset = offset;
-                switch (diag.fail(diagnostics.readFailure(needed, read), .read, .fasta, null, error.SourceReadFailed)) {
-                    else => {},
-                }
-                self.read_failed = true;
+                self.read_failure = diag.fail(diagnostics.readFailure(needed, read), .read, .fasta, null);
                 return false;
             }
             const matches = sameBytes(name, self.scratch.items[0..needed]);
@@ -1389,8 +1392,8 @@ pub fn SourceDedupWith(comptime Diag: type) type {
                 fn grow(self: *@This(), diag: Diag) !void {
                     var required: u128 = if (self.buckets.len == 0) 512 else @as(u128, self.buckets.len) * 2;
                     while ((@as(u128, self.len) + 1) * 5 > required * 4) required *= 2;
-                    const capacity = std.math.cast(usize, required) orelse return diag.capacity(.name_map, std.math.maxInt(usize), required, error.OutOfMemory);
-                    if (required * @sizeOf(u32) > std.math.maxInt(usize)) return diag.capacity(.name_map, std.math.maxInt(usize), required * @sizeOf(u32), error.OutOfMemory);
+                    const capacity = std.math.cast(usize, required) orelse return diag.capacity(.name_map, std.math.maxInt(usize), required);
+                    if (required * @sizeOf(u32) > std.math.maxInt(usize)) return diag.capacity(.name_map, std.math.maxInt(usize), required * @sizeOf(u32));
                     self.allocator.free(self.buckets);
                     self.allocator.free(self.metadata);
                     self.buckets = &.{};
@@ -1432,7 +1435,7 @@ pub fn SourceDedupWith(comptime Diag: type) type {
                                 if (source.source_match) key.offset = @intCast(try source.rememberHot(name, CACHE_FLAG));
                                 return true;
                             }
-                            if (source.read_failed) return error.SourceReadFailed;
+                            if (source.read_failure) |err| return err;
                             if (source.allocation_failed) return error.OutOfMemory;
                         }
                         if (std.simd.firstTrue(bytes == @as(Vec, @splat(0)))) |empty| {

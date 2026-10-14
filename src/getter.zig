@@ -1679,32 +1679,24 @@ test "[edge] - [get requests]: retains the name crossing its byte target" {
     try std.testing.expect(workspace.names.capacity <= MAX_ACTIVE_NAME_BYTES);
 }
 
+// Streams `input` as `source` requests against `idx` into `out`.
+fn streamRequests(idx: *LoadedIndex, input: []const u8, source: StreamRequestSource, out: *std.Io.Writer) diagnostics.Error!BatchStats {
+    var reader = std.Io.Reader.fixed(input);
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.get);
+    var context = Diagnostics{ .failure = &failure, .at = .{ .source = if (source == .bed) .bed else .names } };
+    var storage: GetBuffers = undefined;
+    return processRequestReader(std.testing.allocator, idx, &reader, source, 0, false, out, fastaSource(idx), &context, null, &storage);
+}
+
 test "[unit] - [get names]: reads LF, CRLF, and a final unterminated line" {
     const test_io = std.testing.io;
     var idx = try loadTestIndex(test_io, "tests/data/simple.fasta");
     defer idx.deinit();
-    var reader = std.Io.Reader.fixed("# comment\r\n\r\nseq2\r\nseq1\nseq2");
     var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer writer.deinit();
 
-    var failure: diagnostics.Failure = undefined;
-    failure.reset(.get);
-    var context = Diagnostics{ .failure = &failure, .at = .{ .source = .names } };
-    var storage: GetBuffers = undefined;
-    const buffers = &storage;
-    const result = try processRequestReader(
-        std.testing.allocator,
-        &idx,
-        &reader,
-        .{ .names = .{} },
-        0,
-        false,
-        &writer.writer,
-        fastaSource(&idx),
-        &context,
-        null,
-        buffers,
-    );
+    const result = try streamRequests(&idx, "# comment\r\n\r\nseq2\r\nseq1\nseq2", .{ .names = .{} }, &writer.writer);
 
     try std.testing.expectEqual(@as(usize, 3), result.region_count);
     try std.testing.expectEqual(@as(u64, 48), result.total_bases);
@@ -1722,28 +1714,10 @@ test "[edge] - [get names]: resets storage at the request-count boundary" {
     defer names.deinit();
     const request_count = NAMES_REQUEST_BATCH_SIZE + 1;
     for (0..request_count) |_| try names.writer.writeAll("seq1\n");
-    var reader = std.Io.Reader.fixed(names.written());
     var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer writer.deinit();
 
-    var failure: diagnostics.Failure = undefined;
-    failure.reset(.get);
-    var context = Diagnostics{ .failure = &failure, .at = .{ .source = .names } };
-    var storage: GetBuffers = undefined;
-    const buffers = &storage;
-    const result = try processRequestReader(
-        std.testing.allocator,
-        &idx,
-        &reader,
-        .{ .names = .{} },
-        0,
-        false,
-        &writer.writer,
-        fastaSource(&idx),
-        &context,
-        null,
-        buffers,
-    );
+    const result = try streamRequests(&idx, names.written(), .{ .names = .{} }, &writer.writer);
 
     const one_output = ">seq1\nACGTACGTACGTACGTACGTACGT\n";
     try std.testing.expectEqual(request_count, result.region_count);
@@ -1764,28 +1738,10 @@ test "[unit] - [get bed]: streams rows in source order" {
         "seq1\t0\t4\n" ++
         "seq1\t4\t8";
 
-    var reader = std.Io.Reader.fixed(bed_data);
     var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer writer.deinit();
 
-    var failure: diagnostics.Failure = undefined;
-    failure.reset(.get);
-    var context = Diagnostics{ .failure = &failure, .at = .{ .source = .names } };
-    var storage: GetBuffers = undefined;
-    const buffers = &storage;
-    const result = try processRequestReader(
-        std.testing.allocator,
-        &idx,
-        &reader,
-        .{ .bed = .{ .honor_strand = false, .global_orientation = .{} } },
-        0,
-        false,
-        &writer.writer,
-        fastaSource(&idx),
-        &context,
-        null,
-        buffers,
-    );
+    const result = try streamRequests(&idx, bed_data, .{ .bed = .{ .honor_strand = false, .global_orientation = .{} } }, &writer.writer);
 
     try std.testing.expectEqual(@as(usize, 3), result.region_count);
     try std.testing.expectEqual(@as(u64, 12), result.total_bases);
@@ -1821,27 +1777,9 @@ test "[edge] - [get bed]: preserves output across request-batch boundaries" {
             }
         }
 
-        var reader = std.Io.Reader.fixed(bed.written());
         var output = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer output.deinit();
-        var failure: diagnostics.Failure = undefined;
-        failure.reset(.get);
-        var context = Diagnostics{ .failure = &failure, .at = .{ .source = .names } };
-        var storage: GetBuffers = undefined;
-        const buffers = &storage;
-        const result = try processRequestReader(
-            std.testing.allocator,
-            &idx,
-            &reader,
-            .{ .bed = .{ .honor_strand = true, .global_orientation = .{} } },
-            0,
-            false,
-            &output.writer,
-            fastaSource(&idx),
-            &context,
-            null,
-            buffers,
-        );
+        const result = try streamRequests(&idx, bed.written(), .{ .bed = .{ .honor_strand = true, .global_orientation = .{} } }, &output.writer);
 
         const expected_bases: u64 = count + @as(usize, @intFromBool(count > BED_REQUEST_BATCH_SIZE)) * 4;
         try std.testing.expectEqual(count, result.region_count);

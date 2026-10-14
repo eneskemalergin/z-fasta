@@ -553,6 +553,16 @@ def load_tests(results_dir: Path, manifest: dict | None = None) -> pd.DataFrame 
 # Figures.
 
 
+def draw_tool_bar(ax, xpos: float, val: float, std: float, *, width: float, color: str, styled: bool = False) -> None:
+    """One tool's bar; `styled` (a reference tool) is hatched and lighter, and a positive `std` adds an error bar."""
+    bar_kw: dict = {"width": width, "color": color, "alpha": 0.75 if styled else 0.88, "zorder": 2}
+    if styled:
+        bar_kw.update({"hatch": "///", "edgecolor": color, "linewidth": 0.6})
+    if std > 0:
+        bar_kw.update({"yerr": std, "capsize": 2, "error_kw": {"elinewidth": 0.8, "capthick": 0.8, "ecolor": "#333333"}})
+    ax.bar(xpos, val, **bar_kw)
+
+
 def _save(fig, path):
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -1052,25 +1062,7 @@ def _fig_metric_bars(
                 if pd.notna(raw_std):
                     std = max(float(raw_std), 0.0)
             xpos = di + (i - len(tools) / 2 + 0.5) * width
-            bar_kw: dict = {
-                "width": width,
-                "color": color,
-                "alpha": 0.88,
-                "zorder": 2,
-            }
-            if std > 0:
-                bar_kw.update(
-                    {
-                        "yerr": std,
-                        "capsize": 2,
-                        "error_kw": {
-                            "elinewidth": 0.8,
-                            "capthick": 0.8,
-                            "ecolor": "#333333",
-                        },
-                    }
-                )
-            ax.bar(xpos, val, **bar_kw)
+            draw_tool_bar(ax, xpos, val, std, width=width, color=color)
             bar_tops[(ds, tool)] = (xpos, val)
 
     if after_bars is not None:

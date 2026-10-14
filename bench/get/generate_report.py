@@ -1502,152 +1502,23 @@ def annotate_headline_comparisons(
         )
 
 
-def fig_pos_grouped_bars(
-    work: pd.DataFrame,
-    out: Path,
-    tools: list[str],
-    value_col: str,
-    ylabel: str,
-    title: str,
-    fig_note: str,
-    ir,
-    *,
-    log_y: bool = True,
-    value_floor: float = 1e-6,
-    annotate_comparisons: bool = False,
-) -> Path:
-    """Three side-by-side panels (Genome / Transcriptome / Proteome); grouped bars per region."""
-    filtered = ir.filter_tools(work, tools)
-    tools = [t for t in tools if t in filtered["tool"].unique()]
-    datasets = [d for d in DATASET_ORDER if d in filtered["dataset"].unique()]
-    std_col = _pos_std_col(value_col)
-    peer_tools = speedup_peer_tools(tools)
-    region_counts = [len(regions_for_dataset(filtered, d)) for d in datasets]
-    width_ratios = [max(1, n) for n in region_counts]
-    inches_per_region = 1.25
-    fig_w = inches_per_region * sum(width_ratios)
-
-    fig, axes = plt.subplots(
-        1,
-        len(datasets),
-        figsize=(fig_w, 7.2),
-        sharey=False,
-        gridspec_kw={"width_ratios": width_ratios, "wspace": GROUPED_BAR_WSPACE},
-    )
-    if len(datasets) == 1:
-        axes = [axes]
-
-    ylab_set = False
-    for ax, ds in zip(axes, datasets):
-        ds_work = filtered[filtered["dataset"] == ds]
-        regions = regions_for_dataset(filtered, ds)
-        if not regions:
-            ax.set_visible(False)
-            continue
-        if not ylab_set:
-            ax.set_ylabel(ylabel, fontsize=10, labelpad=2)
-            ylab_set = True
-        present_tools = [t for t in tools if t in ds_work["tool"].unique()]
-        width = min(0.11, 0.82 / max(1, len(present_tools)))
-        x = list(range(len(regions)))
-        bar_tops_by_reg: dict[tuple[str, str, str], tuple[float, float]] = {}
-
-        for ti, tool in enumerate(present_tools):
-            color = ir.COLORS.get(tool, "#888888")
-            for ri, reg in enumerate(regions):
-                row = ds_work[(ds_work["tool"] == tool) & (ds_work["region"] == reg)]
-                if row.empty:
-                    continue
-                val = max(float(row[value_col].iloc[0]), value_floor)
-                std = 0.0
-                if std_col and std_col in row.columns:
-                    raw = row[std_col].iloc[0]
-                    if pd.notna(raw):
-                        std = max(float(raw), 0.0)
-                xpos = ri + (ti - len(present_tools) / 2 + 0.5) * width
-                bar_kw: dict = {
-                    "width": width,
-                    "color": color,
-                    "alpha": 0.75 if tool in REFERENCE_TOOLS else 0.88,
-                    "zorder": 2,
-                }
-                if tool in REFERENCE_TOOLS:
-                    bar_kw["hatch"] = "///"
-                    bar_kw["edgecolor"] = color
-                    bar_kw["linewidth"] = 0.6
-                if std > 0:
-                    bar_kw.update(
-                        {
-                            "yerr": std,
-                            "capsize": 2,
-                            "error_kw": {
-                                "elinewidth": 0.8,
-                                "capthick": 0.8,
-                                "ecolor": "#333333",
-                            },
-                        }
-                    )
-                ax.bar(xpos, val, **bar_kw)
-                bar_tops_by_reg[(ds, reg, tool)] = (xpos, val)
-
-        if annotate_comparisons and peer_tools:
-            for reg in regions:
-                reg_work = ds_work[ds_work["region"] == reg]
-                reg_tops = {
-                    (ds, t): bar_tops_by_reg[(ds, reg, t)]
-                    for t in present_tools
-                    if (ds, reg, t) in bar_tops_by_reg
-                }
-                if (ds, "z-fasta-default") not in reg_tops:
-                    continue
-                comparisons = ir.build_ratio_comparisons(
-                    reg_work,
-                    value_col,
-                    baseline=BASELINE,
-                    peer_tools=peer_tools,
-                )
-                if not comparisons.empty:
-                    annotate_headline_comparisons(
-                        ax,
-                        [ds],
-                        present_tools,
-                        width,
-                        reg_tops,
-                        comparisons,
-                        ir,
-                    )
-
-        if log_y:
-            ax.set_yscale("log")
-        ax.margins(y=0.2)
-        ax.set_xticks(x)
-        ax.set_xticklabels([REGION_LABELS.get(r, r) for r in regions], fontsize=10)
-        ax.set_title(ds, fontsize=11, fontweight="bold")
-        ax.grid(axis="y", alpha=0.28, which="both")
-        ax.set_axisbelow(True)
-
-    fig.suptitle(title, fontsize=12, fontweight="bold", y=0.97)
-    fig.text(
-        0.5,
-        0.915,
-        fig_note,
-        ha="center",
-        va="top",
+def _finish_bed_figure(fig, patches: list, tool_labels: list[str], *, rotate_xt: bool) -> None:
+    fig.subplots_adjust(left=0.05, right=0.995, bottom=BED_FIG_BOTTOM, top=0.86)
+    fig.legend(
+        handles=patches,
+        labels=tool_labels,
         fontsize=9,
-        color="#444444",
-        style="italic",
+        loc="upper center",
+        bbox_to_anchor=(0.5, BED_FIG_BOTTOM - BED_FIG_LEGEND_GAP),
+        bbox_transform=fig.transFigure,
+        ncol=min(len(tool_labels), 6),
+        frameon=False,
+        columnspacing=1.2,
+        handletextpad=0.4,
     )
-    patches = _grouped_bar_patches(tools, ir)
-    _finish_grouped_bar_figure(
-        fig,
-        patches,
-        [ir.display_tool(t) for t in tools],
-        rotate_xt=False,
-    )
-    return ir._save(fig, out)
 
 
-def fig_multi_grouped_bars(
+def _fig_grouped_bars(
     work: pd.DataFrame,
     out: Path,
     tools: list[str],
@@ -1657,23 +1528,26 @@ def fig_multi_grouped_bars(
     fig_note: str,
     ir,
     *,
-    log_y: bool = True,
-    value_floor: float = 1e-6,
-    annotate_comparisons: bool = False,
+    group_col: str,
+    groups_for_dataset,
+    group_label,
+    rotate_above: int | None,
+    hatch_reference: bool,
+    finish,
+    log_y: bool,
+    value_floor: float,
+    annotate_comparisons: bool,
 ) -> Path:
-    """Three side-by-side panels (Genome / Transcriptome / Proteome); grouped bars per N."""
+    """Three side-by-side panels (Genome / Transcriptome / Proteome); grouped bars per `group_col` value."""
     filtered = ir.filter_tools(work, tools)
     tools = [t for t in tools if t in filtered["tool"].unique()]
     datasets = [d for d in DATASET_ORDER if d in filtered["dataset"].unique()]
     std_col = _pos_std_col(value_col)
     peer_tools = speedup_peer_tools(tools)
-    n_counts = [len(n_values_for_dataset(filtered, d)) for d in datasets]
-    width_ratios = [max(1, n) for n in n_counts]
-    # ~1.25" per N cluster (positional uses 5.2" for 4 regions); panel width ∝ its N count.
-    inches_per_n = 1.25
-    fig_w = inches_per_n * sum(width_ratios)
-    max_n = max(width_ratios)
-    rotate_xt = max_n > 5
+    group_counts = [len(groups_for_dataset(filtered, d)) for d in datasets]
+    width_ratios = [max(1, n) for n in group_counts]
+    fig_w = 1.25 * sum(width_ratios)
+    rotate_xt = rotate_above is not None and max(width_ratios) > rotate_above
 
     fig, axes = plt.subplots(
         1,
@@ -1688,8 +1562,8 @@ def fig_multi_grouped_bars(
     ylab_set = False
     for ax, ds in zip(axes, datasets):
         ds_work = filtered[filtered["dataset"] == ds]
-        n_vals = n_values_for_dataset(filtered, ds)
-        if not n_vals:
+        groups = groups_for_dataset(filtered, ds)
+        if not groups:
             ax.set_visible(False)
             continue
         if not ylab_set:
@@ -1697,13 +1571,14 @@ def fig_multi_grouped_bars(
             ylab_set = True
         present_tools = [t for t in tools if t in ds_work["tool"].unique()]
         width = min(0.11, 0.82 / max(1, len(present_tools)))
-        x = list(range(len(n_vals)))
-        bar_tops_by_n: dict[tuple[str, int, str], tuple[float, float]] = {}
+        x = list(range(len(groups)))
+        bar_tops: dict[tuple, tuple[float, float]] = {}
 
         for ti, tool in enumerate(present_tools):
             color = ir.COLORS.get(tool, "#888888")
-            for ni, n in enumerate(n_vals):
-                row = ds_work[(ds_work["tool"] == tool) & (ds_work["n"] == n)]
+            reference = hatch_reference and tool in REFERENCE_TOOLS
+            for gi, group in enumerate(groups):
+                row = ds_work[(ds_work["tool"] == tool) & (ds_work[group_col] == group)]
                 if row.empty:
                     continue
                 val = max(float(row[value_col].iloc[0]), value_floor)
@@ -1712,14 +1587,14 @@ def fig_multi_grouped_bars(
                     raw = row[std_col].iloc[0]
                     if pd.notna(raw):
                         std = max(float(raw), 0.0)
-                xpos = ni + (ti - len(present_tools) / 2 + 0.5) * width
+                xpos = gi + (ti - len(present_tools) / 2 + 0.5) * width
                 bar_kw: dict = {
                     "width": width,
                     "color": color,
-                    "alpha": 0.75 if tool in REFERENCE_TOOLS else 0.88,
+                    "alpha": 0.75 if reference else 0.88,
                     "zorder": 2,
                 }
-                if tool in REFERENCE_TOOLS:
+                if reference:
                     bar_kw["hatch"] = "///"
                     bar_kw["edgecolor"] = color
                     bar_kw["linewidth"] = 0.6
@@ -1736,20 +1611,20 @@ def fig_multi_grouped_bars(
                         }
                     )
                 ax.bar(xpos, val, **bar_kw)
-                bar_tops_by_n[(ds, n, tool)] = (xpos, val)
+                bar_tops[(ds, group, tool)] = (xpos, val)
 
         if annotate_comparisons and peer_tools:
-            for n in n_vals:
-                n_work = ds_work[ds_work["n"] == n]
-                n_tops = {
-                    (ds, t): bar_tops_by_n[(ds, n, t)]
+            for group in groups:
+                group_work = ds_work[ds_work[group_col] == group]
+                group_tops = {
+                    (ds, t): bar_tops[(ds, group, t)]
                     for t in present_tools
-                    if (ds, n, t) in bar_tops_by_n
+                    if (ds, group, t) in bar_tops
                 }
-                if (ds, "z-fasta-default") not in n_tops:
+                if (ds, "z-fasta-default") not in group_tops:
                     continue
                 comparisons = ir.build_ratio_comparisons(
-                    n_work,
+                    group_work,
                     value_col,
                     baseline=BASELINE,
                     peer_tools=peer_tools,
@@ -1760,7 +1635,7 @@ def fig_multi_grouped_bars(
                         [ds],
                         present_tools,
                         width,
-                        n_tops,
+                        group_tops,
                         comparisons,
                         ir,
                     )
@@ -1770,7 +1645,7 @@ def fig_multi_grouped_bars(
         ax.margins(y=0.2)
         ax.set_xticks(x)
         ax.set_xticklabels(
-            [multi_n_label(n) for n in n_vals],
+            [group_label(g) for g in groups],
             fontsize=10 if not rotate_xt else 9,
             rotation=45 if rotate_xt else 0,
             ha="right" if rotate_xt else "center",
@@ -1791,165 +1666,35 @@ def fig_multi_grouped_bars(
         style="italic",
     )
     patches = _grouped_bar_patches(tools, ir)
-    _finish_grouped_bar_figure(
-        fig,
-        patches,
-        [ir.display_tool(t) for t in tools],
-        rotate_xt=rotate_xt,
-    )
+    finish(fig, patches, [ir.display_tool(t) for t in tools], rotate_xt=rotate_xt)
     return ir._save(fig, out)
 
 
-def fig_bed_grouped_bars(
-    work: pd.DataFrame,
-    out: Path,
-    tools: list[str],
-    value_col: str,
-    ylabel: str,
-    title: str,
-    fig_note: str,
-    ir,
-    *,
-    log_y: bool = True,
-    value_floor: float = 1e-6,
-    annotate_comparisons: bool = False,
-) -> Path:
-    """Three side-by-side panels (Genome / Transcriptome / Proteome); grouped bars per BED row count."""
-    filtered = ir.filter_tools(work, tools)
-    tools = [t for t in tools if t in filtered["tool"].unique()]
-    datasets = [d for d in DATASET_ORDER if d in filtered["dataset"].unique()]
-    std_col = _pos_std_col(value_col)
-    peer_tools = speedup_peer_tools(tools)
-    row_counts_per_ds = [len(bed_rows_for_dataset(filtered, d)) for d in datasets]
-    width_ratios = [max(1, n) for n in row_counts_per_ds]
-    inches_per_row = 1.25
-    fig_w = inches_per_row * sum(width_ratios)
-
-    fig, axes = plt.subplots(
-        1,
-        len(datasets),
-        figsize=(fig_w, 7.2),
-        sharey=False,
-        gridspec_kw={"width_ratios": width_ratios, "wspace": GROUPED_BAR_WSPACE},
+def fig_pos_grouped_bars(work, out, tools, value_col, ylabel, title, fig_note, ir, *, log_y=True, value_floor=1e-6, annotate_comparisons=False) -> Path:
+    return _fig_grouped_bars(
+        work, out, tools, value_col, ylabel, title, fig_note, ir,
+        group_col="region", groups_for_dataset=regions_for_dataset, group_label=lambda r: REGION_LABELS.get(r, r),
+        rotate_above=None, hatch_reference=True, finish=_finish_grouped_bar_figure,
+        log_y=log_y, value_floor=value_floor, annotate_comparisons=annotate_comparisons,
     )
-    if len(datasets) == 1:
-        axes = [axes]
 
-    ylab_set = False
-    for ax, ds in zip(axes, datasets):
-        ds_work = filtered[filtered["dataset"] == ds]
-        row_counts = bed_rows_for_dataset(filtered, ds)
-        if not row_counts:
-            ax.set_visible(False)
-            continue
-        if not ylab_set:
-            ax.set_ylabel(ylabel, fontsize=10, labelpad=2)
-            ylab_set = True
-        present_tools = [t for t in tools if t in ds_work["tool"].unique()]
-        width = min(0.11, 0.82 / max(1, len(present_tools)))
-        x = list(range(len(row_counts)))
-        bar_tops_by_row: dict[tuple[str, int, str], tuple[float, float]] = {}
 
-        for ti, tool in enumerate(present_tools):
-            color = ir.COLORS.get(tool, "#888888")
-            for ri, n in enumerate(row_counts):
-                row = ds_work[(ds_work["tool"] == tool) & (ds_work["bed_rows"] == n)]
-                if row.empty:
-                    continue
-                val = max(float(row[value_col].iloc[0]), value_floor)
-                std = 0.0
-                if std_col and std_col in row.columns:
-                    raw = row[std_col].iloc[0]
-                    if pd.notna(raw):
-                        std = max(float(raw), 0.0)
-                xpos = ri + (ti - len(present_tools) / 2 + 0.5) * width
-                bar_kw: dict = {
-                    "width": width,
-                    "color": color,
-                    "alpha": 0.88,
-                    "zorder": 2,
-                }
-                if std > 0:
-                    bar_kw.update(
-                        {
-                            "yerr": std,
-                            "capsize": 2,
-                            "error_kw": {
-                                "elinewidth": 0.8,
-                                "capthick": 0.8,
-                                "ecolor": "#333333",
-                            },
-                        }
-                    )
-                ax.bar(xpos, val, **bar_kw)
-                bar_tops_by_row[(ds, n, tool)] = (xpos, val)
-
-        if annotate_comparisons and peer_tools:
-            for n in row_counts:
-                n_work = ds_work[ds_work["bed_rows"] == n]
-                n_tops = {
-                    (ds, t): bar_tops_by_row[(ds, n, t)]
-                    for t in present_tools
-                    if (ds, n, t) in bar_tops_by_row
-                }
-                if (ds, "z-fasta-default") not in n_tops:
-                    continue
-                comparisons = ir.build_ratio_comparisons(
-                    n_work,
-                    value_col,
-                    baseline=BASELINE,
-                    peer_tools=peer_tools,
-                )
-                if not comparisons.empty:
-                    annotate_headline_comparisons(
-                        ax,
-                        [ds],
-                        present_tools,
-                        width,
-                        n_tops,
-                        comparisons,
-                        ir,
-                    )
-
-        if log_y:
-            ax.set_yscale("log")
-        ax.margins(y=0.2)
-        ax.set_xticks(x)
-        ax.set_xticklabels(
-            [bed_row_axis_label(n) for n in row_counts],
-            fontsize=10,
-            ha="center",
-        )
-        ax.set_title(ds, fontsize=11, fontweight="bold")
-        ax.grid(axis="y", alpha=0.28, which="both")
-        ax.set_axisbelow(True)
-
-    fig.suptitle(title, fontsize=12, fontweight="bold", y=0.97)
-    fig.text(
-        0.5,
-        0.915,
-        fig_note,
-        ha="center",
-        va="top",
-        fontsize=9,
-        color="#444444",
-        style="italic",
+def fig_multi_grouped_bars(work, out, tools, value_col, ylabel, title, fig_note, ir, *, log_y=True, value_floor=1e-6, annotate_comparisons=False) -> Path:
+    return _fig_grouped_bars(
+        work, out, tools, value_col, ylabel, title, fig_note, ir,
+        group_col="n", groups_for_dataset=n_values_for_dataset, group_label=multi_n_label,
+        rotate_above=5, hatch_reference=True, finish=_finish_grouped_bar_figure,
+        log_y=log_y, value_floor=value_floor, annotate_comparisons=annotate_comparisons,
     )
-    patches = _grouped_bar_patches(tools, ir)
-    fig.subplots_adjust(left=0.05, right=0.995, bottom=BED_FIG_BOTTOM, top=0.86)
-    fig.legend(
-        handles=patches,
-        labels=[ir.display_tool(t) for t in tools],
-        fontsize=9,
-        loc="upper center",
-        bbox_to_anchor=(0.5, BED_FIG_BOTTOM - BED_FIG_LEGEND_GAP),
-        bbox_transform=fig.transFigure,
-        ncol=min(len(tools), 6),
-        frameon=False,
-        columnspacing=1.2,
-        handletextpad=0.4,
+
+
+def fig_bed_grouped_bars(work, out, tools, value_col, ylabel, title, fig_note, ir, *, log_y=True, value_floor=1e-6, annotate_comparisons=False) -> Path:
+    return _fig_grouped_bars(
+        work, out, tools, value_col, ylabel, title, fig_note, ir,
+        group_col="bed_rows", groups_for_dataset=bed_rows_for_dataset, group_label=bed_row_axis_label,
+        rotate_above=None, hatch_reference=False, finish=_finish_bed_figure,
+        log_y=log_y, value_floor=value_floor, annotate_comparisons=annotate_comparisons,
     )
-    return ir._save(fig, out)
 
 
 def _rc_draw_facet(
@@ -1982,29 +1727,7 @@ def _rc_draw_facet(
             if std_col and std_col in row.columns and pd.notna(row[std_col].iloc[0]):
                 std = max(float(row[std_col].iloc[0]), 0.0)
             xpos = di + (ti - len(tools) / 2 + 0.5) * width
-            bar_kw: dict = {
-                "width": width,
-                "color": color,
-                "alpha": 0.75 if is_styled else 0.88,
-                "zorder": 2,
-            }
-            if is_styled:
-                bar_kw["hatch"] = "///"
-                bar_kw["edgecolor"] = color
-                bar_kw["linewidth"] = 0.6
-            if std > 0:
-                bar_kw.update(
-                    {
-                        "yerr": std,
-                        "capsize": 2,
-                        "error_kw": {
-                            "elinewidth": 0.8,
-                            "capthick": 0.8,
-                            "ecolor": "#333333",
-                        },
-                    }
-                )
-            ax.bar(xpos, val, **bar_kw)
+            ir.draw_tool_bar(ax, xpos, val, std, width=width, color=color, styled=is_styled)
             bar_tops[(ds, tool)] = (xpos, val)
 
     _rc_annotate_facet(
