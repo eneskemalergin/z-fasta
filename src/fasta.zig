@@ -39,7 +39,7 @@ pub fn countBasesInLineSlice(data: []const u8, start: usize, end: usize) u32 {
 }
 
 // Aligned so the hot loop's position in a cache line does not depend on where the linker puts it.
-pub fn countWhitespace(comptime vector_len: usize, data: []const u8) align(64) usize {
+fn countWhitespace(comptime vector_len: usize, data: []const u8) align(64) usize {
     return countVectorized(vector_len, data, isWhitespace);
 }
 
@@ -86,7 +86,7 @@ pub const PROTEIN_SYMBOLS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ*-abcdefghijklmnopqrstuvw
 /// The common symbols of a nucleotide alphabet, which a vector check accepts: `letters` (lowercase)
 /// in either case. Other IUPAC symbols count as outside, so callers check them through the full
 /// alphabet.
-pub fn PlainLetters(comptime letters: []const u8) type {
+fn PlainLetters(comptime letters: []const u8) type {
     return struct {
         pub fn countOutside(comptime vector_len: usize, data: []const u8) usize {
             return countOutsideWith(vector_len, data, isPlain);
@@ -127,7 +127,7 @@ pub const ProteinSymbols = struct {
 };
 
 /// True when a line of `line_bases` symbols plus an LF or CRLF fills exactly `line_bytes`.
-pub fn isDenseLineGeometry(line_bases: u32, line_bytes: u32) bool {
+fn isDenseLineGeometry(line_bases: u32, line_bytes: u32) bool {
     if (line_bases == 0 or line_bytes <= line_bases) return false;
     const sep_len = line_bytes - line_bases;
     return (sep_len == 1 or sep_len == 2) and line_bases + sep_len == line_bytes;
@@ -540,11 +540,7 @@ pub fn RecordScannerWith(comptime Diag: type) type {
             self.seq_offset = 0;
             self.seq_offset_set = false;
             self.line_builder = .{};
-            self.in_pending_line = false;
-            self.pending_line_bases = 0;
-            self.pending_line_bytes = 0;
-            self.pending_pre_lf_bytes = 0;
-            self.pending_pre_lf_ends_with_cr = false;
+            self.clearPendingLine();
             self.pending_line_file_offset = 0;
             self.side_base_start = 0;
             self.side_table.clearRetainingCapacity();
@@ -697,6 +693,10 @@ pub fn RecordScannerWith(comptime Diag: type) type {
 
             try self.recordSequenceLine(bases, actual_bytes, has_lf, content_len, line_file_offset);
             self.at_line_start = has_lf;
+            self.clearPendingLine();
+        }
+
+        fn clearPendingLine(self: *Self) void {
             self.in_pending_line = false;
             self.pending_line_bases = 0;
             self.pending_line_bytes = 0;
@@ -706,11 +706,8 @@ pub fn RecordScannerWith(comptime Diag: type) type {
 
         fn appendPendingFragment(self: *Self, fragment: []const u8, fragment_file_offset: u64) !void {
             if (!self.in_pending_line) {
+                self.clearPendingLine();
                 self.in_pending_line = true;
-                self.pending_line_bases = 0;
-                self.pending_line_bytes = 0;
-                self.pending_pre_lf_bytes = 0;
-                self.pending_pre_lf_ends_with_cr = false;
                 self.pending_line_file_offset = fragment_file_offset;
             }
             const fragment_bases = countBasesInLineSlice(fragment, 0, fragment.len);
@@ -748,11 +745,7 @@ pub fn RecordScannerWith(comptime Diag: type) type {
                 self.pending_line_file_offset,
             );
             self.at_line_start = has_lf;
-            self.in_pending_line = false;
-            self.pending_line_bases = 0;
-            self.pending_line_bytes = 0;
-            self.pending_pre_lf_bytes = 0;
-            self.pending_pre_lf_ends_with_cr = false;
+            self.clearPendingLine();
         }
 
         fn finalizeHeader(self: *Self) void {
@@ -1068,8 +1061,7 @@ pub fn PackedNamesWith(comptime Diag: type) type {
             return self.blocks.items[ref.offset / BLOCK_BYTES][ref.offset % BLOCK_BYTES ..][0..ref.len];
         }
 
-        pub fn observeAt(self: *@This(), name: []const u8, source_offset: u64) !bool {
-            _ = source_offset;
+        pub fn observe(self: *@This(), name: []const u8) !bool {
             self.map.ctx.owner = self;
             const entry = self.map.getOrPutAdapted(name, Lookup{ .owner = self }) catch return self.diag.oom(.dedup_table, null);
             if (entry.found_existing) return true;
@@ -1513,7 +1505,7 @@ pub fn commonSuffix(a: []const u8, b: []const u8, prefix: usize) usize {
 const SIMD_CHUNK_SIZE = 32;
 const SimdVec = @Vector(SIMD_CHUNK_SIZE, u8);
 
-const DENSE_VECTOR_LEN = std.simd.suggestVectorLength(u8) orelse 1;
+pub const DENSE_VECTOR_LEN = std.simd.suggestVectorLength(u8) orelse 1;
 const DENSE_BLOCK_LINES = 256;
 
 fn countDenseLinesWith(comptime vector_len: usize, comptime Symbols: type, data: []const u8, start: usize, line_bases_u32: u32, line_bytes_u32: u32) usize {

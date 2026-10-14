@@ -17,7 +17,7 @@ const readTestFile = utility.readRequiredFile;
 const writeFastaArtifact = utility.writeFastaArtifact;
 const statMtimeNs = utility.statMtimeNs;
 const scanFaiData = main.indexer.scanFaiData;
-const INDEX_READ_BUFFER_SIZE = main.indexer.INDEX_READ_BUFFER_SIZE;
+const INDEX_READ_BUFFER_BYTES = main.indexer.INDEX_READ_BUFFER_BYTES;
 const IndexRecord = main.index_format.IndexRecord;
 const ZfiHeader = main.index_format.ZfiHeader;
 const ZFI_MAGIC = main.index_format.ZFI_MAGIC;
@@ -859,7 +859,7 @@ test "[property] - [zfi format]: encoders match the frozen little-endian layout"
         .record_count = 0x01020304,
         .source_size = 0x0807060504030201,
     };
-    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&header), &main.index_format.encodeZfiHeader(header));
+    try std.testing.expectEqualSlices(u8, &(ZFI_MAGIC ++ [_]u8{ 0x04, 0x03, 0x02, 0x01, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 }), &main.index_format.encodeZfiHeader(header));
 
     const ZfiRecord = main.index_format.ZfiRecord;
     var rec = IndexRecord{
@@ -972,7 +972,7 @@ test "[edge] - [fasta scanner]: cross the production read boundary" {
     var fasta: std.ArrayList(u8) = .empty;
     defer fasta.deinit(allocator);
     try fasta.appendSlice(allocator, ">seq1\n");
-    try fasta.appendNTimes(allocator, 'A', INDEX_READ_BUFFER_SIZE + 10);
+    try fasta.appendNTimes(allocator, 'A', INDEX_READ_BUFFER_BYTES + 10);
     try fasta.appendSlice(allocator, "\n>seq2\nACGT\n");
 
     var output = std.Io.Writer.Allocating.init(allocator);
@@ -982,10 +982,10 @@ test "[edge] - [fasta scanner]: cross the production read boundary" {
         allocator,
         "seq1\t{d}\t6\t{d}\t{d}\nseq2\t4\t{d}\t4\t5\n",
         .{
-            INDEX_READ_BUFFER_SIZE + 10,
-            INDEX_READ_BUFFER_SIZE + 10,
-            INDEX_READ_BUFFER_SIZE + 11,
-            INDEX_READ_BUFFER_SIZE + 23,
+            INDEX_READ_BUFFER_BYTES + 10,
+            INDEX_READ_BUFFER_BYTES + 10,
+            INDEX_READ_BUFFER_BYTES + 11,
+            INDEX_READ_BUFFER_BYTES + 23,
         },
     );
 
@@ -995,12 +995,12 @@ test "[edge] - [fasta scanner]: cross the production read boundary" {
     var index = try main.indexer.scanZfiData(allocator, fasta.items);
     defer index.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 2), index.records.items.len);
-    try std.testing.expectEqual(@as(u64, INDEX_READ_BUFFER_SIZE + 10), index.records.items[0].seq_len);
+    try std.testing.expectEqual(@as(u64, INDEX_READ_BUFFER_BYTES + 10), index.records.items[0].seq_len);
     try std.testing.expectEqual(@as(u64, 6), index.records.items[0].seq_offset);
-    try std.testing.expectEqual(@as(u32, INDEX_READ_BUFFER_SIZE + 10), index.records.items[0].line_bases);
-    try std.testing.expectEqual(@as(u32, INDEX_READ_BUFFER_SIZE + 11), index.records.items[0].line_bytes);
+    try std.testing.expectEqual(@as(u32, INDEX_READ_BUFFER_BYTES + 10), index.records.items[0].line_bases);
+    try std.testing.expectEqual(@as(u32, INDEX_READ_BUFFER_BYTES + 11), index.records.items[0].line_bytes);
     try std.testing.expectEqual(@as(u64, 4), index.records.items[1].seq_len);
-    try std.testing.expectEqual(@as(u64, INDEX_READ_BUFFER_SIZE + 23), index.records.items[1].seq_offset);
+    try std.testing.expectEqual(@as(u64, INDEX_READ_BUFFER_BYTES + 23), index.records.items[1].seq_offset);
     const second_name = index.name_blob.items[index.records.items[1].name_offset..][0..index.records.items[1].name_len];
     try std.testing.expectEqualStrings("seq2", second_name);
 }
@@ -1010,7 +1010,7 @@ test "[edge] - [fasta scanner]: preserve a header split at the read boundary" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const chunk = INDEX_READ_BUFFER_SIZE;
+    const chunk = INDEX_READ_BUFFER_BYTES;
     var fasta: std.ArrayList(u8) = .empty;
     defer fasta.deinit(allocator);
     try fasta.appendSlice(allocator, ">seq1\n");
@@ -1053,9 +1053,9 @@ test "[property] - [fasta scanner]: reader sizes preserve both formats across to
         line_bytes - 1,
         line_bytes,
         line_bytes + 1,
-        INDEX_READ_BUFFER_SIZE,
+        INDEX_READ_BUFFER_BYTES,
     };
-    const read_storage = try allocator.alloc(u8, INDEX_READ_BUFFER_SIZE);
+    const read_storage = try allocator.alloc(u8, INDEX_READ_BUFFER_BYTES);
     {
         for (read_sizes) |read_size| {
             try expectReaderMatchesProduction(
@@ -1125,7 +1125,7 @@ test "[edge] - [fasta scanner]: preserve sequence data split at the read boundar
     var fasta: std.ArrayList(u8) = .empty;
     defer fasta.deinit(allocator);
     try fasta.appendSlice(allocator, ">seq1\n");
-    try fasta.appendNTimes(allocator, 'A', INDEX_READ_BUFFER_SIZE);
+    try fasta.appendNTimes(allocator, 'A', INDEX_READ_BUFFER_BYTES);
     try fasta.appendSlice(allocator, "ACGT\n");
 
     var output = std.Io.Writer.Allocating.init(allocator);
@@ -1134,7 +1134,7 @@ test "[edge] - [fasta scanner]: preserve sequence data split at the read boundar
     const expected = try std.fmt.allocPrint(
         allocator,
         "seq1\t{d}\t6\t{d}\t{d}\n",
-        .{ INDEX_READ_BUFFER_SIZE + 4, INDEX_READ_BUFFER_SIZE + 4, INDEX_READ_BUFFER_SIZE + 5 },
+        .{ INDEX_READ_BUFFER_BYTES + 4, INDEX_READ_BUFFER_BYTES + 4, INDEX_READ_BUFFER_BYTES + 5 },
     );
 
     try std.testing.expectEqual(@as(u32, 1), count);
@@ -1143,9 +1143,9 @@ test "[edge] - [fasta scanner]: preserve sequence data split at the read boundar
     var index = try main.indexer.scanZfiData(allocator, fasta.items);
     defer index.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), index.records.items.len);
-    try std.testing.expectEqual(@as(u64, INDEX_READ_BUFFER_SIZE + 4), index.records.items[0].seq_len);
-    try std.testing.expectEqual(@as(u32, INDEX_READ_BUFFER_SIZE + 4), index.records.items[0].line_bases);
-    try std.testing.expectEqual(@as(u32, INDEX_READ_BUFFER_SIZE + 5), index.records.items[0].line_bytes);
+    try std.testing.expectEqual(@as(u64, INDEX_READ_BUFFER_BYTES + 4), index.records.items[0].seq_len);
+    try std.testing.expectEqual(@as(u32, INDEX_READ_BUFFER_BYTES + 4), index.records.items[0].line_bases);
+    try std.testing.expectEqual(@as(u32, INDEX_READ_BUFFER_BYTES + 5), index.records.items[0].line_bytes);
 }
 
 test "[edge] - [fai scanner]: counts a wrapped short final line with newline" {
@@ -2856,7 +2856,7 @@ test "[edge] - [zfi scanner]: keeps a short final line across the read boundary 
     defer fasta.deinit(allocator);
     try fasta.appendSlice(allocator, ">seq\n");
     const full_line = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n";
-    while (fasta.items.len + full_line.len < INDEX_READ_BUFFER_SIZE + 200) {
+    while (fasta.items.len + full_line.len < INDEX_READ_BUFFER_BYTES + 200) {
         try fasta.appendSlice(allocator, full_line);
     }
     try fasta.appendSlice(allocator, "ACGT\n");

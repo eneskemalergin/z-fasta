@@ -43,10 +43,10 @@ pub const Validation = struct {
     pub const CheckState = enum { passed, warnings, failed, incomplete };
     /// The four checks every report has, by the category of the codes each reports; `index_match`
     /// joins them when the FASTA was compared with its index.
-    pub const CHECKS = [_]diagnostics.Category{ .structure, .identifiers, .alphabet, .format };
+    const CHECKS = [_]diagnostics.Category{ .structure, .identifiers, .alphabet, .format };
     /// `records` counts headers seen; `records_completed`, records whose end was reached.
     pub const Examined = struct { bytes: u64 = 0, lines: u64 = 0, records: u64 = 0, records_completed: u64 = 0, symbols: u64 = 0 };
-    pub const Totals = struct { errors: u64 = 0, warnings: u64 = 0 };
+    const Totals = struct { errors: u64 = 0, warnings: u64 = 0 };
     pub const BudgetStop = struct { budget_bytes: u64, stopped_at_record: u64 };
     /// `omitted_duplicates`: records the index leaves out because an earlier record has the name.
     pub const IndexComparison = struct { format: diagnostics.Format, entries: u64, matched: u64, omitted_duplicates: u64 };

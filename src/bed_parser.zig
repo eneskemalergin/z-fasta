@@ -63,6 +63,7 @@ const BedDiagnostics = struct {
     at: diagnostics.Reference = .{},
 
     fn fail(self: @This(), details: diagnostics.Details, field_start: usize) diagnostics.Error {
+        @branchHint(.cold);
         var at = self.at;
         if (at.location.offset) |offset| {
             at.location.offset = std.math.add(u64, offset, field_start) catch null;

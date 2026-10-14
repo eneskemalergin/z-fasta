@@ -175,6 +175,7 @@ const Cli = struct {
     }
 
     fn fail(self: *Cli, details: diagnostics.Details) diagnostics.Error {
+        @branchHint(.cold);
         return self.failure.fail(.{ .details = details, .stage = .arguments });
     }
 

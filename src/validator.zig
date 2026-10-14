@@ -16,10 +16,10 @@ const diagnostics = @import("diagnostics");
 const index_format = @import("index_format.zig");
 const reporting = @import("reporting.zig");
 
-pub const TYPE_SAMPLE_SYMBOLS: u64 = 100_000;
+const TYPE_SAMPLE_SYMBOLS: u64 = 100_000;
 pub const READ_BUFFER_BYTES = 256 * 1024;
-pub const DEFAULT_MAX_HEADER_BYTES: u64 = 1024;
-pub const DEFAULT_FIX_WIDTH: u64 = 60;
+const DEFAULT_MAX_HEADER_BYTES: u64 = 1024;
+const DEFAULT_FIX_WIDTH: u64 = 60;
 
 pub const Schema = enum { none, uniprot, refseq };
 
@@ -525,10 +525,12 @@ const ScanDiag = struct {
     }
 
     pub fn capacity(self: @This(), role: diagnostics.CapacityRole, limit: u128, required: u128, legacy: anyerror) anyerror {
+        @branchHint(.cold);
         return self.fail(.{ .@"resource.capacity_limit_exceeded" = .{ .capacity_role = role, .limit = limit, .required = .{ .exact = required } } }, .allocate, .fasta, null, legacy);
     }
 
     pub fn consistency(self: @This(), check: diagnostics.Check, legacy: anyerror) anyerror {
+        @branchHint(.cold);
         return self.fail(.{ .@"internal.consistency_failed" = .{ .component = .validator, .check = check } }, .scan, .fasta, null, legacy);
     }
 
@@ -1047,11 +1049,11 @@ const Scan = struct {
         if (bytes.len == 0) return;
         const all_fast = switch (self.fast) {
             .none => false,
-            .plain_nucleotides => !fasta.PlainNucleotides.anyOutside(DENSE_VECTOR_LEN, bytes),
-            .plain_dna => !fasta.PlainDna.anyOutside(DENSE_VECTOR_LEN, bytes),
-            .plain_rna => !fasta.PlainRna.anyOutside(DENSE_VECTOR_LEN, bytes),
-            .protein => !fasta.ProteinSymbols.anyOutside(DENSE_VECTOR_LEN, bytes),
-            .any => !fasta.Bases.anyOutside(DENSE_VECTOR_LEN, bytes),
+            .plain_nucleotides => !fasta.PlainNucleotides.anyOutside(fasta.DENSE_VECTOR_LEN, bytes),
+            .plain_dna => !fasta.PlainDna.anyOutside(fasta.DENSE_VECTOR_LEN, bytes),
+            .plain_rna => !fasta.PlainRna.anyOutside(fasta.DENSE_VECTOR_LEN, bytes),
+            .protein => !fasta.ProteinSymbols.anyOutside(fasta.DENSE_VECTOR_LEN, bytes),
+            .any => !fasta.Bases.anyOutside(fasta.DENSE_VECTOR_LEN, bytes),
         };
         if (all_fast) {
             self.line.symbols += bytes.len;
@@ -1208,7 +1210,7 @@ const Scan = struct {
         const found = switch (self.names) {
             .stopped => return false,
             .source => |*set| set.observeFingerprint(identifier, offset, fingerprint),
-            .copied => |*set| set.observeAt(identifier, offset),
+            .copied => |*set| set.observe(identifier),
         } catch |err| {
             if (self.budget != null and self.budget.?.exhausted) {
                 self.report.name_budget_stop = .{ .budget_bytes = self.budget.?.limit, .stopped_at_record = self.record.ordinal };
@@ -1439,7 +1441,6 @@ const Scan = struct {
     }
 };
 
-const DENSE_VECTOR_LEN = std.simd.suggestVectorLength(u8) orelse 1;
 const FIRST_DEFINITION_BUFFER_BYTES = 64 * 1024;
 
 fn fileReference(offset: u64, line: u64, column: u64) diagnostics.Reference {
@@ -1735,16 +1736,16 @@ fn checkPackedNameAllocations(allocator: std.mem.Allocator) !void {
     var name = [_]u8{'A'} ** MAX_INDEX_NAME_BYTES;
     for (0..3) |i| {
         name[0] = @intCast('A' + i);
-        try std.testing.expect(!try names.observeAt(&name, 0));
+        try std.testing.expect(!try names.observe(&name));
     }
     for (0..300) |i| {
         var buffer: [32]u8 = undefined;
         const short = try std.fmt.bufPrint(&buffer, "name-{d}", .{i});
-        try std.testing.expect(!try names.observeAt(short, 0));
+        try std.testing.expect(!try names.observe(short));
     }
     for (0..3) |i| {
         name[0] = @intCast('A' + i);
-        try std.testing.expect(try names.observeAt(&name, 0));
+        try std.testing.expect(try names.observe(&name));
     }
 }
 
@@ -1956,7 +1957,7 @@ test "[failure] - [name catalog]: oversized offsets roll back the insertion" {
     var names = PackedNames.init(std.testing.allocator);
     defer names.deinit();
     names.position = @as(usize, std.math.maxInt(u32)) + 1;
-    try std.testing.expectError(error.OutOfMemory, names.observeAt("name", 0));
+    try std.testing.expectError(error.OutOfMemory, names.observe("name"));
     try std.testing.expectEqual(@as(u32, 0), names.map.count());
 }
 
@@ -1980,7 +1981,7 @@ test "[failure] - [name catalog]: cache representation limits are capacity failu
         names.diag = .{ .failure = &failure };
         defer names.deinit();
         names.position = @as(usize, std.math.maxInt(u32)) + 1;
-        try std.testing.expectError(error.CapacityExceeded, names.observeAt("name", 0));
+        try std.testing.expectError(error.CapacityExceeded, names.observe("name"));
         try std.testing.expectEqual(diagnostics.CapacityRole.name_offset, failure.primary().?.details.@"resource.capacity_limit_exceeded".capacity_role);
         try std.testing.expectEqual(@as(u32, 0), names.map.count());
     }

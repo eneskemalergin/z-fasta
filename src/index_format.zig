@@ -299,7 +299,7 @@ pub const LoadMode = union(enum) {
 };
 
 /// The stream a `.stream` load opens, and whether it rebuilds the `.zfi` name table to compare it.
-pub const StreamTarget = struct { entries: *EntryStream, check_name_table: bool = true };
+const StreamTarget = struct { entries: *EntryStream, check_name_table: bool = true };
 
 pub const LoadedIndex = struct {
     io: std.Io,
@@ -1337,6 +1337,7 @@ const Diagnostics = struct {
     }
 
     fn capacity(self: *const Diagnostics, role: diagnostics.CapacityRole, limit: u128, required: u128) diagnostics.Error {
+        @branchHint(.cold);
         return self.failure.fail(.{ .details = .{ .@"resource.capacity_limit_exceeded" = .{ .capacity_role = role, .limit = limit, .required = .{ .exact = required } } }, .stage = switch (role) {
             .map_bytes => .map,
             .name_map, .records => .allocate,
@@ -1350,6 +1351,7 @@ const Diagnostics = struct {
     }
 
     fn overflow(self: *const Diagnostics, field: diagnostics.IndexField, arithmetic: diagnostics.Arithmetic, lhs: u128, rhs: u128, max: u128) diagnostics.Error {
+        @branchHint(.cold);
         return self.fail(.{ .@"index.arithmetic_overflow" = .{ .field = field, .arithmetic = arithmetic, .lhs = lhs, .rhs = rhs, .max_value = max } });
     }
 
@@ -2062,6 +2064,7 @@ fn faiFieldContext(context: *Diagnostics, start: u64) Diagnostics {
 }
 
 fn missingFaiField(context: *Diagnostics, field: diagnostics.FaiField) diagnostics.Error {
+    @branchHint(.cold);
     return context.fail(.{ .@"index.fai.field_missing" = .{ .field = field, .column_number = @intCast(@intFromEnum(field) + 1) } });
 }
 

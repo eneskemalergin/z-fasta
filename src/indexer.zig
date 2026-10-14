@@ -14,11 +14,11 @@ const index_format = @import("index_format.zig");
 const fasta = @import("fasta.zig");
 const diagnostics = @import("diagnostics");
 
-pub const INDEX_READ_BUFFER_SIZE = 256 * 1024;
+pub const INDEX_READ_BUFFER_BYTES = 256 * 1024;
 
 pub const MAX_INDEX_NAME_LEN = std.math.maxInt(u16);
 
-pub const ScanOptions = struct {
+const ScanOptions = struct {
     max_name_len: ?usize = null,
     collect_side_tables: bool = false,
     require_initial_header: bool = false,
@@ -113,7 +113,7 @@ pub fn scanZfiData(
     data: []const u8,
 ) !ZfiIndex {
     var r = std.Io.Reader.fixed(data);
-    var read_buf: [INDEX_READ_BUFFER_SIZE]u8 = undefined;
+    var read_buf: [INDEX_READ_BUFFER_BYTES]u8 = undefined;
     return scanZfiReader(allocator, &r, &read_buf, .{});
 }
 
@@ -128,7 +128,7 @@ pub fn writeZfiIndexFile(
     const file = try std.Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
 
-    var file_buf: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
+    var file_buf: [INDEX_OUTPUT_BUFFER_BYTES]u8 = undefined;
     var file_fw = file.writer(io, &file_buf);
     try writeZfiIndex(&file_fw.interface, index, source_size, source_mtime_ns);
     try file_fw.flush();
@@ -185,7 +185,7 @@ pub fn scanFaiData(
     writer: anytype,
 ) !u32 {
     var r = std.Io.Reader.fixed(data);
-    var read_buf: [INDEX_READ_BUFFER_SIZE]u8 = undefined;
+    var read_buf: [INDEX_READ_BUFFER_BYTES]u8 = undefined;
     return scanFaiReader(allocator, &r, &read_buf, writer, .{});
 }
 
@@ -229,14 +229,14 @@ const IndexRecord = index_format.IndexRecord;
 const ZfiHeader = index_format.ZfiHeader;
 const ZFI_MAGIC = index_format.ZFI_MAGIC;
 
-const FILE_IO_BUF_SIZE = 8 * 1024;
-const INDEX_OUTPUT_BUFFER_SIZE = 64 * 1024;
-const INDEX_PATH_BUFFER_SIZE = std.Io.Dir.max_path_bytes;
+const FILE_IO_BUFFER_BYTES = 8 * 1024;
+const INDEX_OUTPUT_BUFFER_BYTES = 64 * 1024;
+const INDEX_PATH_BUFFER_BYTES = std.Io.Dir.max_path_bytes;
 const SMALL_INDEX_MAX_BYTES = 32 * 1024 * 1024;
 const ZFI_INITIAL_RECORD_CAPACITY = 4096;
-const FAI_SPOOL_NAME_BUFFER_SIZE = 64;
+const FAI_SPOOL_NAME_BUFFER_BYTES = 64;
 const FAI_U64_DECIMAL_DIGITS = 20;
-const FAI_SUFFIX_BUFFER_SIZE = 4 * (1 + FAI_U64_DECIMAL_DIGITS) + 1;
+const FAI_SUFFIX_BUFFER_BYTES = 4 * (1 + FAI_U64_DECIMAL_DIGITS) + 1;
 const FAI_SPOOL_CREATE_ATTEMPTS = 16;
 
 const IndexReference = struct {
@@ -293,10 +293,12 @@ const Diagnostics = struct {
     }
 
     pub fn capacity(self: @This(), role: diagnostics.CapacityRole, limit: u128, required: u128, legacy: anyerror) anyerror {
+        @branchHint(.cold);
         return self.fail(.{ .@"resource.capacity_limit_exceeded" = .{ .capacity_role = role, .limit = limit, .required = .{ .exact = required } } }, .allocate, self.at.source orelse .fasta, null, legacy);
     }
 
     pub fn consistency(self: @This(), check: diagnostics.Check, legacy: anyerror) anyerror {
+        @branchHint(.cold);
         return self.fail(.{ .@"internal.consistency_failed" = .{ .component = .indexer, .check = check } }, .scan, self.at.source orelse .fasta, null, legacy);
     }
 
@@ -399,7 +401,7 @@ fn writeZfiIndex(
         .record_count = @intCast(index.records.items.len),
         .source_size = source_size,
     };
-    try writer.writeAll(std.mem.asBytes(&header));
+    try writer.writeAll(&index_format.encodeZfiHeader(header));
     for (index.records.items) |rec| try writer.writeAll(std.mem.asBytes(&index_format.ZfiRecord.encode(rec)));
     try writer.writeAll(index.side_tables.items);
     try writer.writeAll(index.name_blob.items);
@@ -432,7 +434,7 @@ fn checkReadBufferSize(len: usize, failure: ?*diagnostics.Failure) !void {
 const FaiEmitBuffer = struct {
     diag: Diagnostics = .{ .format = .fai },
     writer: *std.Io.Writer,
-    buf: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined,
+    buf: [INDEX_OUTPUT_BUFFER_BYTES]u8 = undefined,
     len: usize = 0,
 
     fn flush(self: *FaiEmitBuffer) !void {
@@ -447,7 +449,7 @@ const FaiEmitBuffer = struct {
             return scan_diag.fail(.{ .@"index.nonuniform_fai" = .{ .reason = emit_info.nonuniform_reason, .observed = .{ .line_bases = emit_info.record.line_bases, .line_bytes = emit_info.record.line_bytes } } }, .scan, .fasta, null, error.NonUniformFai);
         }
         const rec = emit_info.record;
-        var suffix_buf: [FAI_SUFFIX_BUFFER_SIZE]u8 = undefined;
+        var suffix_buf: [FAI_SUFFIX_BUFFER_BYTES]u8 = undefined;
         const suffix = formatFaiSuffix(&suffix_buf, rec);
         const total = emit_info.name.len + suffix.len;
         if (total > self.buf.len) {
@@ -481,7 +483,7 @@ fn appendUnsignedDecimal(buffer: []u8, value: u64) usize {
     return digit_count;
 }
 
-fn formatFaiSuffix(buffer: *[FAI_SUFFIX_BUFFER_SIZE]u8, rec: IndexRecord) []const u8 {
+fn formatFaiSuffix(buffer: *[FAI_SUFFIX_BUFFER_BYTES]u8, rec: IndexRecord) []const u8 {
     const values = [_]u64{ rec.seq_len, rec.seq_offset, rec.line_bases, rec.line_bytes };
     var len: usize = 0;
     for (values) |value| {
@@ -499,7 +501,7 @@ const FaiSpool = struct {
     dir: std.Io.Dir,
     close_dir: bool,
     file: std.Io.File,
-    name: [FAI_SPOOL_NAME_BUFFER_SIZE]u8,
+    name: [FAI_SPOOL_NAME_BUFFER_BYTES]u8,
     name_len: usize,
 
     fn deinit(self: *FaiSpool, io: std.Io) void {
@@ -539,7 +541,7 @@ fn tryCreateSpool(io: std.Io, dir: std.Io.Dir, close_dir: bool, diag: Diagnostic
             return null;
         };
 
-        var name_buf: [FAI_SPOOL_NAME_BUFFER_SIZE]u8 = undefined;
+        var name_buf: [FAI_SPOOL_NAME_BUFFER_BYTES]u8 = undefined;
         const name = std.fmt.bufPrint(&name_buf, "z-fasta-{x}.fai.tmp", .{nonce}) catch unreachable;
         const file = dir.createFile(io, name, .{ .read = true, .exclusive = true, .permissions = SPOOL_PERMISSIONS }) catch |err| switch (err) {
             error.PathAlreadyExists => continue,
@@ -693,7 +695,7 @@ fn indexFai(
 ) !u32 {
     var spool = try openFaiSpool(io, environ, diag, .fai_spool);
     defer spool.deinit(io);
-    var tmp_io_buf: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
+    var tmp_io_buf: [INDEX_OUTPUT_BUFFER_BYTES]u8 = undefined;
     var tmp_fw = spool.file.writer(io, &tmp_io_buf);
     const count = scanFaiReader(allocator, &reader.interface, read_buf, &tmp_fw.interface, .{ .require_initial_header = true, .failure = diag.failure }) catch |err| {
         retainScanCause(diag.failure, reader, &tmp_fw);
@@ -703,10 +705,10 @@ fn indexFai(
     if (count == 0) return noIndexableRecords(diag);
     try checkSourceUnchanged(io, .cwd(), path, stat, diag);
     const tmp_size = (spool.file.stat(io) catch |err| return diag.fail(.{ .@"io.stat_failed" = {} }, .stat, .fai_spool, err, error.FaiSpoolReadFailed)).size;
-    var out_buf: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
+    var out_buf: [INDEX_OUTPUT_BUFFER_BYTES]u8 = undefined;
     var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
     var offset: u64 = 0;
-    var copy_buf: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
+    var copy_buf: [INDEX_OUTPUT_BUFFER_BYTES]u8 = undefined;
     while (offset < tmp_size) {
         const want: usize = @intCast(@min(copy_buf.len, tmp_size - offset));
         const n = spool.file.readPositionalAll(io, copy_buf[0..want], offset) catch |err| return diag.failReadAt(.fai_spool, offset, want, null, err, error.FaiSpoolReadFailed);
@@ -729,11 +731,11 @@ fn indexFai(
 }
 
 fn runIndexSmall(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, path: []const u8, options: Options, file: std.Io.File, stat: std.Io.File.Stat, diag: Diagnostics) !u32 {
-    var io_buf: [FILE_IO_BUF_SIZE]u8 = undefined;
-    var read_buf: [INDEX_READ_BUFFER_SIZE]u8 = undefined;
+    var io_buf: [FILE_IO_BUFFER_BYTES]u8 = undefined;
+    var read_buf: [INDEX_READ_BUFFER_BYTES]u8 = undefined;
     var file_reader = file.reader(io, &io_buf);
     if (options.emit_fai) return indexFai(allocator, io, environ, path, stat, &file_reader, &read_buf, diag);
-    var path_buf: [INDEX_PATH_BUFFER_SIZE]u8 = undefined;
+    var path_buf: [INDEX_PATH_BUFFER_BYTES]u8 = undefined;
     const zfi_path = try zfiOutputPath(&path_buf, path, diag);
     var index = scanZfiReader(allocator, &file_reader.interface, &read_buf, .{ .require_initial_header = true, .failure = diag.failure }) catch |err| {
         retainScanCause(diag.failure, &file_reader, null);
@@ -746,10 +748,14 @@ fn runIndexSmall(allocator: std.mem.Allocator, io: std.Io, environ: std.process.
     var atomic = std.Io.Dir.cwd().createFileAtomic(io, zfi_path, .{ .replace = true }) catch |err| return diag.fail(.{ .@"io.create_failed" = {} }, .create, .zfi, err, error.ZfiWriteFailed);
     defer cleanupAtomic(&atomic, io, diag.failure);
     if (diag.failure) |failure| failure.outputs.file.state = .staged;
-    var out_buf: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
+    var out_buf: [INDEX_OUTPUT_BUFFER_BYTES]u8 = undefined;
     var output = atomic.file.writer(io, &out_buf);
     writeZfiIndex(&output.interface, &index, stat.size, mtime) catch |err| return diag.fail(.{ .@"io.write_failed" = {} }, .write, .zfi, if (output.err) |cause| cause else err, error.ZfiWriteFailed);
     if (diagnostics.flushOutput(&output, if (diag.failure) |failure| &failure.outputs.file else null)) |cause| return diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .zfi, cause, error.ZfiWriteFailed);
+    return publishZfi(&atomic, io, path, stat, count, diag);
+}
+
+fn publishZfi(atomic: *std.Io.File.Atomic, io: std.Io, path: []const u8, stat: std.Io.File.Stat, count: u32, diag: Diagnostics) !u32 {
     try checkSourceUnchanged(io, .cwd(), path, stat, diag);
     atomic.replace(io) catch |err| {
         if (diag.failure) |failure| failure.outputs.file.state = .unknown;
@@ -764,11 +770,11 @@ fn runIndexSmall(allocator: std.mem.Allocator, io: std.Io, environ: std.process.
 }
 
 fn runIndexLarge(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, path: []const u8, options: Options, file: std.Io.File, stat: std.Io.File.Stat, diag: Diagnostics) !u32 {
-    var io_buf: [FILE_IO_BUF_SIZE]u8 = undefined;
-    var read_buf: [INDEX_READ_BUFFER_SIZE]u8 = undefined;
+    var io_buf: [FILE_IO_BUFFER_BYTES]u8 = undefined;
+    var read_buf: [INDEX_READ_BUFFER_BYTES]u8 = undefined;
     var reader = file.reader(io, &io_buf);
     if (options.emit_fai) return indexFai(allocator, io, environ, path, stat, &reader, &read_buf, diag);
-    var path_buf: [INDEX_PATH_BUFFER_SIZE]u8 = undefined;
+    var path_buf: [INDEX_PATH_BUFFER_BYTES]u8 = undefined;
     const zfi_path = try zfiOutputPath(&path_buf, path, diag);
     var deferred = diag;
     deferred.deferred = true;
@@ -790,17 +796,7 @@ fn runIndexLarge(allocator: std.mem.Allocator, io: std.Io, environ: std.process.
     catalog.names.compressed.encoded.diag.deferred = false;
     catalog.sides.diag.deferred = false;
     try catalog.finish(count, stat.size, mtime);
-    try checkSourceUnchanged(io, .cwd(), path, stat, diag);
-    catalog.atomic_file.?.replace(io) catch |err| {
-        if (diag.failure) |failure| failure.outputs.file.state = .unknown;
-        return diag.fail(.{ .@"io.publish_failed" = {} }, .publish, .zfi, err, error.ZfiFinalizeFailed);
-    };
-    if (diag.failure) |failure| {
-        failure.outputs.file.state = .published;
-        failure.outputs.file.records = count;
-        failure.work_complete = true;
-    }
-    return count;
+    return publishZfi(&catalog.atomic_file.?, io, path, stat, count, diag);
 }
 
 const CatalogBytes = struct {
@@ -811,7 +807,7 @@ const CatalogBytes = struct {
     role: diagnostics.SourceId = .catalog_spool,
     bytes: std.ArrayList(u8) = .empty,
     spool: ?FaiSpool = null,
-    buffer: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined,
+    buffer: [INDEX_OUTPUT_BUFFER_BYTES]u8 = undefined,
     buffered: usize = 0,
     len: u64 = 0,
     const MEMORY_BYTES = 1024 * 1024;
@@ -872,7 +868,7 @@ const CatalogBytes = struct {
             return;
         }
         var offset: u64 = 0;
-        var buffer: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
+        var buffer: [INDEX_OUTPUT_BUFFER_BYTES]u8 = undefined;
         while (offset < self.len) {
             const wanted: usize = @intCast(@min(buffer.len, self.len - offset));
             const n = self.spool.?.file.readPositionalAll(self.io, buffer[0..wanted], offset) catch |err| return self.diag.failReadAt(self.role, offset, wanted, null, err, error.ReadFailed);
@@ -922,7 +918,7 @@ const CompressedNames = struct {
 
     fn write(self: *@This(), writer: *std.Io.Writer, table: *index_format.NameTable.Builder) !void {
         try self.encoded.flush();
-        var read_buffer: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
+        var read_buffer: [INDEX_OUTPUT_BUFFER_BYTES]u8 = undefined;
         var memory_reader = std.Io.Reader.fixed(self.encoded.bytes.items);
         var file_reader: std.Io.File.Reader = undefined;
         const reader = if (self.encoded.spool) |spool| blk: {
@@ -961,7 +957,7 @@ const StreamedCatalog = struct {
     names: StagedNames,
     sides: CatalogBytes,
     atomic_file: ?std.Io.File.Atomic = null,
-    records: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined,
+    records: [INDEX_OUTPUT_BUFFER_BYTES]u8 = undefined,
     buffered: usize = 0,
     record_bytes: u64 = 0,
     write_failed: bool = false,
@@ -1019,7 +1015,7 @@ const StreamedCatalog = struct {
         try self.flushRecords();
         const file = self.atomic_file.?.file;
         const header = ZfiHeader{ .magic = ZFI_MAGIC, .record_count = count, .source_size = size };
-        file.writePositionalAll(self.io, std.mem.asBytes(&header), 0) catch |err| return self.diag.fail(.{ .@"io.write_failed" = {} }, .write, .zfi, err, error.ZfiWriteFailed);
+        file.writePositionalAll(self.io, &index_format.encodeZfiHeader(header), 0) catch |err| return self.diag.fail(.{ .@"io.write_failed" = {} }, .write, .zfi, err, error.ZfiWriteFailed);
         if (self.sides.len != 0) {
             const read_file = try self.openRecordsReader();
             defer read_file.close(self.io);
@@ -1041,7 +1037,7 @@ const StreamedCatalog = struct {
                 offset += wanted;
             }
         }
-        var buffer: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
+        var buffer: [INDEX_OUTPUT_BUFFER_BYTES]u8 = undefined;
         var output = file.writer(self.io, &buffer);
         output.pos = @sizeOf(ZfiHeader) + self.record_bytes;
         self.sides.copyTo(&output.interface) catch |err| {
@@ -1147,7 +1143,7 @@ const StagedNames = struct {
         try self.flushLengths();
         try self.lengths.flush();
         try self.raw.flush();
-        var names_buffer: [INDEX_OUTPUT_BUFFER_SIZE]u8 = undefined;
+        var names_buffer: [INDEX_OUTPUT_BUFFER_BYTES]u8 = undefined;
         var names_memory = std.Io.Reader.fixed(self.raw.bytes.items);
         var names_file: std.Io.File.Reader = undefined;
         const names = if (self.raw.spool) |spool| blk: {
@@ -1241,7 +1237,7 @@ test "[property] - [fai output]: matches standard formatting at integer boundari
     };
 
     for (cases) |rec| {
-        var actual_buf: [FAI_SUFFIX_BUFFER_SIZE]u8 = undefined;
+        var actual_buf: [FAI_SUFFIX_BUFFER_BYTES]u8 = undefined;
         const actual = formatFaiSuffix(&actual_buf, rec);
         var expected_buf: [128]u8 = undefined;
         const expected = try std.fmt.bufPrint(
@@ -1431,7 +1427,7 @@ test "[integration] - [name catalog]: spill replay preserves bytes and removes i
     for (data, 0..) |*byte, i| byte.* = @truncate(i);
     var spool_dir: ?std.Io.Dir = null;
     defer if (spool_dir) |dir| dir.close(io);
-    var spool_name: [FAI_SPOOL_NAME_BUFFER_SIZE]u8 = undefined;
+    var spool_name: [FAI_SPOOL_NAME_BUFFER_BYTES]u8 = undefined;
     var spool_name_len: usize = 0;
     {
         var storage = CatalogBytes{ .allocator = allocator, .io = io, .environ = .empty };
@@ -1636,11 +1632,11 @@ test "[failure] - [index diagnostics]: spill IO retains causes and exact short r
                 try std.testing.expectEqual(error.InputOutput, failure.primary().?.cause.?.zig);
             } else {
                 const details = failure.primary().?.details.@"io.unexpected_eof".exact;
-                try std.testing.expectEqual(@as(u64, INDEX_OUTPUT_BUFFER_SIZE), details.requested_bytes);
+                try std.testing.expectEqual(@as(u64, INDEX_OUTPUT_BUFFER_BYTES), details.requested_bytes);
                 try std.testing.expectEqual(@as(u64, 0), details.received_bytes);
                 try std.testing.expectEqual(@as(?diagnostics.Cause, null), failure.primary().?.cause);
             }
-            const expected_offset: u64 = if (i == 3) INDEX_OUTPUT_BUFFER_SIZE else 0;
+            const expected_offset: u64 = if (i == 3) INDEX_OUTPUT_BUFFER_BYTES else 0;
             try std.testing.expectEqual(expected_offset, output.written().len);
             try std.testing.expectEqual(@as(?u64, expected_offset), failure.primary().?.at.location.offset);
         }
