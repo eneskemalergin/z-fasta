@@ -24,6 +24,9 @@ pub const std_options: std.Options = .{
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 const command_allocator = if (builtin.mode == .Debug) debug_allocator.allocator() else std.heap.page_allocator;
 const LEAK_STATUS = 3;
+// A reader that closes stdout early ends the run as SIGPIPE would: quietly, with 128 + 13, so
+// `| head` prints no error and `set -o pipefail` still sees the truncation.
+const BROKEN_PIPE_STATUS = 141;
 
 pub fn main(init: std.process.Init.Minimal) void {
     const status = runCli(init);
@@ -280,6 +283,7 @@ fn runCli(init: std.process.Init.Minimal) u8 {
         if (format == .text and terminal_command) {
             const bytes = if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) USAGE else "z-fasta " ++ VERSION ++ "\n";
             const write_failure = writeStdoutDirect(bytes) orelse return 0;
+            if (brokenPipe(write_failure.cause)) return BROKEN_PIPE_STATUS;
             var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
             defer threaded.deinit();
             var failure: diagnostics.Failure = undefined;
@@ -302,10 +306,19 @@ fn runCli(init: std.process.Init.Minimal) u8 {
     failure.reset(operation);
     var cli = Cli{ .io = io, .args = &args, .format = format, .failure = &failure };
     const status = dispatch(&cli, init.environ, command) catch {
-        if (failure.primary().?.at.source == .stderr) return 1;
+        const primary = failure.primary().?;
+        if (primary.at.source == .stderr) return 1;
+        if (primary.at.source == .stdout and brokenPipe(primary.cause)) return BROKEN_PIPE_STATUS;
         return reportFailure(io, format, &failure);
     };
     return status;
+}
+
+fn brokenPipe(cause: ?diagnostics.Cause) bool {
+    return switch (cause orelse return false) {
+        .zig => |err| err == error.BrokenPipe,
+        .native => |native| native.domain == .posix_errno and native.number == @intFromEnum(std.posix.E.PIPE),
+    };
 }
 
 fn dispatch(cli: *Cli, environ: std.process.Environ, command: ?[]const u8) diagnostics.Error!u8 {

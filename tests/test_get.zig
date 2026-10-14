@@ -497,6 +497,38 @@ test "[cli] - [get names]: failures preserve only valid output prefixes" {
     }
 }
 
+test "[cli] - [get]: a reader that closes stdout ends the run quietly with 141" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // One record far larger than a pipe buffer, so the writes block until the reader is gone.
+    var data: std.ArrayList(u8) = .empty;
+    try data.appendSlice(allocator, ">long\n");
+    for (0..16 * 1024) |_| try data.appendSlice(allocator, "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT\n");
+    const fasta = try writeFastaArtifact(allocator, "get-closed-stdout", data.items);
+    defer std.Io.Dir.cwd().deleteFile(io, fasta) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta});
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const spawn_io = threaded.io();
+    const indexed = try std.process.run(allocator, spawn_io, .{ .argv = &.{ ZFASTA_BIN, "index", fasta } });
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, indexed.term);
+    var child = try std.process.spawn(spawn_io, .{ .argv = &.{ ZFASTA_BIN, "get", fasta, "long" }, .stdout = .pipe, .stderr = .pipe });
+    child.stdout.?.close(spawn_io);
+    child.stdout = null;
+    var stderr_buffer: [1024]u8 = undefined;
+    var stderr_reader = child.stderr.?.readerStreaming(spawn_io, &stderr_buffer);
+    const stderr = try stderr_reader.interface.allocRemaining(allocator, .limited(64 * 1024));
+    switch (try child.wait(spawn_io)) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 141), code),
+        else => return error.ChildProcessFailed,
+    }
+    try std.testing.expectEqualStrings("", stderr);
+}
+
 test "[cli] - [get]: rejects invalid requests, missing names, and transform conflicts" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

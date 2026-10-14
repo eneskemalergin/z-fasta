@@ -109,15 +109,15 @@ Use the temporary-output recipe in [Recipes](Recipes) when a partial file must n
 
 ## Output closed early
 
-The code is `io.write_failed` with `cause="BrokenPipe"`, and the exit status is 1. The reader closed stdout before z-fasta finished, for example `z-fasta get genome.fa chr1 | head`.
+When the reader closes stdout before z-fasta finishes, for example `z-fasta get genome.fa chr1 | head`, z-fasta stops without a message and exits 141, as a program stopped by `SIGPIPE` does. Any other write failure on stdout, such as a full disk, is `io.write_failed` with exit status 1.
 
-The data that reached the reader is correct; z-fasta reports that it could not deliver the rest. For a quick preview, request a smaller region instead of truncating the stream:
+The data that reached the reader is correct. For a quick preview, request a smaller region instead of truncating the stream:
 
 ```bash
 z-fasta get genome.fa chr1:1-1000
 ```
 
-In a pipeline with `set -o pipefail`, an early-closing reader makes the pipeline fail.
+In a pipeline with `set -o pipefail`, an early-closing reader makes the pipeline fail with status 141.
 
 ## Missing or unreadable file
 

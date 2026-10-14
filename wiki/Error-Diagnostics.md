@@ -11,7 +11,7 @@ z-fasta --error-format=text stats genome.fa
 
 The default is `--error-format=text`. The exact alternatives are `--error-format=text` and `--error-format=json`; the space-separated form is not accepted. The option can precede the command or appear among its arguments. The last valid repetition wins. Values of `--names`, `--bed`, `-o`, `--schema`, `--custom-alphabet` and `--max-header-len` remain option values even if their bytes resemble a renderer option.
 
-Help and version retain their position-dependent behavior. An invalid renderer option uses a short text fallback and exit 1. Failure while allocating command arguments also uses text. A broken stderr sink can prevent any report from arriving. A consumer must handle missing JSON as a failure to obtain a report.
+Help and version retain their position-dependent behavior. An invalid renderer option uses a short text fallback and exit 1. Failure while allocating command arguments also uses text. A broken stderr sink can prevent any report from arriving. A reader that closes stdout early ends any command with exit 141 and no report, as `SIGPIPE` would. A consumer must handle missing JSON as a failure to obtain a report.
 
 ## Text and machine examples
 
