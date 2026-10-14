@@ -4047,7 +4047,7 @@ fn expectStreamMatchesCatalog(allocator: std.mem.Allocator, fasta_path: []const 
         try std.testing.expectEqual(@as(u64, lines.len), try stream.sideLineCount(entry.record));
         for (lines, 0..) |line, k| try std.testing.expectEqual(line, try stream.sideLine(entry.record, k));
     }
-    try std.testing.expectEqual(@as(?main.index_format.EntryStream.Entry, null), try stream.next());
+    try std.testing.expectEqual(@as(?*const main.index_format.EntryStream.Entry, null), try stream.next());
 }
 
 test "[property] - [index loader]: an entry stream yields the catalog's entries in order" {

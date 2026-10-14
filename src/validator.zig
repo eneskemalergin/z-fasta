@@ -564,7 +564,7 @@ const Pair = struct {
     selection: index_format.IndexSelection,
     stream: *index_format.EntryStream,
     // The next entry in file order, read but not yet taken.
-    head: ?index_format.EntryStream.Entry = null,
+    head: ?*const index_format.EntryStream.Entry = null,
     catalog: ?index_format.LoadedIndex = null,
     lookup: ?Lookup = null,
     scanner: fasta.RecordScannerWith(ScanDiag),

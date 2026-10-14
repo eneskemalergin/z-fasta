@@ -293,12 +293,15 @@ pub const LoadMode = union(enum) {
     /// `positional` for the names a request file holds.
     matched: []const []const u8,
     /// Makes the file checks and leaves every entry to the stream, which checks each as it reads it.
-    stream: *EntryStream,
+    stream: StreamTarget,
     /// A mapped `.zfi` with only its file checks; `checkedRecord` checks each record and side
     /// table the first time it reads it, and lookups check what they probe. A `.fai` loads as for
     /// `lookup_full_map`.
     on_access,
 };
+
+/// The stream a `.stream` load opens, and whether it rebuilds the `.zfi` name table to compare it.
+pub const StreamTarget = struct { entries: *EntryStream, check_name_table: bool = true };
 
 pub const LoadedIndex = struct {
     io: std.Io,
@@ -975,14 +978,24 @@ pub const EntryStream = struct {
     remaining: u32 = 0,
     ordinal: u64 = 0,
     row: u64 = 0,
+    entry: Entry = undefined,
 
-    /// `name` borrows the stream until the next call; `offset` is where the entry starts in the
-    /// index file, and `ordinal` counts entries from 1.
+    /// `next` returns the stream's copy, valid until the next call. `name` borrows the stream;
+    /// `offset` is where the entry starts in the index file, and `ordinal` counts entries from 1.
     pub const Entry = struct { record: IndexRecord, name: []const u8, offset: u64, ordinal: u64 };
 
     pub fn open(self: *EntryStream, allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, selection: IndexSelection, failure: *diagnostics.Failure) diagnostics.Error!void {
-        var shell = try loadIndex(allocator, io, fasta_path, selection, .{ .stream = self }, failure);
+        var shell = try loadIndex(allocator, io, fasta_path, selection, .{ .stream = .{ .entries = self } }, failure);
         shell.deinit();
+    }
+
+    /// `open` without the `.zfi` name-table check, keeping the FASTA the index was checked against
+    /// open for the caller, who closes it. `.zfi` entries then come without names; `entryName`
+    /// reads one.
+    pub fn openWithFasta(self: *EntryStream, allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, selection: IndexSelection, failure: *diagnostics.Failure) diagnostics.Error!std.Io.File {
+        var shell = try loadIndex(allocator, io, fasta_path, selection, .{ .stream = .{ .entries = self, .check_name_table = false } }, failure);
+        shell.arena.deinit();
+        return shell.fasta_file;
     }
 
     pub fn close(self: *EntryStream) void {
@@ -991,11 +1004,19 @@ pub const EntryStream = struct {
         self.* = undefined;
     }
 
-    pub fn next(self: *EntryStream) diagnostics.Error!?Entry {
+    pub fn next(self: *EntryStream) diagnostics.Error!?*const Entry {
         return switch (self.source) {
             .zfi => self.nextZfi(),
             .fai => self.nextFai(),
         };
+    }
+
+    /// The entry's name, read from a `.zfi` opened by `openWithFasta`; it borrows the stream until
+    /// the next call.
+    pub fn entryName(self: *EntryStream, entry: *const Entry) diagnostics.Error![]const u8 {
+        if (self.source == .fai or self.table != null) return entry.name;
+        self.context.at = .{ .source = .zfi, .record = entry.ordinal, .location = .{ .offset = entry.offset } };
+        return self.names.take(self.blob_start + entry.record.name_offset, entry.record.name_len, &self.context);
     }
 
     /// The side table of a `.zfi` entry that does not use the uniform formula: its line count.
@@ -1016,7 +1037,7 @@ pub const EntryStream = struct {
     }
 
     // The checks `tryLoadZfi` makes before its records, in its order.
-    fn startZfi(self: *EntryStream, allocator: std.mem.Allocator, io: std.Io, path: []const u8, zfi_size: u64, fasta_size: u64, fasta_mtime_ns: i96, context: *Diagnostics) diagnostics.Error!void {
+    fn startZfi(self: *EntryStream, allocator: std.mem.Allocator, io: std.Io, path: []const u8, zfi_size: u64, fasta_size: u64, fasta_mtime_ns: i96, check_name_table: bool, context: *Diagnostics) diagnostics.Error!void {
         try self.start(io, path, .zfi, fasta_size, context);
         errdefer self.file.close(io);
         const size = std.math.cast(usize, zfi_size) orelse return context.capacity(.map_bytes, std.math.maxInt(usize), zfi_size);
@@ -1045,14 +1066,14 @@ pub const EntryStream = struct {
         self.blob_len = blob.regions.blob_len;
         self.table_start = blob.regions.table_start;
         self.allocator = allocator;
-        self.table = NameTable.Builder.init(allocator, header.record_count) catch return context.allocation(.name_map, blob.regions.table_len);
+        if (check_name_table) self.table = NameTable.Builder.init(allocator, header.record_count) catch return context.allocation(.name_map, blob.regions.table_len);
         self.previous_side_end = self.records_end;
         self.reader.seekTo(ZFI_HEADER_BYTES) catch |err| return context.ioFailure(.read, err);
         self.remaining = header.record_count;
     }
 
     // The checks `validateZfiRecords` makes for one record, in its order.
-    fn nextZfi(self: *EntryStream) diagnostics.Error!?Entry {
+    fn nextZfi(self: *EntryStream) diagnostics.Error!?*const Entry {
         if (self.remaining == 0) {
             if (self.table) |*table| {
                 defer {
@@ -1065,30 +1086,42 @@ pub const EntryStream = struct {
         }
         const context = &self.context;
         const offset = self.reader.logicalPos();
-        context.at = .{ .source = .zfi, .record = self.ordinal + 1, .location = .{ .offset = offset } };
-        const bytes = self.reader.interface.takeArray(ZFI_INDEX_RECORD_BYTES) catch |err| switch (err) {
-            error.ReadFailed => return context.ioFailure(.read, self.reader.err orelse err),
-            error.EndOfStream => return context.read(offset, ZFI_INDEX_RECORD_BYTES, self.reader.interface.buffered().len, null),
+        const bytes = self.reader.interface.takeArray(ZFI_INDEX_RECORD_BYTES) catch |err| {
+            context.at = .{ .source = .zfi, .record = self.ordinal + 1, .location = .{ .offset = offset } };
+            switch (err) {
+                error.ReadFailed => return context.ioFailure(.read, self.reader.err orelse err),
+                error.EndOfStream => return context.read(offset, ZFI_INDEX_RECORD_BYTES, self.reader.interface.buffered().len, null),
+            }
         };
         const record = std.mem.bytesToValue(ZfiRecord, bytes).decode();
-        try checkNameExtent(record, self.blob_len, context);
-        if (record.isUniformWidth()) {
-            try checkUniformGeometry(record, self.fasta_size, context);
-        } else {
-            try checkSequenceStart(record, self.fasta_size, context);
-            const end = try loadZfiSideTable(&self.sides, record, self.records_end, self.blob_start, self.fasta_size, context);
-            const table = record.sideTableOffset();
-            if (table < self.previous_side_end) {
-                context.at.location.offset = table;
-                return context.fail(.{ .@"index.side_table_order_invalid" = .{ .table_start = table, .minimum_start = self.previous_side_end } });
+        // A sound uniform record, nearly every one, is checked without the diagnostic context.
+        const plain = record.isUniformWidth() and nameExtentDefect(record, self.blob_len) == null and uniformGeometryDefect(record, self.fasta_size) == null;
+        if (!plain) {
+            context.at = .{ .source = .zfi, .record = self.ordinal + 1, .location = .{ .offset = offset } };
+            try checkNameExtent(record, self.blob_len, context);
+            if (record.isUniformWidth()) {
+                try checkUniformGeometry(record, self.fasta_size, context);
+            } else {
+                try checkSequenceStart(record, self.fasta_size, context);
+                const end = try loadZfiSideTable(&self.sides, record, self.records_end, self.blob_start, self.fasta_size, context);
+                const table = record.sideTableOffset();
+                if (table < self.previous_side_end) {
+                    context.at.location.offset = table;
+                    return context.fail(.{ .@"index.side_table_order_invalid" = .{ .table_start = table, .minimum_start = self.previous_side_end } });
+                }
+                self.previous_side_end = end;
             }
-            self.previous_side_end = end;
         }
-        const name = try self.names.take(self.blob_start + record.name_offset, record.name_len, context);
-        self.table.?.insert(name);
+        const name = if (self.table) |*table| named: {
+            context.at = .{ .source = .zfi, .record = self.ordinal + 1, .location = .{ .offset = offset } };
+            const name = try self.names.take(self.blob_start + record.name_offset, record.name_len, context);
+            table.insert(name);
+            break :named name;
+        } else "";
         self.remaining -= 1;
         self.ordinal += 1;
-        return .{ .record = record, .name = name, .offset = offset, .ordinal = self.ordinal };
+        self.entry = .{ .record = record, .name = name, .offset = offset, .ordinal = self.ordinal };
+        return &self.entry;
     }
 
     fn compareTable(self: *EntryStream, expected: []const u8) diagnostics.Error!void {
@@ -1102,7 +1135,7 @@ pub const EntryStream = struct {
     }
 
     // The checks `tryLoadFai` makes for one row, in its order.
-    fn nextFai(self: *EntryStream) diagnostics.Error!?Entry {
+    fn nextFai(self: *EntryStream) diagnostics.Error!?*const Entry {
         const context = &self.context;
         while (true) {
             const offset = self.reader.logicalPos();
@@ -1134,7 +1167,8 @@ pub const EntryStream = struct {
             const record = IndexRecord{ .name_offset = offset, .name_len = fields.name_len, .seq_offset = fields.seq_offset, .seq_len = fields.seq_len, .line_bases = fields.line_bases, .line_bytes = fields.line_bytes };
             try checkUniformGeometry(record, self.fasta_size, context);
             self.ordinal += 1;
-            return .{ .record = record, .name = line[0..fields.name_end], .offset = offset, .ordinal = self.ordinal };
+            self.entry = .{ .record = record, .name = line[0..fields.name_end], .offset = offset, .ordinal = self.ordinal };
+            return &self.entry;
         }
     }
 };
@@ -1413,7 +1447,7 @@ fn tryLoadZfi(
 
     if (mode == .stream) {
         if (zfi_stat.kind == .directory) return context.mapping(zfi_stat.size, null);
-        try mode.stream.startZfi(backing_allocator, io, zfi_path, zfi_stat.size, fasta_stat.size, fasta_stat.mtime.nanoseconds, context);
+        try mode.stream.entries.startZfi(backing_allocator, io, zfi_path, zfi_stat.size, fasta_stat.size, fasta_stat.mtime.nanoseconds, mode.stream.check_name_table, context);
         return streamShell(backing_allocator, io, fasta_file, fasta_stat.size, .zfi);
     }
 
@@ -1763,7 +1797,7 @@ fn tryLoadFai(
     if (mode == .matched and fai_stat.kind == .directory) return context.mapping(fai_stat.size, null);
     if (mode == .stream) {
         if (fai_stat.kind == .directory) return context.mapping(fai_stat.size, null);
-        try mode.stream.start(io, fai_path, .fai, fasta_stat.size, context);
+        try mode.stream.entries.start(io, fai_path, .fai, fasta_stat.size, context);
         return streamShell(backing_allocator, io, fasta_file, fasta_stat.size, .fai);
     }
 
@@ -2140,7 +2174,8 @@ fn parseFaiAsciiU64(line: []const u8, start: usize) ?struct { value: u64, end: u
     while (end < line.len and line[end] != '\t') : (end += 1) {
         const byte = line[end];
         if (byte < '0' or byte > '9') return null;
-        value = appendFaiDigit(value, byte) orelse return null;
+        // Nineteen digits always fit a u64.
+        value = if (end - start < 19) value * 10 + (byte - '0') else appendFaiDigit(value, byte) orelse return null;
     }
     if (end == start) return null;
     return .{ .value = value, .end = end };
@@ -2368,5 +2403,32 @@ fn compareNameTable(expected: []const u8, stored: []const u8, table_start: usize
         const slot = (first_byte + byte) / 4;
         context.at = .{ .source = .zfi, .location = .{ .offset = table_start + slot * 4 } };
         return context.fail(.{ .@"index.name_table_invalid" = .{ .slot = slot } });
+    }
+}
+
+test "[property] - [fai parser]: integer fields match a reference parse" {
+    var prng = std.Random.DefaultPrng.init(0xfa1);
+    const random = prng.random();
+    var line: [40]u8 = undefined;
+    for (0..20_000) |_| {
+        const digits = random.intRangeAtMost(usize, 0, 22);
+        const tail = random.intRangeAtMost(usize, 0, 12);
+        for (line[0..digits]) |*byte| byte.* = '0' + random.uintLessThan(u8, 10);
+        for (line[digits..][0..tail]) |*byte| byte.* = switch (random.uintLessThan(u8, 4)) {
+            0 => '\t',
+            1 => '0' + random.uintLessThan(u8, 10),
+            2 => '/',
+            else => ':',
+        };
+        const text = line[0 .. digits + tail];
+        const field_end = std.mem.findScalar(u8, text, '\t') orelse text.len;
+        const expected = std.fmt.parseInt(u64, text[0..field_end], 10) catch null;
+        const got = parseFaiAsciiU64(text, 0);
+        if (expected) |value| {
+            try std.testing.expectEqual(value, got.?.value);
+            try std.testing.expectEqual(field_end, got.?.end);
+        } else {
+            try std.testing.expect(got == null);
+        }
     }
 }
