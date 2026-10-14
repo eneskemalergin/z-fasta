@@ -1386,7 +1386,7 @@ fn runPositionalGet(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path
     try appendCliRequests(allocator, &requests, regions, options.orientation, diag);
     const names = allocator.alloc([]const u8, requests.items.len) catch return diag.oom(.request_names);
     for (requests.items, names) |request, *name| name.* = request.region.name;
-    var idx = try index_format.loadIndex(backing_allocator, io, fasta_path, .automatic, .{ .positional = names }, diag.failure);
+    var idx = try index_format.loadIndex(backing_allocator, io, fasta_path, .automatic, .{ .requested = names }, diag.failure);
     defer idx.deinit();
     diag.index_source = if (idx.source == .zfi) .zfi else .fai;
     return emitGet(allocator, io, &idx, options, requests.items, null, null, null, diag, buffers);
@@ -1415,7 +1415,7 @@ fn runFileGet(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path: []co
             const complete = requested.collect(reader, source, buffered_requests != null) catch return diag.oom(.request_collection);
             if (!complete) break :matched .lookup_full_map;
             if (buffered_requests == null) diag.lookup_scope = .retained_matches;
-            break :matched .{ .matched = requested.names.items };
+            break :matched .{ .requested = requested.names.items };
         } else .lookup_full_map;
         break :load try index_format.loadIndex(backing_allocator, io, fasta_path, .automatic, load_mode, diag.failure);
     };
@@ -1922,7 +1922,7 @@ test "[failure] - [get requests]: detects metadata changes and finds uncollected
     try file.setLength(io, before.size);
     try file.setTimestamps(io, .{ .modify_timestamp = .{ .new = before.mtime } });
     failure.reset(.get);
-    var idx = try index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta", .automatic, .{ .matched = &.{"seq1"} }, &failure);
+    var idx = try index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta", .automatic, .{ .requested = &.{"seq1"} }, &failure);
     defer idx.deinit();
     try checkRequestSource(io, opened, &context);
     var input: [64]u8 = undefined;

@@ -289,9 +289,7 @@ pub const LoadMode = union(enum) {
     stats_scan,
     /// A `.zfi` read on demand; from a `.fai`, only the first line for each name, checked. The
     /// index borrows `names`, which must outlive it.
-    positional: []const []const u8,
-    /// `positional` for the names a request file holds.
-    matched: []const []const u8,
+    requested: []const []const u8,
     /// Makes the file checks and leaves every entry to the stream, which checks each as it reads it.
     stream: StreamTarget,
     /// A mapped `.zfi` with only its file checks; `checkedRecord` checks each record and side
@@ -1437,6 +1435,7 @@ fn tryLoadZfi(
 
     const zfi_stat = zfi_file.stat(io) catch |err| return context.ioFailure(.stat, err);
 
+    if (zfi_stat.kind == .directory) return context.mapping(zfi_stat.size, null);
     if (zfi_stat.size == 0) {
         return context.truncated(.header, ZFI_HEADER_BYTES, zfi_stat.size);
     }
@@ -1446,14 +1445,12 @@ fn tryLoadZfi(
     }
 
     if (mode == .stream) {
-        if (zfi_stat.kind == .directory) return context.mapping(zfi_stat.size, null);
         try mode.stream.entries.startZfi(backing_allocator, io, zfi_path, zfi_stat.size, fasta_stat.size, fasta_stat.mtime.nanoseconds, mode.stream.check_name_table, context);
         return streamShell(backing_allocator, io, fasta_file, fasta_stat.size, .zfi);
     }
 
-    if (zfi_stat.kind == .directory) return context.mapping(zfi_stat.size, null);
     switch (mode) {
-        .lookup_full_map, .positional, .matched => {
+        .lookup_full_map, .requested => {
             const loaded = try openZfiOnDemand(backing_allocator, io, zfi_file, zfi_stat.size, fasta_file, fasta_stat, context);
             keep_file = true;
             return loaded;
@@ -1786,6 +1783,7 @@ fn tryLoadFai(
     defer fai_file.close(io);
 
     const fai_stat = fai_file.stat(io) catch |err| return context.ioFailure(.stat, err);
+    if (fai_stat.kind == .directory) return context.mapping(fai_stat.size, null);
 
     if (fai_stat.mtime.nanoseconds < fasta_stat.mtime.nanoseconds) {
         return context.fail(.{ .@"index.older_than_source" = .{ .index_mtime_ns = fai_stat.mtime.nanoseconds, .source_mtime_ns = fasta_stat.mtime.nanoseconds } });
@@ -1794,17 +1792,14 @@ fn tryLoadFai(
     if (fai_stat.size == 0) {
         return context.fail(.{ .@"index.no_records" = .{ .format = .fai } });
     }
-    if (mode == .matched and fai_stat.kind == .directory) return context.mapping(fai_stat.size, null);
     if (mode == .stream) {
-        if (fai_stat.kind == .directory) return context.mapping(fai_stat.size, null);
         try mode.stream.entries.start(io, fai_path, .fai, fasta_stat.size, context);
         return streamShell(backing_allocator, io, fasta_file, fasta_stat.size, .fai);
     }
 
     const streamed_mode: ?StreamedFaiMode = switch (mode) {
         .stats_scan => .stats_scan,
-        .positional => |names| .{ .positional = names },
-        .matched => |names| .{ .matched = names },
+        .requested => |names| .{ .requested = names },
         .lookup_full_map, .catalog, .on_access => null,
         .stream => unreachable,
     };
@@ -1947,8 +1942,7 @@ const FaiNameRef = struct {
 
 const StreamedFaiMode = union(enum) {
     stats_scan,
-    positional: []const []const u8,
-    matched: []const []const u8,
+    requested: []const []const u8,
 };
 
 fn loadFaiStreamed(
@@ -1969,13 +1963,13 @@ fn loadFaiStreamed(
     defer if (mode == .stats_scan) records_list.deinit(backing_allocator);
     var slices_list: std.ArrayList([]const u8) = .empty;
     const single_name = switch (mode) {
-        .positional, .matched => |names| if (names.len == 1) names[0] else null,
+        .requested => |names| if (names.len == 1) names[0] else null,
         .stats_scan => null,
     };
     var requested: std.StringHashMapUnmanaged(u32) = .empty;
     var maybe_requested: ?*NamePrefilter = null;
     switch (mode) {
-        .positional, .matched => |names| {
+        .requested => |names| {
             if (single_name == null) {
                 requested = try requestedNameMap(allocator, names, context);
                 maybe_requested = allocator.create(NamePrefilter) catch return context.allocation(.name_map, @sizeOf(NamePrefilter));
@@ -2018,7 +2012,7 @@ fn loadFaiStreamed(
             break :buffered available[0..breaks.end];
         } else file_reader.interface.takeDelimiter('\n') catch |err| switch (err) {
             error.ReadFailed => return context.ioFailure(.read, file_reader.err orelse err),
-            error.StreamTooLong => if (mode == .matched) long: {
+            error.StreamTooLong => if (mode == .requested) long: {
                 context.at.record = try context.nextOrdinal(record_number, .records);
                 const parsed = try takeLongFaiLine(&file_reader, &long_line_buffer, context);
                 long_fields = parsed.fields;
@@ -2055,7 +2049,7 @@ fn loadFaiStreamed(
 
         const rec_index = records_list.items.len;
         switch (mode) {
-            .positional, .matched => {
+            .requested => {
                 // The requested slice equals the line's name and outlives the index.
                 const name = if (matched) |entry| entry.key_ptr.* else single_name.?;
                 slices_list.append(allocator, name) catch return context.allocation(.name_slices, null);
@@ -2088,7 +2082,7 @@ fn loadFaiStreamed(
     else
         records_list.toOwnedSlice(allocator) catch return context.allocation(.records, null);
     const owned_slices = switch (mode) {
-        .positional, .matched => slices_list.toOwnedSlice(allocator) catch return context.allocation(.name_slices, null),
+        .requested => slices_list.toOwnedSlice(allocator) catch return context.allocation(.name_slices, null),
         .stats_scan => blk: {
             const names = allocator.alloc([]const u8, 2) catch return context.allocation(.name_slices, 2 * @sizeOf([]const u8));
             names[0] = try readFaiName(allocator, io, fai_file, shortest_ref, context);
@@ -2101,7 +2095,7 @@ fn loadFaiStreamed(
     };
 
     const name_map: ?std.StringHashMapUnmanaged(u32) = switch (mode) {
-        .positional, .matched => if (single_name != null) null else requested,
+        .requested => if (single_name != null) null else requested,
         .stats_scan => null,
     };
 
@@ -2112,7 +2106,7 @@ fn loadFaiStreamed(
         .name_map = name_map,
         .name_slices = owned_slices,
         .stats_name_indices = switch (mode) {
-            .positional, .matched => null,
+            .requested => null,
             .stats_scan => .{ shortest_index, longest_index },
         },
         .fai_data = null,

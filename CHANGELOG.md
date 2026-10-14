@@ -45,6 +45,11 @@ All notable changes to z-fasta will be documented in this file.
 - The fields of `index.no_indexable_records`, which now means that every record is empty.
 - `index.name_not_embedded` and the fields of `index.name_footer_missing`: every version 2 `.zfi` embeds its names and ends with its source identity.
 
+### Fixed
+
+- `get` resolves names through a `.fai` the same way for regions, names files, and BED files: a `.fai` row longer than 64 KiB no longer fails only for regions on the command line.
+- A directory where the `.zfi` or `.fai` should be fails with `io.map_failed` in every command, empty or not; an empty one reported `index.no_records` or `index.truncated`.
+
 ## [0.3.5]
 
 The `.zfi` file format and valid `.fai` rows are unchanged. **Re-index FASTA files that have a space or tab inside or at the end of a sequence line after a record's first line.** Version 0.3.4 indexed those records as fixed-width, so their `.zfi` and `.fai` sidecars report wrong lengths and GET returns the whitespace bytes; the stale-index check does not detect this. Other indexes remain valid. Existing successful FASTA, FAI, statistics and validator JSON v1 output keeps its format.
