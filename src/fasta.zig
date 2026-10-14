@@ -68,6 +68,10 @@ pub fn findNameDelimiter(data: []const u8, start: usize) usize {
 /// The rule `index` uses: a symbol is any byte above space.
 pub const Bases = struct {
     pub const countOutside = countWhitespace;
+
+    pub fn anyOutside(comptime vector_len: usize, data: []const u8) bool {
+        return anyVectorized(vector_len, data, isWhitespace);
+    }
 };
 
 /// IUPAC nucleotide symbols with both T and U, in either case.
@@ -88,6 +92,10 @@ pub fn PlainLetters(comptime letters: []const u8) type {
             return countOutsideWith(vector_len, data, isPlain);
         }
 
+        pub fn anyOutside(comptime vector_len: usize, data: []const u8) bool {
+            return anyOutsideWith(vector_len, data, isPlain);
+        }
+
         fn isPlain(comptime Vec: type, bytes: Vec) @Vector(@typeInfo(Vec).vector.len, bool) {
             const folded = bytes | @as(Vec, @splat(0x20));
             var inside: @Vector(@typeInfo(Vec).vector.len, bool) = @splat(false);
@@ -105,6 +113,10 @@ pub const PlainRna = PlainLetters("acgun");
 pub const ProteinSymbols = struct {
     pub fn countOutside(comptime vector_len: usize, data: []const u8) usize {
         return countOutsideWith(vector_len, data, isProteinSymbol);
+    }
+
+    pub fn anyOutside(comptime vector_len: usize, data: []const u8) bool {
+        return anyOutsideWith(vector_len, data, isProteinSymbol);
     }
 
     fn isProteinSymbol(comptime Vec: type, bytes: Vec) @Vector(@typeInfo(Vec).vector.len, bool) {
@@ -1141,16 +1153,34 @@ pub fn SourceDedupWith(comptime Diag: type) type {
         }
 
         pub fn observe(self: *@This(), name: []const u8, offset: u64) !bool {
+            return self.observeFingerprint(name, offset, fingerprintOf(name));
+        }
+
+        /// The fingerprint `observeFingerprint` takes for `name`. The table slots its probe starts
+        /// at are prefetched, so a caller that observes later finds them in cache.
+        pub fn prefetch(self: *@This(), name: []const u8) u32 {
+            const fingerprint = fingerprintOf(name);
+            switch (self.tables) {
+                inline else => |*set| set.prefetch(fingerprint),
+            }
+            return fingerprint;
+        }
+
+        pub fn observeFingerprint(self: *@This(), name: []const u8, offset: u64, fingerprint: u32) !bool {
             return switch (self.tables) {
                 .narrow => |*set| if (offset >= Tables(u32).CACHE_FLAG)
                     self.diag.capacity(.name_cache_offset, Tables(u32).CACHE_FLAG - 1, offset, error.SourceChanged)
                 else
-                    set.observe(self, name, @intCast(offset)),
+                    set.observeWithFingerprint(self, name, @intCast(offset), fingerprint),
                 .wide => |*set| if (offset >= Tables(u64).CACHE_FLAG)
                     self.diag.capacity(.name_cache_offset, Tables(u64).CACHE_FLAG - 1, offset, error.SourceChanged)
                 else
-                    set.observe(self, name, offset),
+                    set.observeWithFingerprint(self, name, offset, fingerprint),
             };
+        }
+
+        fn fingerprintOf(name: []const u8) u32 {
+            return @truncate(std.hash_map.hashString(name));
         }
 
         const CacheEncoding = struct { header: [7]u8, size: usize, middle: []const u8 };
@@ -1439,6 +1469,13 @@ pub fn SourceDedupWith(comptime Diag: type) type {
                     return false;
                 }
 
+                fn prefetch(self: *const @This(), fingerprint: u32) void {
+                    if (self.buckets.len == 0) return;
+                    const group = spread(fingerprint) & (self.buckets.len - 1) & ~@as(usize, 15);
+                    @prefetch(self.metadata.ptr + group, .{});
+                    @prefetch(self.buckets.ptr + group, .{});
+                }
+
                 fn spread(fingerprint: u32) usize {
                     return @truncate(@as(u64, fingerprint) *% 0x9e3779b97f4a7c15);
                 }
@@ -1544,6 +1581,31 @@ fn countOutsideWith(comptime vector_len: usize, data: []const u8, comptime insid
             return !inside(Vec, bytes);
         }
     }.outside);
+}
+
+fn anyOutsideWith(comptime vector_len: usize, data: []const u8, comptime inside: anytype) bool {
+    return anyVectorized(vector_len, data, struct {
+        fn outside(comptime Vec: type, bytes: Vec) @Vector(@typeInfo(Vec).vector.len, bool) {
+            return !inside(Vec, bytes);
+        }
+    }.outside);
+}
+
+// Whether `matches` selects any byte: masks ORed across vectors, the last partial vector read as the
+// slice's final full vector.
+fn anyVectorized(comptime vector_len: usize, data: []const u8, comptime matches: anytype) bool {
+    const Vec = @Vector(vector_len, u8);
+    if (data.len < vector_len) {
+        for (data) |byte| {
+            if (matches(@Vector(1, u8), .{byte})[0]) return true;
+        }
+        return false;
+    }
+    var found: @Vector(vector_len, bool) = @splat(false);
+    var pos: usize = 0;
+    while (data.len - pos > vector_len) : (pos += vector_len) found = found | matches(Vec, data[pos..][0..vector_len].*);
+    found = found | matches(Vec, data[data.len - vector_len ..][0..vector_len].*);
+    return @reduce(.Or, found);
 }
 
 // Counts the bytes `matches` selects: u8 lanes summed per group, so no lane overflows, and a last
@@ -1787,5 +1849,23 @@ test "[property] - [complement]: matches scalar mapping across chunk boundaries"
             try std.testing.expectEqual(complement(input), actual);
         }
         if (len < dst.len) try std.testing.expectEqual(@as(u8, 0xff), dst[len]);
+    }
+}
+
+test "[property] - [symbol sets]: anyOutside agrees with countOutside" {
+    var prng = std.Random.DefaultPrng.init(0xa11);
+    const random = prng.random();
+    var data: [200]u8 = undefined;
+    const alphabet = "ACGTNacgtnU*-Xx\n \t\r";
+    for (0..4000) |_| {
+        const len = random.uintAtMost(usize, data.len);
+        const stray = random.uintLessThan(u8, 4) == 0;
+        for (data[0..len]) |*byte| byte.* = if (stray) alphabet[random.uintLessThan(usize, alphabet.len)] else "ACGTacgt"[random.uintLessThan(usize, 8)];
+        const bytes = data[0..len];
+        inline for (.{ PlainNucleotides, PlainDna, PlainRna, ProteinSymbols, Bases }) |Symbols| {
+            inline for (.{ 1, 16, 32 }) |vector_len| {
+                try std.testing.expectEqual(Symbols.countOutside(vector_len, bytes) != 0, Symbols.anyOutside(vector_len, bytes));
+            }
+        }
     }
 }

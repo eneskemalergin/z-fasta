@@ -237,6 +237,7 @@ pub const AllocationRole = enum {
     validation_identifiers,
     validation_report,
     serialized_index,
+    output_buffer,
 };
 pub const CapacityRole = enum {
     input_bytes,
