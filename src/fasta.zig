@@ -129,33 +129,64 @@ pub fn countDenseLines(comptime Symbols: type, data: []const u8, start: usize, l
 
 /// Nucleotide when IUPAC nucleotide letters are more than 90% of `total`; empty is nucleotide.
 pub fn detectType(counts: *const [256]u64, total: u64) SequenceType {
-    if (total == 0) return .nucleotide;
-
-    const nuc_count = counts['A'] + counts['a'] +
-        counts['C'] + counts['c'] +
-        counts['G'] + counts['g'] +
-        counts['T'] + counts['t'] +
-        counts['R'] + counts['r'] +
-        counts['Y'] + counts['y'] +
-        counts['S'] + counts['s'] +
-        counts['W'] + counts['w'] +
-        counts['K'] + counts['k'] +
-        counts['M'] + counts['m'] +
-        counts['B'] + counts['b'] +
-        counts['D'] + counts['d'] +
-        counts['H'] + counts['h'] +
-        counts['V'] + counts['v'] +
-        counts['N'] + counts['n'] +
-        counts['U'] + counts['u'];
-
-    if (@as(u128, nuc_count) * 10 > @as(u128, total) * 9) {
-        return .nucleotide;
-    }
-    return .protein;
+    var nucleotides: u64 = 0;
+    for (IUPAC_NUCLEOTIDE_LETTERS) |letter| nucleotides += counts[letter] + counts[std.ascii.toLower(letter)];
+    return typeFromCounts(nucleotides, total);
 }
+
+/// `detectType` from the number of IUPAC nucleotide letters among `total` symbols.
+pub fn typeFromCounts(nucleotides: u64, total: u64) SequenceType {
+    if (total == 0) return .nucleotide;
+    return if (@as(u128, nucleotides) * 10 > @as(u128, total) * 9) .nucleotide else .protein;
+}
+
+pub fn isIupacNucleotide(byte: u8) bool {
+    return IUPAC_NUCLEOTIDE_TABLE[byte];
+}
+
+const IUPAC_NUCLEOTIDE_LETTERS = "ACGTRYSWKMBDHVNU";
+const IUPAC_NUCLEOTIDE_TABLE: [256]bool = blk: {
+    var table = [_]bool{false} ** 256;
+    for (IUPAC_NUCLEOTIDE_LETTERS) |letter| {
+        table[letter] = true;
+        table[std.ascii.toLower(letter)] = true;
+    }
+    break :blk table;
+};
 
 pub fn complement(byte: u8) u8 {
     return IUPAC_COMPLEMENT_TABLE[byte];
+}
+
+const Block = @Vector(32, u8);
+
+// `complement` on 32 bytes: letters fold to upper case, swap with their partner, and get their
+// case back; every other byte is left as it is.
+fn complementBlock(block: Block) Block {
+    const upper = block & @as(Block, @splat(0xDF));
+    // Blocks of A, C, G, T, and N in either case, nearly every block of a genome, swap by XOR.
+    const at = (upper == @as(Block, @splat('A'))) | (upper == @as(Block, @splat('T')));
+    const cg = (upper == @as(Block, @splat('C'))) | (upper == @as(Block, @splat('G')));
+    const plain = at | cg | (upper == @as(Block, @splat('N'))) | (block < @as(Block, @splat('A')));
+    if (@reduce(.And, plain)) {
+        const flip = @select(u8, at, @as(Block, @splat('A' ^ 'T')), @select(u8, cg, @as(Block, @splat('C' ^ 'G')), @as(Block, @splat(0))));
+        return block ^ flip;
+    }
+    var swapped = upper;
+    inline for (.{ "AT", "TA", "CG", "GC", "RY", "YR", "KM", "MK", "BV", "VB", "DH", "HD", "UA" }) |pair| {
+        swapped = @select(u8, upper == @as(Block, @splat(pair[0])), @as(Block, @splat(pair[1])), swapped);
+    }
+    const letter = (upper >= @as(Block, @splat('A'))) & (upper <= @as(Block, @splat('Z')));
+    return @select(u8, letter, swapped | (block & @as(Block, @splat(0x20))), block);
+}
+
+fn reverseBlock(block: Block) Block {
+    const order = comptime blk: {
+        var indices: [32]i32 = undefined;
+        for (&indices, 0..) |*index, i| index.* = 31 - @as(i32, @intCast(i));
+        break :blk indices;
+    };
+    return @shuffle(u8, block, undefined, order);
 }
 
 /// Caller assumes `dst.len == src.len`; only Debug checks it.
@@ -163,12 +194,24 @@ pub fn complementInto(dst: []u8, src: []const u8) void {
     std.debug.assert(dst.len == src.len);
     var i: usize = 0;
     while (src.len - i >= 32) : (i += 32) {
-        inline for (0..32) |j| {
-            dst[i + j] = IUPAC_COMPLEMENT_TABLE[src[i + j]];
-        }
+        dst[i..][0..32].* = complementBlock(src[i..][0..32].*);
     }
     while (i < src.len) : (i += 1) {
         dst[i] = IUPAC_COMPLEMENT_TABLE[src[i]];
+    }
+}
+
+/// `src` written backwards into `dst`, complemented when `do_complement`; they must not overlap.
+pub fn reverseInto(dst: []u8, src: []const u8, do_complement: bool) void {
+    std.debug.assert(dst.len == src.len);
+    var i: usize = 0;
+    while (src.len - i >= 32) : (i += 32) {
+        const block = reverseBlock(src[src.len - i - 32 ..][0..32].*);
+        dst[i..][0..32].* = if (do_complement) complementBlock(block) else block;
+    }
+    while (i < src.len) : (i += 1) {
+        const byte = src[src.len - 1 - i];
+        dst[i] = if (do_complement) IUPAC_COMPLEMENT_TABLE[byte] else byte;
     }
 }
 
@@ -1707,6 +1750,27 @@ test "[unit] - [complement]: maps IUPAC symbols and preserves other bytes" {
 
     for ([_]u8{ 0, '-', 'X', 'x', 0xff }) |byte| {
         try std.testing.expectEqual(byte, complement(byte));
+    }
+}
+
+test "[property] - [complement]: vector blocks match the table for every byte" {
+    const plain = "ACGTNacgtn-\n*" ** 8;
+    var plain_out: [plain.len]u8 = undefined;
+    complementInto(&plain_out, plain);
+    for (plain, plain_out) |input, actual| try std.testing.expectEqual(complement(input), actual);
+    var src: [256 + 31]u8 = undefined;
+    for (&src, 0..) |*byte, i| byte.* = @truncate(i);
+    var dst: [src.len]u8 = undefined;
+    complementInto(&dst, &src);
+    for (src, dst) |input, actual| try std.testing.expectEqual(complement(input), actual);
+    for (0..src.len + 1) |len| {
+        for ([_]bool{ false, true }) |do_complement| {
+            reverseInto(dst[0..len], src[0..len], do_complement);
+            for (dst[0..len], 0..) |actual, i| {
+                const input = src[len - 1 - i];
+                try std.testing.expectEqual(if (do_complement) complement(input) else input, actual);
+            }
+        }
     }
 }
 

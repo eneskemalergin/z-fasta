@@ -86,7 +86,7 @@ Names input streams in reusable batches and has no whole-input row limit.
 
 With a `.zfi`, GET finds each identifier through the index's name table and checks the index header, source identity, and layout plus every record and side table a request uses, so its time and memory depend on the requests, not on the index size. Run `z-fasta validate --index` to check every entry. Repeated requests still produce repeated output.
 
-With a `.fai`, seekable names and BED files are read twice: first to collect unique requested identifiers, then to emit requests in their original order. GET checks the complete `.fai` while retaining only matching records and names, so lookup memory grows with the unique requested identifiers. Stdin and named FIFOs load the full `.fai` because their requests cannot be replayed.
+With a `.fai`, seekable names and BED files are read twice: first to collect unique requested identifiers, then to emit requests in their original order. GET reads the `.fai` until it has the first line for every requested identifier, and checks and keeps only those lines, so lookup memory grows with the unique requested identifiers. Stdin and named FIFOs map the whole `.fai` into a name map because their requests cannot be replayed; each line is still parsed and checked only when a request uses it.
 
 ## Identifiers containing colons
 

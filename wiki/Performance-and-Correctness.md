@@ -40,7 +40,7 @@ I care about correct output before timing. The benchmark harness keeps correctne
 
 - Index reads sequence payload through a fixed 256 KiB buffer. Inputs above 32 MiB use compact name references and stream `.zfi` records to temporary output. Name, name-length, and side-table staging spill to disk after 1 MiB each. The `.zfi` name table is built in memory at the end, about 5 bytes per record. A non-uniform record's line table remains in memory while that record is parsed.
 - GET uses positional reads and fixed input/output buffers. Names and BED requests stream through bounded reusable workspaces.
-- GET resolves `.zfi` identifiers through the index's name table and checks only the records its requests use. With a `.fai`, seekable names and BED files retain only requested entries after checking the complete sidecar, and stdin and named FIFOs retain the full lookup.
+- GET resolves `.zfi` identifiers through the index's name table and checks only the records its requests use. With a `.fai`, positional requests and seekable names and BED files read the sidecar only until every requested name is found and check only the lines they keep; stdin and named FIFOs map every name and parse a line only when a request uses it.
 - Stats uses one 256 KiB descriptor-backed read window over indexed sequence spans.
 - Validate reads through one 256 KiB buffer. Its duplicate check keeps a fingerprint and a file offset per distinct identifier and re-reads an earlier identifier only on a fingerprint match. With `--index` it reads the index in file order through fixed buffers.
 

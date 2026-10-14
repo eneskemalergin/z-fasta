@@ -52,18 +52,19 @@ var failure: diagnostics.Failure = undefined;
 var reader = try zfasta.IndexedReader.open(allocator, io, fasta, .{}, &failure);
 defer reader.deinit();
 try testing.expectEqual(@as(usize, 2), reader.recordCount());
-const a = reader.lookup("a").?;
+const a = (try reader.lookup("a", &failure)).?;
 try testing.expectEqualStrings("a", a.name);
 try testing.expectEqual(@as(u64, 12), a.length);
 
 var buf: [16]u8 = undefined;
 try testing.expectEqualStrings("ACGTA", try reader.fetchInto(a.ordinal, .{ .start = 4, .end = 9 }, &buf, &failure));
-try testing.expect(reader.lookup("missing") == null);
-try testing.expect(reader.record(2) == null);
+try testing.expect(try reader.lookup("missing", &failure) == null);
+try testing.expect(try reader.record(2, &failure) == null);
 ```
 
 - `open` takes `.{ .index = .automatic }` by default, which prefers `ref.fa.zfi` and then `ref.fa.fai`, as `get` does. `.{ .index = .{ .fai = path } }` or `.{ .zfi = path }` opens exactly that file and never falls back.
-- `open` checks every index record once, and the `.zfi` name table; a `.fai` is read into a name map. `recordCount`, `record(ordinal)`, and `lookup(name)` read no sequence. `lookup` returns the first record with that name; later duplicates are reachable by ordinal.
+- `open` maps a `.zfi` and checks its header, source identity, and layout, so it costs the same for any index size; `record`, `lookup`, and `fetchInto` check each record, side table, table entry, and name the first time they read it, and fail with its index diagnostic. A `.fai` is mapped and its names read into a name map at `open`; each line is parsed and checked the first time it is used. Run `z-fasta validate --index` to check a whole index.
+- `record(ordinal, &failure)` and `lookup(name, &failure)` read no sequence and return null past the last record or for an unknown name. The returned `name` borrows the reader until `deinit`. `lookup` returns the first record with that name; later duplicates are reachable by ordinal.
 - `fetchInto` checks the ordinal, the interval, and that `dst` holds `end - start` bytes before it writes anything; a read failure after that can leave a prefix. It returns the slice of `dst` it filled.
 - A reader keeps the files open until `deinit`. It is not safe to share between threads, and its `io` must outlive it. A gzip input fails with `input.unsupported_format`.
 

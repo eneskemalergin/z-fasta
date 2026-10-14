@@ -1,6 +1,7 @@
 //! The `z-fasta` package. Only its public declarations are supported. Calls fill a caller-owned
 //! `diagnostics.Failure` and never print or exit.
-//! `IndexedReader` opens a FASTA and its sidecar once and fetches many intervals from it.
+//! `IndexedReader` opens a FASTA and its sidecar once and fetches many intervals from it; a
+//! `.zfi` is checked as its records are used, so opening costs the same for any index size.
 //! Intervals are zero-based half-open and never clipped. A reader is not safe for concurrent use,
 //! and its `io` must outlive it.
 //! `RecordReader` streams every record of a FASTA from any `std.Io.Reader`, by `index`'s rules.
@@ -50,7 +51,7 @@ pub const IndexedReader = struct {
 
     pub fn open(allocator: std.mem.Allocator, io: std.Io, path: []const u8, options: Options, failure: *diagnostics.Failure) diagnostics.Error!IndexedReader {
         failure.reset(.get);
-        var index = try index_format.loadIndex(allocator, io, path, options.index, .checked, failure);
+        var index = try index_format.loadIndex(allocator, io, path, options.index, .on_access, failure);
         errdefer index.deinit();
         try rejectCompressed(index, failure);
         const read_buffer = index.arena.allocator().alloc(u8, READ_BUFFER_BYTES) catch return failure.fail(.{
@@ -73,18 +74,26 @@ pub const IndexedReader = struct {
         return self.index.records.len();
     }
 
-    pub fn record(self: *const IndexedReader, ordinal: usize) ?RecordInfo {
-        if (ordinal >= self.index.records.len()) return null;
-        return .{
-            .ordinal = ordinal,
-            .name = self.index.recordName(ordinal) orelse "",
-            .length = self.index.records.get(ordinal).seq_len,
-        };
+    /// Null past the last record. A `.zfi` record is checked when it is read.
+    pub fn record(self: *IndexedReader, ordinal: usize, failure: *diagnostics.Failure) diagnostics.Error!?RecordInfo {
+        failure.reset(.get);
+        if (ordinal >= self.index.records.len()) {
+            failure.succeed();
+            return null;
+        }
+        const rec = try self.index.checkedRecord(ordinal, failure);
+        failure.succeed();
+        return .{ .ordinal = ordinal, .name = self.index.recordName(ordinal) orelse "", .length = rec.seq_len };
     }
 
-    /// First match wins.
-    pub fn lookup(self: *const IndexedReader, name: []const u8) ?RecordInfo {
-        return self.record(self.index.lookupName(name) orelse return null);
+    /// First match wins. A `.zfi` lookup checks the table entries and names it reads.
+    pub fn lookup(self: *IndexedReader, name: []const u8, failure: *diagnostics.Failure) diagnostics.Error!?RecordInfo {
+        failure.reset(.get);
+        const ordinal = try self.index.findName(name, failure) orelse {
+            failure.succeed();
+            return null;
+        };
+        return self.record(ordinal, failure);
     }
 
     /// Checks everything before writing `dst`; a later read failure can leave a prefix.

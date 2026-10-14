@@ -42,7 +42,7 @@ fn fetchRegions(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8
         const start = try std.fmt.parseInt(u64, line[colon + 1 .. dash], 10);
         const end = try std.fmt.parseInt(u64, line[dash + 1 ..], 10);
         if (start == 0 or end < start) return error.InvalidRegion;
-        const record = reader.lookup(line[0..colon]) orelse return error.UnknownRecord;
+        const record = try reader.lookup(line[0..colon], &failure) orelse return error.UnknownRecord;
         try bases.resize(allocator, @intCast(end - start + 1));
         try writeRecord(out, line, try reader.fetchInto(record.ordinal, .{ .start = start - 1, .end = end }, bases.items, &failure));
     }

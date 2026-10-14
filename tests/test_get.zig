@@ -94,7 +94,7 @@ test "[unit] - [get orientation]: composes independent reverse and complement op
 }
 
 test "[integration] - [region resolution]: preserves indexed coordinate geometry" {
-    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/simple.fasta", .checked);
+    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/simple.fasta", .on_access);
     defer idx.deinit();
 
     const Case = struct {
@@ -127,7 +127,7 @@ test "[integration] - [region resolution]: preserves indexed coordinate geometry
 }
 
 test "[integration] - [region resolution]: accepts a pipe-delimited protein identifier" {
-    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/proteome.fasta", .checked);
+    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/proteome.fasta", .on_access);
     defer idx.deinit();
 
     const r = try resolveRegion(&idx, "sp|P12345|PROT_HUMAN:1-10");
@@ -137,7 +137,7 @@ test "[integration] - [region resolution]: accepts a pipe-delimited protein iden
 }
 
 test "[integration] - [region resolution]: accepts a 200-byte identifier" {
-    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/edge_cases.fasta", .checked);
+    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/edge_cases.fasta", .on_access);
     defer idx.deinit();
 
     const long_name = "A" ** 200;
@@ -854,7 +854,7 @@ test "[failure] - [bed parser]: owns bounded previews after the input is reused"
 
 test "[failure] - [get diagnostics]: returns exact request facts without exiting" {
     const diagnostics = main.index_format.diagnostics;
-    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/simple.fasta", .checked);
+    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/simple.fasta", .on_access);
     defer idx.deinit();
     const cases = [_]struct { request: []const u8, code: diagnostics.Code }{
         .{ .request = "missing", .code = .@"request.sequence_not_found" },
@@ -909,7 +909,7 @@ test "[failure] - [get diagnostics]: retains FASTA read causes and exact short r
             return 0;
         }
     };
-    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/simple.fasta", .checked);
+    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/simple.fasta", .on_access);
     defer idx.deinit();
     for (0..2) |i| {
         var vtable = io.vtable.*;
@@ -941,7 +941,7 @@ test "[failure] - [get diagnostics]: retains FASTA read causes and exact short r
 
 test "[failure] - [get diagnostics]: returns partial writer failure with no final flush" {
     const diagnostics = main.index_format.diagnostics;
-    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/simple.fasta", .checked);
+    var idx = try utility.loadIndexGrouped(std.testing.allocator, io, "tests/data/simple.fasta", .on_access);
     defer idx.deinit();
     var buffer: [1]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);

@@ -14,6 +14,12 @@ pub const validator = @import("validator.zig");
 const diagnostics = @import("diagnostics");
 pub const reporting = @import("reporting.zig");
 
+/// The alternate signal stack only serves the segfault handler; without the handler, its 256 KiB of
+/// thread-local storage would only be cleared at every start.
+pub const std_options: std.Options = .{
+    .signal_stack_size = if (std.debug.default_enable_segfault_handler) 1 << 18 else null,
+};
+
 pub fn main(init: std.process.Init.Minimal) void {
     const status = runCli(init);
     if (status != 0) std.process.exit(status);

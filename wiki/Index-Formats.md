@@ -19,7 +19,7 @@ z-fasta index genome.fa
 - a name table that finds an identifier's first record directly;
 - optional side tables for non-uniform records.
 
-Uniform records use direct byte-offset arithmetic. Non-uniform records use a binary-searchable per-line table. Each record takes 24 bytes plus its identifier and 5 bytes of name table, and a non-uniform record adds 24 bytes per sequence line. Everything is read in place: GET looks a name up and checks only the records it uses, so opening even a large index costs about as much as opening a small one. `stats`, the Zig package's `IndexedReader.open`, and `validate --index` check every record.
+Uniform records use direct byte-offset arithmetic. Non-uniform records use a binary-searchable per-line table. Each record takes 24 bytes plus its identifier and 5 bytes of name table, and a non-uniform record adds 24 bytes per sequence line. Everything is read in place: GET looks a name up and checks only the records it uses, so opening even a large index costs about as much as opening a small one. The Zig package's `IndexedReader` checks each record the first time it reads it; `stats` and `validate --index` check every record.
 
 ## Compatibility `.fai`
 

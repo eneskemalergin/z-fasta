@@ -50,7 +50,7 @@ fn runCli(allocator: std.mem.Allocator, argv: []const []const u8, stdout_path: ?
 
 fn fetch(reader: *zfasta.IndexedReader, name: []const u8, interval: zfasta.Interval, dst: []u8) ![]u8 {
     var failure: diagnostics.Failure = undefined;
-    const info = reader.lookup(name) orelse return error.TestUnexpectedResult;
+    const info = try reader.lookup(name, &failure) orelse return error.TestUnexpectedResult;
     return reader.fetchInto(info.ordinal, interval, dst, &failure);
 }
 
@@ -73,7 +73,7 @@ fn expectRecordsMatchIndex(allocator: std.mem.Allocator, fixture: *const Fixture
     var records = zfasta.RecordReader.init(&source, &storage, &failure);
     var ordinal: usize = 0;
     while (try records.next()) |record| : (ordinal += 1) {
-        const info = indexed.record(ordinal) orelse return error.TestUnexpectedResult;
+        const info = try indexed.record(ordinal, &index_failure) orelse return error.TestUnexpectedResult;
         try testing.expectEqualStrings(info.name, record.id);
         var bases: [256]u8 = undefined;
         try testing.expectEqualStrings(try indexed.fetchInto(ordinal, .{ .start = 0, .end = info.length }, &bases, &index_failure), record.sequence);
@@ -137,7 +137,7 @@ test "[integration] - [indexed reader]: one open reader serves repeated fetches"
     var reader = try zfasta.IndexedReader.open(allocator, io, fasta, .{}, &failure);
     defer reader.deinit();
     try testing.expectEqual(@as(usize, 2), reader.recordCount());
-    const a = reader.lookup("a").?;
+    const a = (try reader.lookup("a", &failure)).?;
     try testing.expectEqualStrings("a", a.name);
     try testing.expectEqual(@as(u64, 12), a.length);
 
@@ -145,8 +145,8 @@ test "[integration] - [indexed reader]: one open reader serves repeated fetches"
     try testing.expectEqualStrings("ACGTA", try reader.fetchInto(a.ordinal, .{ .start = 4, .end = 9 }, &buf, &failure));
     try testing.expectEqualStrings("ACGTACGTACGT", try reader.fetchInto(a.ordinal, .{ .start = 0, .end = 12 }, &buf, &failure));
     try testing.expectEqualStrings("TTTTTTT", try fetch(&reader, "b", .{ .start = 0, .end = 7 }, &buf));
-    try testing.expect(reader.lookup("missing") == null);
-    try testing.expect(reader.record(2) == null);
+    try testing.expect(try reader.lookup("missing", &failure) == null);
+    try testing.expect(try reader.record(2, &failure) == null);
 }
 
 test "[property] - [indexed reader]: FAI, uniform ZFI and non-uniform ZFI agree" {
@@ -227,9 +227,35 @@ test "[integration] - [indexed reader]: lookup is first-wins while ordinals reac
     var reader = try zfasta.IndexedReader.open(allocator, io, fasta, .{}, &failure);
     defer reader.deinit();
     try testing.expectEqual(@as(usize, 2), reader.recordCount());
-    try testing.expectEqual(@as(usize, 0), reader.lookup("x").?.ordinal);
+    try testing.expectEqual(@as(usize, 0), (try reader.lookup("x", &failure)).?.ordinal);
     var buf: [4]u8 = undefined;
     try testing.expectEqualStrings("CCCC", try reader.fetchInto(1, .{ .start = 0, .end = 4 }, &buf, &failure));
+}
+
+test "[failure] - [indexed reader]: opens a damaged .zfi and reports the record it reads" {
+    const allocator = testing.allocator;
+    var fixture = try Fixture.init(allocator);
+    defer fixture.deinit(allocator);
+    try fixture.write("ref.fa", UNIFORM);
+    const fasta = try fixture.path(allocator, "ref.fa");
+    defer allocator.free(fasta);
+    try runCli(allocator, &.{ ZFASTA_BIN, "index", fasta }, null);
+    const zfi = try fixture.tmp.dir.readFileAlloc(io, "ref.fa.zfi", allocator, .unlimited);
+    defer allocator.free(zfi);
+    // The second record's name length, bits 48-63 of its first word, now reaches past the names.
+    zfi[16 + 24 + 6] = 0xff;
+    zfi[16 + 24 + 7] = 0xff;
+    try fixture.write("ref.fa.zfi", zfi);
+
+    var failure: diagnostics.Failure = undefined;
+    var reader = try zfasta.IndexedReader.open(allocator, io, fasta, .{}, &failure);
+    defer reader.deinit();
+    try testing.expectEqualStrings("a", (try reader.record(0, &failure)).?.name);
+    try testing.expectError(error.InvalidIndex, reader.record(1, &failure));
+    try expectCode(.@"index.name_out_of_bounds", &failure);
+    var buf: [8]u8 = undefined;
+    try testing.expectError(error.InvalidIndex, reader.fetchInto(1, .{ .start = 0, .end = 7 }, &buf, &failure));
+    try testing.expectEqualStrings("ACGTA", try fetch(&reader, "a", .{ .start = 0, .end = 5 }, &buf));
 }
 
 test "[failure] - [indexed reader]: explicit selection never falls back" {

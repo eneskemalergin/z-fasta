@@ -283,18 +283,21 @@ pub const IndexSelection = union(enum) {
 pub const LoadMode = union(enum) {
     /// Finds any name: a `.zfi` through its name table, a `.fai` through a full map.
     lookup_full_map,
-    /// `lookup_full_map`, after checking every record and the `.zfi` name table.
-    checked,
     /// Checks every record and the `.zfi` name table, without a `.fai` lookup map.
     catalog,
     /// Checks every record; a streamed `.fai` keeps only the two names a report prints.
     stats_scan,
-    /// A mapped `.zfi`; keeps only first matches from a `.fai`.
+    /// A `.zfi` read on demand; from a `.fai`, only the first line for each name, checked. The
+    /// index borrows `names`, which must outlive it.
     positional: []const []const u8,
-    /// A mapped `.zfi`; checks a whole `.fai` but keeps only the requested records.
+    /// `positional` for the names a request file holds.
     matched: []const []const u8,
     /// Makes the file checks and leaves every entry to the stream, which checks each as it reads it.
     stream: *EntryStream,
+    /// A mapped `.zfi` with only its file checks; `checkedRecord` checks each record and side
+    /// table the first time it reads it, and lookups check what they probe. A `.fai` loads as for
+    /// `lookup_full_map`.
+    on_access,
 };
 
 pub const LoadedIndex = struct {
@@ -314,18 +317,32 @@ pub const LoadedIndex = struct {
     zfi_side_end: usize = 0,
     name_table: []const u8 = &.{},
     name_table_offset: usize = 0,
-    /// Set for a `.zfi` loaded for `get`; every other load checks all records first.
+    /// Set for a `.zfi` loaded for `get`; every other load but `on_access` checks all records first.
     on_demand: ?*ZfiOnDemand = null,
+    /// One bit per record of an `on_access` `.zfi` or a lazily loaded `.fai`, set once
+    /// `checkedRecord` checked it.
+    checked_records: []usize = &.{},
+    /// Where each line of a lazily loaded `.fai` starts; `checkedRecord` parses it when asked.
+    fai_lines: []const FaiLine = &.{},
     source: IndexSource,
     arena: std.heap.ArenaAllocator,
 
     pub const IndexSource = enum { zfi, fai };
 
-    /// Record `rec_idx`; a `.zfi` loaded for `get` checks it and its side table first.
+    /// Record `rec_idx`; a `.zfi` loaded for `get` or `on_access` checks it and its side table
+    /// first.
     pub fn checkedRecord(self: *const LoadedIndex, rec_idx: usize, failure: *diagnostics.Failure) diagnostics.Error!IndexRecord {
-        const zfi = self.on_demand orelse return self.records.get(rec_idx);
         var context = Diagnostics{ .failure = failure, .at = .{ .source = .zfi } };
-        return zfi.checked(rec_idx, &context);
+        if (self.on_demand) |zfi| return zfi.checked(rec_idx, &context);
+        if (self.fai_lines.len != 0) return self.checkedFaiRecord(rec_idx, &context);
+        const rec = self.records.get(rec_idx);
+        if (self.checked_records.len == 0) return rec;
+        const word = &self.checked_records[rec_idx / @bitSizeOf(usize)];
+        const bit = @as(usize, 1) << @intCast(rec_idx % @bitSizeOf(usize));
+        if (word.* & bit != 0) return rec;
+        _ = try checkZfiRecord(self.zfi_data.?, rec, rec_idx, self.fasta_size, self.name_blob.?.len, self.zfi_side_start, self.zfi_side_end, &context);
+        word.* |= bit;
+        return rec;
     }
 
     /// The first record named `name`. A `.zfi` looks it up in its name table, and a damaged table
@@ -351,11 +368,19 @@ pub const LoadedIndex = struct {
         }
     }
 
-    /// Resolves a request batch's names with few reads for later `findName` and `checkedRecord`
-    /// calls; the results borrow `names` and `scratch` until `clearPrefetch`.
-    pub fn prefetchNames(self: *const LoadedIndex, scratch: std.mem.Allocator, names: []const []const u8) void {
+    /// Resolves a request batch's names with few reads through `buffer`, for `findNameAt` with the
+    /// same slices; the results borrow the bytes of `names` until `clearPrefetch`.
+    pub fn prefetchNames(self: *const LoadedIndex, names: []const []const u8, buffer: []u8) void {
         const zfi = self.on_demand orelse return;
-        zfi.prefetch(scratch, names) catch zfi.clearPrefetch();
+        zfi.prefetch(names, buffer) catch zfi.clearPrefetch();
+    }
+
+    /// `findName` for request `request` of the batch given to `prefetchNames`; `name` must be that
+    /// request's slice. The record it finds is the one `checkedRecord` reads next.
+    pub fn findNameAt(self: *const LoadedIndex, request: usize, name: []const u8, failure: *diagnostics.Failure) diagnostics.Error!?usize {
+        const zfi = self.on_demand orelse return self.findName(name, failure);
+        var context = Diagnostics{ .failure = failure, .at = .{ .source = .zfi } };
+        return zfi.findAt(request, name, &context);
     }
 
     pub fn clearPrefetch(self: *const LoadedIndex) void {
@@ -402,6 +427,7 @@ pub const LoadedIndex = struct {
         if (self.name_slices.len > 0) {
             return self.name_slices[rec_idx];
         }
+        if (self.fai_lines.len != 0) return faiLineName(self.fai_data.?[self.fai_lines[rec_idx].offset..]);
         const rec = self.records.get(rec_idx);
         if (self.source == .zfi) {
             if (nameExtentDefect(rec, self.name_blob.?.len) != null) return null;
@@ -411,10 +437,27 @@ pub const LoadedIndex = struct {
         return null;
     }
 
+    fn checkedFaiRecord(self: *const LoadedIndex, rec_idx: usize, context: *Diagnostics) diagnostics.Error!IndexRecord {
+        const data = self.fai_data.?;
+        const line = self.fai_lines[rec_idx];
+        const rest = data[line.offset..];
+        context.at = .{ .source = .fai, .record = rec_idx + 1, .location = .{ .offset = line.offset, .line = line.row, .column = 1 } };
+        const fields = try parseFaiIndexLine(rest[0 .. std.mem.findScalar(u8, rest, '\n') orelse rest.len], context);
+        const rec = IndexRecord{ .name_offset = line.offset, .name_len = fields.name_len, .seq_offset = fields.seq_offset, .seq_len = fields.seq_len, .line_bases = fields.line_bases, .line_bytes = fields.line_bytes };
+        const word = &self.checked_records[rec_idx / @bitSizeOf(usize)];
+        const bit = @as(usize, 1) << @intCast(rec_idx % @bitSizeOf(usize));
+        if (word.* & bit == 0) {
+            try checkUniformGeometry(rec, self.fasta_size, context);
+            word.* |= bit;
+        }
+        return rec;
+    }
+
     pub fn deinit(self: *LoadedIndex) void {
         if (self.on_demand) |zfi| {
             zfi.file.close(self.io);
             zfi.arena.deinit();
+            zfi.prefetch_arena.deinit();
             zfi.backing_allocator.destroy(zfi);
         }
         if (self.zfi_map) |*m| m.destroy(self.io);
@@ -503,14 +546,28 @@ const ZfiOnDemand = struct {
     side_tables: std.AutoHashMapUnmanaged(u64, CheckedSides) = .empty,
     /// The record a lookup last read, which a request checks next.
     last: ?struct { index: usize, record: IndexRecord } = null,
-    /// Lookups and records a `prefetch` resolved for the current request batch; names borrow it.
-    prefetched_names: std.StringHashMapUnmanaged(?usize) = .empty,
-    prefetched_records: std.AutoHashMapUnmanaged(usize, IndexRecord) = .empty,
+    /// What `prefetch` found for each request of the current batch, with the start of its name.
+    prefetched: []const Prefetched = &.{},
+    prefetched_names: []const [*]const u8 = &.{},
+    prefetched_candidates: []const Candidate = &.{},
+    prefetch_arena: std.heap.ArenaAllocator,
     name: [4096]u8 = undefined,
 
-    const PREFETCH_WINDOW_BYTES = 64 * 1024;
+    // Reading the bytes between two wanted entries costs about what a second read does up to here.
+    const PREFETCH_GAP_BYTES = 4096;
+    const PREFETCH_PROBE_SLOTS = 16;
 
     const CheckedSides = struct { seq_offset: u64, seq_len: u64, lines: []const SideTableLine };
+
+    /// `unknown` leaves the request to `find`, which reports any damage on its path; `found` names
+    /// the candidate that matched.
+    const Prefetched = struct {
+        state: enum(u8) { unknown, missing, found } = .missing,
+        candidate: u32 = 0,
+    };
+
+    /// A table entry whose stored hash bits match a requested name.
+    const Candidate = struct { request: u32, ordinal: u32, record: ZfiRecord = undefined };
 
     fn read(self: *ZfiOnDemand, offset: u64, buffer: []u8, context: *Diagnostics) diagnostics.Error![]u8 {
         const got = std.Io.File.readPositionalAll(self.file, self.io, buffer, offset) catch |err| return context.read(offset, buffer.len, null, err);
@@ -521,7 +578,6 @@ const ZfiOnDemand = struct {
     fn record(self: *ZfiOnDemand, index: usize, context: *Diagnostics) diagnostics.Error!IndexRecord {
         context.at = recordReference(index);
         if (self.last) |last| if (last.index == index) return last.record;
-        if (self.prefetched_records.get(index)) |rec| return rec;
         var bytes: [ZFI_INDEX_RECORD_BYTES]u8 = undefined;
         const rec = std.mem.bytesToValue(ZfiRecord, try self.read(ZFI_HEADER_BYTES + index * ZFI_INDEX_RECORD_BYTES, &bytes, context)).decode();
         self.last = .{ .index = index, .record = rec };
@@ -548,155 +604,264 @@ const ZfiOnDemand = struct {
         const lines = self.arena.allocator().alloc(SideTableLine, @intCast(count)) catch return context.allocation(.side_tables, table_end - count_end);
         context.at.location.offset = count_end;
         _ = try self.read(count_end, std.mem.sliceAsBytes(lines), context);
+        try self.keepSideTable(rec, count_end, lines, context);
+        return rec;
+    }
+
+    // Checks `lines`, the side table of `rec` that starts at `count_end`, and keeps it for the
+    // record's later requests.
+    fn keepSideTable(self: *ZfiOnDemand, rec: IndexRecord, count_end: usize, lines: []const SideTableLine, context: *Diagnostics) diagnostics.Error!void {
         var validation = SideTableValidation{};
         for (lines, 0..) |line, i| {
             context.at.location.offset = count_end + i * @sizeOf(SideTableLine);
             try validation.accept(line, rec, self.fasta_size, i + 1, context);
         }
         if (validation.expected_base_start != rec.seq_len) return context.fail(.{ .@"index.side_sequence_length_mismatch" = .{ .indexed_length = rec.seq_len, .side_table_bases = validation.expected_base_start } });
-        self.side_tables.put(self.arena.allocator(), offset, .{ .seq_offset = rec.seq_offset, .seq_len = rec.seq_len, .lines = lines }) catch return context.allocation(.side_tables, null);
-        return rec;
+        self.side_tables.put(self.arena.allocator(), rec.sideTableOffset(), .{ .seq_offset = rec.seq_offset, .seq_len = rec.seq_len, .lines = lines }) catch return context.allocation(.side_tables, null);
     }
 
-    /// Resolves `names` with reads sorted and merged into 64 KiB windows, so a large request batch
-    /// costs few reads. Best effort: a name whose table entries, record, or bytes are damaged or
-    /// unreadable stays out of the results, and its sequential lookup reports why.
-    fn prefetch(self: *ZfiOnDemand, scratch: std.mem.Allocator, names: []const []const u8) error{OutOfMemory}!void {
+    // The side tables of the records `prefetch` found, in file order through merged reads; a table
+    // that is damaged or does not fit a read is left to `checked`, which reports why.
+    fn prefetchSideTables(self: *ZfiOnDemand, keys: []u64, scratch: []u64, candidates: []const Candidate, buffer: []u8) error{OutOfMemory}!void {
+        radixSort(keys, scratch[0..keys.len], 24);
+        var failure: diagnostics.Failure = undefined;
+        failure.reset(.get);
+        var context = Diagnostics{ .failure = &failure, .at = .{ .source = .zfi } };
+        var i: usize = 0;
+        while (i < keys.len) {
+            const window_start: usize = @intCast(keys[i] >> 24);
+            var last = window_start;
+            var k = i + 1;
+            while (k < keys.len and (keys[k] >> 24) - last <= 4 * PREFETCH_GAP_BYTES and (keys[k] >> 24) - window_start < buffer.len) : (k += 1) last = @intCast(keys[k] >> 24);
+            const window_len = @min(buffer.len, self.side_end - window_start, last - window_start + 4 * PREFETCH_GAP_BYTES);
+            const got = std.Io.File.readPositionalAll(self.file, self.io, buffer[0..window_len], window_start) catch 0;
+            if (got != window_len) return;
+            var j = i;
+            while (j < k) : (j += 1) {
+                const rec = candidates[@intCast(keys[j] & 0xFF_FFFF)].record.decode();
+                const offset: usize = @intCast(keys[j] >> 24);
+                const count_end = sideTableExtent(rec, self.side_start, self.side_end, null, &context) catch continue;
+                if (count_end - window_start > window_len) break;
+                const count = std.mem.readInt(u64, buffer[offset - window_start ..][0..8], .little);
+                const table_end = sideTableExtent(rec, self.side_start, self.side_end, count, &context) catch continue;
+                if (table_end - window_start > window_len) break;
+                const lines = try self.arena.allocator().alloc(SideTableLine, @intCast(count));
+                @memcpy(std.mem.sliceAsBytes(lines), buffer[count_end - window_start .. table_end - window_start]);
+                self.keepSideTable(rec, count_end, lines, &context) catch |err| if (err == error.OutOfMemory) return error.OutOfMemory;
+            }
+            i = @max(j, i + 1);
+        }
+    }
+
+    /// Resolves `names` with reads sorted by position and merged across gaps of at most
+    /// `PREFETCH_GAP_BYTES`, through `buffer`, so a large request batch costs few reads. The results
+    /// borrow the bytes of `names`. Best effort: a name whose table entries, record, or bytes are
+    /// damaged or unreadable stays `unknown`, and its sequential lookup reports why.
+    fn prefetch(self: *ZfiOnDemand, names: []const []const u8, buffer: []u8) error{OutOfMemory}!void {
         self.clearPrefetch();
+        // Each sort key holds a position (home slot, ordinal, name offset) above an item index.
+        const request_bits = 30;
+        if (names.len >= 1 << request_bits or buffer.len < PREFETCH_PROBE_SLOTS * 4) return;
+        const allocator = self.prefetch_arena.allocator();
         const count: u64 = self.record_count;
         const ordinal_bits = NameTable.ordinalBits(count);
-        const Entry = struct { name: []const u8, home: u64, wanted: u64, usable: bool = true, found: ?u32 = null, rank: u32 = std.math.maxInt(u32) };
-        const Candidate = struct { entry: u32, rank: u32, ordinal: u32, name_offset: u64 = 0 };
-        var entries: std.ArrayList(Entry) = .empty;
-        var seen: std.StringHashMapUnmanaged(void) = .empty;
-        for (names) |name| {
-            if ((try seen.getOrPut(scratch, name)).found_existing) continue;
+        const results = try allocator.alloc(Prefetched, names.len);
+        @memset(results, .{});
+        const wanted = try allocator.alloc(u32, names.len);
+        const keys = try allocator.alloc(u64, names.len);
+        var scratch = try allocator.alloc(u64, names.len);
+        for (names, wanted, keys, 0..) |name, *fingerprint, *key, i| {
             const name_hash = NameTable.hash(name);
-            try entries.append(scratch, .{ .name = name, .home = NameTable.home(name_hash, self.table_slots), .wanted = NameTable.fingerprint(name_hash, ordinal_bits) });
+            fingerprint.* = @intCast(NameTable.fingerprint(name_hash, ordinal_bits));
+            key.* = NameTable.home(name_hash, self.table_slots) << request_bits | i;
         }
-        const by_home = try scratch.alloc(u32, entries.items.len);
-        for (by_home, 0..) |*entry, i| entry.* = @intCast(i);
-        std.mem.sortUnstable(u32, by_home, entries.items, struct {
-            fn less(items: []const Entry, a: u32, b: u32) bool {
-                return items[a].home < items[b].home;
-            }
-        }.less);
+        radixSort(keys, scratch, request_bits);
 
-        // Name table: each probe runs inside a window that starts at the first slot it needs.
+        // Name table. A window starts at the first slot a probe needs and reaches the homes that
+        // follow it closely; a probe that runs past its end reads a new one.
         var candidates: std.ArrayList(Candidate) = .empty;
-        const window = try scratch.alloc(u32, PREFETCH_WINDOW_BYTES / 4);
-        defer scratch.free(window);
+        const buffer_slots = buffer.len / 4;
         var window_start: u64 = 0;
         var window_len: u64 = 0;
-        for (by_home) |e| {
-            const entry = &entries.items[e];
-            var slot = entry.home;
-            var rank: u32 = 0;
-            while (true) {
-                if (slot == self.table_slots) {
-                    entry.usable = false;
+        // A repeated name shares the lookup of its first request; repeats sort next to each other.
+        const leader = try allocator.alloc(u32, names.len);
+        var previous: ?u32 = null;
+        var previous_home: u64 = 0;
+        for (keys, 0..) |key, k| {
+            const request: u32 = @intCast(key & ((1 << request_bits) - 1));
+            var slot = key >> request_bits;
+            if (previous) |first| {
+                if (previous_home == slot and std.mem.eql(u8, names[first], names[request])) {
+                    leader[request] = first;
+                    continue;
+                }
+            }
+            leader[request] = request;
+            previous = request;
+            previous_home = slot;
+            var steps: u64 = 0;
+            while (true) : (steps += 1) {
+                if (slot == self.table_slots) slot = 0;
+                if (steps == self.table_slots) {
+                    results[request].state = .unknown;
                     break;
                 }
                 if (slot < window_start or slot >= window_start + window_len) {
+                    var end = slot + PREFETCH_PROBE_SLOTS;
+                    var next = k + 1;
+                    while (next < keys.len) : (next += 1) {
+                        const home = keys[next] >> request_bits;
+                        if (home < slot or home > end + PREFETCH_GAP_BYTES / 4 or home + PREFETCH_PROBE_SLOTS - slot > buffer_slots) break;
+                        end = @max(end, home + PREFETCH_PROBE_SLOTS);
+                    }
                     window_start = slot;
-                    window_len = @min(window.len, self.table_slots - slot);
-                    const bytes = std.mem.sliceAsBytes(window[0..@intCast(window_len)]);
+                    window_len = @min(end, self.table_slots) - slot;
+                    const bytes = buffer[0..@intCast(window_len * 4)];
                     const got = std.Io.File.readPositionalAll(self.file, self.io, bytes, self.table_start + slot * 4) catch 0;
                     if (got != bytes.len) {
                         window_len = 0;
-                        entry.usable = false;
+                        results[request].state = .unknown;
                         break;
                     }
                 }
-                const value: u64 = std.mem.littleToNative(u32, window[@intCast(slot - window_start)]);
+                const value: u64 = std.mem.readInt(u32, buffer[@intCast((slot - window_start) * 4)..][0..4], .little);
                 if (value == 0) break;
                 const ordinal_plus_one = value & ((@as(u64, 1) << ordinal_bits) - 1);
                 if (ordinal_plus_one == 0 or ordinal_plus_one > count) {
-                    entry.usable = false;
+                    results[request].state = .unknown;
                     break;
                 }
-                if (value >> ordinal_bits == entry.wanted) {
-                    try candidates.append(scratch, .{ .entry = e, .rank = rank, .ordinal = @intCast(ordinal_plus_one - 1) });
-                    rank += 1;
+                // The first entry with the name's hash bits is almost always the name: other names
+                // share those bits once in 2^(32 - ordinal bits) entries. When it is not, the name
+                // goes to `find`, which walks on.
+                if (value >> ordinal_bits == wanted[request]) {
+                    try candidates.append(allocator, .{ .request = request, .ordinal = @intCast(ordinal_plus_one - 1) });
+                    break;
                 }
                 slot += 1;
             }
         }
+        if (candidates.items.len >= 1 << 24) return self.clearPrefetch();
 
-        // Records, in ordinal order.
-        const buffer = std.mem.sliceAsBytes(window);
-        std.mem.sortUnstable(Candidate, candidates.items, {}, struct {
-            fn less(_: void, a: Candidate, b: Candidate) bool {
-                return a.ordinal < b.ordinal;
-            }
-        }.less);
-        var named: std.ArrayList(Candidate) = .empty;
+        // Records, in ordinal order; a candidate whose name length matches moves on to the names.
+        const order = try allocator.alloc(u64, candidates.items.len);
+        if (scratch.len < order.len) scratch = try allocator.alloc(u64, order.len);
+        for (order, candidates.items, 0..) |*key, candidate, c| key.* = @as(u64, candidate.ordinal) << 32 | c;
+        radixSort(order, scratch[0..order.len], 32);
+        var named: usize = 0;
         var i: usize = 0;
-        while (i < candidates.items.len) {
-            const first = candidates.items[i].ordinal;
+        while (i < order.len) {
+            const first: u64 = order[i] >> 32;
             var j = i;
-            while (j + 1 < candidates.items.len and (@as(u64, candidates.items[j + 1].ordinal) - first + 1) * ZFI_INDEX_RECORD_BYTES <= buffer.len) j += 1;
-            const span: usize = @intCast((@as(u64, candidates.items[j].ordinal) - first + 1) * ZFI_INDEX_RECORD_BYTES);
-            const got = std.Io.File.readPositionalAll(self.file, self.io, buffer[0..span], ZFI_HEADER_BYTES + @as(u64, first) * ZFI_INDEX_RECORD_BYTES) catch 0;
-            for (candidates.items[i .. j + 1]) |candidate| {
-                const entry = &entries.items[candidate.entry];
+            while (j + 1 < order.len) : (j += 1) {
+                const next = order[j + 1] >> 32;
+                if ((next - (order[j] >> 32)) * ZFI_INDEX_RECORD_BYTES > PREFETCH_GAP_BYTES or (next - first + 1) * ZFI_INDEX_RECORD_BYTES > buffer.len) break;
+            }
+            const span: usize = @intCast(((order[j] >> 32) - first + 1) * ZFI_INDEX_RECORD_BYTES);
+            const got = std.Io.File.readPositionalAll(self.file, self.io, buffer[0..span], ZFI_HEADER_BYTES + first * ZFI_INDEX_RECORD_BYTES) catch 0;
+            for (order[i .. j + 1]) |key| {
+                const candidate = &candidates.items[@intCast(key & 0xFFFF_FFFF)];
                 if (got != span) {
-                    entry.usable = false;
+                    results[candidate.request].state = .unknown;
                     continue;
                 }
-                const at = (candidate.ordinal - first) * ZFI_INDEX_RECORD_BYTES;
-                const rec = std.mem.bytesToValue(ZfiRecord, buffer[at..][0..ZFI_INDEX_RECORD_BYTES]).decode();
+                const at: usize = @intCast((candidate.ordinal - first) * ZFI_INDEX_RECORD_BYTES);
+                candidate.record = std.mem.bytesToValue(ZfiRecord, buffer[at..][0..ZFI_INDEX_RECORD_BYTES]);
+                const rec = candidate.record.decode();
                 if (nameExtentDefect(rec, self.blob_len) != null) {
-                    entry.usable = false;
+                    results[candidate.request].state = .unknown;
                     continue;
                 }
-                try self.prefetched_records.put(scratch, candidate.ordinal, rec);
-                if (rec.name_len != entry.name.len) continue;
-                var with_name = candidate;
-                with_name.name_offset = rec.name_offset;
-                try named.append(scratch, with_name);
+                if (rec.name_len != names[candidate.request].len) {
+                    results[candidate.request].state = .unknown;
+                    continue;
+                }
+                // Name offsets are below 2^40, so 24 bits remain for the candidate.
+                order[named] = rec.name_offset << 24 | (key & 0xFFFF_FFFF);
+                named += 1;
             }
             i = j + 1;
         }
 
-        // Names, in blob order.
-        std.mem.sortUnstable(Candidate, named.items, {}, struct {
-            fn less(_: void, a: Candidate, b: Candidate) bool {
-                return a.name_offset < b.name_offset;
+        // Names, in blob order; a stored name that differs leaves its request to `find`.
+        const matches = order[0..named];
+        radixSort(matches, scratch[0..named], 24);
+        const nameEnd = struct {
+            fn get(key: u64, all: []const Candidate, requested: []const []const u8) u64 {
+                return (key >> 24) + requested[all[@intCast(key & 0xFF_FFFF)].request].len;
             }
-        }.less);
+        }.get;
         i = 0;
-        while (i < named.items.len) {
-            const first = named.items[i].name_offset;
+        while (i < matches.len) {
+            const first = matches[i] >> 24;
+            var end = nameEnd(matches[i], candidates.items, names);
             var j = i;
-            while (j + 1 < named.items.len and named.items[j + 1].name_offset + entries.items[named.items[j + 1].entry].name.len - first <= buffer.len) j += 1;
-            const end = named.items[j].name_offset + entries.items[named.items[j].entry].name.len;
+            while (j + 1 < matches.len) : (j += 1) {
+                const next = matches[j + 1] >> 24;
+                const next_end = @max(end, nameEnd(matches[j + 1], candidates.items, names));
+                if (next > end + PREFETCH_GAP_BYTES or next_end - first > buffer.len) break;
+                end = next_end;
+            }
             const span: usize = @intCast(end - first);
-            const bytes = buffer[0..span];
-            const got = std.Io.File.readPositionalAll(self.file, self.io, bytes, self.blob_start + first) catch 0;
-            for (named.items[i .. j + 1]) |candidate| {
-                const entry = &entries.items[candidate.entry];
+            const got = std.Io.File.readPositionalAll(self.file, self.io, buffer[0..span], self.blob_start + first) catch 0;
+            for (matches[i .. j + 1]) |key| {
+                const candidate = candidates.items[@intCast(key & 0xFF_FFFF)];
+                const result = &results[candidate.request];
                 if (got != span) {
-                    entry.usable = false;
+                    result.state = .unknown;
                     continue;
                 }
-                const stored = bytes[@intCast(candidate.name_offset - first)..][0..entry.name.len];
-                if (std.mem.eql(u8, stored, entry.name) and candidate.rank < entry.rank) {
-                    entry.rank = candidate.rank;
-                    entry.found = candidate.ordinal;
-                }
+                const name = names[candidate.request];
+                const stored = buffer[@intCast((key >> 24) - first)..][0..name.len];
+                if (result.state == .unknown) continue;
+                result.* = if (std.mem.eql(u8, stored, name)) .{ .state = .found, .candidate = @intCast(key & 0xFF_FFFF) } else .{ .state = .unknown };
             }
             i = j + 1;
         }
-        for (entries.items) |entry| {
-            if (entry.usable) try self.prefetched_names.put(scratch, entry.name, if (entry.found) |ordinal| ordinal else null);
+        var sides: std.ArrayList(u64) = .empty;
+        for (results, leader, 0..) |result, first, request| {
+            if (first != request or result.state != .found) continue;
+            const rec = candidates.items[result.candidate].record.decode();
+            if (rec.isUniformWidth() or self.side_tables.contains(rec.sideTableOffset())) continue;
+            // Side-table offsets are below 2^39, so 24 bits remain for the candidate.
+            try sides.append(allocator, rec.sideTableOffset() << 24 | result.candidate);
         }
+        if (sides.items.len != 0) {
+            if (scratch.len < sides.items.len) scratch = try allocator.alloc(u64, sides.items.len);
+            try self.prefetchSideTables(sides.items, scratch, candidates.items, buffer);
+        }
+        for (results, leader, 0..) |*result, first, request| {
+            if (first != request) result.* = results[first];
+        }
+        const starts = try allocator.alloc([*]const u8, names.len);
+        for (starts, names) |*start, name| start.* = name.ptr;
+        self.prefetched_names = starts;
+        self.prefetched_candidates = candidates.items;
+        self.prefetched = results;
     }
 
     fn clearPrefetch(self: *ZfiOnDemand) void {
-        self.prefetched_names = .empty;
-        self.prefetched_records = .empty;
+        self.prefetched = &.{};
+        self.prefetched_names = &.{};
+        self.prefetched_candidates = &.{};
+        _ = self.prefetch_arena.reset(.retain_capacity);
         self.last = null;
+    }
+
+    fn findAt(self: *ZfiOnDemand, request: usize, name: []const u8, context: *Diagnostics) diagnostics.Error!?usize {
+        if (request < self.prefetched.len and self.prefetched_names[request] == name.ptr) {
+            const result = self.prefetched[request];
+            switch (result.state) {
+                .found => {
+                    const candidate = self.prefetched_candidates[result.candidate];
+                    self.last = .{ .index = candidate.ordinal, .record = candidate.record.decode() };
+                    return candidate.ordinal;
+                },
+                .missing => return null,
+                .unknown => {},
+            }
+        }
+        return self.find(name, context);
     }
 
     // Compares the stored name at `offset` with `name`, a buffer at a time.
@@ -722,7 +887,6 @@ const ZfiOnDemand = struct {
         const ordinal_bits = NameTable.ordinalBits(count);
         const name_hash = NameTable.hash(name);
         const wanted = NameTable.fingerprint(name_hash, ordinal_bits);
-        if (self.prefetched_names.get(name)) |found| return found;
         var slot = NameTable.home(name_hash, self.table_slots);
         var window_buffer: [16]u32 = undefined;
         var window: []const u32 = &.{};
@@ -753,6 +917,39 @@ const ZfiOnDemand = struct {
         return null;
     }
 };
+
+/// Sorts `keys` ascending by their bits from `low_bit` up, 11 bits per pass, or 8 below 4,096 keys,
+/// where clearing the larger count table would cost more than the extra passes. Each pass is
+/// stable, so keys equal above `low_bit` keep their order: callers put an item index below it.
+/// For the key counts a request batch makes, this beats `std.mem.sortUnstable` several times over.
+fn radixSort(keys: []u64, scratch: []u64, low_bit: u7) void {
+    std.debug.assert(scratch.len == keys.len);
+    var used: u64 = 0;
+    for (keys) |key| used |= key;
+    const digit_bits: u7 = if (keys.len < 4096) 8 else 11;
+    const digits: usize = @as(usize, 1) << @intCast(digit_bits);
+    var source = keys;
+    var target = scratch;
+    var shift: u7 = low_bit;
+    while (shift < 64 - @clz(used)) : (shift += digit_bits) {
+        var starts: [2048]u32 = undefined;
+        @memset(starts[0..digits], 0);
+        for (source) |key| starts[@intCast(key >> @intCast(shift) & (digits - 1))] += 1;
+        var total: u32 = 0;
+        for (starts[0..digits]) |*start| {
+            const n = start.*;
+            start.* = total;
+            total += n;
+        }
+        for (source) |key| {
+            const digit: usize = @intCast(key >> @intCast(shift) & (digits - 1));
+            target[starts[digit]] = key;
+            starts[digit] += 1;
+        }
+        std.mem.swap([]u64, &source, &target);
+    }
+    if (source.ptr != keys.ptr) @memcpy(keys, source);
+}
 
 /// Every index entry in file order, through fixed buffers. `open` makes `loadIndex`'s file checks;
 /// `next` checks each entry as `loadIndex` does, so a damaged one fails where it is read. An
@@ -1200,7 +1397,9 @@ fn tryLoadZfi(
         error.FileNotFound => return null,
         else => return context.ioFailure(.open, err),
     };
-    defer zfi_file.close(io);
+    // An index read on demand keeps the file.
+    var keep_file = false;
+    defer if (!keep_file) zfi_file.close(io);
 
     const zfi_stat = zfi_file.stat(io) catch |err| return context.ioFailure(.stat, err);
 
@@ -1220,8 +1419,12 @@ fn tryLoadZfi(
 
     if (zfi_stat.kind == .directory) return context.mapping(zfi_stat.size, null);
     switch (mode) {
-        .lookup_full_map, .positional, .matched => return try openZfiOnDemand(backing_allocator, io, zfi_path, zfi_stat.size, fasta_file, fasta_stat, context),
-        .catalog, .stats_scan, .checked, .stream => {},
+        .lookup_full_map, .positional, .matched => {
+            const loaded = try openZfiOnDemand(backing_allocator, io, zfi_file, zfi_stat.size, fasta_file, fasta_stat, context);
+            keep_file = true;
+            return loaded;
+        },
+        .catalog, .stats_scan, .stream, .on_access => {},
     }
     const zfi_size = std.math.cast(usize, zfi_stat.size) orelse return context.capacity(.map_bytes, std.math.maxInt(usize), zfi_stat.size);
     var zfi_map = platform.mapFileReadOnly(io, zfi_file, zfi_size) catch |err| return context.mapping(zfi_stat.size, err);
@@ -1268,11 +1471,16 @@ fn tryLoadZfi(
     const side_region_start = records_end;
     const side_region_end = regions.blob_start;
 
-    try validateZfiRecords(records, fasta_stat.size, zfi_data, name_blob, side_region_start, side_region_end, context);
-    if (mode == .checked or mode == .catalog) try verifyNameTable(backing_allocator, .{ .mapped = records }, name_blob, name_table, regions.table_start, context);
+    if (mode != .on_access) try validateZfiRecords(records, fasta_stat.size, zfi_data, name_blob, side_region_start, side_region_end, context);
+    if (mode == .catalog) try verifyNameTable(backing_allocator, .{ .mapped = records }, name_blob, name_table, regions.table_start, context);
 
     var arena = std.heap.ArenaAllocator.init(backing_allocator);
     errdefer arena.deinit();
+    const checked_records: []usize = if (mode == .on_access) checked: {
+        const words = arena.allocator().alloc(usize, (header.record_count + @bitSizeOf(usize) - 1) / @bitSizeOf(usize)) catch return context.allocation(.records, null);
+        @memset(words, 0);
+        break :checked words;
+    } else &.{};
 
     return LoadedIndex{
         .io = io,
@@ -1286,6 +1494,7 @@ fn tryLoadZfi(
         .zfi_side_end = side_region_end,
         .name_table = name_table,
         .name_table_offset = regions.table_start,
+        .checked_records = checked_records,
         .source = .zfi,
         .arena = arena,
     };
@@ -1293,10 +1502,8 @@ fn tryLoadZfi(
 
 // The file checks of `tryLoadZfi`, in its order, through positional reads; records are left for
 // `ZfiOnDemand` to check as requests reach them.
-fn openZfiOnDemand(backing_allocator: std.mem.Allocator, io: std.Io, zfi_path: []const u8, zfi_size: u64, fasta_file: std.Io.File, fasta_stat: std.Io.File.Stat, context: *Diagnostics) diagnostics.Error!LoadedIndex {
+fn openZfiOnDemand(backing_allocator: std.mem.Allocator, io: std.Io, file: std.Io.File, zfi_size: u64, fasta_file: std.Io.File, fasta_stat: std.Io.File.Stat, context: *Diagnostics) diagnostics.Error!LoadedIndex {
     const size = std.math.cast(usize, zfi_size) orelse return context.capacity(.map_bytes, std.math.maxInt(usize), zfi_size);
-    const file = std.Io.Dir.cwd().openFile(io, zfi_path, .{}) catch |err| return context.ioFailure(.open, err);
-    errdefer file.close(io);
     context.at.location.offset = 0;
     if (size < ZFI_HEADER_BYTES) return context.truncated(.header, ZFI_HEADER_BYTES, size);
     var header_bytes: [ZFI_HEADER_BYTES]u8 = undefined;
@@ -1322,6 +1529,7 @@ fn openZfiOnDemand(backing_allocator: std.mem.Allocator, io: std.Io, zfi_path: [
         .file = file,
         .backing_allocator = backing_allocator,
         .arena = .init(backing_allocator),
+        .prefetch_arena = .init(backing_allocator),
         .record_count = header.record_count,
         .fasta_size = fasta_stat.size,
         .side_start = records_end,
@@ -1367,11 +1575,10 @@ const ZfiReadWindow = struct {
 
 const UNMATCHED_RECORD_INDEX = std.math.maxInt(u32);
 
-fn requestedNameMap(allocator: std.mem.Allocator, names: []const []const u8, reserve_multiplier: u32, context: *Diagnostics) diagnostics.Error!std.StringHashMapUnmanaged(u32) {
+fn requestedNameMap(allocator: std.mem.Allocator, names: []const []const u8, context: *Diagnostics) diagnostics.Error!std.StringHashMapUnmanaged(u32) {
     var map: std.StringHashMapUnmanaged(u32) = .empty;
     const count = std.math.cast(u32, names.len) orelse return context.capacity(.name_map, std.math.maxInt(u32), names.len);
-    const capacity = std.math.mul(u32, count, reserve_multiplier) catch return context.capacity(.name_map, std.math.maxInt(u32), @as(u128, count) * reserve_multiplier);
-    map.ensureTotalCapacity(allocator, capacity) catch return context.allocation(.name_map, null);
+    map.ensureTotalCapacity(allocator, count) catch return context.allocation(.name_map, null);
     for (names) |name| {
         const entry = map.getOrPutAssumeCapacity(name);
         if (!entry.found_existing) entry.value_ptr.* = UNMATCHED_RECORD_INDEX;
@@ -1564,7 +1771,7 @@ fn tryLoadFai(
         .stats_scan => .stats_scan,
         .positional => |names| .{ .positional = names },
         .matched => |names| .{ .matched = names },
-        .lookup_full_map, .checked, .catalog => null,
+        .lookup_full_map, .catalog, .on_access => null,
         .stream => unreachable,
     };
     if (streamed_mode) |selected| return @as(?LoadedIndex, try loadFaiStreamed(backing_allocator, io, fai_file, fasta_file, fasta_stat, selected, context));
@@ -1579,6 +1786,24 @@ fn tryLoadFai(
     const allocator = arena.allocator();
 
     const fai_data: platform.MappedBytes = fai_map.memory;
+
+    if (mode != .catalog) {
+        const lazy = try loadFaiLazy(allocator, fai_data, context);
+        return LoadedIndex{
+            .io = io,
+            .fasta_file = fasta_file,
+            .fai_map = fai_map,
+            .records = .{ .on_demand = lazy.lines.len },
+            .name_map = lazy.map,
+            .fai_data = fai_data,
+            .fai_lines = lazy.lines,
+            .checked_records = lazy.checked,
+            .fasta_size = fasta_stat.size,
+            .zfi_data = null,
+            .source = .fai,
+            .arena = arena,
+        };
+    }
 
     var approx_records = std.mem.count(u8, fai_data, "\n");
     if (fai_data.len > 0 and fai_data[fai_data.len - 1] != '\n') {
@@ -1645,6 +1870,41 @@ fn tryLoadFai(
     };
 }
 
+const FaiLine = struct { offset: u64, row: u64 };
+
+fn faiLineName(line: []const u8) []const u8 {
+    for (line, 0..) |byte, i| if (byte == '\t' or byte == '\n') return line[0..i];
+    return line;
+}
+
+// The lines of a mapped `.fai`, for any-name lookups: each name goes into the name map (first line
+// wins) and each line's start is kept; `checkedRecord` parses and checks a line when it is used.
+fn loadFaiLazy(allocator: std.mem.Allocator, data: []const u8, context: *Diagnostics) diagnostics.Error!struct { lines: []const FaiLine, map: std.StringHashMapUnmanaged(u32), checked: []usize } {
+    var lines: std.ArrayList(FaiLine) = .empty;
+    var map: std.StringHashMapUnmanaged(u32) = .empty;
+    const approx = std.mem.count(u8, data, "\n") + 1;
+    lines.ensureTotalCapacityPrecise(allocator, approx) catch return context.allocation(.records, @as(u64, approx) * @sizeOf(FaiLine));
+    map.ensureTotalCapacity(allocator, std.math.cast(u32, approx) orelse return context.capacity(.name_map, std.math.maxInt(u32), approx)) catch return context.allocation(.name_map, null);
+    var pos: usize = 0;
+    var row: u64 = 0;
+    while (pos < data.len) {
+        row += 1;
+        const breaks = @call(.always_inline, faiLineBreaks, .{data[pos..]});
+        const end = if (breaks) |found| pos + found.end else data.len;
+        defer pos = end + 1;
+        if (end == pos) continue;
+        const name_end = if (breaks) |found| if (found.tab) |tab| pos + tab else end else if (std.mem.findScalar(u8, data[pos..end], '\t')) |tab| pos + tab else end;
+        const ordinal = std.math.cast(u32, lines.items.len) orelse return context.capacity(.records, std.math.maxInt(u32), lines.items.len);
+        const entry = map.getOrPutAssumeCapacity(data[pos..name_end]);
+        if (!entry.found_existing) entry.value_ptr.* = ordinal;
+        lines.appendAssumeCapacity(.{ .offset = pos, .row = row });
+    }
+    if (lines.items.len == 0) return context.fail(.{ .@"index.no_records" = .{ .format = .fai } });
+    const checked = allocator.alloc(usize, (lines.items.len + @bitSizeOf(usize) - 1) / @bitSizeOf(usize)) catch return context.allocation(.records, null);
+    @memset(checked, 0);
+    return .{ .lines = lines.items, .map = map, .checked = checked };
+}
+
 const FaiNameRef = struct {
     offset: u64,
     len: usize,
@@ -1674,11 +1934,20 @@ fn loadFaiStreamed(
     const records_allocator = if (mode == .stats_scan) backing_allocator else allocator;
     defer if (mode == .stats_scan) records_list.deinit(backing_allocator);
     var slices_list: std.ArrayList([]const u8) = .empty;
-    const single_name = if (mode == .matched and mode.matched.len == 1) mode.matched[0] else null;
+    const single_name = switch (mode) {
+        .positional, .matched => |names| if (names.len == 1) names[0] else null,
+        .stats_scan => null,
+    };
     var requested: std.StringHashMapUnmanaged(u32) = .empty;
+    var maybe_requested: ?*NamePrefilter = null;
     switch (mode) {
         .positional, .matched => |names| {
-            if (single_name == null) requested = try requestedNameMap(allocator, names, if (mode == .matched) 4 else 1, context);
+            if (single_name == null) {
+                requested = try requestedNameMap(allocator, names, context);
+                maybe_requested = allocator.create(NamePrefilter) catch return context.allocation(.name_map, @sizeOf(NamePrefilter));
+                maybe_requested.?.* = .{};
+                for (names) |name| maybe_requested.?.add(name);
+            }
             const count = if (single_name != null) 1 else requested.count();
             records_list.ensureTotalCapacityPrecise(allocator, count) catch return context.allocation(.records, @as(u64, count) * @sizeOf(IndexRecord));
             slices_list.ensureTotalCapacityPrecise(allocator, count) catch return context.allocation(.name_slices, @as(u64, count) * @sizeOf([]const u8));
@@ -1707,9 +1976,12 @@ fn loadFaiStreamed(
         context.at.record = null;
         var long_fields: ?FaiLineFields = null;
         const available = file_reader.interface.buffered();
-        const maybe_line = if (std.mem.findScalar(u8, available, '\n')) |end| buffered: {
-            file_reader.interface.toss(end + 1);
-            break :buffered available[0..end];
+        var name_end: ?usize = null;
+        // Inlined: as a call per line, the scan of a transcriptome `.fai` took 7 M more instructions.
+        const maybe_line = if (@call(.always_inline, faiLineBreaks, .{available})) |breaks| buffered: {
+            file_reader.interface.toss(breaks.end + 1);
+            name_end = breaks.tab orelse breaks.end;
+            break :buffered available[0..breaks.end];
         } else file_reader.interface.takeDelimiter('\n') catch |err| switch (err) {
             error.ReadFailed => return context.ioFailure(.read, file_reader.err orelse err),
             error.StreamTooLong => if (mode == .matched) long: {
@@ -1724,6 +1996,16 @@ fn loadFaiStreamed(
         if (line.len == 0 and long_fields == null) continue;
         record_number = try context.nextOrdinal(record_number, .records);
         context.at.record = record_number;
+        saw_record = true;
+
+        // GET parses and checks only the lines it retains, and stops once every name is found.
+        var matched: ?std.StringHashMapUnmanaged(u32).Entry = null;
+        if (mode != .stats_scan) {
+            const name = if (long_fields != null) line else line[0 .. name_end orelse std.mem.findScalar(u8, line, '\t') orelse line.len];
+            if (single_name == null and maybe_requested.?.mayHold(name)) matched = requested.getEntry(name);
+            const wanted = if (single_name) |only| std.mem.eql(u8, name, only) else if (matched) |entry| entry.value_ptr.* == UNMATCHED_RECORD_INDEX else false;
+            if (!wanted) continue;
+        }
 
         const fields = long_fields orelse try parseFaiIndexLine(line, context);
 
@@ -1737,28 +2019,13 @@ fn loadFaiStreamed(
         };
         try checkUniformGeometry(rec, fasta_stat.size, context);
 
-        saw_record = true;
-        const matched = if (mode != .stats_scan and single_name == null) requested.getEntry(line[0..fields.name_end]) else null;
-        const retain = switch (mode) {
-            .stats_scan => true,
-            .positional, .matched => if (single_name) |wanted|
-                records_list.items.len == 0 and std.mem.eql(u8, line[0..fields.name_end], wanted)
-            else if (matched) |entry|
-                entry.value_ptr.* == UNMATCHED_RECORD_INDEX
-            else
-                false,
-        };
-        if (!retain) continue;
-
         const rec_index = records_list.items.len;
         switch (mode) {
             .positional, .matched => {
-                const name = allocator.dupe(u8, line[0..fields.name_end]) catch return context.allocation(.retained_names, fields.name_end);
+                // The requested slice equals the line's name and outlives the index.
+                const name = if (matched) |entry| entry.key_ptr.* else single_name.?;
                 slices_list.append(allocator, name) catch return context.allocation(.name_slices, null);
-                if (matched) |entry| {
-                    entry.key_ptr.* = name;
-                    entry.value_ptr.* = @intCast(rec_index);
-                }
+                if (matched) |entry| entry.value_ptr.* = @intCast(rec_index);
             },
             .stats_scan => {
                 const name_ref = FaiNameRef{ .offset = current_offset, .len = fields.name_end, .at = context.at };
@@ -1775,6 +2042,7 @@ fn loadFaiStreamed(
             },
         }
         records_list.append(records_allocator, rec) catch return context.allocation(.records, null);
+        if (mode != .stats_scan and records_list.items.len == if (single_name != null) 1 else requested.count()) break;
     }
 
     if (!saw_record) return context.fail(.{ .@"index.no_records" = .{ .format = .fai } });
@@ -1887,6 +2155,59 @@ fn faiIntegerFailure(text: []const u8, field: diagnostics.FaiField, max: u64, co
     }
     return context.fail(.{ .@"index.fai.integer_out_of_range" = .{ .field = field, .max_value = max, .value = preview } });
 }
+
+// The end of the first line of `bytes` and the tab before it, if any, in one pass.
+fn faiLineBreaks(bytes: []const u8) ?struct { tab: ?usize, end: usize } {
+    const Block = @Vector(32, u8);
+    var tab: ?usize = null;
+    var i: usize = 0;
+    while (i + 32 <= bytes.len) : (i += 32) {
+        const block: Block = bytes[i..][0..32].*;
+        const newlines: u32 = @bitCast(block == @as(Block, @splat('\n')));
+        if (tab == null) {
+            const tabs: u32 = @bitCast(block == @as(Block, @splat('\t')));
+            if (tabs != 0 and (newlines == 0 or @ctz(tabs) < @ctz(newlines))) tab = i + @ctz(tabs);
+        }
+        if (newlines != 0) return .{ .tab = tab, .end = i + @ctz(newlines) };
+    }
+    while (i < bytes.len) : (i += 1) {
+        if (bytes[i] == '\n') return .{ .tab = tab, .end = i };
+        if (tab == null and bytes[i] == '\t') tab = i;
+    }
+    return null;
+}
+
+/// A 65,536-bit filter over requested names, keyed by length and the first 16 and last 8 bytes;
+/// a `.fai` line whose name it rules out skips the hash lookup.
+const NamePrefilter = struct {
+    bits: [1024]u64 = .{0} ** 1024,
+
+    fn key(name: []const u8) u16 {
+        var mixed: u64 = name.len *% 0x9E3779B97F4A7C15;
+        if (name.len >= 16) {
+            mixed ^= std.mem.readInt(u64, name[0..8], .little) *% 0xC2B2AE3D27D4EB4F;
+            mixed ^= std.mem.readInt(u64, name[8..16], .little) *% 0x165667B19E3779F9;
+            mixed ^= std.mem.readInt(u64, name[name.len - 8 ..][0..8], .little) *% 0x27D4EB2F165667C5;
+        } else {
+            var padded = [_]u8{0} ** 16;
+            @memcpy(padded[0..name.len], name);
+            mixed ^= std.mem.readInt(u64, padded[0..8], .little) *% 0xC2B2AE3D27D4EB4F;
+            mixed ^= std.mem.readInt(u64, padded[8..16], .little) *% 0x165667B19E3779F9;
+        }
+        mixed ^= mixed >> 29;
+        return @truncate((mixed *% 0xBF58476D1CE4E5B9) >> 48);
+    }
+
+    fn add(self: *NamePrefilter, name: []const u8) void {
+        const k = key(name);
+        self.bits[k >> 6] |= @as(u64, 1) << @intCast(k & 63);
+    }
+
+    fn mayHold(self: *const NamePrefilter, name: []const u8) bool {
+        const k = key(name);
+        return self.bits[k >> 6] & @as(u64, 1) << @intCast(k & 63) != 0;
+    }
+};
 
 fn parseFaiIndexLine(line: []const u8, context: *Diagnostics) diagnostics.Error!FaiLineFields {
     const name_end = std.mem.findScalar(u8, line, '\t') orelse {
