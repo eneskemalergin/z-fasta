@@ -1201,6 +1201,27 @@ test "[cli] - [validate]: reads standard input" {
 }
 
 // Writes `fasta`, then a `.zfi` built from `indexed`, which has the same size, with the file's identity.
+fn discardValidateStdout(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+    return switch (operation) {
+        .file_write_streaming => |write| blk: {
+            var size = write.header.len;
+            for (write.data, 0..) |data, i| size += data.len * (if (i + 1 == write.data.len) write.splat else 1);
+            break :blk .{ .file_write_streaming = size };
+        },
+        else => io.vtable.operate(userdata, operation),
+    };
+}
+
+fn runValidateForAllocationCheck(allocator: std.mem.Allocator, path: []const u8, options: validator.Options) !void {
+    var vtable = io.vtable.*;
+    vtable.operate = discardValidateStdout;
+    var failure: diagnostics.Failure = undefined;
+    _ = validator.runValidate(allocator, .{ .userdata = io.userdata, .vtable = &vtable }, path, options, &failure) catch |err| {
+        if (err == error.OutOfMemory) try std.testing.expectEqual(diagnostics.Code.@"resource.out_of_memory", failure.primary().?.code());
+        return err;
+    };
+}
+
 fn writeIndexedPair(allocator: std.mem.Allocator, stem: []const u8, fasta: []const u8, indexed: []const u8) ![]u8 {
     try std.testing.expectEqual(fasta.len, indexed.len);
     const path = try writeFastaArtifact(allocator, stem, fasta);
@@ -1212,6 +1233,25 @@ fn deletePair(allocator: std.mem.Allocator, path: []const u8, suffix: []const u8
     const sidecar = std.fmt.allocPrint(allocator, "{s}{s}", .{ path, suffix }) catch return;
     std.Io.Dir.cwd().deleteFile(io, sidecar) catch {};
     std.Io.Dir.cwd().deleteFile(io, path) catch {};
+}
+
+test "[failure] - [validate]: every allocation failure in a run is reported and released" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const data = ">a desc\nACGT  \nAC\n>b\nGG\nGGGG\n>a\nTT\n";
+    const path = try writeFastaArtifact(allocator, "validate-allocation", data);
+    defer deletePair(allocator, path, ".zfi");
+    try writeZfi(allocator, path, data);
+    const output = try utility.uniqueArtifactPath(allocator, "validate-allocation-output", "fa");
+    defer std.Io.Dir.cwd().deleteFile(io, output) catch {};
+    for ([_]validator.Options{
+        .{},
+        .{ .fix = true, .output_path = output },
+        .{ .index = .automatic },
+    }) |options| {
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, runValidateForAllocationCheck, .{ path, options });
+    }
 }
 
 test "[cli] - [validate index]: matches the records index writes" {

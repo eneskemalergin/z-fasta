@@ -1288,7 +1288,7 @@ const Scan = struct {
         const source = self.file orelse return;
         const first = &(self.report.findings[comptime reportSlot(.@"fasta.duplicate_identifier")].first orelse return);
         const stop = first.at.location.offset.?;
-        const buffer = self.allocator.alloc(u8, @max(FIRST_DEFINITION_BUFFER_BYTES, name.len + UTF8_BOM.len + 2)) catch return self.outOfMemory(.validation_identifiers, stop);
+        const buffer = self.allocator.alloc(u8, @max(FIRST_DEFINITION_BUFFER_BYTES, name.len + UTF8_BOM.len + 2)) catch return self.outOfMemoryAt(.validation_identifiers, first.at);
         defer self.allocator.free(buffer);
         var offset: u64 = 0;
         var line: u64 = 1;
