@@ -20,8 +20,8 @@ const HELP_STDOUT =
     \\  validate Check FASTA structure, alphabets, headers, and fix safe format issues
     \\
     \\General options:
-    \\  --help       Show this help message
-    \\  --version    Print version
+    \\  -h, --help     Show this help message
+    \\  -V, --version  Print version
     \\  --error-format=text|json  Select stderr diagnostics (default: text)
     \\
     \\Index options:
@@ -42,6 +42,7 @@ const HELP_STDOUT =
     \\  --complement-only  Complement extracted sequence output without reversing
     \\  --reverse-only  Reverse extracted sequence output without complementing
     \\  --annotate-rc   Annotate the final output orientation when it is transformed
+    \\  --summary       Print region count, total bases, and elapsed time to stderr
     \\  Positional regions: max 1024 per invocation. Names and BED input stream.
     \\
     \\Validate usage:

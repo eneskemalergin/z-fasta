@@ -56,6 +56,7 @@ All notable changes to z-fasta will be documented in this file.
 - A directory where the `.zfi` or `.fai` should be fails with `io.map_failed` in every command, empty or not; an empty one reported `index.no_records` or `index.truncated`.
 - A FIFO where the `.zfi` or `.fai` should be fails at once as an empty index instead of waiting for a writer.
 - Temporary files that `index` writes while it works are readable only by their owner.
+- `--help` lists `get --summary` and the `-h` and `-V` short forms.
 
 ## [0.3.5]
 
