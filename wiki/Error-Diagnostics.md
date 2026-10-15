@@ -29,7 +29,7 @@ Running `z-fasta get --error-format=json` returns exit 1 and one newline-termina
   "catalog_revision": "0.4.0-1",
   "producer": {
     "name": "z-fasta",
-    "version": "0.3.5"
+    "version": "0.4.0"
   },
   "kind": "failure",
   "operation": {

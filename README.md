@@ -21,12 +21,13 @@
 
 ---
 
-I built z-fasta around the four FASTA jobs I use most. One CLI, no runtime dependencies. I kept the scope small on purpose:
+I built z-fasta around the four FASTA jobs I use most. One CLI, also usable as a Zig package, with no runtime dependencies. I kept the scope small on purpose:
 
 - `index`: Build the default `.zfi` index or emit a samtools-compatible `.fai` for representable FASTA.
 - `get`: Extract records, regions, names files, or BED intervals with optional strand and orientation transforms.
 - `validate`: Check structure, identifiers, alphabet, and layout in one streaming pass, compare with an index, or write a repaired copy.
 - `stats`: Report indexed length, Nx, DNA, RNA, or protein statistics through a bounded sequence scan.
+- [Zig package](https://github.com/eneskemalergin/z-fasta/wiki/Library): `IndexedReader`, `RecordReader`, and `validation` give other Zig programs the same rules without the CLI.
 
 z-fasta accepts uncompressed FASTA and writes FASTA or reports. It does not currently handle FASTQ, gzip, or BGZF.
 
@@ -74,7 +75,7 @@ The Wiki holds the details that would otherwise bury this page:
 
 ## Performance
 
-Selected warm-cache results for v0.3.5, measured on 2026-10-10 with an AMD Ryzen 9 3950X, are shown below. Lower is better. The generated summaries keep elapsed time beside process memory; the linked reports contain the complete methods, field coverage, scaling, correctness checks, and peer definitions.
+Selected warm-cache results for v0.4.0, measured on 2026-10-15 with an AMD Ryzen 9 3950X, are shown below. Lower is better. The generated summaries keep elapsed time beside process memory; the linked reports contain the complete methods, field coverage, scaling, correctness checks, and peer definitions.
 
 ### Index
 
@@ -82,9 +83,9 @@ Selected warm-cache results for v0.3.5, measured on 2026-10-10 with an AMD Ryzen
 
 | Dataset       |     Size |      z-fasta |  noodles | rust-bio | samtools |
 | ------------- | -------: | -----------: | -------: | -------: | -------: |
-| Human genome  | ~2.9 GiB | **0.3824 s** | 1.3640 s | 3.4821 s | 8.1614 s |
-| Transcriptome | ~459 MiB | **0.1546 s** | 0.4111 s | 0.6943 s | 1.7112 s |
-| Proteome      |  ~13 MiB | **0.0113 s** | 0.0176 s | 0.0254 s | 0.0650 s |
+| Human genome  | ~2.9 GiB | **0.3279 s** | 1.3459 s | 3.4821 s | 8.1025 s |
+| Transcriptome | ~459 MiB | **0.1252 s** | 0.4097 s | 0.7088 s | 1.7222 s |
+| Proteome      |  ~13 MiB | **0.0091 s** | 0.0181 s | 0.0253 s | 0.0655 s |
 
 [Index benchmark report](bench/index/REPORT.md)
 
@@ -94,21 +95,21 @@ One 1 kbp positional region through each indexed implementation:
 
 | Dataset       | z-fasta `.zfi` | z-fasta `.fai` | noodles | rust-bio | samtools |
 | ------------- | -------------: | -------------: | ------: | -------: | -------: |
-| Human genome  |     **2.3 ms** |         2.3 ms |  2.6 ms |   2.8 ms |   8.2 ms |
-| Transcriptome |     **8.2 ms** |        28.3 ms | 97.4 ms | 546.2 ms | 301.8 ms |
-| Proteome      |     **2.7 ms** |         3.9 ms |  6.8 ms |  20.1 ms |  17.9 ms |
+| Human genome  |     **2.1 ms** |         2.1 ms |  2.6 ms |   2.9 ms |   8.7 ms |
+| Transcriptome |     **2.2 ms** |        11.1 ms | 88.5 ms | 536.0 ms | 292.0 ms |
+| Proteome      |     **2.3 ms** |         2.7 ms |  7.3 ms |  22.0 ms |  18.2 ms |
 
 [GET benchmark report](bench/get/REPORT.md)
 
 ### Stats
 
-Complete z-fasta and noodles reports, with SeqKit `stats -a` as a partial ecosystem reference:
+Complete z-fasta, noodles, and rust-bio reports, with SeqKit `stats -a` as a partial ecosystem reference:
 
-| Dataset       | z-fasta `.zfi` | z-fasta `.fai` |  noodles | SeqKit `stats -a` |
-| ------------- | -------------: | -------------: | -------: | ----------------: |
-| Human genome  |        2.840 s |    **2.838 s** | 10.173 s |          17.726 s |
-| Transcriptome |    **0.396 s** |        0.431 s |  1.172 s |           2.420 s |
-| Proteome      |    **13.2 ms** |        15.1 ms |  36.8 ms |           60.3 ms |
+| Dataset       | z-fasta `.zfi` | z-fasta `.fai` |  noodles | rust-bio | SeqKit `stats -a` |
+| ------------- | -------------: | -------------: | -------: | -------: | ----------------: |
+| Human genome  |    **0.413 s** |        0.421 s | 10.144 s |  7.490 s |          17.619 s |
+| Transcriptome |    **88.9 ms** |       107.0 ms |   1.125 s |  1.200 s |           2.405 s |
+| Proteome      |    **10.4 ms** |        11.3 ms |  37.7 ms |  39.2 ms |           64.1 ms |
 
 [Stats benchmark report](bench/stats/REPORT.md) | [Benchmark framework](bench/README.md)
 
