@@ -4,7 +4,7 @@
 
 All notable changes to z-fasta will be documented in this file.
 
-## [Unreleased]
+## [0.4.0]
 
 `validate` is overhauled. It reads the FASTA once through a fixed 256 KiB buffer, by the same rules as `index`, and its peak memory no longer grows with the file. On a 3.15 GB human genome it takes about as long as `index`, under half a second on a warm cache, with under 4 MiB of memory; the previous version mapped the whole file. **Its report, counting rules, and options change; update scripts that parse validate output.**
 
