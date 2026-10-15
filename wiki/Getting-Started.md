@@ -26,7 +26,8 @@ z-fasta validate example.fa
 Expected output:
 
 ```text
-OK: no issues found
+OK example.fa: no findings
+complete: examined 64 bytes, 6 lines, 3 records, 26 symbols; protein alphabet chosen from 26 symbols
 ```
 
 Validation does not require an index.

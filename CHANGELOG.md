@@ -4,6 +4,70 @@
 
 All notable changes to z-fasta will be documented in this file.
 
+## [0.4.0]
+
+The 0.4.0 update is a huge one. It makes z-fasta also a rudimentary library, so other Zig projects can take it as a package dependency. Another large change is the error codes and diagnostic flexibility I wanted to provide: begun in 0.3.5, they now cover `validate` too, which is rebuilt as one streaming pass. They have ballooned the binary size, but I believe they serve pipeline usage better and make it easy to track what went wrong. Alongside this I've made various improvements, especially around speed and memory footprint (`get`, `stats`, and `validate --fix` are several times faster), and fixed the issues and bugs that I could find.
+
+Two changes need action:
+
+- **Re-index.** `.zfi` is now version 2; an older `.zfi` fails with `index.unsupported_version`. `.fai` files are unchanged.
+- **Update scripts that read `validate` output.** Its report, codes, and options changed; see Changed and Removed.
+
+### Added
+
+- **Zig package (closes [#35](https://github.com/eneskemalergin/z-fasta/issues/35), [#36](https://github.com/eneskemalergin/z-fasta/issues/36)).** `@import("z-fasta")` gives the CLI's rules without running it; calls fill a caller-owned `diagnostics.Failure` and never print or exit.
+  - `IndexedReader` opens a FASTA and its sidecar once and fetches zero-based, half-open intervals by record or name; `open` costs the same for any index size (10 transcriptome regions: 1.3 ms and 3 MiB, against 19 ms and 37 MiB for a full load).
+  - `RecordReader` streams whole records from any `std.Io.Reader` into caller storage, by `index`'s rules, without allocating.
+  - `validation.validate` and `validation.repair` run `validate` and `--fix` over any reader.
+  - The wiki's [Zig package](https://github.com/eneskemalergin/z-fasta/wiki/Library) page covers setup, the three APIs, and how zero-based ordinals relate to one-based diagnostics.
+- **`validate --index[=PATH]`** checks in the same pass that the index `get` would load (or the named `.zfi` or `.fai`) describes the FASTA: each record `index` would write is compared with its entry, and six `pair.*` codes report the differences.
+- **`validate` options.**
+  - `--type auto|dna|rna|protein|any` names the alphabet instead of sampling the first 100,000 symbols.
+  - `--width N` sets the `--fix` line width (default 60).
+  - `--max-name-memory BYTES` bounds the duplicate check; past it the report is `incomplete`, never clean.
+  - `validate -` reads standard input.
+- **Codes.** `fasta.identifier_too_long` for an identifier over 65,535 bytes, which no index can hold; `resource.out_of_memory` names `output_buffer` for the `--fix` writer.
+
+### Changed
+
+- **`validate` (closes [#30](https://github.com/eneskemalergin/z-fasta/issues/30), [#31](https://github.com/eneskemalergin/z-fasta/issues/31)).**
+  - **One pass, flat memory.** It reads through a fixed 256 KiB buffer by `index`'s rules: the 3.15 GB human genome takes 0.36 s and 3.6 MiB, about what `index` takes.
+  - **One report.** Each finding code is counted exactly in its unit (byte, line, record, or file), with affected records and its first occurrence; nothing is capped. Text prints one line per code; `--json` prints one object with outcome, per-check states, totals, and progress.
+  - **Finding codes** replace the old kinds: `fasta.*`, `header.convention_mismatch`, `sequence.invalid_symbol`, and six `format.*` codes.
+  - **Rules.** Spaces and tabs in sequence lines are whitespace findings, as `index` and `get` skip them; other control bytes and empty identifiers are errors; `--schema` checks the identifier, not the whole header.
+  - **Identifiers in JSON are reversible:** UTF-8 as text, other bytes as base64, with truncation and original length.
+  - **`--fix` writes in the same pass,** wrapping at `--width`, and refuses only what the copy cannot keep (no records, content before the first header, control bytes); duplicates and symbols outside the alphabet are kept and reported. The human genome takes about 1.1 s.
+- **`.zfi` version 2.**
+  - Records take 24 bytes instead of 40 and side-table lines 24 instead of 32: with the name table included, indexes are 7% smaller on the human transcriptome and 18% on the proteome.
+  - A name table (5 bytes per record) finds a name's first record directly, so `get` on a `.zfi` reads and checks only the records and side tables its requests use.
+- **`index` keeps every record with symbols,** duplicate names included, so `stats` counts them all; `get` and the package resolve a name to its first record, and `validate` reports duplicates.
+- **Faster, with identical output** (fixes [#34](https://github.com/eneskemalergin/z-fasta/issues/34)). Numbers are warm-cache means from the 0.3.5 and 0.4.0 reports in `bench/`.
+  - `index` is faster than 0.3.4 and 0.3.5 on every real input, in one batch of all three (medians of 10 runs): the human genome `.fai` in 327 ms (0.3.5: 357 ms, 0.3.4: 353 ms), the transcriptome in 123 ms (157 ms, 143 ms). A million short records take 0.25 s and 3.6 MiB instead of 0.45 s and 19 MiB.
+  - `get` on the transcriptome: one 1 kbp region in 2.2 ms and 3.8 MiB through `.zfi` instead of 8.2 ms and 22.5 MiB, 11.1 ms instead of 28.3 ms through `.fai`; 1,000 regions in 11.9 ms instead of 38.8 ms.
+  - `stats`: the human genome in 0.41 s instead of 2.84 s; the transcriptome in 89 ms and 3.6 MiB instead of 396 ms and 12.5 MiB.
+  - Every command starts faster: release builds no longer clear an unused 256 KiB signal stack.
+- **Memory.** Every command and `IndexedReader.open` run within 64 KiB of stack, so the package works on small thread stacks such as musl's 128 KiB; `get --names` with a `.fai` peaks 66 MiB lower on a million short records.
+- **A reader that closes stdout early** (`z-fasta get genome.fa chr1 | head`) ends the run quietly with exit status 141, as `SIGPIPE` would; other stdout write failures stay `io.write_failed` with status 1.
+- **Binary size (answers [#37](https://github.com/eneskemalergin/z-fasta/issues/37)).** The stripped Linux x86_64 binary is 924,808 bytes, 12.7% over 0.3.5 built the same way: the validation report (+31 KB), the streamed stats scan (+27 KB), on-demand `.zfi` access (+21 KB), and the one-pass validator (+12 KB), less 14 KB of sorting code.
+
+### Removed
+
+- **Options:** `validate --summary` (`--json` always prints one object), `validate --fix-format-only`, and `index --dedup` and `--no-dedup`.
+- **Report fields:** `schema_version` (`catalog_revision` and `producer.version` identify a report), and the 10,000-event list with its exit status.
+- **Codes and fields.**
+  - `index.no_indexable_records` has no fields and means that every record is empty.
+  - `index.name_not_embedded` and the fields of `index.name_footer_missing`: every version 2 `.zfi` embeds its names.
+  - `io.seek_failed` and the `seek` stage: no operation can fail to seek.
+  - `bound_source`, which was always `actual`, and 26 enumerated values no command produced, among them the `win32` and `ntstatus` cause domains.
+
+### Fixed
+
+- **`.fai` name resolution** is the same for regions, names files, and BED files: a `.fai` row over 64 KiB failed only for command-line regions, and for `stats` on an index listed out of file order.
+- **Sidecar paths that are not files.** A directory fails with `io.map_failed` in every command, empty or not; a FIFO fails at once as an empty index instead of waiting for a writer.
+- **Temporary files** that `index` writes are readable only by their owner.
+- **Text diagnostics** show up to 48 bytes of a path instead of 24, so most file names are no longer cut.
+- **`--help`** lists `get --summary` and the `-h` and `-V` short forms.
+
 ## [0.3.5]
 
 The `.zfi` file format and valid `.fai` rows are unchanged. **Re-index FASTA files that have a space or tab inside or at the end of a sequence line after a record's first line.** Version 0.3.4 indexed those records as fixed-width, so their `.zfi` and `.fai` sidecars report wrong lengths and GET returns the whitespace bytes; the stale-index check does not detect this. Other indexes remain valid. Existing successful FASTA, FAI, statistics and validator JSON v1 output keeps its format.

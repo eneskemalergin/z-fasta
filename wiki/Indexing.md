@@ -1,6 +1,6 @@
 # Indexing
 
-Index once, then GET and stats can jump to the sequence bytes they need. I recommend the default `.zfi` when z-fasta is the only consumer. Validate does not need an index.
+Index once, then GET and stats can jump to the sequence bytes they need. I recommend the default `.zfi` when z-fasta is the only consumer. Validate does not need an index; `validate --index` checks that an existing one still describes its FASTA.
 
 ## Build the default `.zfi`
 
@@ -51,23 +51,11 @@ Records with no sequence symbols are skipped:
 ACGT
 ```
 
-The index contains only `kept`. Validate still reports `empty` as an empty-sequence warning.
+The index contains only `kept`. Validate still reports `empty` as a `fasta.empty_record` warning.
 
 ## Duplicate identifiers
 
-Default indexing keeps the first non-empty record for each exact identifier:
-
-```bash
-z-fasta index duplicates.fa
-```
-
-Keep every index record when stats must describe the full source population:
-
-```bash
-z-fasta index --no-dedup duplicates.fa
-```
-
-GET still resolves a duplicate identifier to the first exact match. If every record needs independent retrieval, rename duplicates in the FASTA instead of relying on index policy.
+Indexing keeps every non-empty record in file order, duplicate identifiers included, so stats counts them all. GET resolves a duplicate identifier to its first record; the [Zig package](Library) reaches later ones by ordinal. `validate` reports each duplicate as `fasta.duplicate_identifier`. If every record needs retrieval by name, rename the duplicates in the FASTA.
 
 ## Uniform and non-uniform records
 

@@ -1,0 +1,543 @@
+#!/usr/bin/env bash
+# Validate benchmark: correctness against index, samtools faidx, and seqkit, then performance.
+# Usage: bash bench/validate/run.sh [options]   (ZFASTA, ZEBRAC select the binaries)
+#   --runs N --warmup N --duration MS      sampling (defaults 5, 3, 5000)
+#   --skip-tests --skip-benchmarks --skip-report   (--skip-messy is accepted; no messy section)
+# Results go to results/, the report to REPORT.md.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BENCH_ROOT="$(dirname "$SCRIPT_DIR")"
+RESULTS_DIR="$SCRIPT_DIR/results"
+DATA_DIR="$BENCH_ROOT/shared/data"
+WORK_DIR="$SCRIPT_DIR/data/work"
+CRAFTED_DIR="$SCRIPT_DIR/data/crafted"
+FIXTURE_DIR="$BENCH_ROOT/shared/cache/messy_fixtures"
+MESSY_DIR="$BENCH_ROOT/shared/cache/messy_perf"
+
+source "$BENCH_ROOT/shared/runner_common.sh"
+
+RUNS=5
+WARMUP=3
+ZEBRAC_DURATION_MS="${ZEBRAC_DURATION_MS:-5000}"
+DO_TESTS=true
+DO_BENCHMARKS=true
+DO_REPORT=true
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --runs) RUNS="$2"; shift 2 ;;
+        --warmup) WARMUP="$2"; shift 2 ;;
+        --duration) ZEBRAC_DURATION_MS="$2"; shift 2 ;;
+        --skip-tests) DO_TESTS=false; shift ;;
+        --skip-benchmarks) DO_BENCHMARKS=false; shift ;;
+        --skip-messy) shift ;;
+        --skip-report) DO_REPORT=false; shift ;;
+        -h|--help)
+            sed -n '2,/^set -euo pipefail$/{/^#/s/^# \{0,1\}//p}' "$0"
+            exit 0
+            ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
+
+PYTHON="$(report_python)"
+LAYOUT_CODES=",format.inconsistent_wrapping,format.sequence_whitespace,format.blank_sequence_line,format.mixed_line_endings,"
+FIXTURES=(uniform mixed_widths trailing_whitespace blank_lines mixed_crlf)
+VARIANTS=(mixed_widths trailing_whitespace mixed_crlf all_messy)
+DATASETS=(Genome Transcriptome Proteome)
+
+PASS=0
+FAIL=0
+declare -A SUMMARY=()
+
+record() {
+    local group="$1" case="$2" check="$3" expected="$4" observed="$5" status
+    if [[ "$expected" == "$observed" ]]; then
+        PASS=$((PASS + 1))
+        status=pass
+        printf '  PASS: [%s] %s %s: %s\n' "$group" "$case" "$check" "$observed"
+    else
+        FAIL=$((FAIL + 1))
+        status=fail
+        printf '  FAIL: [%s] %s %s: expected %s, got %s\n' "$group" "$case" "$check" "$expected" "$observed"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$group" "$case" "$check" "$expected" "$observed" "$status" >> "$TESTS_TSV"
+}
+
+observe() {
+    local case="$1" check="$2" first="$3" second="$4"
+    printf '  INFO: [difference] %s %s: %s, %s\n' "$case" "$check" "$first" "$second"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' difference "$case" "$check" "$first" "$second" info >> "$TESTS_TSV"
+}
+
+section_hdr() { echo ""; echo "--- [$1] $2 ---"; }
+
+# Prints "<exit>\t<errors>\t<codes>" for one validate run.
+validate_summary() {
+    local file="$1"; shift
+    local json status=0
+    json="$("$ZFASTA" validate --json "$@" "$file" 2>/dev/null)" || status=$?
+    printf '%s' "$json" | "$PYTHON" -c '
+import json, sys
+text = sys.stdin.read()
+data = json.loads(text) if text.strip() else None
+if data is None:
+    print(sys.argv[1], "unknown", "no-report", sep="\t")
+else:
+    codes = data["validation"]["codes"]
+    errors = any(code["severity"] == "error" for code in codes)
+    names = sorted(code["code"] for code in codes)
+    print(sys.argv[1], "yes" if errors else "no", ",".join(names) or "none", sep="\t")
+' "$status"
+}
+
+load_summary() {
+    SUMMARY["$1"]="$(validate_summary "$1")"
+}
+
+cached_summary() {
+    if [[ -z "${SUMMARY[$1]:-}" ]]; then
+        echo "error: no validate summary loaded for $1" >&2
+        return 1
+    fi
+    printf '%s\n' "${SUMMARY[$1]}"
+}
+
+summary_field() {
+    local line="$1" field="$2"
+    cut -f "$field" <<<"$line"
+}
+
+has_kind() {
+    local kinds=",$1," list="$2" kind
+    for kind in ${kinds//,/ }; do
+        [[ "$list" == *",$kind,"* ]] && return 0
+    done
+    return 1
+}
+
+check_findings() {
+    local group="$1" case="$2" file="$3" exit_code="$4" codes="$5"; shift 5
+    local line
+    if [[ $# -eq 0 ]]; then line="$(cached_summary "$file")"; else line="$(validate_summary "$file" "$@")"; fi
+    record "$group" "$case" findings "exit $exit_code; $codes" "exit $(summary_field "$line" 1); $(summary_field "$line" 3)"
+}
+
+validate_verdict() {
+    if [[ "$(summary_field "$(cached_summary "$1")" 2)" == yes ]]; then echo reject; else echo accept; fi
+}
+
+index_verdict() {
+    local file="$1" name="$2"
+    ln -sfn "$file" "$WORK_DIR/$name"
+    if TMPDIR="$WORK_DIR" "$ZFASTA" index "$WORK_DIR/$name" > /dev/null 2>&1; then echo accept; else echo reject; fi
+}
+
+pair_verdict() {
+    "$ZFASTA" validate --json --index "$WORK_DIR/$1" 2>/dev/null | "$PYTHON" -c '
+import json, sys
+text = sys.stdin.read()
+print(json.loads(text)["validation"]["checks"].get("index_match", "absent") if text.strip() else "not loaded")'
+}
+
+samtools_verdict() {
+    if "$SAMTOOLS" faidx --fai-idx "$WORK_DIR/$2.fai" "$1" > /dev/null 2>&1; then echo accept; else echo reject; fi
+}
+
+seqkit_verdict() {
+    if "$SEQKIT" seq -v -t "$2" "$1" > /dev/null 2>&1; then echo accept; else echo reject; fi
+}
+
+layout_verdict() {
+    if has_kind "$(summary_field "$(cached_summary "$1")" 3)" "$LAYOUT_CODES"; then echo reject; else echo accept; fi
+}
+
+alphabet_verdict() {
+    if has_kind "$(summary_field "$(cached_summary "$1")" 3)" ",sequence.invalid_symbol,"; then echo reject; else echo accept; fi
+}
+
+write_crafted() {
+    "$PYTHON" - "$DATA_DIR/REAL_Proteome.fasta" "$CRAFTED_DIR" <<'PY'
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_bytes()
+out = Path(sys.argv[2])
+assert source.startswith(b">") and source.endswith(b"\n")
+starts = [0]
+at = source.find(b"\n>")
+while at != -1:
+    starts.append(at + 1)
+    at = source.find(b"\n>", at + 1)
+records = [source[start:end] for start, end in zip(starts, starts[1:] + [len(source)])]
+assert len(records) > 600
+
+
+def edit_line(record: bytes, line_index: int, edit) -> bytes:
+    lines = record.split(b"\n")
+    lines[line_index] = edit(lines[line_index])
+    return b"\n".join(lines)
+
+
+def replace(index: int, record: bytes) -> bytes:
+    return b"".join(records[:index] + [record] + records[index + 1:])
+
+
+cases = {
+    "duplicate_identifier": source + records[0],
+    "invalid_symbol": replace(100, edit_line(records[100], 1, lambda line: line[:5] + b"1" + line[6:])),
+    "header_nul": replace(200, edit_line(records[200], 0, lambda line: line[:4] + b"\x00" + line[4:])),
+    "leading_bom": b"\xef\xbb\xbf" + source,
+    "empty_record": b"".join(records[:300] + [b">empty_record no bases\n"] + records[300:]),
+    "missing_terminal_newline": source[:-1],
+    "interior_space": replace(400, edit_line(records[400], 1, lambda line: line[:10] + b" " + line[10:])),
+    "long_header": replace(500, edit_line(records[500], 0, lambda line: line + b" " + b"x" * (2000 - len(line) - 1))),
+}
+context = b"ACGT" * 30
+for name, middle in (("rna_u", b"U"), ("dot_gap", b"."), ("space_inside", b" ")):
+    cases[f"difference_{name}"] = b">d\n" + context + middle + context + b"\n"
+cases["difference_tab_at_end"] = b">d\n" + context + b"\t\n" + context + b"\n"
+out.mkdir(parents=True, exist_ok=True)
+for name, data in cases.items():
+    (out / f"{name}.fasta").write_bytes(data)
+PY
+}
+
+outside_count() {
+    LC_ALL=C grep -v '^>' "$1" | LC_ALL=C tr -d "$2"$'\n\r \t' | wc -c | tr -d ' '
+}
+
+validate_value() {
+    local file="$1" expr="$2"; shift 2
+    "$ZFASTA" validate --json "$@" "$file" 2>/dev/null | "$PYTHON" -c '
+import json, sys
+v = json.loads(sys.stdin.read())["validation"]
+codes = {c["code"]: c for c in v["codes"]}
+occ = lambda code: int(codes[code]["occurrences"]) if code in codes else 0
+print(eval(sys.argv[1]))' "$expr"
+}
+
+# Each record on one line after its header, so two layouts of the same records compare equal.
+joined_records() {
+    LC_ALL=C tr -d '\r \t' < "$1" | awk '/^>/ { if (n) print seq; print; seq = ""; n = 1; next } { seq = seq $0 } END { if (n) print seq }'
+}
+
+check_real_flags() {
+    local ds="$1" file="$2"
+    local dna='ACGTNRYWSMKHBVDacgtnrywsmkhbvd' rna='ACGUNRYWSMKHBVDacgunrywsmkhbvd'
+    local protein='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz*-'
+    case "$ds" in
+        Genome)
+            record flags "$ds" "--type dna (tr)" "$(outside_count "$file" "$dna")" "$(validate_value "$file" 'occ("sequence.invalid_symbol")' --type dna)"
+            ;;
+        Transcriptome)
+            record flags "$ds" "--type dna (tr)" "$(outside_count "$file" "$dna")" "$(validate_value "$file" 'occ("sequence.invalid_symbol")' --type dna)"
+            record flags "$ds" "--type rna (tr)" "$(outside_count "$file" "$rna")" "$(validate_value "$file" 'occ("sequence.invalid_symbol")' --type rna)"
+            record flags "$ds" "--custom-alphabet (tr)" "$(outside_count "$file" ACGT)" "$(validate_value "$file" 'occ("sequence.invalid_symbol")' --custom-alphabet ACGT)"
+            record flags "$ds" "--schema refseq (awk)" \
+                "$(awk '/^>/ { id = substr($1, 2); if (id !~ /^(NC|NM|NR|NP|NW|NG|NT|NZ|XM|XR|XP)_/) n++ } END { print n + 0 }' "$file")" \
+                "$(validate_value "$file" 'occ("header.convention_mismatch")' --schema refseq)"
+            record flags "$ds" "--max-name-memory" "incomplete; identifiers incomplete" \
+                "$(validate_value "$file" 'v["completion"] + "; identifiers " + v["checks"]["identifiers"]' --max-name-memory 2000000)"
+            ;;
+        Proteome)
+            record flags "$ds" "--type protein (tr)" "$(outside_count "$file" "$protein")" "$(validate_value "$file" 'occ("sequence.invalid_symbol")' --type protein)"
+            record flags "$ds" "--schema uniprot (awk)" \
+                "$(awk '/^>/ { id = substr($1, 2); if (id !~ /^(sp|tr|db)\|[^|]+\|./) n++ } END { print n + 0 }' "$file")" \
+                "$(validate_value "$file" 'occ("header.convention_mismatch")' --schema uniprot)"
+            record flags "$ds" "--max-header-len (awk)" \
+                "$(LC_ALL=C awk '/^>/ { if (length($0) - 1 > 100) n++ } END { print n + 0 }' "$file")" \
+                "$(validate_value "$file" 'occ("fasta.long_header")' --max-header-len 100)"
+            ;;
+    esac
+    record flags "$ds" "--type any" 0 "$(validate_value "$file" 'occ("sequence.invalid_symbol")' --type any)"
+
+    if [[ "$ds" != Genome ]]; then
+        local fixed="$WORK_DIR/fixed_$ds.fa"
+        "$ZFASTA" validate --fix --width 80 -o "$fixed" "$file" > /dev/null 2>&1 || true
+        local same=no widest
+        cmp -s <(joined_records "$file") <(joined_records "$fixed") && same=yes
+        widest="$(LC_ALL=C awk '!/^>/ { if (length($0) > w) w = length($0) } END { print w + 0 }' "$fixed")"
+        record flags "$ds" "--fix --width (awk)" "same records; widest 80; exit 0" \
+            "$( [[ "$same" == yes ]] && echo same || echo different ) records; widest $widest; exit $("$ZFASTA" validate --strict "$fixed" > /dev/null 2>&1; echo $?)"
+    fi
+
+    local view="$WORK_DIR/explicit_$ds.fa"
+    ln -sfn "$file" "$view"
+    TMPDIR="$WORK_DIR" "$ZFASTA" index "$view" > /dev/null 2>&1
+    TMPDIR="$WORK_DIR" "$ZFASTA" index --emit-fai "$view" > "$WORK_DIR/explicit_$ds.fai" 2> /dev/null
+    record flags "$ds" "--index=PATH" "fai; passed" \
+        "$(validate_value "$view" 'v["index"]["format"] + "; " + v["checks"]["index_match"]' "--index=$WORK_DIR/explicit_$ds.fai")"
+
+    local before after code
+    before="$(stat -c '%s %Y' "$file")"
+    code="$("$ZFASTA" validate --error-format=json --fix -o "$file" "$file" 2>&1 > /dev/null | "$PYTHON" -c 'import json, sys; print(json.load(sys.stdin)["failure"]["primary"]["code"])')"
+    after="$(stat -c '%s %Y' "$file")"
+    record flags "$ds" "--error-format=json" "repair.output_is_input; unchanged" "$code; $( [[ "$before" == "$after" ]] && echo unchanged || echo changed )"
+}
+
+run_tests() {
+    PASS=0
+    FAIL=0
+    bench_require_tool z-fasta
+    bench_require_tool samtools
+    bench_require_tool seqkit
+    mkdir -p "$WORK_DIR" "$CRAFTED_DIR"
+    printf 'group\tcase\tcheck\texpected\tobserved\tstatus\n' > "$TESTS_TSV"
+
+    echo "z-fasta validate verification"
+    echo "  z-fasta:  $ZFASTA"
+    echo "  samtools: $SAMTOOLS"
+    echo "  seqkit:   $SEQKIT"
+
+    ensure_real_data
+    write_crafted
+
+    local c="$CRAFTED_DIR" ds name file
+    for name in duplicate_identifier invalid_symbol header_nul leading_bom empty_record \
+        missing_terminal_newline interior_space long_header difference_rna_u difference_dot_gap \
+        difference_space_inside difference_tab_at_end; do
+        load_summary "$c/$name.fasta"
+    done
+    for name in "${FIXTURES[@]}"; do load_summary "$FIXTURE_DIR/$name.fasta"; done
+    for name in "${VARIANTS[@]}"; do load_summary "$MESSY_DIR/$name.fasta"; done
+    for ds in "${DATASETS[@]}"; do
+        file="${REAL_DATASETS[$ds]:-}"
+        [[ -n "$file" ]] && load_summary "$file"
+    done
+
+    section_hdr crafted "proteome copies with one injected defect each"
+    check_findings crafted duplicate_identifier "$c/duplicate_identifier.fasta" 1 fasta.duplicate_identifier
+    check_findings crafted invalid_symbol "$c/invalid_symbol.fasta" 1 sequence.invalid_symbol
+    check_findings crafted header_nul "$c/header_nul.fasta" 1 fasta.header_control_byte
+    check_findings crafted leading_bom "$c/leading_bom.fasta" 2 format.leading_bom
+    check_findings crafted empty_record "$c/empty_record.fasta" 2 fasta.empty_record
+    check_findings crafted missing_terminal_newline "$c/missing_terminal_newline.fasta" 2 format.missing_terminal_newline
+    check_findings crafted interior_space "$c/interior_space.fasta" 2 format.sequence_whitespace
+    check_findings crafted long_header "$c/long_header.fasta" 2 fasta.long_header
+    check_findings crafted strict "$c/empty_record.fasta" 1 fasta.empty_record --strict
+
+    section_hdr messy "shared messy layouts"
+    check_findings fixture uniform "$FIXTURE_DIR/uniform.fasta" 0 none
+    check_findings fixture mixed_widths "$FIXTURE_DIR/mixed_widths.fasta" 2 format.inconsistent_wrapping
+    check_findings fixture trailing_whitespace "$FIXTURE_DIR/trailing_whitespace.fasta" 2 format.sequence_whitespace
+    check_findings fixture blank_lines "$FIXTURE_DIR/blank_lines.fasta" 2 format.blank_sequence_line,format.inconsistent_wrapping
+    check_findings fixture mixed_crlf "$FIXTURE_DIR/mixed_crlf.fasta" 2 format.inconsistent_wrapping,format.mixed_line_endings
+    check_findings variant mixed_widths "$MESSY_DIR/mixed_widths.fasta" 2 format.inconsistent_wrapping
+    check_findings variant trailing_whitespace "$MESSY_DIR/trailing_whitespace.fasta" 2 format.sequence_whitespace
+    check_findings variant mixed_crlf "$MESSY_DIR/mixed_crlf.fasta" 2 format.mixed_line_endings
+    check_findings variant all_messy "$MESSY_DIR/all_messy.fasta" 2 format.inconsistent_wrapping,format.mixed_line_endings,format.sequence_whitespace
+
+    section_hdr stdin "validate - reads standard input like a file"
+    for ds in "${DATASETS[@]}"; do
+        file="${REAL_DATASETS[$ds]:-}"
+        [[ -n "$file" ]] || continue
+        local from_file from_stdin
+        from_file="$(cached_summary "$file")"
+        from_stdin="$(validate_summary - < "$file")"
+        record real "$ds" "stdin (validate -)" "exit $(summary_field "$from_file" 1); $(summary_field "$from_file" 3)" "exit $(summary_field "$from_stdin" 1); $(summary_field "$from_stdin" 3)"
+    done
+
+    section_hdr index "validate accepts the files that index accepts and matches each index"
+    local verdict
+    for ds in "${DATASETS[@]}"; do
+        file="${REAL_DATASETS[$ds]:-}"
+        [[ -n "$file" ]] || continue
+        verdict="$(index_verdict "$file" "real_$ds.fa")"
+        record real "$ds" "accepted (index, validate)" "$verdict" "$(validate_verdict "$file")"
+        if [[ "$verdict" == accept ]]; then record real "$ds" "index pair (validate --index)" passed "$(pair_verdict "real_$ds.fa")"; fi
+    done
+    for name in "${FIXTURES[@]}"; do
+        file="$FIXTURE_DIR/$name.fasta"
+        verdict="$(index_verdict "$file" "fixture_$name.fasta")"
+        record fixture "$name" "accepted (index, validate)" "$verdict" "$(validate_verdict "$file")"
+        if [[ "$verdict" == accept ]]; then record fixture "$name" "index pair (validate --index)" passed "$(pair_verdict "fixture_$name.fasta")"; fi
+    done
+    for name in "${VARIANTS[@]}"; do
+        file="$MESSY_DIR/$name.fasta"
+        verdict="$(index_verdict "$file" "variant_$name.fasta")"
+        record variant "$name" "accepted (index, validate)" "$verdict" "$(validate_verdict "$file")"
+        if [[ "$verdict" == accept ]]; then record variant "$name" "index pair (validate --index)" passed "$(pair_verdict "variant_$name.fasta")"; fi
+    done
+
+    section_hdr samtools "samtools faidx rejects exactly the layouts validate warns about"
+    for ds in "${DATASETS[@]}"; do
+        file="${REAL_DATASETS[$ds]:-}"
+        [[ -n "$file" ]] || continue
+        record real "$ds" "layout (samtools, validate)" "$(samtools_verdict "$file" "real_$ds")" "$(layout_verdict "$file")"
+    done
+    for name in "${FIXTURES[@]}"; do
+        file="$FIXTURE_DIR/$name.fasta"
+        record fixture "$name" "layout (samtools, validate)" "$(samtools_verdict "$file" "fixture_$name")" "$(layout_verdict "$file")"
+    done
+    for name in "${VARIANTS[@]}"; do
+        file="$MESSY_DIR/$name.fasta"
+        record variant "$name" "layout (samtools, validate)" "$(samtools_verdict "$file" "variant_$name")" "$(layout_verdict "$file")"
+    done
+
+    section_hdr seqkit "SeqKit seq -v and validate agree where their alphabets match"
+    local type
+    for ds in "${DATASETS[@]}"; do
+        file="${REAL_DATASETS[$ds]:-}"
+        [[ -n "$file" ]] || continue
+        type=dna
+        [[ "$ds" == Proteome ]] && type=protein
+        record real "$ds" "alphabet (seqkit, validate)" "$(seqkit_verdict "$file" "$type")" "$(alphabet_verdict "$file")"
+    done
+    record crafted invalid_symbol "alphabet (seqkit, validate)" "$(seqkit_verdict "$c/invalid_symbol.fasta" protein)" "$(alphabet_verdict "$c/invalid_symbol.fasta")"
+    for name in rna_u dot_gap space_inside tab_at_end; do
+        file="$c/difference_$name.fasta"
+        observe "$name" "alphabet (seqkit, validate)" "$(seqkit_verdict "$file" dna)" "$(alphabet_verdict "$file")"
+    done
+
+    section_hdr flags "validate's options on the REAL datasets, against counts from tr and awk"
+    for ds in "${DATASETS[@]}"; do
+        file="${REAL_DATASETS[$ds]:-}"
+        [[ -n "$file" ]] && check_real_flags "$ds" "$file"
+    done
+
+    echo ""
+    echo "Results: $PASS passed, $FAIL failed"
+    if [[ "$FAIL" -gt 0 ]]; then
+        echo "VERIFICATION FAILED"
+        return 1
+    fi
+    echo "ALL PASSED"
+}
+
+run_zebrac_tool() {
+    local workload="$1" tool="$2" family="$3" json_out="$4" script="$5" input_bytes="$6"
+    echo "  >> perf $workload $tool  (runs=$RUNS warmup=$WARMUP)"
+    zebrac_clear_commands
+    zebrac_add_command validate perf "$workload" "$tool" "$family" "$input_bytes" "" "$json_out" "$(shell_command "$script")"
+    if ! bench_group "$json_out"; then
+        echo "error: zebrac failed for $workload $tool" >&2
+        echo "  command: $script" >&2
+        return 1
+    fi
+}
+
+write_run_manifest() {
+    BENCH_ZFASTA_BUILD="$(bench_build_identity)"
+    export BENCH_ZFASTA_BUILD
+    python3 - "$RUN_MANIFEST" "$TIMESTAMP" "$(basename "$METADATA_JSONL")" "$RUNS" "$WARMUP" \
+        "$ZEBRAC_DURATION_MS" "$DO_TESTS" "perf_${TIMESTAMP}" "tests_${TIMESTAMP}.tsv" <<'PY'
+import json, os, sys
+from pathlib import Path
+
+manifest, ts, metadata, runs, warmup, duration, did_verify, perf, tests = sys.argv[1:10]
+tools = {}
+for name in ("samtools", "seqkit"):
+    value = os.environ.get(f"BENCH_VER_{name.upper()}")
+    if value:
+        tools[name] = value
+sections = {"perf": perf}
+if (Path(manifest).parent / tests).is_file():
+    sections["correctness"] = tests
+out = {
+    "schema_version": "validate-run.v1",
+    "timestamp": ts,
+    "runner": "zebrac",
+    "zebrac": os.environ.get("BENCH_VER_ZEBRAC", ""),
+    "z_fasta": os.environ.get("BENCH_VER_ZFASTA", ""),
+    "z_fasta_build": json.loads(os.environ["BENCH_ZFASTA_BUILD"]),
+    "runs": int(runs),
+    "warmup": int(warmup),
+    "duration_ms": int(duration),
+    "verify_skipped": did_verify != "true",
+    "verify_pass": os.environ.get("BENCH_VERIFY_PASS"),
+    "metadata": metadata,
+    "tools": tools,
+    "sections": sections,
+}
+Path(manifest).write_text(json.dumps(out, indent=2) + "\n")
+PY
+}
+
+run_perf() {
+    bench_require_tool zebrac
+    bench_require_tool z-fasta
+    bench_require_tool samtools
+    bench_require_tool seqkit
+    METADATA_JSONL="$RESULTS_DIR/metadata_${TIMESTAMP}.jsonl"
+    RUN_MANIFEST="$RESULTS_DIR/run_${TIMESTAMP}.json"
+    : > "$METADATA_JSONL"
+    ZEBRAC_MIN_SAMPLES="$RUNS"
+    ZEBRAC_MAX_SAMPLES="$RUNS"
+    ZEBRAC_WARMUP="$WARMUP"
+    local out_dir="$RESULTS_DIR/perf_${TIMESTAMP}"
+    mkdir -p "$out_dir" "$WORK_DIR"
+
+    echo ""
+    echo "================================================================"
+    echo "  Validate zebrac performance"
+    echo "================================================================"
+    echo "  Runs: $RUNS | Warmup: $WARMUP | Duration: ${ZEBRAC_DURATION_MS}ms"
+    echo "  metadata: $METADATA_JSONL"
+
+    ensure_real_data
+    local ds fa bytes type qf qz qk qs qw qp
+    qz="$(quote_arg "$ZFASTA")"
+    qk="$(quote_arg "$SEQKIT")"
+    qs="$(quote_arg "$SAMTOOLS")"
+    for ds in "${DATASETS[@]}"; do
+        fa="${REAL_DATASETS[$ds]:-}"
+        [[ -n "$fa" ]] || continue
+        bytes="$(file_size_bytes "$fa")"
+        type=dna
+        [[ "$ds" == Proteome ]] && type=protein
+        qf="$(quote_arg "$fa")"
+        qw="$(quote_arg "$WORK_DIR/perf_$ds.fai")"
+        ln -sfn "$fa" "$WORK_DIR/pair_$ds.fa"
+        TMPDIR="$WORK_DIR" "$ZFASTA" index "$WORK_DIR/pair_$ds.fa" > /dev/null
+        qp="$(quote_arg "$WORK_DIR/pair_$ds.fa")"
+        echo "  -- dataset $ds ($(du -h "$fa" | cut -f1)) --"
+        run_zebrac_tool "$ds" z-fasta z-fasta "$out_dir/${ds}__z-fasta.json" "$qz validate --json $qf > /dev/null" "$bytes"
+        run_zebrac_tool "$ds" z-fasta-index z-fasta "$out_dir/${ds}__z-fasta-index.json" "$qz validate --json --index $qp > /dev/null" "$bytes"
+        run_zebrac_tool "$ds" seqkit peer "$out_dir/${ds}__seqkit.json" "$qk seq -j 1 -v -t $type -o /dev/null $qf" "$bytes"
+        run_zebrac_tool "$ds" samtools peer "$out_dir/${ds}__samtools.json" "$qs faidx --fai-idx $qw $qf" "$bytes"
+    done
+
+    export_manifest_core_versions
+    export_manifest_optional_tool_versions seqkit
+    write_run_manifest
+    printf '%s\n' "$TIMESTAMP" > "$RESULTS_DIR/LATEST"
+    echo "  manifest: $RUN_MANIFEST"
+}
+
+run_report() {
+    echo ""
+    echo "================================================================"
+    echo "  Generating REPORT.md"
+    echo "================================================================"
+    "$PYTHON" "$SCRIPT_DIR/generate_report.py"
+}
+
+TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+TESTS_TSV="$RESULTS_DIR/tests_${TIMESTAMP}.tsv"
+mkdir -p "$RESULTS_DIR"
+
+if $DO_TESTS; then
+    echo ""
+    echo "================================================================"
+    echo "  run_tests (correctness)"
+    echo "================================================================"
+    bench_ensure_messy --fixtures --perf
+    verify_log="$RESULTS_DIR/verify_${TIMESTAMP}.log"
+    if run_tests | tee "$verify_log"; then
+        BENCH_VERIFY_PASS="$(awk '/^Results:/{print $2; exit}' "$verify_log")"
+        export BENCH_VERIFY_PASS
+    else
+        echo "error: run_tests failed" >&2
+        exit 1
+    fi
+fi
+$DO_BENCHMARKS && run_perf
+$DO_REPORT && run_report
+
+echo ""
+echo "================================================================"
+echo "  Validate suite complete"
+echo "================================================================"

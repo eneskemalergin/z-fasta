@@ -110,12 +110,12 @@ The summary appears only after successful output.
 ```bash
 z-fasta validate \
   --strict \
-  --json --summary \
+  --json \
   incoming.fa \
   > validation.json
 ```
 
-Warnings become exit 1 while the JSON event levels remain unchanged.
+Warnings become exit 1 while the JSON severities remain unchanged. Read `validation.outcome` and the exit status together.
 
 ## Validate RefSeq headers
 
@@ -124,7 +124,7 @@ z-fasta validate \
   --strict \
   --schema refseq \
   --max-header-len 200 \
-  --json --summary \
+  --json \
   reference.fa \
   > validation.json
 ```
@@ -140,7 +140,7 @@ z-fasta validate \
   aligned.fa
 ```
 
-Use `--fix-format-only` only when invalid alphabet bytes are intentional and must remain unchanged.
+Bytes outside the alphabet do not block repair; the copy keeps them and validation still reports them.
 
 ## Compare two assemblies
 
@@ -152,7 +152,7 @@ z-fasta stats assembly-b.fa > assembly-b.stats.txt
 diff -u assembly-a.stats.txt assembly-b.stats.txt
 ```
 
-Align duplicate-index policy before comparing the biological metrics.
+Build both indexes with the same tool before comparing the biological metrics; a samtools `.fai` leaves out later duplicates.
 
 The raw diff also includes the FASTA path and file size. Use it for human review, not as a stable machine comparison contract.
 

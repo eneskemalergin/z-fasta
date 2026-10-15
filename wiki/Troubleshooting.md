@@ -59,7 +59,7 @@ Work through these checks in order:
 
 - Identifier spelling and case.
 - Header token before the first space or tab.
-- Duplicate and empty-record policy.
+- Duplicate identifiers, which resolve to the first record, and empty records, which are not indexed.
 - Names-file whitespace.
 - Whether a colon suffix was interpreted as coordinates.
 - Whether the chosen sidecar belongs to this FASTA.
@@ -109,15 +109,15 @@ Use the temporary-output recipe in [Recipes](Recipes) when a partial file must n
 
 ## Output closed early
 
-The code is `io.write_failed` with `cause="BrokenPipe"`, and the exit status is 1. The reader closed stdout before z-fasta finished, for example `z-fasta get genome.fa chr1 | head`.
+When the reader closes stdout before z-fasta finishes, for example `z-fasta get genome.fa chr1 | head`, z-fasta stops without a message and exits 141, as a program stopped by `SIGPIPE` does. Any other write failure on stdout, such as a full disk, is `io.write_failed` with exit status 1.
 
-The data that reached the reader is correct; z-fasta reports that it could not deliver the rest. For a quick preview, request a smaller region instead of truncating the stream:
+The data that reached the reader is correct. For a quick preview, request a smaller region instead of truncating the stream:
 
 ```bash
 z-fasta get genome.fa chr1:1-1000
 ```
 
-In a pipeline with `set -o pipefail`, an early-closing reader makes the pipeline fail.
+In a pipeline with `set -o pipefail`, an early-closing reader makes the pipeline fail with status 141.
 
 ## Missing or unreadable file
 
@@ -143,23 +143,26 @@ Use `--strict` when warnings must fail automation:
 z-fasta validate --strict genome.fa
 ```
 
-## Validate retained 10000 examples
+## Validate reports an interrupted check
 
-Scanning and legacy kind counts continued, but additional event examples were omitted. JSON includes `truncated: true`. Without fix, the existing cap policy returns exit 1. With fix, a permitted rewrite can finish and the remaining findings select the status.
+`INTERRUPTED` (JSON `completion: interrupted`) means a read or memory failure stopped the scan. The report covers what was examined, whole-file findings such as a missing final newline are not decided, the failure is on stderr, and the exit status is 1. Fix the cause and rerun; a partial report is never a pass.
 
-Text mode says the retained examples were capped. Machine error mode omits that prose notice; inspect the v1 report's truncation field and the actual status. This is not a new coded biological failure.
+## Validate --index reports differences
+
+`pair.*` findings mean the index no longer describes the FASTA: a record is missing from one side, or its length, offset, line layout, or side table differs. GET would return wrong bytes for those records. Rebuild the index:
+
+```bash
+z-fasta index genome.fa
+z-fasta validate --index genome.fa
+```
+
+A missing or stale index stops validate before the scan, with the loader's code on stderr, such as `index.not_found` or `index.source_size_mismatch`. A damaged entry stops it where the scan reaches that entry: the report is `INTERRUPTED`, and the entry's code is on stderr.
 
 ## Fix refuses the file
 
-Fix cannot repair no-sequence, duplicate-name, or null-byte errors. It also refuses non-null content before the first header instead of discarding it. Resolve those in the source.
+`repair.blocked` names the first finding the copy could not keep: no records, content before the first header, or a control byte in a header or sequence line. The report on stdout lists every finding. Resolve those in the source; an existing destination is left unchanged.
 
-Invalid alphabet bytes require either source correction, a correct `--custom-alphabet`, or an explicit format-only decision:
-
-```bash
-z-fasta validate --fix --fix-format-only -o output.fa input.fa
-```
-
-The invalid bytes remain and still affect exit status.
+Duplicate identifiers and symbols outside the alphabet do not block repair. The copy keeps them, and they still affect the exit status.
 
 ## Fix refuses the output path
 
@@ -171,7 +174,7 @@ A separate hard-link destination can be atomically replaced without modifying th
 
 - `fasta.no_records`: the input is empty.
 - `index.initial_header_required`: the first byte is not `>`. The report's `byte` shows it; `0xef` is the start of a UTF-8 BOM.
-- `index.no_indexable_records`: every record is empty. The report counts seen, empty, and duplicate records.
+- `index.no_indexable_records`: every record is empty.
 
 Index requires a non-empty input whose first byte is `>`. Validate can report a BOM and write a clean copy:
 

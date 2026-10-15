@@ -1,17 +1,15 @@
-//! Sequence extraction: positional regions, BED/names batching, strand, and RC transforms.
-//!
-//! Uniform records use O(1) byte-offset math; non-uniform records use side-table lookup.
-//! A present `.zfi` is authoritative; `.fai` is used only when `.zfi` is absent.
+//! Extracts sequence for `z-fasta get` and for `IndexedReader.fetchInto`.
+//! Requests are one-based inclusive; an end past the record is clamped, and a suffix that does
+//! not parse as a range stays part of the name. Lookups are first-wins.
+//! Byte spans come from the uniform line formula or a side-table search; reads are positional.
+//! Output is wrapped at 60 and written per record, so a later failure can leave a valid prefix.
 
 const std = @import("std");
-const complement = @import("complement.zig");
+const fasta = @import("fasta.zig");
 const bed_parser = @import("bed_parser.zig");
 const index_format = @import("index_format.zig");
-const stats = @import("stats.zig");
 const diagnostics = @import("diagnostics");
 
-/// A borrowed sequence name with an optional 1-based inclusive interval.
-/// `is_full` preserves the distinct header form of a bare name.
 pub const Region = struct {
     name: []const u8,
     start: u64,
@@ -19,7 +17,6 @@ pub const Region = struct {
     is_full: bool,
 };
 
-/// Independent reverse and complement operations composed by toggling each operation.
 pub const Orientation = struct {
     reverse: bool = false,
     complement: bool = false,
@@ -48,30 +45,23 @@ pub const Orientation = struct {
     }
 };
 
-/// GET execution options for one borrowed request source.
-/// Direct callers must supply combinations accepted by the CLI contract.
+/// Caller assumes a combination the CLI accepts.
 pub const Options = struct {
     source: RequestSource,
     honor_strand: bool = false,
-    /// Capture elapsed time for the caller to report.
     measure_elapsed: bool = false,
     orientation: Orientation = .{},
     annotate_transform: bool = false,
 };
 
-/// Borrowed positional tokens or a names/BED path; a path of `-` selects stdin.
 pub const RequestSource = union(enum) {
     positional: []const []const u8,
     names: []const u8,
     bed: []const u8,
 };
 
-/// Completed GET data output. The CLI writes a requested summary afterward.
-/// `elapsed_ns` is zero when timing was not requested through `measure_elapsed`.
 pub const Result = struct { region_count: usize, total_bases: u64, elapsed_ns: u64 };
 
-/// Parses a borrowed name or rightmost `:START-END`/`:START-` suffix.
-/// Invalid or overflowing suffixes remain part of the literal name.
 pub fn parseRegion(input: []const u8) Region {
     if (std.mem.findScalarLast(u8, input, ':')) |cp| {
         const suffix = input[cp + 1 ..];
@@ -94,8 +84,6 @@ pub fn parseRegion(input: []const u8) Region {
     };
 }
 
-/// A validated extraction request borrowing its name and non-uniform line table.
-/// Coordinates are 1-based inclusive; `display_end` preserves an unclamped request end.
 pub const ResolvedRegion = struct {
     name: []const u8,
     start: u64,
@@ -111,46 +99,80 @@ pub const ResolvedRegion = struct {
     annotate_transform: bool,
 };
 
-/// Resolves one request, borrowing its name and side table from input/index.
-/// Resets caller-owned failure storage once; returns without printing or exiting.
-/// Failure input labels borrow `region_str` through handling or the next reset.
-/// A supplied index does not carry complete-selection evidence, so misses report
-/// `retained_matches` rather than claiming absence from the complete catalog.
 pub fn resolveRegion(idx: *const LoadedIndex, region_str: []const u8, failure: *diagnostics.Failure) diagnostics.Error!ResolvedRegion {
     failure.reset(.get);
     failure.sources.set(.request_snapshot, .{ .label = .{ .borrowed = region_str }, .kind = .memory });
     var context = Diagnostics{ .failure = failure, .lookup_scope = .retained_matches, .index_source = if (idx.source == .zfi) .zfi else .fai, .at = .{ .source = .request_snapshot, .request = 1 } };
-    const result = try resolveRegionInternal(idx, region_str, &context);
+    const result = try resolveRegionText(idx, region_str, &context);
     failure.succeed();
     return result;
 }
 
-/// Writes one resolved request with 60-base wrapping. Failure storage resets
-/// once; a failed writer may have accepted a prefix, including a partial header.
-/// The caller owns the writer and its final flush. Its state is `outputs.file`
-/// with source role `output`; failure input labels borrow `region_str`.
+/// The caller owns `writer` and its flush.
 pub fn extractRegion(idx: *const LoadedIndex, region_str: []const u8, writer: anytype, failure: *diagnostics.Failure) diagnostics.Error!void {
     failure.reset(.get);
     failure.sources.set(.output, .{ .label = .{ .borrowed = "caller writer" }, .kind = .stream });
     failure.sources.set(.request_snapshot, .{ .label = .{ .borrowed = region_str }, .kind = .memory });
     var context = Diagnostics{ .failure = failure, .output_source = .output, .lookup_scope = .retained_matches, .index_source = if (idx.source == .zfi) .zfi else .fai, .at = .{ .source = .request_snapshot, .request = 1 } };
     const diag = &context;
-    const resolved = try resolveRegionInternal(idx, region_str, diag);
-    var input_buffer: [FASTA_INPUT_BUFFER_BYTES]u8 = undefined;
-    var output_buffer: [REGION_OUTPUT_BUFFER_BYTES]u8 = undefined;
-    try emitRegion(resolved, fastaSource(idx), &input_buffer, &output_buffer, writer, diag);
+    const resolved = try resolveRegionText(idx, region_str, diag);
+    var buffers: GetBuffers = undefined;
+    try emitRegion(resolved, fastaSource(idx), &buffers, writer, diag);
     failure.succeed();
 }
 
-/// Runs one GET source and finishes stdout. Caller-owned diagnostics reset once.
-/// Returns after discarding pending output on failure and releasing temporary
-/// storage. A successful result does not deliver the CLI's requested summary.
-pub fn runGetWithOptions(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, options: Options, failure: *diagnostics.Failure) diagnostics.Error!Result {
+/// `input_buffer` must not alias `dst`.
+pub fn fetchSymbols(idx: *const LoadedIndex, ordinal: usize, start: u64, end: u64, dst: []u8, input_buffer: []u8, failure: *diagnostics.Failure) diagnostics.Error![]u8 {
+    failure.reset(.get);
+    failure.sources.set(.output, .{ .label = .{ .borrowed = "caller buffer" }, .kind = .memory });
+    const index_source: diagnostics.SourceId = if (idx.source == .zfi) .zfi else .fai;
+    var context = Diagnostics{ .failure = failure, .output_source = .output, .index_source = index_source, .at = .{ .source = index_source } };
+    const diag = &context;
+    if (ordinal >= idx.records.len()) return diag.fail(.{ .@"request.ordinal_out_of_range" = .{ .ordinal = ordinal, .record_count = idx.records.len() } }, .resolve, index_source, null, null);
+    const rec = try idx.checkedRecord(ordinal, failure);
+    if (end < start) return diag.fail(.{ .@"request.end_before_start" = .{ .start = start, .end = end } }, .resolve, index_source, null, null);
+    if (end > rec.seq_len) return diag.fail(.{ .@"request.end_after_sequence" = .{ .end = end, .sequence_length = rec.seq_len } }, .resolve, index_source, null, null);
+    const count = end - start;
+    if (count > dst.len) return diag.fail(.{ .@"request.output_buffer_too_small" = .{ .required_bytes = count, .available_bytes = dst.len } }, .resolve, .output, null, null);
+    const symbols = dst[0..@intCast(count)];
+    if (count == 0) {
+        failure.succeed();
+        return symbols;
+    }
+
+    const side_table = idx.sideTableLines(rec);
+    if (!rec.isUniformWidth() and side_table.len == 0) return diag.consistency(.missing_side_table);
+    if (side_table.len == 0 and (rec.line_bases == 0 or rec.line_bytes < rec.line_bases)) return diag.consistency(.traversal_position);
+    const resolved = ResolvedRegion{
+        .name = idx.recordName(ordinal) orelse "",
+        .start = start + 1,
+        .display_end = end,
+        .is_full = false,
+        .seq_offset = rec.seq_offset,
+        .num_bases = count,
+        .line_bases = rec.line_bases,
+        .line_bytes = rec.line_bytes,
+        .side_table = side_table,
+        .record_index = ordinal,
+        .orientation = .{},
+        .annotate_transform = false,
+    };
+    const source = fastaSource(idx);
+    const span = try regionSpan(resolved, source, diag);
+    var output = RegionOutput{ .bytes = symbols, .diag = diag, .wrap = false };
+    var unused: std.Io.Writer = .failing;
+    try copyRegion(resolved, span, source, input_buffer, &.{}, &output, &unused, diag);
+    if (output.stray) return diag.mismatch(resolved, span, fasta.countBases(symbols));
+    failure.succeed();
+    return symbols;
+}
+
+pub fn runGet(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, options: Options, failure: *diagnostics.Failure) diagnostics.Error!Result {
     failure.reset(.get);
     failure.sources.set(.stdout, .{ .label = .{ .borrowed = "stdout" }, .kind = .stream });
     var context = Diagnostics{ .failure = failure };
-    var storage: GetBuffers = undefined;
-    const buffers = &storage;
+    const buffers = backing_allocator.create(GetBuffers) catch return context.oom(.reader_buffer);
+    defer backing_allocator.destroy(buffers);
     const start_ns = if (options.measure_elapsed) monotonicNs(io) else 0;
     switch (options.source) {
         .positional => {
@@ -220,10 +242,7 @@ const Diagnostics = struct {
 
     fn read(self: *@This(), offset: u64, wanted: u64, received: ?u64, cause: ?anyerror) diagnostics.Error {
         @branchHint(.cold);
-        return self.fail(if (received) |got| .{ .@"io.unexpected_eof" = .{ .exact = .{
-            .requested_bytes = wanted,
-            .received_bytes = got,
-        } } } else .{ .@"io.read_failed" = .{ .requested_bytes = wanted } }, .read, .fasta, offset, cause);
+        return self.fail(diagnostics.readFailure(wanted, received), .read, .fasta, offset, cause);
     }
 
     fn span(self: *@This(), end: u128, size: u64) diagnostics.Error {
@@ -231,7 +250,6 @@ const Diagnostics = struct {
         return self.fail(.{ .@"index.sequence_span_out_of_bounds" = .{
             .required_end = end,
             .source_bytes = size,
-            .bound_source = .actual,
         } }, .resolve, self.index_source, null, null);
     }
 
@@ -271,11 +289,11 @@ const Diagnostics = struct {
 
 const MAX_REQUEST_NAME_BYTES = std.math.maxInt(u16);
 const REQUEST_LINE_READER_BUFFER_BYTES = MAX_REQUEST_NAME_BYTES + 4096;
-const REQUEST_NAME_STACK_BYTES = 8 * 1024;
 const ACTIVE_NAME_BYTES = 4 * 1024 * 1024;
 const MAX_ACTIVE_NAME_BYTES = ACTIVE_NAME_BYTES + MAX_REQUEST_NAME_BYTES;
 const NAMES_REQUEST_BATCH_SIZE = 65536;
 const BED_REQUEST_BATCH_SIZE = 4096;
+const TYPE_SAMPLE_BASES: u64 = 256;
 
 const ParsedRequest = struct {
     region: Region,
@@ -364,9 +382,9 @@ fn parseRangeSuffix(suffix: []const u8) ?ParsedRange {
     return .{ .start = start, .end = end };
 }
 
-fn resolveRegionInternal(idx: *const LoadedIndex, region_str: []const u8, diag: *Diagnostics) diagnostics.Error!ResolvedRegion {
+fn resolveRegionText(idx: *const LoadedIndex, region_str: []const u8, diag: *Diagnostics) diagnostics.Error!ResolvedRegion {
     const region = parseRegion(region_str);
-    const rec_idx = idx.lookupName(region.name) orelse return diag.missing(region.name);
+    const rec_idx = try idx.findName(region.name, diag.failure) orelse return diag.missing(region.name);
     return resolveParsedRequest(idx, .{ .region = region, .orientation = .{} }, rec_idx, false, diag);
 }
 
@@ -377,7 +395,7 @@ fn resolveParsedRequest(
     annotate_transform: bool,
     diag: *Diagnostics,
 ) diagnostics.Error!ResolvedRegion {
-    const rec = idx.records[rec_idx];
+    const rec = try idx.checkedRecord(rec_idx, diag.failure);
     const region = request.region;
 
     var start = region.start;
@@ -425,36 +443,72 @@ fn resolveParsedRequest(
     };
 }
 
-fn detectRegionType(source: FastaSource, resolved: ResolvedRegion, diag: *Diagnostics, buffers: *GetBuffers) diagnostics.Error!stats.SequenceType {
+fn detectRegionType(source: FastaSource, resolved: ResolvedRegion, diag: *Diagnostics, buffers: *GetBuffers) diagnostics.Error!fasta.SequenceType {
     const span = try diskSpanForRegion(resolved, diag);
     if (span.end > source.size) return diag.span(span.end, source.size);
     if (span.start >= span.end) return diag.consistency(.traversal_position);
 
-    var counts = [_]u64{0} ** 256;
-    var total: u64 = 0;
-    var skip = span.leading_bases;
+    var sample = SampleCounts{ .skip = span.leading_bases, .wanted = resolved.num_bases };
     const input = &buffers.input;
     var offset = span.start;
-
-    while (offset < span.end and total < resolved.num_bases) {
+    while (offset < span.end and sample.total < resolved.num_bases) {
         const wanted: usize = @intCast(@min(@as(u64, input.len), span.end - offset));
         const got = std.Io.File.readPositionalAll(source.file, source.io, input[0..wanted], offset) catch |err| return diag.read(offset, wanted, null, err);
         if (got != wanted) return diag.read(offset, wanted, got, null);
-        for (input[0..got]) |byte| {
-            if (byte <= ' ') continue;
-            if (skip != 0) {
-                skip -= 1;
-                continue;
-            }
-            counts[byte] += 1;
-            total += 1;
-            if (total == resolved.num_bases) break;
-        }
+        sample.add(input[0..got]);
         offset += got;
     }
+    if (sample.total != resolved.num_bases) return diag.mismatch(resolved, span, sample.total);
+    return fasta.typeFromCounts(sample.nucleotides, sample.total);
+}
 
-    if (total != resolved.num_bases) return diag.mismatch(resolved, span, total);
-    return stats.detectType(&counts, total);
+fn detectBufferedType(resolved: ResolvedRegion, bytes: []const u8, bytes_start: u64, diag: *Diagnostics) diagnostics.Error!fasta.SequenceType {
+    const span = try diskSpanForRegion(resolved, diag);
+    if (span.start < bytes_start or span.end - bytes_start > bytes.len) return diag.consistency(.traversal_position);
+    var sample = SampleCounts{ .skip = span.leading_bases, .wanted = resolved.num_bases };
+    sample.add(bytes[@intCast(span.start - bytes_start)..@intCast(span.end - bytes_start)]);
+    if (sample.total != resolved.num_bases) return diag.mismatch(resolved, span, sample.total);
+    return fasta.typeFromCounts(sample.nucleotides, sample.total);
+}
+
+const SampleCounts = struct {
+    nucleotides: u64 = 0,
+    total: u64 = 0,
+    skip: u64,
+    wanted: u64,
+
+    fn add(self: *SampleCounts, bytes: []const u8) void {
+        for (bytes) |byte| {
+            if (self.total == self.wanted) return;
+            if (!fasta.isBase(byte)) continue;
+            if (self.skip != 0) {
+                self.skip -= 1;
+                continue;
+            }
+            self.nucleotides += @intFromBool(fasta.isIupacNucleotide(byte));
+            self.total += 1;
+        }
+    }
+};
+
+const TypedRecord = struct { record: usize, kind: fasta.SequenceType, sample: diagnostics.Sample };
+
+fn checkComplement(region: ResolvedRegion, typed: *?TypedRecord, buffered: ?struct { bytes: []const u8, start: u64 }, source: FastaSource, diag: *Diagnostics, buffers: *GetBuffers) diagnostics.Error!void {
+    if (!region.orientation.complement) return;
+    const known = if (typed.*) |record| record.record == region.record_index else false;
+    if (!known) {
+        var sample = region;
+        sample.num_bases = @min(sample.num_bases, TYPE_SAMPLE_BASES);
+        const kind = if (buffered) |read| try detectBufferedType(sample, read.bytes, read.start, diag) else try detectRegionType(source, sample, diag, buffers);
+        typed.* = .{ .record = region.record_index, .kind = kind, .sample = .{ .symbols = @intCast(sample.num_bases), .rule = .nucleotide_above_90_percent, .interval = .{ .start = sample.start, .end = sample.start + sample.num_bases - 1 }, .request = diag.at.request } };
+    }
+    const record = typed.*.?;
+    if (record.kind == .protein) return diag.fail(.{ .@"transform.complement_on_protein" = .{
+        .transform = .{ .reverse = region.orientation.reverse, .complement = region.orientation.complement },
+        .classification = .protein,
+        .sample = record.sample,
+        .identifier = diag.failure.retain(region.name, 32),
+    } }, .transform, diag.at.source orelse .request_snapshot, null, null);
 }
 
 const FastaSource = struct {
@@ -469,10 +523,15 @@ fn fastaSource(idx: *const LoadedIndex) FastaSource {
 
 const FASTA_INPUT_BUFFER_BYTES: usize = 256 * 1024;
 const REGION_OUTPUT_BUFFER_BYTES: usize = 64 * 1024;
+const REVERSED_BUFFER_BYTES: usize = 64 * 1024;
+const STDOUT_BUFFER_BYTES: usize = 64 * 1024;
 
 const GetBuffers = struct {
     input: [FASTA_INPUT_BUFFER_BYTES]u8,
     output: [REGION_OUTPUT_BUFFER_BYTES]u8,
+    reversed: [REVERSED_BUFFER_BYTES]u8,
+    stdout: [STDOUT_BUFFER_BYTES]u8,
+    request: [REQUEST_LINE_READER_BUFFER_BYTES]u8,
 };
 
 const DiskSpan = struct {
@@ -482,8 +541,11 @@ const DiskSpan = struct {
     trailing_bases: u64,
 };
 
-fn spansOverlapOrTouch(first_start: u64, first_end: u64, second_start: u64, second_end: u64) bool {
-    return first_start <= second_end and second_start <= first_end;
+// Reading over a gap this size costs about what a second read does.
+const COALESCE_GAP_BYTES = 4096;
+
+fn spansNear(first_start: u64, first_end: u64, second_start: u64, second_end: u64) bool {
+    return first_start <= second_end + COALESCE_GAP_BYTES and second_start <= first_end + COALESCE_GAP_BYTES;
 }
 
 fn sideTableLineForBase(lines: []const index_format.SideTableLine, base_index: u64) usize {
@@ -544,12 +606,16 @@ fn diskSpanForRegion(resolved: ResolvedRegion, diag: *Diagnostics) diagnostics.E
     };
 }
 
+const OUTPUT_LINE_BASES = 60;
+
 const RegionOutput = struct {
     line_pos: usize = 0,
     len: usize = 0,
     bases_written: u64 = 0,
     bytes: []u8,
     diag: *Diagnostics,
+    wrap: bool = true,
+    stray: bool = false,
 
     fn flush(self: *RegionOutput, writer: anytype) diagnostics.Error!void {
         if (self.len == 0) return;
@@ -560,11 +626,13 @@ const RegionOutput = struct {
     fn appendForward(self: *RegionOutput, src: []const u8, do_complement: bool, writer: anytype) diagnostics.Error!void {
         var start: usize = 0;
         while (start < src.len) {
-            const chunk = @min(src.len - start, 60 - self.line_pos);
-            if (self.bytes.len - self.len < chunk + 1) try self.flush(writer);
+            const chunk = if (self.wrap) @min(src.len - start, OUTPUT_LINE_BASES - self.line_pos) else src.len - start;
+            if (self.bytes.len - self.len < chunk + @intFromBool(self.wrap)) try self.flush(writer);
             const dst = self.bytes[self.len .. self.len + chunk];
             if (do_complement) {
-                complement.complementInto(dst, src[start .. start + chunk]);
+                fasta.complementInto(dst, src[start .. start + chunk]);
+            } else if (chunk <= 64) {
+                copyShort(dst, src[start .. start + chunk]);
             } else {
                 @memcpy(dst, src[start .. start + chunk]);
             }
@@ -572,7 +640,7 @@ const RegionOutput = struct {
             self.bases_written += chunk;
             self.line_pos += chunk;
             start += chunk;
-            if (self.line_pos == 60) {
+            if (self.wrap and self.line_pos == OUTPUT_LINE_BASES) {
                 self.bytes[self.len] = '\n';
                 self.len += 1;
                 self.line_pos = 0;
@@ -580,26 +648,11 @@ const RegionOutput = struct {
         }
     }
 
-    fn appendReverse(self: *RegionOutput, src: []const u8, do_complement: bool, writer: anytype) diagnostics.Error!void {
-        var end = src.len;
-        while (end > 0) {
-            const chunk = @min(end, 60 - self.line_pos);
-            if (self.bytes.len - self.len < chunk + 1) try self.flush(writer);
-            var j: usize = 0;
-            while (j < chunk) : (j += 1) {
-                const byte = src[end - 1 - j];
-                self.bytes[self.len + j] = if (do_complement) complement.complement(byte) else byte;
-            }
-            self.len += chunk;
-            self.bases_written += chunk;
-            self.line_pos += chunk;
-            end -= chunk;
-            if (self.line_pos == 60) {
-                self.bytes[self.len] = '\n';
-                self.len += 1;
-                self.line_pos = 0;
-            }
-        }
+    fn passLines(self: *RegionOutput, block: []const u8, lines: usize, writer: anytype) diagnostics.Error!void {
+        std.debug.assert(self.wrap and self.line_pos == 0);
+        try self.flush(writer);
+        writer.writeAll(block) catch |err| return self.diag.fail(.{ .@"io.write_failed" = {} }, .write, self.diag.output_source, null, err);
+        self.bases_written += lines * OUTPUT_LINE_BASES;
     }
 
     fn finish(self: *RegionOutput, writer: anytype) diagnostics.Error!void {
@@ -611,6 +664,85 @@ const RegionOutput = struct {
         try self.flush(writer);
     }
 };
+
+fn copyShort(dst: []u8, src: []const u8) void {
+    std.debug.assert(dst.len == src.len and src.len <= 64);
+    const n = src.len;
+    if (n >= 32) {
+        const head: @Vector(32, u8) = src[0..32].*;
+        const tail: @Vector(32, u8) = src[n - 32 ..][0..32].*;
+        dst[0..32].* = head;
+        dst[n - 32 ..][0..32].* = tail;
+    } else if (n >= 16) {
+        const head: @Vector(16, u8) = src[0..16].*;
+        const tail: @Vector(16, u8) = src[n - 16 ..][0..16].*;
+        dst[0..16].* = head;
+        dst[n - 16 ..][0..16].* = tail;
+    } else if (n >= 8) {
+        const head = std.mem.readInt(u64, src[0..8], .little);
+        const tail = std.mem.readInt(u64, src[n - 8 ..][0..8], .little);
+        std.mem.writeInt(u64, dst[0..8], head, .little);
+        std.mem.writeInt(u64, dst[n - 8 ..][0..8], tail, .little);
+    } else {
+        for (dst, src) |*d, b| d.* = b;
+    }
+}
+
+fn forwardUniform(resolved: ResolvedRegion, bytes: []const u8, start_pos: usize, start_column: u64, output: *RegionOutput, writer: anytype) diagnostics.Error!usize {
+    var pos = start_pos;
+    var column = start_column;
+    const line_bases: usize = resolved.line_bases;
+    const terminator: usize = resolved.line_bytes - resolved.line_bases;
+    const same_lines = output.wrap and !resolved.orientation.complement and line_bases == OUTPUT_LINE_BASES and terminator == 1;
+    var pass = same_lines;
+    while (output.bases_written < resolved.num_bases and pos < bytes.len) {
+        if (same_lines and column != 0 and output.line_pos == 0) {
+            // An output line spans two input lines: two 64-byte moves, the second overwriting the overrun.
+            const rest = OUTPUT_LINE_BASES - column;
+            while (resolved.num_bases - output.bases_written >= OUTPUT_LINE_BASES and bytes.len - pos >= 2 * 64) {
+                if (output.bytes.len - output.len < 2 * 64) try output.flush(writer);
+                const dst = output.bytes[output.len..];
+                dst[0..64].* = bytes[pos..][0..64].*;
+                dst[rest..][0..64].* = bytes[pos + rest + 1 ..][0..64].*;
+                dst[OUTPUT_LINE_BASES] = '\n';
+                output.len += OUTPUT_LINE_BASES + 1;
+                output.bases_written += OUTPUT_LINE_BASES;
+                pos += OUTPUT_LINE_BASES + 1;
+            }
+        }
+        if (pass and column == 0 and output.line_pos == 0) {
+            const lines: usize = @intCast(@min((bytes.len - pos) / (line_bases + 1), (resolved.num_bases - output.bases_written) / line_bases));
+            const block = bytes[pos..][0 .. lines * (line_bases + 1)];
+            if (lines != 0) {
+                if (newlinesEvery(block, line_bases + 1)) {
+                    try output.passLines(block, lines, writer);
+                    pos += block.len;
+                    continue;
+                }
+                pass = false;
+            }
+        }
+        var take: usize = @intCast(@min(line_bases - column, resolved.num_bases - output.bases_written, bytes.len - pos));
+        if (same_lines) take = @min(take, OUTPUT_LINE_BASES - output.line_pos);
+        if (!output.wrap and fasta.countBasesInLineSlice(bytes, pos, pos + take) != take) output.stray = true;
+        try output.appendForward(bytes[pos..][0..take], resolved.orientation.complement, writer);
+        pos += take;
+        column += take;
+        if (column == line_bases) {
+            column = 0;
+            pos += terminator;
+        }
+    }
+    return pos;
+}
+
+fn newlinesEvery(block: []const u8, stride: usize) bool {
+    var at = stride - 1;
+    while (at < block.len) : (at += stride) {
+        if (block[at] != '\n') return false;
+    }
+    return true;
+}
 
 fn writeRegionHeader(resolved: ResolvedRegion, writer: anytype, diag: *Diagnostics) diagnostics.Error!void {
     diag.output().state = .streaming;
@@ -632,9 +764,8 @@ fn consumeForwardBytes(
 ) diagnostics.Error!void {
     var pos: usize = 0;
     while (pos < bytes.len and output.bases_written < resolved.num_bases) {
-        while (pos < bytes.len and bytes[pos] <= ' ') pos += 1;
-        const run_start = pos;
-        while (pos < bytes.len and bytes[pos] > ' ') pos += 1;
+        const run_start = findBaseOrNot(bytes, pos, true);
+        pos = findBaseOrNot(bytes, run_start, false);
         var run = bytes[run_start..pos];
         if (skip.* != 0) {
             const skipped: usize = @intCast(@min(skip.*, @as(u64, run.len)));
@@ -647,28 +778,17 @@ fn consumeForwardBytes(
     }
 }
 
-fn consumeReverseBytes(
-    resolved: ResolvedRegion,
-    bytes: []const u8,
-    skip: *u64,
-    output: *RegionOutput,
-    writer: anytype,
-) diagnostics.Error!void {
-    var i = bytes.len;
-    while (i > 0 and output.bases_written < resolved.num_bases) {
-        while (i > 0 and bytes[i - 1] <= ' ') i -= 1;
-        const run_end = i;
-        while (i > 0 and bytes[i - 1] > ' ') i -= 1;
-        var run = bytes[i..run_end];
-        if (skip.* != 0) {
-            const skipped: usize = @intCast(@min(skip.*, @as(u64, run.len)));
-            skip.* -= @intCast(skipped);
-            run = run[0 .. run.len - skipped];
-        }
-        const remaining: usize = @intCast(resolved.num_bases - output.bases_written);
-        if (run.len > remaining) run = run[run.len - remaining ..];
-        try output.appendReverse(run, resolved.orientation.complement, writer);
+fn findBaseOrNot(bytes: []const u8, start: usize, base: bool) usize {
+    const Block = @Vector(32, u8);
+    var pos = start;
+    while (bytes.len - pos >= 32) : (pos += 32) {
+        const block: Block = bytes[pos..][0..32].*;
+        const bases: u32 = @bitCast(block > @as(Block, @splat(' ')));
+        const hits = if (base) bases else ~bases;
+        if (hits != 0) return pos + @ctz(hits);
     }
+    while (pos < bytes.len and fasta.isBase(bytes[pos]) != base) pos += 1;
+    return pos;
 }
 
 fn emitUniformFromSpan(
@@ -679,50 +799,11 @@ fn emitUniformFromSpan(
     writer: anytype,
     diag: *Diagnostics,
 ) diagnostics.Error!void {
-    var remaining = resolved.num_bases;
-    const base_index = if (resolved.orientation.reverse)
-        resolved.start - 1 + resolved.num_bases - 1
-    else
-        resolved.start - 1;
-    var column = base_index % resolved.line_bases;
-    var line_start = try uniformByteOffset(resolved, base_index, diag) - column;
-
-    while (remaining != 0) {
-        const take_u64 = if (resolved.orientation.reverse)
-            @min(column + 1, remaining)
-        else
-            @min(resolved.line_bases - column, remaining);
-        const take: usize = @intCast(take_u64);
-        const source_start = if (resolved.orientation.reverse)
-            line_start + column + 1 - take_u64
-        else
-            line_start + column;
-        if (source_start < span_start) return diag.consistency(.traversal_position);
-        const relative_start: usize = @intCast(source_start - span_start);
-        if (relative_start > bytes.len or take > bytes.len - relative_start) {
-            return diag.consistency(.traversal_position);
-        }
-        const src = bytes[relative_start .. relative_start + take];
-        if (resolved.orientation.reverse) {
-            try output.appendReverse(src, resolved.orientation.complement, writer);
-        } else {
-            try output.appendForward(src, resolved.orientation.complement, writer);
-        }
-
-        remaining -= take_u64;
-        if (remaining == 0) break;
-        if (resolved.orientation.reverse) {
-            line_start = std.math.sub(u64, line_start, resolved.line_bytes) catch {
-                return diag.consistency(.traversal_position);
-            };
-            column = resolved.line_bases - 1;
-        } else {
-            line_start = std.math.add(u64, line_start, resolved.line_bytes) catch {
-                return diag.consistency(.traversal_position);
-            };
-            column = 0;
-        }
-    }
+    const base_index = resolved.start - 1;
+    const source_start = try uniformByteOffset(resolved, base_index, diag);
+    if (source_start < span_start or source_start - span_start > bytes.len) return diag.consistency(.traversal_position);
+    _ = try forwardUniform(resolved, bytes, @intCast(source_start - span_start), base_index % resolved.line_bases, output, writer);
+    if (output.bases_written != resolved.num_bases) return diag.consistency(.traversal_position);
 }
 
 fn consumeUniformForwardChunk(
@@ -734,54 +815,39 @@ fn consumeUniformForwardChunk(
     writer: anytype,
     diag: *Diagnostics,
 ) diagnostics.Error!void {
+    if (output.bases_written >= resolved.num_bases) return;
     const chunk_end = std.math.add(u64, chunk_start, bytes.len) catch {
         return diag.consistency(.traversal_position);
     };
-    while (output.bases_written < resolved.num_bases) {
-        const column = base_index.* % resolved.line_bases;
-        const source_start = try uniformByteOffset(resolved, base_index.*, diag);
-        if (source_start >= chunk_end) return;
-        if (source_start < chunk_start) return diag.consistency(.traversal_position);
-        const relative_start: usize = @intCast(source_start - chunk_start);
-        const available = @min(
-            resolved.line_bases - column,
-            resolved.num_bases - output.bases_written,
-        );
-        const take: usize = @intCast(@min(available, chunk_end - source_start));
-        try output.appendForward(bytes[relative_start .. relative_start + take], resolved.orientation.complement, writer);
-        base_index.* += take;
-    }
+    const source_start = try uniformByteOffset(resolved, base_index.*, diag);
+    if (source_start >= chunk_end) return;
+    if (source_start < chunk_start) return diag.consistency(.traversal_position);
+    _ = try forwardUniform(resolved, bytes, @intCast(source_start - chunk_start), base_index.* % resolved.line_bases, output, writer);
+    base_index.* = resolved.start - 1 + output.bases_written;
 }
 
-fn consumeUniformReverseChunk(
+fn consumeReversed(
     resolved: ResolvedRegion,
-    chunk_start: u64,
     bytes: []const u8,
+    bytes_end: u64,
+    scratch: []u8,
     base_index: *u64,
+    skip: *u64,
     output: *RegionOutput,
     writer: anytype,
     diag: *Diagnostics,
 ) diagnostics.Error!void {
-    const chunk_end = std.math.add(u64, chunk_start, bytes.len) catch {
-        return diag.consistency(.traversal_position);
-    };
-    while (output.bases_written < resolved.num_bases) {
-        const column = base_index.* % resolved.line_bases;
-        const source_end = std.math.add(u64, try uniformByteOffset(resolved, base_index.*, diag), 1) catch {
-            return diag.consistency(.traversal_position);
-        };
-        if (source_end > chunk_end) return;
-        if (source_end <= chunk_start) return;
-        const available = @min(
-            column + 1,
-            resolved.num_bases - output.bases_written,
-        );
-        const take: usize = @intCast(@min(available, source_end - chunk_start));
-        const source_start = source_end - take;
-        const relative_start: usize = @intCast(source_start - chunk_start);
-        try output.appendReverse(bytes[relative_start .. relative_start + take], resolved.orientation.complement, writer);
-        if (output.bases_written < resolved.num_bases) base_index.* -= take;
-    }
+    if (output.bases_written >= resolved.num_bases) return;
+    const reversed = scratch[0..bytes.len];
+    fasta.reverseInto(reversed, bytes, resolved.orientation.complement);
+    var forward = resolved;
+    forward.orientation = .{};
+    if (resolved.side_table.len != 0) return consumeForwardBytes(forward, reversed, skip, output, writer);
+    const position = try uniformByteOffset(resolved, base_index.*, diag);
+    if (position >= bytes_end) return diag.consistency(.traversal_position);
+    if (bytes_end - position > bytes.len) return;
+    _ = try forwardUniform(forward, reversed, @intCast(bytes_end - 1 - position), resolved.line_bases - 1 - base_index.* % resolved.line_bases, output, writer);
+    base_index.* = resolved.start - 1 + resolved.num_bases - 1 - @min(output.bases_written, resolved.num_bases - 1);
 }
 
 fn emitRegionFromSpan(
@@ -789,7 +855,7 @@ fn emitRegionFromSpan(
     span: DiskSpan,
     span_start: u64,
     bytes: []const u8,
-    output_buffer: []u8,
+    buffers: *GetBuffers,
     writer: anytype,
     diag: *Diagnostics,
 ) diagnostics.Error!void {
@@ -803,17 +869,21 @@ fn emitRegionFromSpan(
     if (relative_end > bytes.len or relative_start > relative_end) {
         return diag.consistency(.traversal_position);
     }
-    var output = RegionOutput{ .bytes = output_buffer, .diag = diag };
-    if (resolved.side_table.len == 0) {
+    var output = RegionOutput{ .bytes = &buffers.output, .diag = diag };
+    if (resolved.orientation.reverse) {
+        var base_index = resolved.start - 1 + resolved.num_bases - 1;
+        var skip = span.trailing_bases;
+        var end = relative_end;
+        while (end > relative_start) {
+            const start = end - @min(end - relative_start, buffers.reversed.len);
+            try consumeReversed(resolved, bytes[start..end], span_start + end, &buffers.reversed, &base_index, &skip, &output, writer, diag);
+            end = start;
+        }
+    } else if (resolved.side_table.len == 0) {
         try emitUniformFromSpan(resolved, span_start, bytes, &output, writer, diag);
     } else {
-        const region_bytes = bytes[relative_start..relative_end];
-        var skip = if (resolved.orientation.reverse) span.trailing_bases else span.leading_bases;
-        if (resolved.orientation.reverse) {
-            try consumeReverseBytes(resolved, region_bytes, &skip, &output, writer);
-        } else {
-            try consumeForwardBytes(resolved, region_bytes, &skip, &output, writer);
-        }
+        var skip = span.leading_bases;
+        try consumeForwardBytes(resolved, bytes[relative_start..relative_end], &skip, &output, writer);
     }
     if (output.bases_written != resolved.num_bases) return diag.mismatch(resolved, span, output.bases_written);
     try output.finish(writer);
@@ -823,17 +893,35 @@ fn emitRegionFromSpan(
 fn emitRegion(
     resolved: ResolvedRegion,
     source: FastaSource,
-    input_buffer: []u8,
-    output_buffer: []u8,
+    buffers: *GetBuffers,
     writer: anytype,
     diag: *Diagnostics,
 ) diagnostics.Error!void {
+    const span = try regionSpan(resolved, source, diag);
+    try writeRegionHeader(resolved, writer, diag);
+    var output = RegionOutput{ .bytes = &buffers.output, .diag = diag };
+    try copyRegion(resolved, span, source, &buffers.input, &buffers.reversed, &output, writer, diag);
+    try output.finish(writer);
+    diag.output().records = (diag.output().records orelse 0) + 1;
+}
+
+fn regionSpan(resolved: ResolvedRegion, source: FastaSource, diag: *Diagnostics) diagnostics.Error!DiskSpan {
     const span = try diskSpanForRegion(resolved, diag);
     if (span.end > source.size) return diag.span(span.end, source.size);
     if (span.start >= span.end) return diag.consistency(.traversal_position);
+    return span;
+}
 
-    try writeRegionHeader(resolved, writer, diag);
-    var output = RegionOutput{ .bytes = output_buffer, .diag = diag };
+fn copyRegion(
+    resolved: ResolvedRegion,
+    span: DiskSpan,
+    source: FastaSource,
+    input_buffer: []u8,
+    scratch: []u8,
+    output: *RegionOutput,
+    writer: anytype,
+    diag: *Diagnostics,
+) diagnostics.Error!void {
     var skip = if (resolved.orientation.reverse) span.trailing_bases else span.leading_bases;
     var base_index = if (resolved.orientation.reverse)
         resolved.start - 1 + resolved.num_bases - 1
@@ -847,31 +935,25 @@ fn emitRegion(
             const got = std.Io.File.readPositionalAll(source.file, source.io, input_buffer[0..wanted], offset) catch |err| return diag.read(offset, wanted, null, err);
             if (got != wanted) return diag.read(offset, wanted, got, null);
             if (resolved.side_table.len == 0) {
-                try consumeUniformForwardChunk(resolved, offset, input_buffer[0..got], &base_index, &output, writer, diag);
+                try consumeUniformForwardChunk(resolved, offset, input_buffer[0..got], &base_index, output, writer, diag);
             } else {
-                try consumeForwardBytes(resolved, input_buffer[0..got], &skip, &output, writer);
+                try consumeForwardBytes(resolved, input_buffer[0..got], &skip, output, writer);
             }
             offset += got;
         }
     } else {
         var end = span.end;
         while (end > span.start and output.bases_written < resolved.num_bases) {
-            const wanted: usize = @intCast(@min(@as(u64, input_buffer.len), end - span.start));
+            const wanted: usize = @intCast(@min(@as(u64, @min(input_buffer.len, scratch.len)), end - span.start));
             const offset = end - wanted;
             const got = std.Io.File.readPositionalAll(source.file, source.io, input_buffer[0..wanted], offset) catch |err| return diag.read(offset, wanted, null, err);
             if (got != wanted) return diag.read(offset, wanted, got, null);
-            if (resolved.side_table.len == 0) {
-                try consumeUniformReverseChunk(resolved, offset, input_buffer[0..got], &base_index, &output, writer, diag);
-            } else {
-                try consumeReverseBytes(resolved, input_buffer[0..got], &skip, &output, writer);
-            }
+            try consumeReversed(resolved, input_buffer[0..got], end, scratch, &base_index, &skip, output, writer, diag);
             end = offset;
         }
     }
 
     if (output.bases_written != resolved.num_bases) return diag.mismatch(resolved, span, output.bases_written);
-    try output.finish(writer);
-    diag.output().records = (diag.output().records orelse 0) + 1;
 }
 
 fn emitResolvedBatch(
@@ -887,7 +969,7 @@ fn emitResolvedBatch(
     var total_bases = total_base;
     const request_source = diag.at.source;
     const shared = &buffers.input;
-    const output_buffer = &buffers.output;
+    var typed: ?TypedRecord = null;
     var i: usize = 0;
 
     while (i < resolved.len) {
@@ -911,7 +993,7 @@ fn emitResolvedBatch(
             const separated_before = shared_first_base > next_last_base and shared_first_base - next_last_base > 1;
             const logical_neighbor = resolved[group_end].record_index == shared_record and
                 !separated_after and !separated_before;
-            const disk_neighbor = spansOverlapOrTouch(shared_start, shared_end, next.start, next.end);
+            const disk_neighbor = spansNear(shared_start, shared_end, next.start, next.end);
             if ((!logical_neighbor and !disk_neighbor) or merged_end - merged_start > shared.len) break;
             shared_start = merged_start;
             shared_end = merged_end;
@@ -928,8 +1010,9 @@ fn emitResolvedBatch(
             for (resolved[i..group_end], i..) |region, ordinal| {
                 diag.at = requestReference(request_source, request_entries[ordinal].lineNumber(), request_base + ordinal + 1);
                 const next_total = try diag.add(.total_symbols, total_bases, region.num_bases);
+                try checkComplement(region, &typed, .{ .bytes = shared[0..got], .start = shared_start }, source, diag, buffers);
                 const span = try diskSpanForRegion(region, diag);
-                try emitRegionFromSpan(region, span, shared_start, shared[0..got], output_buffer, writer, diag);
+                try emitRegionFromSpan(region, span, shared_start, shared[0..got], buffers, writer, diag);
                 total_bases = next_total;
             }
             i = group_end;
@@ -937,7 +1020,8 @@ fn emitResolvedBatch(
         }
 
         const next_total = try diag.add(.total_symbols, total_bases, resolved[i].num_bases);
-        try emitRegion(resolved[i], source, shared, output_buffer, writer, diag);
+        try checkComplement(resolved[i], &typed, null, source, diag, buffers);
+        try emitRegion(resolved[i], source, buffers, writer, diag);
         total_bases = next_total;
         i += 1;
     }
@@ -993,7 +1077,7 @@ fn appendOwnedRequest(allocator: std.mem.Allocator, workspace: *RequestWorkspace
 
 fn appendBedLineRequest(allocator: std.mem.Allocator, workspace: *RequestWorkspace, line: []const u8, line_number: usize, honor_strand: bool, global_orientation: Orientation, diag: *Diagnostics) diagnostics.Error!void {
     diag.at.location.line = line_number;
-    const parsed = try bed_parser.parseBedLineChecked(line, honor_strand, diag.at, diag.failure);
+    const parsed = try bed_parser.parseBedLine(line, honor_strand, diag.at, diag.failure);
     switch (parsed) {
         .skip => {},
         .region => |region| {
@@ -1028,6 +1112,8 @@ fn requestReference(source: ?diagnostics.SourceId, line: ?u64, ordinal: u64) dia
     return .{ .source = source, .location = .{ .line = line }, .request = ordinal };
 }
 
+const PREFETCH_MIN_REQUESTS = 32;
+
 fn processParsedRequests(
     allocator: std.mem.Allocator,
     idx: *LoadedIndex,
@@ -1045,39 +1131,26 @@ fn processParsedRequests(
     _ = try diag.add(.requests, request_base, request_entries.len);
     const resolved = allocator.alloc(ResolvedRegion, request_entries.len) catch return diag.oom(.resolved_requests);
     defer allocator.free(resolved);
+    if (idx.on_demand != null and request_entries.len >= PREFETCH_MIN_REQUESTS) prefetch: {
+        const names = allocator.alloc([]const u8, request_entries.len) catch break :prefetch;
+        defer allocator.free(names);
+        for (request_entries, names) |entry, *name| name.* = entry.parsed(active_names).region.name;
+        idx.prefetchNames(names, &buffers.input);
+    }
+    defer idx.clearPrefetch();
     var last_name: ?[]const u8 = null;
     var last_rec_idx: usize = 0;
-    var last_typed_rec_idx: ?usize = null;
-    var last_type: stats.SequenceType = undefined;
-    var last_sample: diagnostics.Sample = undefined;
     const request_source = diag.at.source;
     for (request_entries, 0..) |entry, i| {
         diag.at = requestReference(request_source, entry.lineNumber(), request_base + i + 1);
         const request = entry.parsed(active_names);
         const rec_idx = if (last_name) |name|
-            if (std.mem.eql(u8, name, request.region.name)) last_rec_idx else idx.lookupName(request.region.name) orelse return diag.missing(request.region.name)
+            if (std.mem.eql(u8, name, request.region.name)) last_rec_idx else try idx.findNameAt(i, request.region.name, diag.failure) orelse return diag.missing(request.region.name)
         else
-            idx.lookupName(request.region.name) orelse return diag.missing(request.region.name);
+            try idx.findNameAt(i, request.region.name, diag.failure) orelse return diag.missing(request.region.name);
         last_name = request.region.name;
         last_rec_idx = rec_idx;
         resolved[i] = try resolveParsedRequest(idx, request, rec_idx, annotate_transform, diag);
-        if (request.orientation.complement) {
-            const rec_type = if (last_typed_rec_idx == rec_idx) last_type else blk: {
-                var sample = resolved[i];
-                sample.num_bases = @min(sample.num_bases, stats.GET_TYPE_SAMPLE_BASES);
-                const detected = try detectRegionType(source, sample, diag, buffers);
-                last_typed_rec_idx = rec_idx;
-                last_type = detected;
-                last_sample = .{ .symbols = @intCast(sample.num_bases), .rule = .nucleotide_above_90_percent, .interval = .{ .start = sample.start, .end = sample.start + sample.num_bases - 1 }, .request = diag.at.request };
-                break :blk detected;
-            };
-            if (rec_type == .protein) return diag.fail(.{ .@"transform.complement_on_protein" = .{
-                .transform = .{ .reverse = request.orientation.reverse, .complement = request.orientation.complement },
-                .classification = .protein,
-                .sample = last_sample,
-                .identifier = diag.failure.retain(request.region.name, 32),
-            } }, .transform, request_source orelse .request_snapshot, null, null);
-        }
     }
     return .{ .region_count = request_entries.len, .total_bases = try emitResolvedBatch(resolved, source, writer, diag, request_entries, request_base, total_base, buffers) };
 }
@@ -1091,23 +1164,29 @@ const StreamRequestSource = union(enum) {
 };
 
 const RequestedNames = struct {
-    arena: std.heap.ArenaAllocator,
-    stack_allocator: std.heap.StackFallbackAllocator(REQUEST_NAME_STACK_BYTES) = undefined,
+    allocator: std.mem.Allocator,
+    // Names read from a stream are copied here; names from a buffered file borrow its bytes.
+    copies: std.heap.ArenaAllocator,
     names: std.ArrayList([]const u8) = .empty,
     set: std.StringHashMapUnmanaged(void) = .empty,
 
     fn init(allocator: std.mem.Allocator) RequestedNames {
-        return .{ .arena = std.heap.ArenaAllocator.init(allocator) };
+        return .{ .allocator = allocator, .copies = std.heap.ArenaAllocator.init(allocator) };
     }
 
     fn deinit(self: *RequestedNames) void {
-        self.arena.deinit();
+        self.set.deinit(self.allocator);
+        self.names.deinit(self.allocator);
+        self.copies.deinit();
     }
 
     fn collect(self: *RequestedNames, reader: *std.Io.Reader, source: StreamRequestSource, stable_input: bool) !bool {
-        self.stack_allocator = std.heap.stackFallback(REQUEST_NAME_STACK_BYTES, self.arena.allocator());
-        const allocator = self.stack_allocator.get();
-        const initial_capacity = if (stable_input) @min(128, 1 + std.mem.count(u8, reader.buffered(), "\n")) else 0;
+        const allocator = self.allocator;
+        if (stable_input) {
+            const lines = 1 + std.mem.count(u8, reader.buffered(), "\n");
+            try self.set.ensureTotalCapacity(allocator, @intCast(lines));
+            try self.names.ensureTotalCapacityPrecise(allocator, lines);
+        }
         var previous_name: ?[]const u8 = null;
         while (true) {
             const available = reader.buffered();
@@ -1131,11 +1210,7 @@ const RequestedNames = struct {
                 previous_name = existing;
                 continue;
             }
-            if (self.names.items.len == 0 and initial_capacity != 0) {
-                try self.set.ensureTotalCapacity(allocator, @intCast(initial_capacity));
-                try self.names.ensureTotalCapacityPrecise(allocator, initial_capacity);
-            }
-            const owned = if (stable_input) name else try allocator.dupe(u8, name);
+            const owned = if (stable_input) name else try self.copies.allocator().dupe(u8, name);
             try self.set.put(allocator, owned, {});
             try self.names.append(allocator, owned);
             previous_name = owned;
@@ -1263,20 +1338,11 @@ fn processRequestPath(
     buffers: *GetBuffers,
 ) diagnostics.Error!BatchStats {
     if (std.mem.eql(u8, path, "-")) {
-        var buffer: [REQUEST_LINE_READER_BUFFER_BYTES]u8 = undefined;
-        var reader = std.Io.File.stdin().reader(io, &buffer);
+        var reader = std.Io.File.stdin().reader(io, &buffers.request);
         diag.request_reader = &reader;
         return processRequestReader(allocator, idx, &reader.interface, source, 0, annotate_transform, writer, fasta_source, diag, null, buffers);
     }
-    const file = if (opened_file) |opened| opened.file else std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| {
-        const details: diagnostics.Details = switch (err) {
-            error.FileNotFound => .{ .@"io.file_not_found" = {} },
-            error.AccessDenied => .{ .@"io.access_denied" = {} },
-            error.NameTooLong => .{ .@"io.invalid_path" = .{ .reason = .too_long } },
-            else => .{ .@"io.open_failed" = {} },
-        };
-        return diag.fail(details, .open, diag.at.source orelse .names, null, err);
-    };
+    const file = if (opened_file) |opened| opened.file else std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| return diag.fail(diagnostics.openFailure(err), .open, diag.at.source orelse .names, null, err);
     defer if (opened_file == null) file.close(io);
     const name_reservation: usize = switch (source) {
         .names => blk: {
@@ -1286,8 +1352,7 @@ fn processRequestPath(
         },
         .bed => 0,
     };
-    var buffer: [REQUEST_LINE_READER_BUFFER_BYTES]u8 = undefined;
-    var reader = file.reader(io, &buffer);
+    var reader = file.reader(io, &buffers.request);
     diag.request_reader = if (prepared_reader != null) prepared_file_reader else &reader;
     return processRequestReader(allocator, idx, prepared_reader orelse &reader.interface, source, name_reservation, annotate_transform, writer, fasta_source, diag, if (prepared_reader != null and prepared_file_reader == null) null else opened_file, buffers);
 }
@@ -1300,7 +1365,7 @@ fn runPositionalGet(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path
     try appendCliRequests(allocator, &requests, regions, options.orientation, diag);
     const names = allocator.alloc([]const u8, requests.items.len) catch return diag.oom(.request_names);
     for (requests.items, names) |request, *name| name.* = request.region.name;
-    var idx = try index_format.loadIndexCheckedWithMode(backing_allocator, io, fasta_path, .{ .positional = names }, diag.failure);
+    var idx = try index_format.loadIndex(backing_allocator, io, fasta_path, .automatic, .{ .requested = names }, diag.failure);
     defer idx.deinit();
     diag.index_source = if (idx.source == .zfi) .zfi else .fai;
     return emitGet(allocator, io, &idx, options, requests.items, null, null, null, diag, buffers);
@@ -1309,7 +1374,7 @@ fn runPositionalGet(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path
 fn runFileGet(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, request_path: []const u8, source: StreamRequestSource, options: Options, diag: *Diagnostics, buffers: *GetBuffers) diagnostics.Error!BatchStats {
     const request_file = openSeekableRequest(io, request_path);
     defer if (request_file) |opened| opened.file.close(io);
-    var request_buffer: [REQUEST_LINE_READER_BUFFER_BYTES]u8 = undefined;
+    const request_buffer = &buffers.request;
     const buffered_requests = if (request_file) |opened| buffered: {
         if (opened.size == 0 or opened.size > request_buffer.len) break :buffered null;
         const size: usize = @intCast(opened.size);
@@ -1318,24 +1383,33 @@ fn runFileGet(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path: []co
         break :buffered request_buffer[0..size];
     } else null;
     var small_reader = std.Io.Reader.fixed(buffered_requests orelse &.{});
-    var request_reader: ?std.Io.File.Reader = if (request_file != null and buffered_requests == null) request_file.?.file.reader(io, &request_buffer) else null;
+    var request_reader: ?std.Io.File.Reader = if (request_file != null and buffered_requests == null) request_file.?.file.reader(io, request_buffer) else null;
+    // A `.fai` loaded for the requested names borrows them, so they live as long as the index.
+    var requested = RequestedNames.init(backing_allocator);
+    defer requested.deinit();
     var idx = load: {
-        var requested = RequestedNames.init(backing_allocator);
-        defer requested.deinit();
-        const load_mode: index_format.LoadMode = if (request_file != null) matched: {
+        const load_mode: index_format.LoadMode = if (request_file != null and !zfiPresent(io, fasta_path)) matched: {
             const reader = if (buffered_requests != null) &small_reader else &request_reader.?.interface;
             const complete = requested.collect(reader, source, buffered_requests != null) catch return diag.oom(.request_collection);
             if (!complete) break :matched .lookup_full_map;
             if (buffered_requests == null) diag.lookup_scope = .retained_matches;
-            break :matched .{ .matched = requested.names.items };
+            break :matched .{ .requested = requested.names.items };
         } else .lookup_full_map;
-        break :load try index_format.loadIndexCheckedWithMode(backing_allocator, io, fasta_path, load_mode, diag.failure);
+        break :load try index_format.loadIndex(backing_allocator, io, fasta_path, .automatic, load_mode, diag.failure);
     };
     defer idx.deinit();
     diag.index_source = if (idx.source == .zfi) .zfi else .fai;
+    if (idx.source == .zfi) diag.lookup_scope = .complete_catalog;
     if (buffered_requests) |bytes| small_reader = std.Io.Reader.fixed(bytes);
-    if (request_reader != null) request_reader = request_file.?.file.reader(io, &request_buffer);
+    if (request_reader != null) request_reader = request_file.?.file.reader(io, request_buffer);
     return emitGet(backing_allocator, io, &idx, options, &.{}, request_file, if (buffered_requests != null) &small_reader else if (request_reader) |*reader| &reader.interface else null, if (request_reader) |*reader| reader else null, diag, buffers);
+}
+
+fn zfiPresent(io: std.Io, fasta_path: []const u8) bool {
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const zfi_path = std.fmt.bufPrint(&path_buffer, "{s}.zfi", .{fasta_path}) catch return false;
+    std.Io.Dir.cwd().access(io, zfi_path, .{}) catch return false;
+    return true;
 }
 
 fn emitGet(
@@ -1351,8 +1425,7 @@ fn emitGet(
     buffers: *GetBuffers,
 ) diagnostics.Error!BatchStats {
     const fasta_source = fastaSource(idx);
-    var out_buf: [65536]u8 = undefined;
-    var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &out_buf);
+    var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, &buffers.stdout);
     const writer = &stdout_fw.interface;
     errdefer {
         writer.end = 0;
@@ -1373,12 +1446,14 @@ fn emitGet(
         .bed => .bed,
     } } }, .resolve, diag.at.source orelse .request_snapshot, null, null);
     diag.failure.work_complete = true;
-    stdout_fw.flush() catch |err| {
-        diag.failure.outputs.stdout.final_flush = .failed;
-        return diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .stdout, null, stdout_fw.err orelse err);
-    };
-    diag.failure.outputs.stdout.final_flush = .succeeded;
+    if (diagnostics.flushOutput(&stdout_fw, &diag.failure.outputs.stdout)) |cause| return diag.fail(.{ .@"io.flush_failed" = {} }, .flush, .stdout, null, cause);
     return totals;
+}
+
+fn loadTestIndex(test_io: std.Io, fasta_path: []const u8) diagnostics.Error!LoadedIndex {
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.get);
+    return index_format.loadIndex(std.testing.allocator, test_io, fasta_path, .automatic, .on_access, &failure);
 }
 
 fn collectNamesForAllocationCheck(allocator: std.mem.Allocator, stable_input: bool) !void {
@@ -1395,7 +1470,7 @@ fn collectNamesForAllocationCheck(allocator: std.mem.Allocator, stable_input: bo
 }
 
 fn checkGetRequestAllocations(allocator: std.mem.Allocator) !void {
-    var idx = try index_format.loadIndexCheckedLegacy(std.testing.allocator, std.testing.io, "tests/data/simple.fasta");
+    var idx = try loadTestIndex(std.testing.io, "tests/data/simple.fasta");
     defer idx.deinit();
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
@@ -1413,22 +1488,130 @@ fn checkGetRequestAllocations(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(u64, 4), result.total_bases);
 }
 
-test "[failure] - [get requested names]: releases partial collection" {
+test "[failure] - [get requests]: releases partial collection" {
     for ([_]bool{ false, true }) |stable_input| {
         try std.testing.checkAllAllocationFailures(std.testing.allocator, collectNamesForAllocationCheck, .{stable_input});
     }
 }
 
-test "[unit] - [get read grouping]: accepts overlap and adjacency in either order" {
-    try std.testing.expect(spansOverlapOrTouch(10, 20, 20, 30));
-    try std.testing.expect(spansOverlapOrTouch(20, 30, 10, 20));
-    try std.testing.expect(spansOverlapOrTouch(10, 20, 15, 25));
-    try std.testing.expect(spansOverlapOrTouch(15, 25, 10, 20));
-    try std.testing.expect(!spansOverlapOrTouch(10, 20, 21, 30));
-    try std.testing.expect(!spansOverlapOrTouch(21, 30, 10, 20));
+test "[unit] - [get extraction]: shares a read across overlap and small gaps in either order" {
+    try std.testing.expect(spansNear(10, 20, 20, 30));
+    try std.testing.expect(spansNear(20, 30, 10, 20));
+    try std.testing.expect(spansNear(10, 20, 15, 25));
+    try std.testing.expect(spansNear(15, 25, 10, 20));
+    try std.testing.expect(spansNear(10, 20, 20 + COALESCE_GAP_BYTES, 30 + COALESCE_GAP_BYTES));
+    try std.testing.expect(spansNear(20 + COALESCE_GAP_BYTES, 30 + COALESCE_GAP_BYTES, 10, 20));
+    try std.testing.expect(!spansNear(10, 20, 21 + COALESCE_GAP_BYTES, 30 + COALESCE_GAP_BYTES));
+    try std.testing.expect(!spansNear(21 + COALESCE_GAP_BYTES, 30 + COALESCE_GAP_BYTES, 10, 20));
 }
 
-test "[unit] - [get request workspace]: reuses consecutive names" {
+test "[property] - [get extraction]: uniform copy matches a byte-by-byte copy across layouts, chunks, and orientations" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const random = prng.random();
+    var file: std.ArrayList(u8) = .empty;
+    defer file.deinit(allocator);
+    var expected: std.ArrayList(u8) = .empty;
+    defer expected.deinit(allocator);
+    var output_storage: [REGION_OUTPUT_BUFFER_BYTES]u8 = undefined;
+    var scratch: [4096]u8 = undefined;
+    const layouts = [_][2]u32{ .{ 60, 61 }, .{ 60, 62 }, .{ 1, 2 }, .{ 7, 8 }, .{ 59, 60 }, .{ 61, 62 }, .{ 130, 131 } };
+    for (layouts) |layout| for (0..12) |round| {
+        const line_bases = layout[0];
+        const line_bytes = layout[1];
+        const seq_len = if (round == 0) 1000 else 1 + random.uintLessThan(u64, 2000);
+        const seq_offset = random.uintLessThan(u64, 5);
+        file.clearRetainingCapacity();
+        try file.appendNTimes(allocator, '>', @intCast(seq_offset));
+        for (0..@intCast(seq_len)) |k| {
+            try file.append(allocator, "ACGTacgtN"[random.uintLessThan(usize, 9)]);
+            if ((k + 1) % line_bases == 0 or k + 1 == seq_len) {
+                try file.append(allocator, if (round == 0 and k / line_bases == 1) 'X' else if (line_bytes - line_bases == 2) '\r' else '\n');
+                if (line_bytes - line_bases == 2) try file.append(allocator, '\n');
+            }
+        }
+        const start = if (round == 0) 0 else if (round % 2 == 0) random.uintLessThan(u64, (seq_len + line_bases - 1) / line_bases) * line_bases else random.uintLessThan(u64, seq_len);
+        const count = if (round == 0) seq_len else 1 + random.uintLessThan(u64, seq_len - start);
+        const orientations = [_]Orientation{ .{}, .reverseComplement(), .reverseOnly(), .complementOnly() };
+        for (orientations) |orientation| for ([_]bool{ true, false }) |wrap| {
+            const resolved = ResolvedRegion{ .name = "r", .start = start + 1, .display_end = start + count, .is_full = false, .seq_offset = seq_offset, .num_bases = count, .line_bases = line_bases, .line_bytes = line_bytes, .side_table = &.{}, .record_index = 0, .orientation = orientation, .annotate_transform = false };
+            expected.clearRetainingCapacity();
+            for (0..@intCast(count)) |i| {
+                const k = if (orientation.reverse) start + count - 1 - i else start + i;
+                const byte = file.items[@intCast(seq_offset + k / line_bases * line_bytes + k % line_bases)];
+                try expected.append(allocator, if (orientation.complement) fasta.complement(byte) else byte);
+                if (wrap and ((i + 1) % OUTPUT_LINE_BASES == 0 or i + 1 == count)) try expected.append(allocator, '\n');
+            }
+            for ([_]usize{ 1, 7, 61, 4096 }) |chunk| {
+                var failure: diagnostics.Failure = undefined;
+                failure.reset(.get);
+                var context = Diagnostics{ .failure = &failure, .output_source = .output };
+                var sink = std.Io.Writer.Allocating.init(allocator);
+                defer sink.deinit();
+                var output = RegionOutput{ .bytes = &output_storage, .diag = &context, .wrap = wrap };
+                const span = try diskSpanForRegion(resolved, &context);
+                if (orientation.reverse) {
+                    var base_index = start + count - 1;
+                    var skip: u64 = 0;
+                    var end = span.end;
+                    while (end > span.start) {
+                        const offset = if (end - span.start > chunk) end - chunk else span.start;
+                        try consumeReversed(resolved, file.items[@intCast(offset)..@intCast(end)], end, &scratch, &base_index, &skip, &output, &sink.writer, &context);
+                        end = offset;
+                    }
+                } else {
+                    var base_index = start;
+                    var offset = span.start;
+                    while (offset < span.end) : (offset += chunk) {
+                        const end = @min(offset + chunk, span.end);
+                        try consumeUniformForwardChunk(resolved, offset, file.items[@intCast(offset)..@intCast(end)], &base_index, &output, &sink.writer, &context);
+                    }
+                }
+                if (wrap) try output.finish(&sink.writer) else try output.flush(&sink.writer);
+                try std.testing.expectEqualStrings(expected.items, sink.written());
+            }
+        };
+    };
+}
+
+test "[property] - [get extraction]: side-table byte filter keeps exactly the bases after the skip" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xb17e);
+    const random = prng.random();
+    var bytes: [700]u8 = undefined;
+    var expected: std.ArrayList(u8) = .empty;
+    defer expected.deinit(allocator);
+    var output_storage: [REGION_OUTPUT_BUFFER_BYTES]u8 = undefined;
+    for (0..200) |_| {
+        for (&bytes) |*byte| byte.* = if (random.uintLessThan(u8, 5) == 0) " \t\r\n"[random.uintLessThan(usize, 4)] else "ACGTN"[random.uintLessThan(usize, 5)];
+        const len = random.uintLessThan(usize, bytes.len + 1);
+        var bases: u64 = 0;
+        for (bytes[0..len]) |byte| bases += @intFromBool(fasta.isBase(byte));
+        if (bases == 0) continue;
+        const skip_start = random.uintLessThan(u64, bases);
+        const count = 1 + random.uintLessThan(u64, bases - skip_start);
+        expected.clearRetainingCapacity();
+        var seen: u64 = 0;
+        for (bytes[0..len]) |byte| {
+            if (!fasta.isBase(byte)) continue;
+            if (seen >= skip_start and seen < skip_start + count) try expected.append(allocator, byte);
+            seen += 1;
+        }
+        var failure: diagnostics.Failure = undefined;
+        failure.reset(.get);
+        var context = Diagnostics{ .failure = &failure, .output_source = .output };
+        var sink = std.Io.Writer.Allocating.init(allocator);
+        defer sink.deinit();
+        var output = RegionOutput{ .bytes = &output_storage, .diag = &context, .wrap = false };
+        const resolved = ResolvedRegion{ .name = "r", .start = skip_start + 1, .display_end = skip_start + count, .is_full = false, .seq_offset = 0, .num_bases = count, .line_bases = 0, .line_bytes = 0, .side_table = &.{}, .record_index = 0, .orientation = .{}, .annotate_transform = false };
+        var skip = skip_start;
+        try consumeForwardBytes(resolved, bytes[0..len], &skip, &output, &sink.writer);
+        try output.flush(&sink.writer);
+        try std.testing.expectEqualStrings(expected.items, sink.written());
+    }
+}
+
+test "[unit] - [get requests]: reuses consecutive names" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.get);
     var context = Diagnostics{ .failure = &failure, .at = .{ .source = .names } };
@@ -1447,7 +1630,7 @@ test "[unit] - [get request workspace]: reuses consecutive names" {
     try std.testing.expectEqualStrings("seq2", workspace.requests.items[2].parsed(workspace.names.items).region.name);
 }
 
-test "[edge] - [get request workspace]: retains the name crossing its byte target" {
+test "[edge] - [get requests]: retains the name crossing its byte target" {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.get);
     var context = Diagnostics{ .failure = &failure, .at = .{ .source = .names } };
@@ -1472,32 +1655,23 @@ test "[edge] - [get request workspace]: retains the name crossing its byte targe
     try std.testing.expect(workspace.names.capacity <= MAX_ACTIVE_NAME_BYTES);
 }
 
-test "[unit] - [get names reader]: handles line endings and a final unterminated line" {
+fn streamRequests(idx: *LoadedIndex, input: []const u8, source: StreamRequestSource, out: *std.Io.Writer) diagnostics.Error!BatchStats {
+    var reader = std.Io.Reader.fixed(input);
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.get);
+    var context = Diagnostics{ .failure = &failure, .at = .{ .source = if (source == .bed) .bed else .names } };
+    var storage: GetBuffers = undefined;
+    return processRequestReader(std.testing.allocator, idx, &reader, source, 0, false, out, fastaSource(idx), &context, null, &storage);
+}
+
+test "[unit] - [get names]: reads LF, CRLF, and a final unterminated line" {
     const test_io = std.testing.io;
-    var idx = try index_format.loadIndexCheckedLegacy(std.testing.allocator, test_io, "tests/data/simple.fasta");
+    var idx = try loadTestIndex(test_io, "tests/data/simple.fasta");
     defer idx.deinit();
-    var reader = std.Io.Reader.fixed("# comment\r\n\r\nseq2\r\nseq1\nseq2");
     var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer writer.deinit();
 
-    var failure: diagnostics.Failure = undefined;
-    failure.reset(.get);
-    var context = Diagnostics{ .failure = &failure, .at = .{ .source = .names } };
-    var storage: GetBuffers = undefined;
-    const buffers = &storage;
-    const result = try processRequestReader(
-        std.testing.allocator,
-        &idx,
-        &reader,
-        .{ .names = .{} },
-        0,
-        false,
-        &writer.writer,
-        fastaSource(&idx),
-        &context,
-        null,
-        buffers,
-    );
+    const result = try streamRequests(&idx, "# comment\r\n\r\nseq2\r\nseq1\nseq2", .{ .names = .{} }, &writer.writer);
 
     try std.testing.expectEqual(@as(usize, 3), result.region_count);
     try std.testing.expectEqual(@as(u64, 48), result.total_bases);
@@ -1507,36 +1681,18 @@ test "[unit] - [get names reader]: handles line endings and a final unterminated
     );
 }
 
-test "[edge] - [get names reader]: resets storage at the request-count boundary" {
+test "[edge] - [get names]: resets storage at the request-count boundary" {
     const test_io = std.testing.io;
-    var idx = try index_format.loadIndexCheckedLegacy(std.testing.allocator, test_io, "tests/data/simple.fasta");
+    var idx = try loadTestIndex(test_io, "tests/data/simple.fasta");
     defer idx.deinit();
     var names = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer names.deinit();
     const request_count = NAMES_REQUEST_BATCH_SIZE + 1;
     for (0..request_count) |_| try names.writer.writeAll("seq1\n");
-    var reader = std.Io.Reader.fixed(names.written());
     var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer writer.deinit();
 
-    var failure: diagnostics.Failure = undefined;
-    failure.reset(.get);
-    var context = Diagnostics{ .failure = &failure, .at = .{ .source = .names } };
-    var storage: GetBuffers = undefined;
-    const buffers = &storage;
-    const result = try processRequestReader(
-        std.testing.allocator,
-        &idx,
-        &reader,
-        .{ .names = .{} },
-        0,
-        false,
-        &writer.writer,
-        fastaSource(&idx),
-        &context,
-        null,
-        buffers,
-    );
+    const result = try streamRequests(&idx, names.written(), .{ .names = .{} }, &writer.writer);
 
     const one_output = ">seq1\nACGTACGTACGTACGTACGTACGT\n";
     try std.testing.expectEqual(request_count, result.region_count);
@@ -1546,9 +1702,9 @@ test "[edge] - [get names reader]: resets storage at the request-count boundary"
     try std.testing.expectEqualStrings(one_output, writer.written()[writer.written().len - one_output.len ..]);
 }
 
-test "[unit] - [get BED reader]: streams rows in source order" {
+test "[unit] - [get bed]: streams rows in source order" {
     const test_io = std.testing.io;
-    var idx = try index_format.loadIndexCheckedLegacy(std.testing.allocator, test_io, "tests/data/simple.fasta");
+    var idx = try loadTestIndex(test_io, "tests/data/simple.fasta");
     defer idx.deinit();
 
     const bed_data =
@@ -1557,28 +1713,10 @@ test "[unit] - [get BED reader]: streams rows in source order" {
         "seq1\t0\t4\n" ++
         "seq1\t4\t8";
 
-    var reader = std.Io.Reader.fixed(bed_data);
     var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer writer.deinit();
 
-    var failure: diagnostics.Failure = undefined;
-    failure.reset(.get);
-    var context = Diagnostics{ .failure = &failure, .at = .{ .source = .names } };
-    var storage: GetBuffers = undefined;
-    const buffers = &storage;
-    const result = try processRequestReader(
-        std.testing.allocator,
-        &idx,
-        &reader,
-        .{ .bed = .{ .honor_strand = false, .global_orientation = .{} } },
-        0,
-        false,
-        &writer.writer,
-        fastaSource(&idx),
-        &context,
-        null,
-        buffers,
-    );
+    const result = try streamRequests(&idx, bed_data, .{ .bed = .{ .honor_strand = false, .global_orientation = .{} } }, &writer.writer);
 
     try std.testing.expectEqual(@as(usize, 3), result.region_count);
     try std.testing.expectEqual(@as(u64, 12), result.total_bases);
@@ -1588,9 +1726,9 @@ test "[unit] - [get BED reader]: streams rows in source order" {
     );
 }
 
-test "[edge] - [get BED reader]: preserves output across request-batch boundaries" {
+test "[edge] - [get bed]: preserves output across request-batch boundaries" {
     const test_io = std.testing.io;
-    var idx = try index_format.loadIndexCheckedLegacy(std.testing.allocator, test_io, "tests/data/simple.fasta");
+    var idx = try loadTestIndex(test_io, "tests/data/simple.fasta");
     defer idx.deinit();
 
     const counts = [_]usize{
@@ -1614,27 +1752,9 @@ test "[edge] - [get BED reader]: preserves output across request-batch boundarie
             }
         }
 
-        var reader = std.Io.Reader.fixed(bed.written());
         var output = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer output.deinit();
-        var failure: diagnostics.Failure = undefined;
-        failure.reset(.get);
-        var context = Diagnostics{ .failure = &failure, .at = .{ .source = .names } };
-        var storage: GetBuffers = undefined;
-        const buffers = &storage;
-        const result = try processRequestReader(
-            std.testing.allocator,
-            &idx,
-            &reader,
-            .{ .bed = .{ .honor_strand = true, .global_orientation = .{} } },
-            0,
-            false,
-            &output.writer,
-            fastaSource(&idx),
-            &context,
-            null,
-            buffers,
-        );
+        const result = try streamRequests(&idx, bed.written(), .{ .bed = .{ .honor_strand = true, .global_orientation = .{} } }, &output.writer);
 
         const expected_bases: u64 = count + @as(usize, @intFromBool(count > BED_REQUEST_BATCH_SIZE)) * 4;
         try std.testing.expectEqual(count, result.region_count);
@@ -1643,8 +1763,8 @@ test "[edge] - [get BED reader]: preserves output across request-batch boundarie
     }
 }
 
-test "[failure] - [GET request facts]: keeps original rows and ordinals across skipped rows and batches" {
-    var idx = try index_format.loadIndexCheckedLegacy(std.testing.allocator, std.testing.io, "tests/data/simple.fasta");
+test "[failure] - [get requests]: keeps original rows and ordinals across skipped rows and batches" {
+    var idx = try loadTestIndex(std.testing.io, "tests/data/simple.fasta");
     defer idx.deinit();
     var rows = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer rows.deinit();
@@ -1671,8 +1791,8 @@ test "[failure] - [GET request facts]: keeps original rows and ordinals across s
     try std.testing.expectEqual(@sizeOf(PreviousRequest) + 8, @sizeOf(OwnedRequest));
 }
 
-test "[failure] - [GET totals]: rejects repeated-request overflow before writing another region" {
-    var idx = try index_format.loadIndexCheckedLegacy(std.testing.allocator, std.testing.io, "tests/data/simple.fasta");
+test "[failure] - [get requests]: rejects repeated-request overflow before writing another region" {
+    var idx = try loadTestIndex(std.testing.io, "tests/data/simple.fasta");
     defer idx.deinit();
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
@@ -1689,11 +1809,11 @@ test "[failure] - [GET totals]: rejects repeated-request overflow before writing
     try std.testing.expectEqual(@as(?u128, 2), detail.increment);
 }
 
-test "[failure] - [GET requests]: releases partial batches on allocation failure" {
+test "[failure] - [get requests]: releases partial batches on allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, checkGetRequestAllocations, .{});
 }
 
-test "[failure] - [GET request replay]: detects metadata changes and limits equal-metadata misses" {
+test "[failure] - [get requests]: detects metadata changes and finds uncollected names through a .zfi" {
     const io = std.testing.io;
     var directory = std.testing.tmpDir(.{});
     defer directory.cleanup();
@@ -1714,20 +1834,18 @@ test "[failure] - [GET request replay]: detects metadata changes and limits equa
     try file.setLength(io, before.size);
     try file.setTimestamps(io, .{ .modify_timestamp = .{ .new = before.mtime } });
     failure.reset(.get);
-    var idx = try index_format.loadIndexCheckedWithMode(std.testing.allocator, io, "tests/data/simple.fasta", .{ .matched = &.{"seq1"} }, &failure);
+    var idx = try index_format.loadIndex(std.testing.allocator, io, "tests/data/simple.fasta", .automatic, .{ .requested = &.{"seq1"} }, &failure);
     defer idx.deinit();
     try checkRequestSource(io, opened, &context);
     var input: [64]u8 = undefined;
     var reader = file.reader(io, &input);
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    try std.testing.expectError(error.InvalidRequest, processRequestReader(std.testing.allocator, &idx, &reader.interface, .{ .names = .{} }, 0, false, &output.writer, fastaSource(&idx), &context, opened, buffers));
-    try std.testing.expectEqual(diagnostics.LookupScope.retained_matches, failure.primary().?.details.@"request.sequence_not_found".lookup_scope);
-    try std.testing.expectEqualStrings("seq2", failure.preview(failure.primary().?.details.@"request.sequence_not_found".identifier.?));
-    try std.testing.expectEqual(@as(usize, 0), output.written().len);
+    _ = try processRequestReader(std.testing.allocator, &idx, &reader.interface, .{ .names = .{} }, 0, false, &output.writer, fastaSource(&idx), &context, opened, buffers);
+    try std.testing.expectEqualStrings(">seq2\nGGGGCCCCAAAA\n", output.written());
 }
 
-test "[failure] - [GET request IO]: retains required read and comparison causes" {
+test "[failure] - [get requests]: retains required read and comparison causes" {
     const io = std.testing.io;
     const Fault = struct {
         fn read(_: ?*anyopaque, _: std.Io.File, _: []const []u8, _: u64) std.Io.File.ReadPositionalError!usize {
@@ -1765,7 +1883,7 @@ test "[failure] - [GET request IO]: retains required read and comparison causes"
     var buffer: [128]u8 = undefined;
     var reader = file.reader(fault_io, &buffer);
     context.request_reader = &reader;
-    var idx = try index_format.loadIndexCheckedLegacy(std.testing.allocator, io, "tests/data/simple.fasta");
+    var idx = try loadTestIndex(io, "tests/data/simple.fasta");
     defer idx.deinit();
     var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer writer.deinit();
@@ -1778,7 +1896,7 @@ test "[failure] - [GET request IO]: retains required read and comparison causes"
     try std.testing.expectEqual(@as(usize, 0), writer.written().len);
 }
 
-test "[regression] - [GET discovery]: retries interrupted discovery with the full catalog" {
+test "[regression] - [get requests]: retries interrupted discovery with the full catalog" {
     const io = std.testing.io;
     const Fault = struct {
         var scenario: enum { first, partial, persistent } = .first;
@@ -1830,6 +1948,10 @@ test "[regression] - [GET discovery]: retries interrupted discovery with the ful
     defer std.testing.allocator.free(path);
     const request_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/requests.txt", .{path});
     defer std.testing.allocator.free(request_path);
+    const fasta_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/ref.fa", .{path});
+    defer std.testing.allocator.free(fasta_path);
+    try directory.dir.writeFile(io, .{ .sub_path = "ref.fa", .data = ">seq1 test sequence\nACGTACGTACGT\nACGTACGTACGT\n>seq2 another sequence\nGGGGCCCCAAAA\n" });
+    try directory.dir.writeFile(io, .{ .sub_path = "ref.fa.fai", .data = "seq1\t24\t20\t12\t13\nseq2\t12\t69\t12\t13\n" });
     var vtable = io.vtable.*;
     vtable.fileReadPositional = Fault.read;
     vtable.operate = Fault.operate;
@@ -1855,7 +1977,7 @@ test "[regression] - [GET discovery]: retries interrupted discovery with the ful
             Fault.output_len = 0;
             var failure: diagnostics.Failure = undefined;
             if (scenario == .persistent) {
-                try std.testing.expectError(error.Io, runGetWithOptions(std.testing.allocator, fault_io, "tests/data/simple.fasta", options, &failure));
+                try std.testing.expectError(error.Io, runGet(std.testing.allocator, fault_io, fasta_path, options, &failure));
                 const primary = failure.primary().?;
                 try std.testing.expectEqual(diagnostics.Code.@"io.read_failed", primary.code());
                 try std.testing.expectEqual(error.InputOutput, primary.cause.?.zig);
@@ -1865,7 +1987,7 @@ test "[regression] - [GET discovery]: retries interrupted discovery with the ful
                 try std.testing.expectEqual(@as(usize, 0), Fault.output_len);
                 try std.testing.expect(!failure.complete and !failure.work_complete);
             } else {
-                const result = try runGetWithOptions(std.testing.allocator, fault_io, "tests/data/simple.fasta", options, &failure);
+                const result = try runGet(std.testing.allocator, fault_io, fasta_path, options, &failure);
                 try std.testing.expectEqual(@as(usize, 2), result.region_count);
                 try std.testing.expectEqual(@as(u64, if (bed) 4 else 36), result.total_bases);
                 const expected = if (bed) ">seq1:1-2\nAC\n>seq2:1-2\nGG\n" else ">seq1\nACGTACGTACGTACGTACGTACGT\n>seq2\nGGGGCCCCAAAA\n";

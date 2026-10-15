@@ -2,7 +2,7 @@
 
 # Benchmarking Framework
 
-This is the benchmarking framework for z-fasta. I use it to compare z-fasta with the reference tools across indexing, sequence extraction, and stats. Each suite checks correctness first, then uses [zebrac](https://github.com/eneskemalergin/zebrac) to measure wall time, peak RSS, and page faults.
+This is the benchmarking framework for z-fasta. I use it to compare z-fasta with the reference tools across indexing, sequence extraction, stats, and validation. Each suite checks correctness first, then uses [zebrac](https://github.com/eneskemalergin/zebrac) to measure wall time, peak RSS, and page faults.
 
 Zebrac is Linux-only. It is similar to `hyperfine`, but it also records process memory and page faults. It is the runner for the performance sections, not a dependency of z-fasta. The local runner is kept at `tools/zebrac`, separately from the peer-tool installer.
 
@@ -11,8 +11,9 @@ Zebrac is Linux-only. It is similar to `hyperfine`, but it also records process 
 - [Index benchmark report](index/REPORT.md)
 - [GET benchmark report](get/REPORT.md)
 - [Stats benchmark report](stats/REPORT.md)
+- [Validate benchmark report](validate/REPORT.md)
 
-The published reports and figures describe the measured 0.3.5 runs.
+All four reports and their figures describe the 0.4.0 release runs listed under [v0.4.0 measurements](#v040-measurements).
 
 Each report describes its own methods, field coverage, correctness checks, measurements, and figures. The suites do not all compare the same operation: stats has complete wrapper lanes and partial SeqKit/Seqtk reference lanes, while GET and index have their own compatibility limits.
 
@@ -30,20 +31,24 @@ bash bench/shared/install_tools.sh   # verify the local toolchain
 bash bench/index/run.sh
 bash bench/get/run.sh
 bash bench/stats/run.sh
+bash bench/validate/run.sh
 
 # Correctness only
 bash bench/index/run.sh --skip-benchmarks --skip-messy --skip-report
 bash bench/get/run.sh --skip-benchmarks --skip-messy --skip-report
 bash bench/stats/run.sh --skip-benchmarks --skip-messy --skip-report
+bash bench/validate/run.sh --skip-benchmarks --skip-report
 ```
 
-Each suite has one entrypoint: `bash bench/<index|get|stats>/run.sh`. It runs correctness first, then optional zebrac measurements, then writes `REPORT.md`. The suites have different default sample counts and warmups, so check `--help` or the generated report when those details matter.
+The GET suite also times the package: `bench/get/library.zig`, which `run.sh` builds with `zig build bench-library`, opens a reference once with `IndexedReader` and fetches the same multi-region and BED sets. It must print what `z-fasta get` prints for each set before that set is timed.
+
+Each suite has one entrypoint: `bash bench/<index|get|stats|validate>/run.sh`. It runs correctness first, then optional zebrac measurements, then writes `REPORT.md`. The suites have different default sample counts and warmups, so check `--help` or the generated report when those details matter.
 
 The benchmark scripts resolve commands from `tools/bin/` by default. Set `SAMTOOLS`, `BEDTOOLS`, `SEQKIT`, or another tool variable when you intentionally want to compare a different executable. `bench/shared/install_tools.sh` only verifies the local bundle and pinned versions; it does not silently fall back to a command found elsewhere on `PATH`.
 
-The v0.3.5 refresh uses Zig 0.16.0 and zebrac 0.6.2 from `PATH`, with `ZEBRAC="$(command -v zebrac)"` passed to each suite. Index, GET, and stats run in that order without overlapping measurements. Each main section uses five measured samples, three warmups, and a 5,000 ms budget per command. The suites' default warmups differ, so pass these settings explicitly. Messy sections retain their separately documented sampling settings.
+The v0.4.0 refresh uses Zig 0.16.0 and zebrac 0.6.2 from `PATH`, with `ZEBRAC="$(command -v zebrac)"` passed to each suite. Index, GET, stats, and validate run in that order without overlapping measurements. Each main section uses five measured samples, three warmups, and a 5,000 ms budget per command. The suites' default warmups differ, so pass these settings explicitly. Messy sections retain their separately documented sampling settings. The validate suite runs after stats with the same settings.
 
-The common skips are `--skip-tests` (`--skip-verify`), `--skip-benchmarks` (`--skip-perf`), `--skip-report`, and `--skip-messy`. The last one skips messy performance work only. It does not skip messy correctness cases.
+The common skips are `--skip-tests`, `--skip-benchmarks`, `--skip-report`, and `--skip-messy`. The last one skips messy performance work only. It does not skip messy correctness cases.
 
 ## Refresh reports for a new version
 
@@ -64,11 +69,49 @@ Run the full suites sequentially, with the verified zebrac executable:
 ZEBRAC=$(command -v zebrac) bash bench/index/run.sh --runs 5 --warmup 3 --duration 5000
 ZEBRAC=$(command -v zebrac) bash bench/get/run.sh --runs 5 --warmup 3 --duration 5000
 ZEBRAC=$(command -v zebrac) bash bench/stats/run.sh --runs 5 --warmup 3 --duration 5000
+ZEBRAC=$(command -v zebrac) bash bench/validate/run.sh --runs 5 --warmup 3 --duration 5000
 ```
 
 Check each command's exit status before starting the next suite. Review its manifest, output checks, complete workload set and report before updating README or Wiki summaries. Keep units and measured populations consistent between tables and figures. Do not relabel an older report as the new version. If executable code or the measurement method changes afterward, repeat the affected checks and measurements before regenerating its report.
 
 The correctness-only commands above disable both ordinary and messy measurements and report generation. They cannot supply timing, RSS, allocation, stack or binary-size evidence for a report refresh.
+
+## Feature coverage
+
+Every CLI option and package call, with the Zig tests that cover it (file and test target) and its check on the REAL datasets (suite and section). The REAL checks compare with another tool or an independent count, and run in each suite's correctness pass.
+
+- **Every command**
+  - `--help`, `-h`, `--version`, `-V`: `tests/test_diagnostics.zig` (`dispatch`). No REAL check: they print fixed text.
+  - `--error-format=json`: `tests/test_diagnostics.zig` and each command's test file (`diagnostics`). REAL: one failure per command, with its code read from the JSON: `index --emit-fai` on a non-uniform layout (`index.nonuniform_fai`), a `get` start past a record (`request.start_after_sequence`) and `--rc` on the proteome (`transform.complement_on_protein`), `stats` with an index older than its FASTA (`index.older_than_source`), and `validate --fix` onto its input (`repair.output_is_input`).
+  - `--error-format=text`: `tests/test_diagnostics.zig`. No separate REAL check: the same failures render through the text encoder.
+- **index**
+  - Default `.zfi`: `tests/test_index.zig` (`index`, `zfi writer`, `zfi loader`). REAL: index suite, a `.zfi` reader written from the format compares every entry with `samtools faidx`.
+  - `--emit-fai`: `tests/test_index.zig` (`fai output`). REAL: index suite, byte-identical to `samtools faidx`.
+  - Duplicate identifiers, all indexed: `tests/test_index.zig`, `tests/test_library.zig`. No REAL check: the REAL datasets have no duplicate identifiers. The stats suite checks the counts on a fixture with duplicates, and the GET suite that a duplicate resolves to its first record.
+- **get**
+  - Positional regions: `tests/test_get.zig` (`get extraction`, `region resolution`). REAL: GET suite section 6, 100 regions against `samtools faidx`, through `.zfi` and `.fai`.
+  - `--names FILE` and `--names -`: `tests/test_get.zig` (`get names`). REAL: section 6, against `samtools faidx -r`, and the same output from standard input.
+  - `--bed FILE` and `--bed -`: `tests/test_get.zig` (`get bed`, `bed parser`). REAL: section 6, 1,000 rows against `bedtools getfasta`, and the same output from standard input.
+  - `--strand-aware`, `--honor-strand`: `tests/test_get.zig` (`get bed`). REAL: section 6, against `bedtools getfasta -s` on alternating strands.
+  - `--rc`: `tests/test_get.zig` (`get`, `get orientation`). REAL: section 6, against `samtools faidx -i`.
+  - `--complement-only`, `--reverse-only`: `tests/test_get.zig` (`get`, `get orientation`). REAL: section 6, the complement table and the reversal applied to output already checked against samtools.
+  - `--annotate-rc`: `tests/test_get.zig` (`get`, `get bed`). REAL: section 6, every header names the orientation.
+  - `--summary`: `tests/test_get.zig`. REAL: section 6, the region count and base total.
+- **stats**
+  - The report: `tests/test_stats.zig` (`stats`, `stats report`, `sequence type`). REAL: stats suite, the exact oracle on the transcriptome and the proteome through `.zfi` and `.fai`; on the genome, which is too large for the oracle, the `.zfi` and `.fai` reports are identical.
+- **validate**
+  - The report and exit status: `tests/test_validate.zig` (`validate`, `validate scan`, `validate report`). REAL: validate suite, findings on crafted copies and messy variants, and acceptance agreeing with `index`, samtools, and SeqKit.
+  - `--strict`, `--json`: `tests/test_validate.zig` (`validate`, `validate json`). REAL: validate suite, every check reads `--json`; `--strict` on a crafted copy.
+  - `--type`, `--custom-alphabet`: `tests/test_validate.zig` (`validate alphabet`, `validate`). REAL: validate suite, the count of bytes outside each alphabet from `grep` and `tr`.
+  - `--schema`, `--max-header-len`: `tests/test_validate.zig` (`validate schemas`, `validate scan`, `validate`). REAL: validate suite, mismatching identifiers and long headers counted with `awk`.
+  - `--max-name-memory`: `tests/test_validate.zig` (`validate scan`, `validate`). REAL: validate suite, an incomplete report on the transcriptome.
+  - `--fix`, `-o`, `--width`: `tests/test_validate.zig` (`validate fix`), `src/validator.zig`. REAL: validate suite, the copy has the same records, lines no wider than the width, and a clean strict validation.
+  - `--index`, `--index=PATH`: `tests/test_validate.zig` (`validate index`), `tests/test_index.zig` (`index loader`). REAL: validate suite, every index `index` writes matches, and the named `.fai` is the one compared.
+  - `-` (standard input): `tests/test_validate.zig` (`validate`). REAL: validate suite, the same codes and status as from the file.
+- **Package**
+  - `IndexedReader` (`open`, `recordCount`, `record`, `lookup`, `fetchInto`): `tests/test_library.zig` (`indexed reader`). REAL: GET suite, the package lane prints what `z-fasta get` prints for every multi-region and BED set before it is timed.
+  - `RecordReader` (`init`, `next`): `tests/test_library.zig` (`record reader`). REAL: GET suite section 6, every record equals `z-fasta get --names` over every name.
+  - `validation.validate`, `validation.repair`: `tests/test_library.zig` (`validation`), `tests/test_validate.zig`. No separate REAL check: `validate` runs the same scan, and the validate suite checks it.
 
 ## Source and executable records
 
@@ -92,28 +135,28 @@ The z-fasta binary is built separately with `zig build -Doptimize=ReleaseFast -D
 
 [noodles](https://github.com/zaeleus/noodles) and [rust-bio](https://github.com/rust-bio/rust-bio) are Rust libraries, not matching standalone FASTA CLIs. I compile small release-mode adapters so they can participate in the same benchmark contract and emit the output needed by these suites.
 
-The `noodles` binary uses noodles-fasta 0.66.0, including noodles' FAI indexer. The `rustbio` binary uses rust-bio 4.0.1 and its custom strict FAI scanner. Both adapters expose `index`, `get`, and `stats`; GET also covers the shared region, BED, names, and reverse-complement paths that the benchmark exercises. Their `stats` command re-parses clean FASTA and emits the agreed TSV fields. The shared formulas in [`tools/stats_peer.rs`](../tools/stats_peer.rs) are compiled into both binaries. That file is not another executable and the other peer tools do not use it.
+The `noodles` binary uses noodles-fasta 0.66.0, including noodles' FAI indexer. The `rustbio` binary uses rust-bio 4.0.1 and its custom strict FAI scanner. Both adapters expose `index`, `get`, and `stats`; GET also covers the shared region, BED, names, and reverse-complement paths that the benchmark exercises. Their `stats` command re-parses clean FASTA and emits the agreed TSV fields. The shared formulas in [`tools/peer_stats.rs`](../tools/peer_stats.rs) and the shared GET argument parsing and reverse complement in [`tools/peer_get.rs`](../tools/peer_get.rs) are compiled into both binaries. Neither file is another executable, and the other peer tools do not use them.
 
 These wrappers add argument parsing, indexing or index reading, output formatting, and the benchmark-specific stats path. Their timings and sizes therefore describe the complete wrapper CLIs, not the upstream Rust crates in isolation. The reports call out where a wrapper is custom or where a peer only covers part of the stats contract.
 
 ## Binary sizes
 
-These sizes describe the Linux x86_64 tool bundle used for the 0.3.5 reports. Compiler versions, link mode, debug information, stripping, and dependency versions all change the sizes. Every compiled executable in this historical table was stripped. The table compares that build bundle; it does not rank the projects.
+These sizes describe the Linux x86_64 tool bundle used for the 0.4.0 reports. Compiler versions, link mode, debug information, stripping, and dependency versions all change the sizes. Every compiled executable in this historical table was stripped. The table compares that build bundle; it does not rank the projects.
 
-| command     | version or implementation                   |                      file size |
-| ----------- | ------------------------------------------- | -----------------------------: |
-| `z-fasta`   | 0.3.5, Zig `ReleaseFast`, stripped          |        819,416 bytes (800 KiB) |
-| `noodles`   | noodles-fasta 0.66.0 wrapper                |        449,712 bytes (439 KiB) |
-| `rustbio`   | rust-bio 4.0.1 wrapper                      |        492,712 bytes (481 KiB) |
-| `samtools`  | 1.24 with HTSlib 1.24                       |        869,232 bytes (849 KiB) |
-| `bedtools`  | 2.31.1                                      |     2,098,216 bytes (2.00 MiB) |
-| `seqkit`    | 2.13.0, upstream Linux amd64 release binary |    20,078,754 bytes (19.2 MiB) |
-| `seqtk`     | 1.5-r133                                    |        77,600 bytes (75.8 KiB) |
-| `fastahack` | 1.0.0                                       |        89,664 bytes (87.6 KiB) |
-| `faidx`     | pyfaidx 0.9.0.4                             | symlink, not a compiled binary |
-| `zebrac`    | 0.6.2, static stripped binary               |        588,584 bytes (575 KiB) |
+| Command | Version | Bytes |
+| --- | --- | ---: |
+| `z-fasta` | 0.4.0 | 924,808 |
+| `noodles` | noodles-fasta 0.66.0 | 449,712 |
+| `rustbio` | rust-bio 4.0.1 | 492,712 |
+| `samtools` | 1.24 | 869,232 |
+| `bedtools` | 2.31.1 | 2,098,216 |
+| `seqkit` | 2.13.0 | 20,078,754 |
+| `seqtk` | 1.5-r133 | 77,600 |
+| `fastahack` | 1.0.0 | 89,664 |
+| `zebrac` | 0.6.2 | 588,584 |
 
-The `faidx` entry is intentionally not given a fake binary size: `tools/bin/faidx` is a 17-byte symlink into `tools/venv`, and the actual command is a Python entry point with its environment and installed package outside that link.
+- `z-fasta` is the Zig `ReleaseFast` build, stripped; `noodles` and `rustbio` are the local wrappers; `samtools` is built with HTSlib 1.24; `seqkit` is the upstream Linux amd64 release binary; `zebrac` is a static stripped binary.
+- `faidx` (pyfaidx 0.9.0.4) has no binary size: `tools/bin/faidx` is a 17-byte symlink into `tools/venv`, and the actual command is a Python entry point with its environment and installed package outside that link.
 
 ## What the numbers do and do not say
 
@@ -137,6 +180,82 @@ The checks cover 30 index, 118 GET, and 28 stats measurements for z-fasta. 26 wa
 
 Transcriptome `.fai` stats uses less memory: 20.2 MiB, down from 23.7 MiB. Index, GET, and stats remain faster than every reported peer on all three real datasets.
 
+## v0.4.0 baseline
+
+The baseline runs are index `20261013_094246`, GET `20261013_101405`, stats `20261013_102006`, and validate `20261013_103504`, each with five measured samples, three warmups, and a 5,000 ms budget, on the same host as the v0.3.5 runs. The host was busier (load average about 23 on 32 cores), and load differs between sessions, so wall time is compared only inside one zebrac batch. Across sessions, instruction counts are compared instead: they do not depend on load.
+
+- **Against v0.3.5, by instructions:** every index, GET, and stats workload is within 3%. Wall times on short runs differ by up to tens of percent between the sessions, with cycles moving the same way and instructions not, which is host contention rather than code.
+- **Against peers in the same batch:** z-fasta is fastest in every index, GET, stats, and validate workload; on the 1 MB `.fai` scaling input it ties with noodles.
+- **Against v0.3.4 in one batch** (the tip twice as an A/A control, then v0.3.4; 15 samples; unpinned, since pinning to one busy core spread the A/A control by 16%): the genome indexes 2% to 4% faster. The 1,000,000-sequence input is slower: `.fai` 482.8 ms against 444.6 ms (+8.6%, instructions +28%) and `.zfi` 472.9 ms against 404.7 ms (+16.8%, instructions +32%). Per symbol, the added instructions are per-line whitespace counting (+160 M), the scan loop (+195 M), catalog appends (+65 M), the duplicate check (+55 M), and the dense-line check (+35 M).
+- **Positional GET through `.zfi` on the transcriptome:** 6.9 ms against 5.3 ms for v0.3.4, with 58% more instructions, from checking the whole index when it loads; peak RSS is 164 KiB higher. Through `.fai` it takes 27 ms, parsing the 34.5 MB index for one lookup.
+- **Transcriptome stats through `.zfi`:** 398.7 ms against 391.8 ms for v0.3.4 (+1.8%).
+- **Genome stats:** 14.9 billion instructions, 99.6% of them in per-byte composition counting, at 1.57 instructions per cycle.
+- **`RecordReader` on the genome:** 853 ms, 2.46 times `index --emit-fai` and 3.3 times a plain read of the file; its storage holds the largest record (238 MiB).
+- **Process start:** `--version` takes 0.58 ms and 1.05 million instructions, as in v0.3.4 and v0.3.5.
+
+Peak live heap, from a counting allocator around each command's allocator (mapped indexes, runtime I/O buffers, and stack arrays are not heap); every command frees everything it allocates:
+
+| Command                  |    Genome | Transcriptome |  Proteome |
+| ------------------------ | --------: | ------------: | --------: |
+| `index`                  |   837 KiB |     5,346 KiB | 1,542 KiB |
+| `index --emit-fai`       |   835 KiB |     5,346 KiB |   800 KiB |
+| `get` (1 region)         |     324 B |         324 B |     324 B |
+| `get --bed` (1,000 rows) |   353 KiB |     1,025 KiB |   623 KiB |
+| `stats`                  |   1.5 KiB |     1,985 KiB |   161 KiB |
+| `validate`               | 1,114 KiB |     5,625 KiB | 1,400 KiB |
+| `validate --index`       | 1,307 KiB |     5,818 KiB | 1,592 KiB |
+
+Peak stack, from Valgrind Massif on the stripped binary (it samples, so it is not a proven maximum); most of it is fixed read buffers declared on the stack:
+
+| Command                  |    Genome |  Proteome |
+| ------------------------ | --------: | --------: |
+| `index`                  | 878,016 B | 557,792 B |
+| `index --emit-fai`       | 817,968 B | 555,024 B |
+| `get` (1 region)         | 569,616 B | 569,616 B |
+| `get --bed` (1,000 rows) | 657,296 B | 657,296 B |
+| `stats`                  | 490,432 B | 490,432 B |
+| `validate`               | 162,352 B | 162,352 B |
+| `validate --index`       | 310,128 B | 310,128 B |
+
+`stats` uses 10,192 bytes more stack than v0.3.4 (480,240 B) and 1,936 bytes more than v0.3.5 (488,496 B).
+
+Stripped ReleaseFast binary bytes, attributed by building with one command's entry point unreachable; "shared" is code that two or more commands use, and "base" is the CLI, diagnostics, reporting, and runtime:
+
+| Part            |  v0.3.5 |  v0.4.0 |   Change |
+| --------------- | ------: | ------: | -------: |
+| `validate` only |  54,240 | 128,192 |  +73,952 |
+| `index` only    |  98,512 |  94,784 |   -3,728 |
+| `get` only      |  72,624 |  71,552 |   -1,072 |
+| `stats` only    |  75,488 |  75,648 |     +160 |
+| shared          |  68,272 |  86,288 |  +18,016 |
+| base            | 451,480 | 469,208 |  +17,728 |
+| total           | 820,616 | 925,672 | +105,056 |
+
+The binary is 12.8% larger than v0.3.5 and within the 1 MiB release limit. The validate rewrite accounts for 70% of the growth; the code `index` and `validate` now share in `fasta.zig` counts as shared.
+
+## v0.4.0 measurements
+
+The release runs are index `20261015_121432`, GET `20261015_124422`, stats `20261015_124934`, and validate `20261015_130219`: source `faf505d`, the stripped 924,808-byte ReleaseFast binary, five measured samples after three warmups, and a 5,000 ms budget, on the same host as the v0.3.5 runs (load average about 4 to 5 on 32 cores). The manifests mark the checkout dirty because documentation was being edited; no source or build file differed from `faf505d`, and the binary's hash was checked after every suite. Correctness: GET 483, stats 66, and validate 81 checks passed; index matched the peers on 24 edge cases, with the expected review of binary input, which z-fasta rejects, and every messy layout passed through `.zfi`.
+
+- **Against the v0.3.5 reports:**
+  - Index: human genome `.fai` 327.9 ms (382.4 ms); 1,000,000 fixed sequences 253.4 ms and 3.6 MiB (445.8 ms and 19.2 MiB).
+  - GET on the transcriptome: one 1 kbp region 2.2 ms and 3.8 MiB through `.zfi` (8.2 ms and 22.5 MiB), 11.1 ms through `.fai` (28.3 ms); 1,000 regions 11.9 ms (38.8 ms).
+  - Stats: human genome 0.413 s (2.840 s); transcriptome through `.zfi` 88.9 ms and 3.6 MiB (396 ms and 12.5 MiB).
+- **Against peers in the same batch:** z-fasta is fastest in every index, GET, stats, and validate workload in which a peer completes. On the four messy index layouts every peer exits nonzero, except one that indexes `mixed_crlf` in 26.1 ms against 19.0 ms.
+- **Against v0.3.4 and v0.3.5 in one batch** ([#34](https://github.com/eneskemalergin/z-fasta/issues/34)): the three versions were built stripped at their tags and timed interleaved by zebrac, 10 samples after three warmups, each indexing its own symlink to the same input. Medians in milliseconds; peak RSS stayed within 0.1 MiB except the transcriptome, where 0.4.0 uses 3.7 MiB against 5.8 MiB for v0.3.4:
+
+| Input                | v0.3.4 | v0.3.5 | v0.4.0 |
+| -------------------- | -----: | -----: | -----: |
+| Genome `.fai`        |  353.1 |  356.5 |  326.5 |
+| Genome `.zfi`        |  351.3 |  361.0 |  326.3 |
+| Transcriptome `.fai` |  143.3 |  156.9 |  123.1 |
+| Transcriptome `.zfi` |  177.0 |  194.8 |  168.6 |
+| Proteome `.fai`      |    8.3 |    9.3 |    7.1 |
+| Proteome `.zfi`      |   11.0 |   11.4 |   11.0 |
+
+- `.zfi` sizes, version 2 against v0.3.5's version 1: genome 7,397 bytes (9,529), transcriptome 36,477,118 (39,271,886), proteome 1,030,891 (1,258,059), name table included.
+- The stripped binary is 924,808 bytes, 12.7% over v0.3.5 built the same way (820,616); see the attribution under v0.4.0 baseline and [#37](https://github.com/eneskemalergin/z-fasta/issues/37).
+
 ---
 
 ## High-level benchmark summary figures
@@ -145,7 +264,7 @@ The individual reports above are the source for methods, correctness checks, com
 
 These three views therefore use the same selected index, GET, and stats runs but organize them differently. Every view keeps wall time beside peak RSS, covers the same human genome, transcriptome, and proteome inputs, and identifies partial or reference work instead of quietly ranking it as equivalent. They are not three independent benchmark claims and they are not a combined winner score.
 
-The selected v0.3.5 runs are index `20261010_140037`, GET `20261010_143023`, and stats `20261010_143519`. Summary RSS uses decimal MB (1,000,000 bytes); the individual reports use MiB (1,048,576 bytes). GET summaries select a single 1 kbp positional request. The seekable BED and names changes in [#14](https://github.com/eneskemalergin/z-fasta/issues/14) affect batch lookup; their measurements are in the [GET report](get/REPORT.md#performance-bed-batch).
+The selected v0.4.0 runs are index `20261015_121432`, GET `20261015_124422`, and stats `20261015_124934`. Summary RSS uses decimal MB (1,000,000 bytes); the individual reports use MiB (1,048,576 bytes). GET summaries select a single 1 kbp positional request. The seekable BED and names changes in [#14](https://github.com/eneskemalergin/z-fasta/issues/14) affect batch lookup; their measurements are in the [GET report](get/REPORT.md#performance-bed-batch).
 
 GitHub selects the dark or light SVG to match the reader's color scheme.
 

@@ -1,37 +1,12 @@
 #!/usr/bin/env bash
-# GET benchmark runner: correctness (run_tests), then zebrac perf and report.
-#
-# Usage:
-#   bash bench/get/run.sh [options]
-#
-# Defaults: correctness first (418 checks), then perf (--runs 5, --warmup 5, --duration 5000).
-# A full perf pass (all sections, default zebrac settings) typically takes several hours.
-# Multi-region seqtk/fastahack reference loops are omitted by default (O(N) subprocesses;
-# cost grows linearly and duplicates positional seqtk reference data). Set
-# GET_MULTI_REFERENCE=1 to re-enable them for a one-off reference sweep.
-# Use --skip-* for partial re-runs; resume with GET_RUN_TIMESTAMP=<ts> and GET_MULTI_COUNTS.
-# Use --skip-tests (alias --skip-verify) to run perf/report only. Correctness failure aborts before perf or report.
-# --skip-messy skips messy zebrac perf only (never skips messy cases inside run_tests).
-# --focused runs the complete development benchmark without regenerating the checked report.
-#
-# Canonical flags (index-aligned): --skip-tests --skip-benchmarks --skip-messy --skip-report
-# Deprecated aliases (one release cycle): --skip-verify --skip-perf
-#
-#   bash bench/get/run.sh
-#   bash bench/get/run.sh --skip-tests --skip-report   # perf only
-#   bash bench/get/run.sh --skip-verify --skip-perf    # same via aliases
-#   bash bench/get/run.sh --skip-messy --skip-bed
-#   bash bench/get/run.sh --focused --skip-tests --runs 5 --warmup 5
-#   bash bench/get/run.sh --regenerate-fixtures
-#   bash bench/get/run.sh --skip-benchmarks --skip-report   # correctness only
-#
-# ── Workload fixtures (generated; bench/get/data/ is gitignored) ───
-#   regions/{Dataset}_{label}.txt        positional slices on REAL_* (incl. 1kbp_mid for RC)
-#   regions/{Dataset}_regions_N{n}.txt   multi-region lists
-#   bed/{Dataset}_{n}.bed                BED batch (+ .regions.txt for samtools)
-#   Created on demand by generate_get_fixtures in this script.
-#
-#   -h|--help  print this header
+# GET benchmark: correctness against peers, positional, multi-region, BED, RC, and messy runs.
+# Usage: bash bench/get/run.sh [options]   (ZFASTA, ZEBRAC select the binaries)
+#   --runs N --warmup N --duration MS      sampling (defaults 5, 5, 5000)
+#   --messy-runs N --messy-warmup N --messy-duration MS   messy sampling (50, 10, 30000)
+#   --skip-tests --skip-benchmarks --skip-messy --skip-report
+#   --skip-pos --skip-multi --skip-bed --skip-rc   leave out a benchmark group
+#   --regenerate-fixtures   rebuild the fixtures; --focused   every benchmark, no report
+# GET_RUN_TIMESTAMP resumes a run; GET_MULTI_COUNTS and GET_MULTI_REFERENCE set the sweep.
 
 set -euo pipefail
 
@@ -52,8 +27,6 @@ source "$BENCH_ROOT/shared/runner_common.sh"
 RUNS=5
 WARMUP=5
 ZEBRAC_DURATION_MS="${ZEBRAC_DURATION_MS:-5000}"
-# Messy GET uses sub-millisecond timings on small slices; large proteome fixtures use
-# higher sampling. Override via GET_MESSY_* or --messy-runs etc.
 MESSY_RUNS="${GET_MESSY_RUNS:-50}"
 MESSY_WARMUP="${GET_MESSY_WARMUP:-10}"
 MESSY_DURATION_MS="${GET_MESSY_DURATION_MS:-30000}"
@@ -73,12 +46,10 @@ TEST_DATA_DIR=""
 declare -A ZFI_VIEWS=()
 declare -A FAI_VIEWS=()
 
-# Multi-region perf sweep (log-spaced). 15/16 boundary lives in run_tests, not timed here.
 MULTI_COUNTS=(1 10 100 1000)
 BED_COUNTS=(10 100 1000 10000)
 POS_LABELS=(100bp 1kbp_mid 10kbp full_seq)
 
-# Count GET bases with indexed bounds; closed messy-fixture ranges are prevalidated.
 region_span_bases() {
     local region="$1"
     local fasta="${2:-}"
@@ -163,8 +134,8 @@ while [[ $# -gt 0 ]]; do
         --messy-runs) MESSY_RUNS="$2"; shift 2 ;;
         --messy-warmup) MESSY_WARMUP="$2"; shift 2 ;;
         --messy-duration) MESSY_DURATION_MS="$2"; shift 2 ;;
-        --skip-tests|--skip-verify) DO_TESTS=false; shift ;;
-        --skip-benchmarks|--skip-perf) DO_BENCHMARKS=false; shift ;;
+        --skip-tests) DO_TESTS=false; shift ;;
+        --skip-benchmarks) DO_BENCHMARKS=false; shift ;;
         --skip-pos) DO_POS=false; shift ;;
         --skip-multi) DO_MULTI=false; shift ;;
         --skip-bed) DO_BED=false; shift ;;
@@ -174,7 +145,7 @@ while [[ $# -gt 0 ]]; do
         --regenerate-fixtures) REGENERATE_FIXTURES=true; shift ;;
         --focused) FOCUSED=true; DO_MESSY=false; DO_REPORT=false; shift ;;
         -h|--help)
-            sed -n '2,/^set -euo pipefail$/p' "$0" | head -n -1
+            sed -n '2,/^set -euo pipefail$/{/^#/s/^# \{0,1\}//p}' "$0"
             exit 0
             ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -251,6 +222,28 @@ multi_positional_get_core() {
 # Keep large request sets out of zebrac's argv. Bash reads them at sample time.
 multi_positional_get_cmd() {
     echo "$(multi_positional_get_core "$1" "$2" "$3") > /dev/null"
+}
+
+LIBRARY="$PROJECT_ROOT/zig-out/bin/z-fasta-library"
+
+build_library_lane() {
+    (cd "$PROJECT_ROOT" && zig build bench-library -Doptimize=ReleaseFast -Dstrip=true) \
+        || { echo "error: could not build the package lane" >&2; return 1; }
+}
+
+check_library_positional() {
+    local fasta="$1" regions="$2"
+    local -a regs
+    mapfile -t regs < "$regions"
+    cmp -s <("$ZFASTA" get "$fasta" "${regs[@]}") <("$LIBRARY" "$fasta" "$regions") \
+        || { echo "error: the package lane differs from z-fasta get on $regions ($fasta)" >&2; return 1; }
+}
+
+# BED output names regions differently, so the lane and `get --bed` are compared on bases.
+check_library_bed() {
+    local fasta="$1" bed="$2" regions="$3"
+    cmp -s <("$ZFASTA" get "$fasta" --bed "$bed" | grep -v '^>') <("$LIBRARY" "$fasta" "$regions" | grep -v '^>') \
+        || { echo "error: the package lane differs from z-fasta get --bed on $bed ($fasta)" >&2; return 1; }
 }
 
 
@@ -591,13 +584,10 @@ PY
 
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  Correctness: z-fasta get vs oracles
-# ══════════════════════════════════════════════════════════════════════
+# --- Correctness ---
 
-SKIP_INDEX=false SKIP_GET=false SKIP_MULTI=false SKIP_BED=false SKIP_RC=false SKIP_EDGE=false
+SKIP_INDEX=false SKIP_GET=false SKIP_MULTI=false SKIP_BED=false SKIP_RC=false SKIP_EDGE=false SKIP_REAL=false
 
-# Correctness fixture paths (distinct from perf MESSY_DIR=shared/cache/messy_perf)
 MESSY_TEST_DIR="$BENCH_ROOT/shared/cache/messy_fixtures"
 
 MESSY_POS_CASES=(
@@ -623,10 +613,7 @@ diff_oracle() {
     diff -q "$1" "$2" >/dev/null 2>&1 && pass "$3" || fail "$3" "${4:-$1}" "$2"
 }
 
-# samtools 1.24 formats extracted FASTA at a fixed 60-column width. Older
-# samtools releases followed the source record's wrapping, which is also what
-# z-fasta and the wrappers emit. Compare headers and bases here while leaving
-# the repository's own byte-level index/output checks unchanged.
+# samtools 1.24 rewraps output at 60 columns, so headers and bases are compared, not bytes.
 diff_fasta_oracle() {
     local expected="$1" got="$2" label="$3"
     if python3 - "$expected" "$got" <<'PY'
@@ -668,7 +655,6 @@ ensure_index() {
     [[ -f "${f}.zfi" ]] || "$ZFASTA" index "$f" 2>/dev/null
 }
 
-# Messy-FASTA oracles (region/rc/rev/comp/bed). argv: MODE FASTA ... OUT
 oracle() {
     python3 - "$@" <<'PY'
 import sys
@@ -755,8 +741,7 @@ _zfasta_get() {
 
 names_to_regions() { awk '!/^[[:space:]]*$|^#/{sub(/\r$/,""); print}' "$1"; }
 
-# Split name:start-end on the last ':' (handles sp|P12345|PROT_HUMAN:1-10).
-# Sets PARSE_NAME, PARSE_START, PARSE_END; returns 0 when coords present.
+# Splits on the last ':' so a name like sp|P12345|PROT_HUMAN:1-10 parses.
 parse_region_spec() {
     local region="$1"
     PARSE_NAME="" PARSE_START="" PARSE_END=""
@@ -875,8 +860,6 @@ verify_open_ended_region() {
     fi
 }
 
-# verify_index_cross: byte-identical get with `.zfi` present vs `.fai` selected.
-# Optional third arg: existing file → read GET input from stdin (e.g. BED via pipe).
 verify_index_cross() {
     local desc="$1" src="$2"
     shift 2
@@ -1217,7 +1200,6 @@ seq1	2	8	overlap_minus	0	-
 seq2	0	4	short_plus	0	+
 BED
 
-    # Spot checks with samtools oracle on both index paths.
     verify_index positional "$simple" "seq1:1-10" "sub-region"
     verify_index positional "$simple" "seq1" "full sequence"
     verify_index positional "$TEST_DATA_DIR/single.fasta" "single_sequence:1-4" "single record"
@@ -1662,8 +1644,8 @@ section5() {
 
     local dup="$TMPDIR/dup_edge.fasta"
     printf '>dupname\nAAAA\n>other\nGG\n>dupname\nCCCCCC\n' > "$dup"
-    "$ZFASTA" index --no-dedup "$dup" >/dev/null 2>&1 || fail "[extended:dedup] index"
-    "$ZFASTA" index --emit-fai --no-dedup "$dup" > "${dup}.fai" 2>/dev/null || fail "[extended:dedup] fai index"
+    "$ZFASTA" index "$dup" >/dev/null 2>&1 || fail "[extended:duplicates] index"
+    "$ZFASTA" index --emit-fai "$dup" > "${dup}.fai" 2>/dev/null || fail "[extended:duplicates] fai index"
     printf '>dupname\nAAAA\n' > "$TMPDIR/dup_expected.fa"
     printf '>dupname:1-4\nAAAA\n' > "$TMPDIR/dup_bed_expected.fa"
     printf 'dupname\n' > "$TMPDIR/dup_names.txt"
@@ -1673,14 +1655,14 @@ section5() {
             mv "${dup}.zfi" "$TMPDIR/dup.zfi"
         fi
         "$ZFASTA" get "$dup" dupname > "$TMPDIR/got.tmp" 2>/dev/null \
-            && diff_oracle "$TMPDIR/dup_expected.fa" "$TMPDIR/got.tmp" "[extended:dedup] $sidecar positional first record" \
-            || fail "[extended:dedup] $sidecar positional first record"
+            && diff_oracle "$TMPDIR/dup_expected.fa" "$TMPDIR/got.tmp" "[extended:duplicates] $sidecar positional first record" \
+            || fail "[extended:duplicates] $sidecar positional first record"
         "$ZFASTA" get "$dup" --names "$TMPDIR/dup_names.txt" > "$TMPDIR/got.tmp" 2>/dev/null \
-            && diff_oracle "$TMPDIR/dup_expected.fa" "$TMPDIR/got.tmp" "[extended:dedup] $sidecar names first record" \
-            || fail "[extended:dedup] $sidecar names first record"
+            && diff_oracle "$TMPDIR/dup_expected.fa" "$TMPDIR/got.tmp" "[extended:duplicates] $sidecar names first record" \
+            || fail "[extended:duplicates] $sidecar names first record"
         "$ZFASTA" get "$dup" --bed "$TMPDIR/dup.bed" > "$TMPDIR/got.tmp" 2>/dev/null \
-            && diff_oracle "$TMPDIR/dup_bed_expected.fa" "$TMPDIR/got.tmp" "[extended:dedup] $sidecar BED first record" \
-            || fail "[extended:dedup] $sidecar BED first record"
+            && diff_oracle "$TMPDIR/dup_bed_expected.fa" "$TMPDIR/got.tmp" "[extended:duplicates] $sidecar BED first record" \
+            || fail "[extended:duplicates] $sidecar BED first record"
         if [[ "$sidecar" == fai ]]; then
             mv "$TMPDIR/dup.zfi" "${dup}.zfi"
         fi
@@ -1688,8 +1670,8 @@ section5() {
 
     local empty_name="$TMPDIR/empty_name.fasta"
     printf '>\nAAAA\n>\nCCCCCC\n' > "$empty_name"
-    "$ZFASTA" index --no-dedup "$empty_name" >/dev/null 2>&1 || fail "[extended:empty-name] zfi index"
-    "$ZFASTA" index --emit-fai --no-dedup "$empty_name" > "${empty_name}.fai" 2>/dev/null || fail "[extended:empty-name] fai index"
+    "$ZFASTA" index "$empty_name" >/dev/null 2>&1 || fail "[extended:empty-name] zfi index"
+    "$ZFASTA" index --emit-fai "$empty_name" > "${empty_name}.fai" 2>/dev/null || fail "[extended:empty-name] fai index"
     printf '>\nAAAA\n' > "$TMPDIR/empty_name_expected.fa"
     "$ZFASTA" get "$empty_name" "" > "$TMPDIR/got.tmp" 2>/dev/null \
         && diff_oracle "$TMPDIR/empty_name_expected.fa" "$TMPDIR/got.tmp" "[extended:empty-name] zfi positional first record" \
@@ -1721,6 +1703,110 @@ section5() {
 }
 
 # --- run_tests ---
+fasta_sequences() {
+    awk '/^>/ { if (n) print seq; seq = ""; n = 1; next } { gsub(/[ \t\r]/, ""); seq = seq $0 } END { if (n) print seq }' "$1"
+}
+
+same_sequences() {
+    cmp -s <(fasta_sequences "$1") <(fasta_sequences "$2")
+}
+
+section6_real() {
+    section_hdr 6 "REAL datasets"
+    ensure_real_data
+    build_library_lane || { fail "[real] package lane build"; return; }
+    generate_get_fixtures multi > /dev/null
+    generate_get_fixtures bed > /dev/null
+    local ds source dir view kind regions bed strand_bed names first_name first_len total
+    local -a regs
+    for ds in Genome Transcriptome Proteome; do
+        source="${REAL_DATASETS[$ds]:-}"
+        [[ -n "$source" ]] || continue
+        regions="$REGIONS_DIR/${ds}_regions_N100.txt"
+        bed="$BED_DIR/${ds}_1000.bed"
+        [[ -f "$regions" && -f "$bed" ]] || { fail "[real:$ds] region fixtures missing"; continue; }
+        mapfile -t regs < "$regions"
+        dir="$TMPDIR/real_$ds"
+        mkdir -p "$dir/zfi" "$dir/fai"
+        ln -sfn "$source" "$dir/zfi/${source##*/}"
+        ln -sfn "$source" "$dir/fai/${source##*/}"
+        TMPDIR="$dir" "$ZFASTA" index "$dir/zfi/${source##*/}" > /dev/null 2>&1
+        "$SAMTOOLS" faidx "$dir/fai/${source##*/}"
+        "$SAMTOOLS" faidx "$dir/fai/${source##*/}" "${regs[@]}" > "$dir/samtools.fa"
+        sort -t$'\t' -k2,2n "$dir/fai/${source##*/}.fai" | head -5 | cut -f1 > "$dir/names.txt"
+        "$SAMTOOLS" faidx -r "$dir/names.txt" "$dir/fai/${source##*/}" > "$dir/samtools_names.fa"
+        "$BEDTOOLS" getfasta -fi "$dir/fai/${source##*/}" -bed "$bed" > "$dir/bedtools.fa"
+        IFS=$'\t' read -r first_name first_len _ < "$dir/fai/${source##*/}.fai"
+        total="$(awk -F'[:-]' '{ n += $(NF) - $(NF - 1) + 1 } END { print n }' "$regions")"
+        cut -f1 "$dir/fai/${source##*/}.fai" > "$dir/all_names.txt"
+        cmp -s <("$LIBRARY" --records "$source" "$(awk -F'\t' '{ if ($2 > m) m = $2 } END { print m + 65536 }' "$dir/fai/${source##*/}.fai")") \
+            <("$ZFASTA" get "$dir/zfi/${source##*/}" --names "$dir/all_names.txt") \
+            && pass "[real:$ds] RecordReader vs get --names" || fail "[real:$ds] RecordReader vs get --names"
+        for kind in zfi fai; do
+            view="$dir/$kind/${source##*/}"
+            local label="[real:$ds .$kind]"
+            "$ZFASTA" get "$view" "${regs[@]}" > "$dir/got.fa" 2> "$dir/got.err" \
+                && diff_fasta_oracle "$dir/samtools.fa" "$dir/got.fa" "$label 100 regions vs samtools" \
+                || fail "$label 100 regions vs samtools"
+            "$ZFASTA" get "$view" "${regs[@]}" --summary > /dev/null 2> "$dir/summary.err" \
+                && grep -Eq "^summary: regions=100 total_bases=$total " "$dir/summary.err" \
+                && pass "$label --summary totals" || fail "$label --summary totals"
+            "$ZFASTA" get "$view" --names "$dir/names.txt" > "$dir/got_names.fa" 2> /dev/null \
+                && diff_fasta_oracle "$dir/samtools_names.fa" "$dir/got_names.fa" "$label --names vs samtools" \
+                || fail "$label --names vs samtools"
+            "$ZFASTA" get "$view" --bed "$bed" > "$dir/got_bed.fa" 2> /dev/null \
+                && same_sequences "$dir/bedtools.fa" "$dir/got_bed.fa" \
+                && pass "$label --bed vs bedtools" || fail "$label --bed vs bedtools"
+            "$ZFASTA" get "$view" --names - < "$dir/names.txt" 2> /dev/null | cmp -s "$dir/got_names.fa" - \
+                && pass "$label --names - (stdin)" || fail "$label --names - (stdin)"
+            "$ZFASTA" get "$view" --bed - < "$bed" 2> /dev/null | cmp -s "$dir/got_bed.fa" - \
+                && pass "$label --bed - (stdin)" || fail "$label --bed - (stdin)"
+            if [[ "$ds" == Proteome ]]; then
+                local code
+                code="$("$ZFASTA" get "$view" "${regs[0]}" --rc --error-format=json 2>&1 > /dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin)["failure"]["primary"]["code"])')"
+                [[ "$code" == transform.complement_on_protein ]] && pass "$label --rc on protein fails as JSON" || fail "$label --rc on protein fails as JSON ($code)"
+                continue
+            fi
+            "$SAMTOOLS" faidx -i "$dir/fai/${source##*/}" "${regs[@]}" > "$dir/samtools_rc.fa"
+            "$ZFASTA" get "$view" "${regs[@]}" --rc > "$dir/got_rc.fa" 2> /dev/null \
+                && same_sequences "$dir/samtools_rc.fa" "$dir/got_rc.fa" \
+                && pass "$label --rc vs samtools -i" || fail "$label --rc vs samtools -i"
+            "$ZFASTA" get "$view" "${regs[@]}" --rc --annotate-rc > "$dir/got_annotated.fa" 2> /dev/null \
+                && [[ "$(grep -c ' (reverse complement)$' "$dir/got_annotated.fa")" == 100 ]] \
+                && same_sequences "$dir/got_rc.fa" "$dir/got_annotated.fa" \
+                && pass "$label --annotate-rc headers" || fail "$label --annotate-rc headers"
+            "$ZFASTA" get "$view" "${regs[@]}" --complement-only > "$dir/got_comp.fa" 2> /dev/null
+            "$ZFASTA" get "$view" "${regs[@]}" --reverse-only > "$dir/got_rev.fa" 2> /dev/null
+            python3 - "$dir/got.fa" "$dir/got_comp.fa" "$dir/got_rev.fa" <<'PY' \
+                && pass "$label --complement-only and --reverse-only" || fail "$label --complement-only and --reverse-only"
+import sys
+table = str.maketrans("ACGTURYSWKMBDHVNacgturyswkmbdhvn", "TGCAAYRSWMKVHDBNtgcaayrswmkvhdbn")
+def sequences(path):
+    out, seq = [], None
+    for line in open(path):
+        if line.startswith(">"):
+            if seq is not None: out.append(seq)
+            seq = ""
+        else:
+            seq += line.strip()
+    return out + ([seq] if seq is not None else [])
+plain, comp, rev = (sequences(p) for p in sys.argv[1:])
+raise SystemExit(0 if comp == [s.translate(table) for s in plain] and rev == [s[::-1] for s in plain] and len(plain) == 100 else 1)
+PY
+            awk 'BEGIN { OFS = "\t" } /^#/ { next } { $6 = (NR % 2) ? "+" : "-"; print }' "$bed" > "$dir/strand.bed"
+            "$BEDTOOLS" getfasta -s -fi "$dir/fai/${source##*/}" -bed "$dir/strand.bed" > "$dir/bedtools_strand.fa"
+            for flag in --strand-aware --honor-strand; do
+                "$ZFASTA" get "$view" --bed "$dir/strand.bed" "$flag" > "$dir/got_strand.fa" 2> /dev/null \
+                    && same_sequences "$dir/bedtools_strand.fa" "$dir/got_strand.fa" \
+                    && pass "$label $flag vs bedtools -s" || fail "$label $flag vs bedtools -s"
+            done
+            local code
+            code="$("$ZFASTA" get "$view" "$first_name:$((first_len + 1))-$((first_len + 5))" --error-format=json 2>&1 > /dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin)["failure"]["primary"]["code"])')"
+            [[ "$code" == request.start_after_sequence ]] && pass "$label a start past the record fails as JSON" || fail "$label a start past the record fails as JSON ($code)"
+        done
+    done
+}
+
 run_tests() {
     PASS=0
     FAIL=0
@@ -1751,6 +1837,7 @@ run_tests() {
     ! $SKIP_BED   && section3
     ! $SKIP_RC    && section4
     ! $SKIP_EDGE  && section5
+    ! $SKIP_REAL  && section6_real
 
     echo ""
     echo "Results: $PASS passed, $FAIL failed"
@@ -2207,6 +2294,8 @@ run_perf_multi() {
         for n in "${multi_counts[@]}"; do
             path="$REGIONS_DIR/${ds}_regions_N${n}.txt"
             [[ -f "$path" ]] || continue
+            check_library_positional "$zfi_fa" "$path" || return 1
+            check_library_positional "$fai_fa" "$path" || return 1
             json="$out_dir/${ds}_N${n}.json"
             workload="${ds}/N=${n}"
             total_bases=$((n * 1000))
@@ -2221,6 +2310,7 @@ run_perf_multi() {
             zebrac_clear_commands
             get_add_command perf_multi "$workload" z-fasta-default z-fasta "$json" "$zf_cmd" "$nbytes" "$total_bases"
             get_add_command perf_multi "$workload" z-fasta-fai z-fasta "$json" "$zf_fai_cmd" "$nbytes" "$total_bases"
+            get_add_command perf_multi "$workload" z-fasta-library z-fasta "$json" "$(quote_arg "$LIBRARY") $qzfi $(quote_arg "$path") > /dev/null" "$nbytes" "$total_bases"
             bench_has_tool samtools && get_add_command perf_multi "$workload" samtools samtools "$json" "$st_cmd" "$nbytes" "$total_bases"
             bench_has_tool noodles && get_add_command perf_multi "$workload" noodles noodles "$json" "$nd_cmd" "$nbytes" "$total_bases"
             bench_has_tool rustbio && get_add_command perf_multi "$workload" rustbio-custom-get rustbio "$json" "$rb_cmd" "$nbytes" "$total_bases"
@@ -2264,6 +2354,8 @@ run_perf_bed() {
             bed="$BED_DIR/${ds}_${n}.bed"
             regions="$BED_DIR/${ds}_${n}.regions.txt"
             [[ -f "$bed" && -f "$regions" ]] || continue
+            check_library_bed "$zfi_fa" "$bed" "$regions" || return 1
+            check_library_bed "$fai_fa" "$bed" "$regions" || return 1
             json="$out_dir/${ds}_rows_${n}.json"
             workload="${ds}/rows=${n}"
             out_bases=$((n * 1000))
@@ -2276,6 +2368,8 @@ run_perf_bed() {
                 "$qz get $qzfi --bed $qbed > /dev/null" "$nbytes" "$out_bases"
             get_add_command perf_bed "$workload" z-fasta-fai z-fasta "$json" \
                 "$qz get $qfai --bed $qbed > /dev/null" "$nbytes" "$out_bases"
+            get_add_command perf_bed "$workload" z-fasta-library z-fasta "$json" \
+                "$(quote_arg "$LIBRARY") $qzfi $qreg > /dev/null" "$nbytes" "$out_bases"
             bench_has_tool bedtools && get_add_command perf_bed "$workload" bedtools bedtools "$json" \
                 "$qb getfasta -fi $qfai -bed $qbed > /dev/null" "$nbytes" "$out_bases"
             bench_has_tool samtools && get_add_command perf_bed "$workload" samtools samtools "$json" \
@@ -2315,7 +2409,7 @@ run_perf_rc() {
     qr="$(quote_arg "$RUSTBIO")"
 
     local ds fa zfi_fa fai_fa region_file region workload json qzfi qfai qrgn nbytes out_bases
-    # Nucleotide datasets only: Proteome omitted (--rc / complement N/A; reverse-only is trivial).
+    # Nucleotide datasets only: complement does not apply to protein.
     for ds in Genome Transcriptome; do
         fa="${REAL_DATASETS[$ds]:-}"
         [[ -n "$fa" ]] || continue
@@ -2360,7 +2454,6 @@ run_perf_messy() {
 
     bench_ensure_messy --perf
 
-    # Drop stale JSON from prior messy perf formats (e.g. verify-region spans).
     while IFS= read -r stale; do
         rm -f "$out_dir/$stale"
     done < <(python3 - "$out_dir" "$MESSY_PERF_JSON" <<'PY'
@@ -2491,6 +2584,7 @@ run_perf() {
 
     ensure_real_data
     prepare_benchmark_views
+    if ! $FOCUSED && { $DO_MULTI || $DO_BED; }; then build_library_lane || return 1; fi
 
     if $FOCUSED; then
         run_perf_focused

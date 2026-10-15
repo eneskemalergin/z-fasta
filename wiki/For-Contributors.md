@@ -33,15 +33,16 @@ The filter applies to Zig tests. Separate native callers still run when selected
 ## Source map
 
 - `src/main.zig`: CLI parsing, help, dispatch, diagnostics and checked final status.
+- `src/root.zig`: the Zig package: `IndexedReader`, `RecordReader`, and `validation`; [Zig package](Library) describes it.
 - `src/diagnostics.zig`: native codes, observed facts and caller-owned failure storage.
 - `src/reporting.zig`: text and JSON encoding without allocation or flushing.
-- `src/indexer.zig`: bounded FASTA scanner and index output.
+- `src/indexer.zig`: record scanning and index output.
 - `src/index_format.zig`: `.zfi` or `.fai` loading, validation, lookup, and ownership.
 - `src/getter.zig`: requests, coordinates, transforms, and bounded output.
-- `src/stats.zig`: length and composition reports plus shared type detection.
-- `src/validator.zig`: events, JSON, fix policy, and normalized rewrite.
+- `src/stats.zig`: length and composition reports.
+- `src/validator.zig`: the streaming validation scan, its report, and the repair written in the same pass.
 - `src/bed_parser.zig`: BED row conversion and strand parsing.
-- `src/complement.zig`: IUPAC complement table.
+- `src/fasta.zig`: bases, identifier ends, alphabet detection, the IUPAC complement, the record scanner, and the record reader.
 - `src/platform.zig`: portable read-only mapping and advice.
 
 The Wiki owns public behavior and workflow documentation. Source files and their tests own implementation details that are not part of the public contract.
@@ -51,12 +52,12 @@ The Wiki owns public behavior and workflow documentation. Source files and their
 ```bash
 zig build test-diagnostics
 zig build test-reporting
-bash tests/check_diagnostics.sh
+bash tests/consumer_json.sh
 ```
 
-The separate caller in `tests/diagnostics_commands_caller.zig` handles failures from the actual command functions and then calls them again successfully. It uses existing exports without running the CLI dispatcher. Preserve finite error unions, allocator cleanup, original causes and the primary failure when cleanup or reporting also fails. Reset `Failure` once at the owning operation entry; nested helpers retain facts before returning and must not reset them.
+The separate caller in `tests/consumer_commands.zig` handles failures from the actual command functions and then calls them again successfully. It uses existing exports without running the CLI dispatcher. Preserve finite error unions, allocator cleanup, original causes and the primary failure when cleanup or reporting also fails. Reset `Failure` once at the owning operation entry; nested helpers retain facts before returning and must not reset them.
 
-Borrowed source labels live through handling or reset. Retained preview views belong to their `Failure`. Validator event names borrow the input while `Summary` owns its arrays. Keep those input bytes alive until handling is finished. Failure capture allocates no new message; preview exhaustion marks truncation and must not hide the original failure. See [Error diagnostics](Error-Diagnostics) for units, encoding and output states.
+Borrowed source labels live through handling or reset. Retained preview views belong to their `Failure`. A validator `Report` copies the identifiers it keeps. Failure capture allocates no new message; preview exhaustion marks truncation and must not hide the original failure. See [Error diagnostics](Error-Diagnostics) for units, encoding and output states.
 
 ## Local correctness gates
 
@@ -64,6 +65,7 @@ Borrowed source labels live through handling or reset. Retained preview views be
 bash bench/index/run.sh --skip-benchmarks --skip-messy --skip-report
 bash bench/get/run.sh --skip-benchmarks --skip-messy --skip-report
 bash bench/stats/run.sh --skip-benchmarks --skip-messy --skip-report
+bash bench/validate/run.sh --skip-benchmarks --skip-report
 ```
 
 Run every affected gate after code changes. Synthetic unit fixtures do not replace real-data and peer verification.
@@ -78,7 +80,7 @@ Run every affected gate after code changes. Synthetic unit fixtures do not repla
 - Positional and BED coordinate systems remain distinct and explicit.
 - Shared type detection changes are checked in stats, GET, and validate.
 - GET and index hot paths stay bounded by fixed sequence payload buffers.
-- Validate fix preserves biological sequence bytes and never overwrites input.
+- Validate fix preserves every header byte and every symbol, and never overwrites input.
 
 ## Documentation update map
 

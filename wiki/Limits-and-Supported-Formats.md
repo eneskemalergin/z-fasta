@@ -32,14 +32,17 @@ FASTQ is coming as a separate project, z-fastq, built around the same priorities
 ## Input limits
 
 - Indexed identifier: 65535 bytes.
-- Retained index records: 4294967295 per file, after skipping empty records and applying the selected duplicate policy.
+- Retained index records: 4294967295 per file, after skipping empty records.
 - Positional GET regions: 1024 per invocation.
 - Names file identifier: 65535 bytes.
 - BED chromosome or identifier: 65535 bytes.
 - BED or names line reader: 69631 bytes before newline is required.
-- Retained validate events: 10000.
+- Validate identifier: 65535 bytes; a longer one is reported as `fasta.identifier_too_long`.
+- Validate examples: the first occurrence of each finding code; counts are exact and uncapped.
+- Validate read buffer: 256 KiB.
+- Validate duplicate check: unbounded unless `--max-name-memory` sets a budget; on a file it reserves about 1 MiB before its first name. On a file it holds 8 to 16 bytes per identifier (1,000,000 records: 15 MiB); from standard input it also holds a copy of each identifier (the same records: 31 MiB; 254,070 identifiers of 29 MB in all: 29 MiB).
 - Default validate header warning threshold: 1024 bytes.
-- Validate type sample: first 100000 sequence bytes across the file.
+- Validate type sample: first 100000 symbols across the file, unless `--type` names the alphabet.
 - GET complement type sample: up to 256 requested bases per record.
 
 ## Streaming batches
@@ -50,13 +53,13 @@ FASTQ is coming as a separate project, z-fastq, built around the same priorities
 
 These are memory bounds, not whole-input row caps. Names and BED continue with a fresh reusable batch.
 
-Seekable BED and names files also retain one lookup entry per unique requested identifier. Matched non-uniform `.zfi` records retain their required side tables. This lookup storage is separate from the active output batch; stdin and named FIFOs retain the complete index lookup.
+A `.zfi` needs no lookup storage: identifiers resolve through its name table. With a `.fai`, seekable BED and names files retain one lookup entry per unique requested identifier, separate from the active output batch, and stdin and named FIFOs retain the complete `.fai` lookup.
 
 ## Symbol treatment
 
 Index and GET treat bytes greater than ASCII space as sequence symbols. GET side-table extraction ignores ASCII whitespace between symbol runs.
 
-Validate trims only spaces and tabs from the right edge of sequence lines before width and alphabet checks. Interior whitespace remains content for validation and is normally an invalid character.
+Validate uses the same rule: spaces and tabs in a sequence line are not symbols and are reported as `format.sequence_whitespace`; other bytes below space are reported as control bytes.
 
 ## Sequence transforms
 
@@ -71,7 +74,7 @@ Validate trims only spaces and tabs from the right edge of sequence lines before
 - GET wraps at 60 symbols per line.
 - Index `.fai` writes stdout only.
 - Stats writes one human-readable text report.
-- Validate writes human text, JSON Lines, or one JSON summary.
+- Validate writes a human-readable text report or one JSON object.
 
 ## Index limits
 

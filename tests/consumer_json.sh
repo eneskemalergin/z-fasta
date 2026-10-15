@@ -14,12 +14,11 @@ for command in ("index", "get", "stats", "validate"):
     result = subprocess.run([binary, command, "--error-format=json"], capture_output=True, check=False)
     assert result.returncode == 1 and result.stdout == b""
     report = json.loads(result.stderr)
-    assert report["schema_version"] == "v2"
+    assert "schema_version" not in report and report["catalog_revision"] == "0.4.0-1"
     assert report["operation"]["name"] == command
     assert report["operation"]["complete"] is False
     assert report["accepted"] is False
     assert report["failure"]["primary"]["code"] == "usage.missing_argument"
-    # Missing/truncated machine objects cannot be accepted just from status.
     for broken in (b"", result.stderr[:-2]):
         try:
             json.loads(broken)
@@ -28,7 +27,6 @@ for command in ("index", "get", "stats", "validate"):
         else:
             raise AssertionError("Incomplete JSON was accepted")
 
-# Warning acceptance is explicit. Validator data remains a separate v1 report.
 with tempfile.TemporaryDirectory(prefix="zfasta-diagnostic-consumer-") as directory:
     reference = Path(directory) / "reference.fa"
     reference.write_bytes(b">seq1\nACGT\n")
@@ -41,8 +39,11 @@ with tempfile.TemporaryDirectory(prefix="zfasta-diagnostic-consumer-") as direct
 
     warning = Path(directory) / "warning.fa"
     warning.write_bytes(b">empty\n")
-    result = subprocess.run([binary, "validate", str(warning), "--json", "--summary", "--error-format=json"], capture_output=True, check=False)
+    result = subprocess.run([binary, "validate", str(warning), "--json", "--error-format=json"], capture_output=True, check=False)
     assert result.returncode == 2 and result.stderr == b""
-    assert json.loads(result.stdout)["schema_version"] == "v1"
+    report = json.loads(result.stdout)
+    assert report["kind"] == "summary" and report["failure"] is None
+    assert report["validation"]["outcome"] == "warnings"
+    assert report["validation"]["codes"][0]["code"] == "fasta.empty_record"
 print("diagnostic consumer: passed")
 PY

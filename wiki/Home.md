@@ -17,7 +17,7 @@
 I built z-fasta to keep four common FASTA jobs in one place: check a file, index it, pull out the records you need, and understand what is inside. When exact behavior matters, this Wiki gets specific about coordinates, sidecars, output, and failure modes.
 
 > [!NOTE]
-> This Wiki documents z-fasta v0.3.5. Run `z-fasta --version` before following version-specific behavior.
+> This Wiki documents z-fasta v0.4.0. Run `z-fasta --version` before following version-specific behavior.
 
 ## Start with this workflow
 
@@ -58,7 +58,7 @@ reference.fa
 - Positional GET behavior is checked for byte equality with `samtools faidx` on the verified path.
 - BED, names, reverse-complement, and messy-layout extraction have dedicated correctness coverage.
 - Stats scans indexed sequence spans and reports nucleotide or protein composition, Nx, auN, quartiles, and extrema.
-- Validate reports the documented structure, alphabet, and header problems, then rewrites supported format issues to a separate file.
+- Validate counts every documented structure, identifier, alphabet, and layout problem in one streaming pass, then can write a repaired copy to a separate file.
 
 ## Know the boundary
 

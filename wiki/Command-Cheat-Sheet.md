@@ -17,9 +17,6 @@ z-fasta index genome.fa
 
 # Samtools-compatible .fai for uniform FASTA
 z-fasta index --emit-fai genome.fa > genome.fa.fai
-
-# Retain duplicate index records
-z-fasta index --no-dedup genome.fa
 ```
 
 ## Get
@@ -67,20 +64,29 @@ z-fasta validate genome.fa
 # Fail a warnings-only quality gate
 z-fasta validate --strict genome.fa
 
-# JSON Lines or one JSON summary
+# One JSON report
 z-fasta validate --json genome.fa
-z-fasta validate --json --summary genome.fa
 
 # Header policies
 z-fasta validate --schema refseq genome.fa
 z-fasta validate --max-header-len 200 genome.fa
 z-fasta validate --custom-alphabet ACGTN- aligned.fa
 
-# Write a normalized copy
-z-fasta validate --fix -o genome.clean.fa genome.fa
+# Read standard input; bound the duplicate check's memory
+zcat genome.fa.gz | z-fasta validate -
+z-fasta validate --max-name-memory 268435456 proteins.fa
 
-# Keep invalid alphabet bytes while fixing format
-z-fasta validate --fix --fix-format-only -o genome.clean.fa genome.fa
+# Check that the index get loads still describes the FASTA
+z-fasta validate --index genome.fa
+z-fasta validate --index=genome.fa.fai genome.fa
+
+# Name the alphabet instead of sampling it
+z-fasta validate --type dna genome.fa
+z-fasta validate --type protein proteins.fa
+
+# Write a repaired copy, wrapped at 60 or at a chosen width
+z-fasta validate --fix -o genome.clean.fa genome.fa
+z-fasta validate --fix --width 80 -o genome.clean.fa genome.fa
 ```
 
 ## Stats

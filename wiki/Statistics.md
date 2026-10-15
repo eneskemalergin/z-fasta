@@ -40,7 +40,7 @@ An existing `.zfi` or `.fai` is required.
 
 ## Indexed population
 
-Stats describes records retained by the selected index. Default indexing removes later duplicate identifiers and skips empty records. `index --no-dedup` retains duplicate records, so reports from different duplicate policies are not directly comparable.
+Stats describes the records in the selected index. z-fasta indexes every non-empty record, duplicate identifiers included. A `.fai` from samtools leaves out later duplicates, so compare reports built from the same kind of index.
 
 > [!IMPORTANT]
 > Run `validate` when you need source-header duplicate or empty-record reporting. Stats intentionally reports the indexed population.

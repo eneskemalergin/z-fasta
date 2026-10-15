@@ -29,7 +29,6 @@ ok() { printf '  [ok] %s\n' "$*"; }
 warn() { printf '  [warn] %s\n' "$*"; }
 fail() { printf '  [fail] %s\n' "$*"; }
 
-# Tools every full suite path expects. Missing any exits nonzero.
 REQUIRED_TOOLS=(
     z-fasta
     zebrac

@@ -1,23 +1,13 @@
 #!/usr/bin/env python3
 
-import os
-from pathlib import Path
+from representation_common import (
+    DATASETS, TASKS, Theme, draw_footer, draw_header, format_multiple,
+    format_rss, format_time, main, plot_color, tool_legend,
+)
 
-MPL_CONFIG_DIR = Path(__file__).resolve().parents[3] / "tools" / "build" / "matplotlib"
-MPL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-os.environ.setdefault("MPLCONFIGDIR", str(MPL_CONFIG_DIR))
-
-import matplotlib
-
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from representation_common import (
-    DATASETS, DATASET_DETAILS, DATASET_IDENTITIES, ROOT, TASKS, Theme,
-    configure, extract, format_multiple, format_rss, format_time, plot_color,
-    provenance, save, tool_legend, tool_versions,
-)
 
 
 def ascii_multiple(value: float) -> str:
@@ -117,71 +107,15 @@ def render(frame, theme: Theme, meta, versions):
             fontsize=9.5, fontweight="bold", color=theme.ink,
         )
 
-    fig.text(
-        0.145, 0.956, "Speed and memory across real FASTA shapes",
-        ha="left", va="top", fontsize=22, fontweight="bold", color=theme.ink,
-    )
-    fig.text(
-        0.145, 0.902,
-        "FASTA index construction | 1 kbp positional extraction | complete statistics output",
-        ha="left", va="top", fontsize=10.2, color=theme.muted,
-    )
-    fig.text(
-        0.985, 0.952, f"z-fasta v{meta.zfasta_version}",
-        ha="right", va="top", fontsize=10.5, fontweight="bold", color=theme.ink,
-    )
-    fig.text(
-        0.985, 0.925, "github.com/eneskemalergin/z-fasta",
-        ha="right", va="top", fontsize=7.2, fontweight="bold", color=theme.section,
-    )
-    fig.text(
-        0.985, 0.894, "REAL FASTA BENCHMARK SUMMARY",
-        ha="right", va="top", fontsize=7.4, fontweight="bold", color=theme.muted,
-    )
-    fig.add_artist(plt.Line2D(
-        [0.145, 0.985], [0.852, 0.852], transform=fig.transFigure,
-        color=theme.grid, linewidth=0.8,
-    ))
+    draw_header(fig, theme, meta)
     tool_legend(
         fig, theme, x=0.565, y=0.800, loc="center",
         ncol=5, fontsize=6.7, versions=versions,
     )
 
-    footer_top = 0.135
-    for x in (0.415, 0.705):
-        fig.add_artist(plt.Line2D(
-            [x, x], [0.027, footer_top], transform=fig.transFigure,
-            color=theme.grid, linewidth=0.8,
-        ))
-    fig.text(0.025, 0.116, "HUMAN DATASETS", ha="left", va="center", fontsize=7.0, fontweight="bold", color=theme.section)
-    for y, dataset in zip((0.087, 0.060, 0.033), DATASETS, strict=True):
-        details = DATASET_DETAILS[dataset].replace("  ·  ", " | ")
-        fig.text(
-            0.025, y, f"{dataset}  {DATASET_IDENTITIES[dataset]} | {details}",
-            ha="left", va="center", fontsize=6.6, color=theme.ink,
-        )
-    fig.text(0.560, 0.116, "RANKING RIBBONS", ha="center", va="center", fontsize=7.0, fontweight="bold", color=theme.section)
-    fig.text(0.560, 0.087, "Rank 1 = best complete lane for that metric", ha="center", va="center", fontsize=6.8, fontweight="bold", color=theme.ink)
-    fig.text(0.560, 0.060, "Labels = absolute value | x best complete", ha="center", va="center", fontsize=6.8, fontweight="bold", color=theme.ink)
-    fig.text(0.560, 0.033, "Open + dashed lanes = reference or partial work, not ranked", ha="center", va="center", fontsize=6.6, color=theme.muted)
-    fig.text(0.975, 0.116, "MEASUREMENT", ha="right", va="center", fontsize=7.0, fontweight="bold", color=theme.section)
-    fig.text(0.975, 0.087, f"zebrac {meta.zebrac_version} | {meta.samples} samples | {meta.warmups} warmups", ha="right", va="center", fontsize=6.8, fontweight="bold", color=theme.ink)
-    fig.text(0.975, 0.060, f"{meta.duration_ms} ms budget | Zig {meta.zig_version}", ha="right", va="center", fontsize=6.8, color=theme.ink)
-    fig.text(0.975, 0.033, f"Warm-cache benchmark | {meta.benchmark_date}", ha="right", va="center", fontsize=6.6, color=theme.muted)
+    draw_footer(fig, theme, meta, ("RANKING RIBBONS", "Rank 1 = best complete lane for that metric", "Labels = absolute value | x best complete", "Open + dashed lanes = reference or partial work, not ranked"))
     return fig
 
 
 if __name__ == "__main__":
-    data = extract()
-    run_meta = provenance()
-    peer_versions = tool_versions(run_meta.zfasta_version)
-    icon = ROOT / "assets/icon.svg"
-    for theme_name in ("light", "dark"):
-        active_theme = configure(theme_name)
-        save(
-            render(data, active_theme, run_meta, peer_versions),
-            f"03-ranking-ribbons-{theme_name}",
-            embedded_svg=icon,
-            embedded_box=(51.84, 16.5, 88, 67.1),
-            render_png=False,
-        )
+    main(render, "03-ranking-ribbons")

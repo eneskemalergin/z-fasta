@@ -1,49 +1,11 @@
 #!/usr/bin/env bash
-# Stats benchmark runner: correctness (run_tests), then zebrac perf.
-#
-# Usage:
-#   bash bench/stats/run.sh [options]
-#
-# Defaults: correctness first, then perf (--runs 5, --warmup 1, --duration 5000).
-# Report generation: python3 bench/stats/generate_report.py
-#   (run.sh calls this after perf; --allow-incomplete for drafts)
-# Use --skip-tests (alias --skip-verify) to run perf/report only. Correctness failure aborts before perf or report.
-# --skip-messy is accepted for suite parity (messy zebrac perf); stats has no messy perf section today.
-#
-# Canonical flags (index-aligned): --skip-tests --skip-benchmarks --skip-messy --skip-report
-# Deprecated aliases (one release cycle): --skip-verify --skip-perf
-#
-#   bash bench/stats/run.sh
-#   bash bench/stats/run.sh --skip-tests --skip-report   # perf only
-#   bash bench/stats/run.sh --skip-verify --skip-perf    # same via aliases
-#   bash bench/stats/run.sh --skip-full                   # scaling only
-#   bash bench/stats/run.sh --skip-scale                  # REAL data only
-#   bash bench/stats/run.sh --skip-size                   # skip file-size sweep only
-#   bash bench/stats/run.sh --skip-seqs                   # skip seq-count sweep only
-#   bash bench/stats/run.sh --regenerate-fixtures
-#   bash bench/stats/run.sh --allow-incomplete
-#   bash bench/stats/run.sh --skip-benchmarks --skip-report   # correctness only
-#   STATS_RUN_TIMESTAMP=<ts> bash bench/stats/run.sh --skip-tests ...  # resume same run id
-#
-# Scaling fixtures (shared cache; gitignored):
-#   bench/shared/cache/scaling/size_{N}mb.fasta
-#   bench/shared/cache/scaling/seqs_fixed_{N}.fasta
-#   Same tree as index (budget fixtures live there too; stats does not bench them).
-#   Materialize: python3 bench/shared/generate_scaling.py
-#   Indexes (.zfi + .fai) are preloaded once per file; timed stats only loads them.
-#
-# Not in this runner (deferred):
-#   scale_seqs_budget, messy zebrac, layout-twin zebrac
-#
-# Outputs:
-#   results/LATEST           pointer to newest run_<timestamp>.json
-#   results/run_<ts>.json    manifest (sections, tool versions, skip flags)
-#   results/metadata_<ts>.jsonl
-#   results/perf_full_<ts>/  z-fasta formats, complete peers, partial references (REAL)
-#   results/scale_size_<ts>/ z-fasta formats + complete peers, file-size scaling
-#   results/scale_seqs_fixed_<ts>/ z-fasta formats + complete peers, record-count scaling
-#
-#   -h|--help  print this header
+# Stats benchmark: correctness against oracles and peers, then real and scaling performance.
+# Usage: bash bench/stats/run.sh [options]   (ZFASTA, ZEBRAC select the binaries)
+#   --runs N --warmup N --duration MS      sampling (defaults 5, 1, 5000)
+#   --skip-tests --skip-benchmarks --skip-report   (--skip-messy is accepted; no messy section)
+#   --skip-full --skip-scale --skip-size --skip-seqs   leave out a benchmark group
+#   --regenerate-fixtures   rebuild the fixtures; --allow-incomplete   draft report
+# STATS_RUN_TIMESTAMP resumes a run. Results go to results/, the report to REPORT.md.
 
 set -euo pipefail
 
@@ -56,11 +18,9 @@ DATA_DIR="$BENCH_ROOT/shared/data"
 
 source "$BENCH_ROOT/shared/runner_common.sh"
 
-# Scaling sweep constants (match index bench shape)
 SIZE_MBS=(1 5 10 25 50 100 250 500)
 SEQ_FIXED_COUNTS=(100000 250000 500000)
 
-# Defaults
 RUNS=5
 WARMUP=1
 ZEBRAC_DURATION_MS="${ZEBRAC_DURATION_MS:-5000}"
@@ -79,8 +39,8 @@ while [[ $# -gt 0 ]]; do
         --runs) RUNS="$2"; shift 2 ;;
         --warmup) WARMUP="$2"; shift 2 ;;
         --duration) ZEBRAC_DURATION_MS="$2"; shift 2 ;;
-        --skip-tests|--skip-verify) DO_TESTS=false; shift ;;
-        --skip-benchmarks|--skip-perf) DO_BENCHMARKS=false; shift ;;
+        --skip-tests) DO_TESTS=false; shift ;;
+        --skip-benchmarks) DO_BENCHMARKS=false; shift ;;
         --skip-full) DO_FULL=false; shift ;;
         --skip-scale) DO_SCALE=false; shift ;;
         --skip-size) DO_SCALE_SIZE=false; shift ;;
@@ -90,7 +50,7 @@ while [[ $# -gt 0 ]]; do
         --regenerate-fixtures) REGENERATE_FIXTURES=true; shift ;;
         --allow-incomplete) ALLOW_INCOMPLETE=true; shift ;;
         -h|--help)
-            sed -n '2,/^set -euo pipefail$/p' "$0" | head -n -1
+            sed -n '2,/^set -euo pipefail$/{/^#/s/^# \{0,1\}//p}' "$0"
             exit 0
             ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -238,7 +198,6 @@ Path(manifest).write_text(json.dumps(out, indent=2) + "\n")
 PY
 }
 
-# Run one timed tool with live progress (zebrac groups are silent until done).
 run_zebrac_tool() {
     local section="$1" workload="$2" tool="$3" family="$4"
     local json_out="$5" script="$6" input_bytes="$7"
@@ -287,7 +246,6 @@ run_zebrac_tool_fai() (
         "$qz stats $qf > /dev/null" "$input_bytes"
 )
 
-# Timed tools for one FASTA. One zebrac group per tool so progress is visible.
 run_stats_tools() {
     local section="$1" workload="$2" fa="$3" out_dir="$4"
     local include_fai="${5:-false}"
@@ -337,21 +295,17 @@ run_stats_tools() {
 
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  Correctness: z-fasta stats vs oracles
-# ══════════════════════════════════════════════════════════════════════
+# --- Correctness ---
 
 SKIP_TOOLS=false
 SKIP_MESSY=false
-SKIP_DEDUP=false
+SKIP_DUPLICATES=false
 SKIP_EDGE=false
 SKIP_LAYOUT=false
 
-# Correctness paths (oracle.py stays external; fixtures under data/verify)
 ORACLE="$SCRIPT_DIR/oracle.py"
 TEST_DATA="$PROJECT_ROOT/tests/data"
 MESSY_DIR="$BENCH_ROOT/shared/cache/messy_fixtures"
-# Generated on demand under data/ (gitignored). Do not track FASTA here.
 VERIFY_DATA="$SCRIPT_DIR/data/verify"
 LAYOUT_TWINS="$VERIFY_DATA/layout_twins"
 PYTHON="${PYTHON:-$PROJECT_ROOT/tools/venv/bin/python}"
@@ -360,19 +314,13 @@ PYTHON="${PYTHON:-$PROJECT_ROOT/tools/venv/bin/python}"
 
 
 FIXTURES=(simple proteome single edge_cases mixed_widths)
-# Side-table / whitespace messy: z-fasta .zfi only (peers count raw bytes).
 MESSY_FIXTURES=(mixed_widths trailing_whitespace blank_lines mixed_crlf)
-# Uniform messy control: samtools .fai works; exercise zfi+fai cross like get.
 UNIFORM_MESSY=uniform
 # Partial references are checked only on fields they provide.
 # SeqKit counts raw FASTA records, so edge_cases is excluded.
 SEQKIT_FIXTURES=(simple proteome single mixed_widths)
-# Seqtk comp is a nucleotide composition reference, not a protein statistics peer.
 SEQTK_FIXTURES=(simple single mixed_widths)
-# noodles/rustbio wrappers: clean FASTA comparison peers only (no messy / side-table).
-# Richer TSV fields exist so we can compare assembly+composition; they do not gain messy support.
 WRAPPER_FIXTURES=(simple proteome single edge_cases mixed_widths)
-# Same bases, different wrapping: uniform reference vs messy layouts (z-fasta only).
 LAYOUT_TWIN_VARIANTS=(mixed_widths trailing_whitespace blank_lines mixed_crlf)
 
 PASS=0 FAIL=0
@@ -454,7 +402,6 @@ run_stats() {
     fi
 }
 
-# Same bases, different wrapping. Written under data/verify/layout_twins/ (not tracked).
 generate_layout_twins() {
     mkdir -p "$LAYOUT_TWINS"
     "$PYTHON" - "$LAYOUT_TWINS" <<'PY'
@@ -539,11 +486,11 @@ verify_formats() {
     check_oracle "$label" check fai "$fasta" "$exp" "$fai_txt"
     mv "$stash" "${fasta}.zfi"
 
-    check_oracle "[index:cross] $name .zfi == .fai" same "$zfi_txt" "$fai_txt"
+    if [[ "$("$PYTHON" -c "import json; print(json.load(open('$exp'))['duplicates'])")" -eq 0 ]]; then
+        check_oracle "[index:cross] $name .zfi == .fai" same "$zfi_txt" "$fai_txt"
+    fi
 }
 
-# One pass per peer tool so failures name the tool (get-style).
-# Wrappers: clean fixtures only (WRAPPER_FIXTURES). Never run on messy side-table files.
 verify_parity() {
     local name="$1" fasta="$2" exp="$3"
     local stats_txt="$TMPDIR/$name.zfi.txt"
@@ -574,7 +521,7 @@ verify_parity() {
                 fail "$label (run)" "$err"
                 continue
             fi
-            # Stale binary: old wrappers only printed sequences + total_bases.
+            # A wrapper whose output lacks n50 and type is out of date.
             if ! grep -q $'^n50\t' "$out" || ! grep -q $'^type\t' "$out"; then
                 echo "wrapper output missing n50/type; rebuild tools/${tool}_wrapper (clean-FASTA comparison peer, not messy)" >"$err"
                 fail "$label (stale binary)" "$err"
@@ -640,7 +587,6 @@ verify_messy() {
         verify_formats "extended:messy" "messy_$name" "$fasta" "$TMPDIR/messy_${name}.expected.json" zfi-only
     done
 
-    # Uniform control: peers can index; exercise .zfi and .fai stats cross-compare.
     name="$UNIFORM_MESSY"
     fasta="$TMPDIR/messy_${name}.fasta"
     [[ -f "$MESSY_DIR/${name}.fasta" ]] || { fail "[extended:messy] missing fixture $name"; return; }
@@ -650,41 +596,27 @@ verify_messy() {
     verify_formats "extended:messy" "messy_$name" "$fasta" "$TMPDIR/messy_${name}.expected.json"
 }
 
-verify_dedup_stats() {
-    local dedup_fasta="$TMPDIR/dedup_default.fasta"
-    local nodedup_fasta="$TMPDIR/dedup_nodedup.fasta"
-    local exp_dedup="$TMPDIR/dedup_default.expected.json"
-    local exp_nodedup="$TMPDIR/nodedup.expected.json"
-    local label="[extended:dedup] --no-dedup indexes more sequences than default"
-    local err dedup_seqs nodedup_seqs
+# samtools faidx keeps the first record of each name; z-fasta indexes every record.
+verify_duplicate_stats() {
+    local fasta="$TMPDIR/duplicates.fasta"
+    local exp="$TMPDIR/duplicates.expected.json"
+    local label="[extended:duplicates] .zfi counts every duplicate record"
+    local duplicates
 
-    cp "$TEST_DATA/edge_cases.fasta" "$dedup_fasta"
-    rm -f "${dedup_fasta}.zfi" "${dedup_fasta}.fai"
-    ensure_index "$dedup_fasta" || { fail "[extended:dedup] default index setup" "$TMPDIR/faidx.err"; return; }
-    oracle expected "$dedup_fasta" >"$exp_dedup"
-    err="$TMPDIR/dedup_default.err"
-    run_stats "$dedup_fasta" "$TMPDIR/dedup_default.txt" "$err" \
-        || { fail "[extended:dedup] default stats" "$err"; return; }
-    check_oracle "[extended:dedup] default exact report" check zfi \
-        "$dedup_fasta" "$exp_dedup" "$TMPDIR/dedup_default.txt"
-
-    cp "$TEST_DATA/edge_cases.fasta" "$nodedup_fasta"
-    rm -f "${nodedup_fasta}.zfi" "${nodedup_fasta}.fai"
-    "$ZFASTA" index --no-dedup "$nodedup_fasta" >/dev/null 2>&1 \
-        || { fail "[extended:dedup] index --no-dedup"; return; }
-    oracle expected "$nodedup_fasta" --no-dedup >"$exp_nodedup"
-    verify_formats "extended:dedup" "edge_cases_nodedup" "$nodedup_fasta" "$exp_nodedup" zfi-only
-    dedup_seqs="$("$PYTHON" -c "import json; print(json.load(open('$exp_dedup'))['num_seqs'])")"
-    nodedup_seqs="$("$PYTHON" -c "import json; print(json.load(open('$exp_nodedup'))['num_seqs'])")"
-    if [[ "$nodedup_seqs" -gt "$dedup_seqs" ]]; then
+    cp "$TEST_DATA/edge_cases.fasta" "$fasta"
+    rm -f "${fasta}.zfi" "${fasta}.fai"
+    ensure_index "$fasta" || { fail "[extended:duplicates] index setup" "$TMPDIR/faidx.err"; return; }
+    oracle expected "$fasta" >"$exp"
+    verify_formats "extended:duplicates" "duplicates" "$fasta" "$exp"
+    duplicates="$("$PYTHON" -c "import json; print(json.load(open('$exp'))['duplicates'])")"
+    if [[ "$duplicates" -gt 0 ]]; then
         pass "$label"
     else
-        echo "dedup=$dedup_seqs nodedup=$nodedup_seqs" >"$TMPDIR/dedup_cmp.err"
-        fail "$label" "$TMPDIR/dedup_cmp.err"
+        echo "fixture has no duplicate names" >"$TMPDIR/duplicates_cmp.err"
+        fail "$label" "$TMPDIR/duplicates_cmp.err"
     fi
 }
 
-# Same sequence bytes, different on-disk wrapping: stats must match (layout invariant).
 verify_layout_twins() {
     section_hdr "extended:layout" "messy == uniform (same bases)"
     local uniform="$TMPDIR/layout_uniform.fasta"
@@ -773,6 +705,34 @@ verify_edge_paths() {
     fi
 }
 
+verify_real() {
+    section_hdr real "REAL datasets"
+    ensure_real_data
+    local ds source dir view code
+    for ds in Genome Transcriptome Proteome; do
+        source="${REAL_DATASETS[$ds]:-}"
+        [[ -n "$source" ]] || continue
+        dir="$TMPDIR/real_$ds"
+        mkdir -p "$dir"
+        view="$dir/${source##*/}"
+        ln -sfn "$source" "$view"
+        ensure_index "$view" || { fail "[real:$ds] index setup" "$TMPDIR/faidx.err"; continue; }
+        if [[ "$ds" == Genome ]]; then
+            run_stats "$view" "$dir/zfi.txt" "$dir/zfi.err" || fail "[real:$ds] stats through .zfi" "$dir/zfi.err"
+            mv "$view.zfi" "$dir/stash.zfi"
+            run_stats "$view" "$dir/fai.txt" "$dir/fai.err" || fail "[real:$ds] stats through .fai" "$dir/fai.err"
+            mv "$dir/stash.zfi" "$view.zfi"
+            check_oracle "[real:$ds] .zfi == .fai" same "$dir/zfi.txt" "$dir/fai.txt"
+        else
+            oracle expected "$view" > "$dir/expected.json"
+            verify_formats "real" "real_$ds" "$view" "$dir/expected.json"
+        fi
+        touch -d '2000-01-01' "$view.zfi"
+        code="$("$ZFASTA" stats --error-format=json "$view" 2>&1 > /dev/null | "$PYTHON" -c 'import json, sys; print(json.load(sys.stdin)["failure"]["primary"]["code"])')"
+        [[ "$code" == index.older_than_source ]] && pass "[real:$ds] an older index fails as JSON" || fail "[real:$ds] an older index fails as JSON ($code)" /dev/null
+    done
+}
+
 run_tests() {
     PASS=0
     FAIL=0
@@ -790,7 +750,7 @@ run_tests() {
     echo "  z-fasta:  $ZFASTA"
     echo "  skip tools: $SKIP_TOOLS"
     echo "  skip messy: $SKIP_MESSY"
-    echo "  skip dedup: $SKIP_DEDUP"
+    echo "  skip duplicates: $SKIP_DUPLICATES"
     echo "  skip edge: $SKIP_EDGE"
     echo "  skip layout: $SKIP_LAYOUT"
 
@@ -821,9 +781,11 @@ run_tests() {
         verify_layout_twins
     fi
 
-    if ! $SKIP_DEDUP; then
-        verify_dedup_stats
+    if ! $SKIP_DUPLICATES; then
+        verify_duplicate_stats
     fi
+
+    verify_real
 
     if ! $SKIP_EDGE; then
         verify_edge_paths

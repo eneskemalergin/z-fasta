@@ -1,49 +1,12 @@
 #!/usr/bin/env bash
-# Index benchmark master runner: correctness, performance, messy FASTA, and report.
-#
-# Usage:
-#   bash bench/index/run.sh [options]
-#
-# Default: run every section, then write REPORT.md.
-#
-# Sampling:
-#   --runs 5              measured samples for real and scaling benchmarks
-#   --warmup 5            unmeasured warmups before sampling
-#   --duration 5000       sampling budget per command, capped by --runs
-#
-# Correctness does one exit and byte comparison per tool and fixture. Messy performance
-# uses 3 samples, 1 warmup, a 1000 ms budget, and --allow-failures.
-#
-# Common invocations:
-#   bash bench/index/run.sh
-#   bash bench/index/run.sh --runs 10 --warmup 2
-#   bash bench/index/run.sh --skip-report
-#   bash bench/index/run.sh --skip-tests --skip-messy
-#   bash bench/index/run.sh --skip-benchmarks --skip-messy --skip-report
-#   bash bench/index/run.sh --skip-real
-#   bash bench/index/run.sh --skip-scaling
-#   bash bench/index/run.sh --skip-size
-#   bash bench/index/run.sh --scaling-only
-#   bash bench/index/run.sh --regenerate-fixtures
-#   bash bench/index/run.sh --clean-legacy
-#
-# Skip flags:
+# Index benchmark: correctness, real and scaling performance, messy FASTA, then REPORT.md.
+# Usage: bash bench/index/run.sh [options]   (ZFASTA, ZEBRAC select the binaries)
+#   --runs N --warmup N --duration MS      sampling (defaults 5, 5, 5000)
 #   --skip-tests --skip-benchmarks --skip-messy --skip-report
-#   --skip-verify and --skip-perf are deprecated aliases.
-#
-# Outputs:
-#   results/run_<ts>.json          result-file index and run settings
-#   results/metadata_<ts>.jsonl    command and workload metadata
-#   results/LATEST                 newest generated run
-#   REPORT.md                      benchmark report
-#
-# Scaling fixtures under bench/shared/cache/scaling/:
-#   size_{N}mb.fasta         1 to 1000 MiB, 100 sequences each
-#   seqs_budget_{N}.fasta    about 50 MiB total, N in 1k 10k 100k 250k
-#   seqs_fixed_{N}.fasta     1024 bp per sequence, N in 100k 250k 500k 1M
-#
-# Headline and scaling comparisons use z-fasta .fai. Transcriptome and Proteome also use
-# all four format and dedup product lanes.
+#   --skip-real --skip-scaling --skip-size  leave out a benchmark group
+#   --scaling-only [--merge-base TS]        scaling only, merged into run TS (default: LATEST)
+#   --regenerate-fixtures                   rebuild the shared fixtures
+# Results go to results/ (run_<ts>.json, metadata_<ts>.jsonl, LATEST), the report to REPORT.md.
 
 set -euo pipefail
 
@@ -76,7 +39,6 @@ SKIP_SCALING=false
 SKIP_SIZE=false
 SCALING_ONLY=false
 REGENERATE_FIXTURES=false
-CLEAN_LEGACY=false
 MERGE_BASE=""
 INDEX_CORRECTNESS_STATUS="not_run"
 INDEX_CORRECTNESS_CHECKS=0
@@ -91,8 +53,8 @@ while [[ $# -gt 0 ]]; do
         --runs)              RUNS="$2"; shift 2 ;;
         --warmup)            WARMUP="$2"; shift 2 ;;
         --duration)          ZEBRAC_DURATION_MS="$2"; shift 2 ;;
-        --skip-tests|--skip-verify) DO_TESTS=false; shift ;;
-        --skip-benchmarks|--skip-perf) DO_BENCHMARKS=false; shift ;;
+        --skip-tests) DO_TESTS=false; shift ;;
+        --skip-benchmarks) DO_BENCHMARKS=false; shift ;;
         --skip-messy)        DO_MESSY=false; shift ;;
         --skip-report)       DO_REPORT=false; shift ;;
         --skip-real)         SKIP_REAL=true; shift ;;
@@ -109,7 +71,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --merge-base)        MERGE_BASE="$2"; shift 2 ;;
         --regenerate-fixtures) REGENERATE_FIXTURES=true; shift ;;
-        --clean-legacy)      CLEAN_LEGACY=true; REGENERATE_FIXTURES=true; shift ;;
         -h|--help)
             awk '
                 NR == 1 { next }
@@ -137,13 +98,11 @@ if $SCALING_ONLY; then
     fi
 fi
 
-# Helpers: scaling setup, manifest, and zebrac benchmark.
+# --- Helpers ---
 
 ensure_scaling() {
     local args=(--mode all)
-    if $CLEAN_LEGACY; then
-        args+=(--clean-legacy --force)
-    elif $REGENERATE_FIXTURES; then
+    if $REGENERATE_FIXTURES; then
         args+=(--force)
     fi
     bench_ensure_scaling "${args[@]}"
@@ -341,7 +300,6 @@ bench_file() {
 
     local bench_mode="$mode"
     if [[ "$mode" == "messy" ]]; then
-        # Messy matrix uses production `.zfi` only; treat like headline for peer set.
         bench_mode="headline"
     fi
 
@@ -361,24 +319,17 @@ bench_file() {
 
     zebrac_clear_commands
     if [[ "$mode" == "messy" ]]; then
-        # Production `.zfi` is the messy contract. `--emit-fai` must refuse non-uniform
-        # layouts, so timing emit-fai here falsely marks z-fasta as fail in the matrix.
+        # `--emit-fai` refuses non-uniform layouts, so only the `.zfi` is timed on messy input.
         bench_add_command "$section" "$workload" "z-fasta" "z-fasta" "$json_out" \
             "$clean; $qz index $qf > /dev/null" "$nbytes"
     elif [[ "$bench_mode" == "headline" ]]; then
-        # Peer-comparable lane only (scaling sweeps).
         bench_add_command "$section" "$workload" "z-fasta-fai" "z-fasta" "$json_out" \
             "$clean; TMPDIR=$qt $qz index --emit-fai $qf > /dev/null" "$nbytes"
     else
-        # Product matrix: {.fai, .zfi} x {dedup, --no-dedup}.
         bench_add_command "$section" "$workload" "z-fasta-fai" "z-fasta" "$json_out" \
             "$clean; TMPDIR=$qt $qz index --emit-fai $qf > /dev/null" "$nbytes"
-        bench_add_command "$section" "$workload" "z-fasta-fai-nodedup" "z-fasta" "$json_out" \
-            "$clean; TMPDIR=$qt $qz index --emit-fai --no-dedup $qf > /dev/null" "$nbytes"
         bench_add_command "$section" "$workload" "z-fasta-zfi" "z-fasta" "$json_out" \
             "$clean; $qz index $qf > /dev/null" "$nbytes"
-        bench_add_command "$section" "$workload" "z-fasta-zfi-nodedup" "z-fasta" "$json_out" \
-            "$clean; $qz index --no-dedup $qf > /dev/null" "$nbytes"
     fi
 
     bench_add_command "$section" "$workload" "samtools" "samtools" "$json_out" \
@@ -403,7 +354,7 @@ export_manifest_tool_versions() {
     export_manifest_optional_tool_versions seqkit fastahack pyfaidx noodles rustbio
 }
 
-# Correctness: edge cases and lightweight messy variants.
+# --- Correctness ---
 
 run_tests() {
     bench_require_tool z-fasta
@@ -514,15 +465,29 @@ run_tests() {
         fi
     }
 
+    # z-fasta indexes every record; samtools faidx keeps only the first of each name.
+    score_every_duplicate() {
+        local name="$1"
+        if [[ $zf_exit -eq 0 ]] && diff -q "$zf_fai" <(printf 'dup\t4\t5\t4\t5\ndup\t4\t15\t4\t5\ndup\t4\t25\t4\t5\n') &>/dev/null; then
+            match="MATCH"
+        else
+            match="DIFF"
+            echo "FAILURE: $name (every duplicate record expected)" >> "$fail_log"
+        fi
+    }
+
     for file in "$EDGE_DIR"/*.fasta; do
         [[ -f "$file" ]] || continue
         name="$(basename "$file" .fasta)"
         contract_class="fai_parity"
         [[ "$name" == "binary_data" ]] && contract_class="invalid_input"
+        [[ "$name" == "triple_dup" ]] && contract_class="all_records"
         total=$((total + 1))
         run_index_tools "$file"
         if [[ "$contract_class" == "invalid_input" ]]; then
             match="REVIEW"
+        elif [[ "$contract_class" == "all_records" ]]; then
+            score_every_duplicate "$name"
         else
             score_edge_case "$file" "$name"
         fi
@@ -547,10 +512,10 @@ from pathlib import Path
 import sys
 zfi = Path(sys.argv[1]).read_bytes()
 expected = sys.argv[2]
-if len(zfi) < 16 or zfi[:4] != b"ZFI\x01":
+if len(zfi) < 16 or zfi[:4] != b"ZFI\x02":
     raise SystemExit(1)
 count = int.from_bytes(zfi[4:8], "little")
-side = any(zfi[16 + i * 40 + 10] & 1 for i in range(count))
+side = any(zfi[16 + i * 24 + 23] & 0x80 for i in range(count))
 raise SystemExit(0 if (expected == "side-table") == side else 1)
 PY
     }
@@ -564,7 +529,6 @@ PY
         run_index_tools "$file"
         match="DIFF"
         zfi_status="ok"
-        # Production `.zfi` is the contract for messy layouts; `--emit-fai` must refuse them.
         if [[ $zfi_exit -ne 0 ]]; then
             zfi_status="index-failed"
         elif ! check_zfi_side_table "${file}.zfi" "$zfi_expect"; then
@@ -578,7 +542,6 @@ PY
                 && diff -q "$zf_fai" "${file}.fai" &>/dev/null \
                 && [[ "$zfi_status" == "ok" ]] && match="MATCH"
         elif [[ "$behavior" == "zfasta-only" ]]; then
-            # emit-fai nonzero (non-uniform), samtools fails, `.zfi` + side-table ok
             [[ $zf_exit -ne 0 && $sam_exit -ne 0 && "$zfi_status" == "ok" ]] && match="MATCH"
         fi
         echo "$name,$contract_class,$zf_exit,$zfi_exit,$sam_exit,$seq_exit,$fh_exit,$pyfaidx_exit,$noodles_exit,$rustbio_exit,$match" >> "$csv"
@@ -601,6 +564,67 @@ PY
     run_messy_case "$MESSY_TEST_DIR/blank_lines.fasta" zfasta-only side-table
     run_messy_case "$MESSY_TEST_DIR/mixed_crlf.fasta" zfasta-only side-table
 
+    run_real_case() {
+        local label="$1" expected="$2" observed="$3"
+        total=$((total + 1))
+        if [[ "$expected" == "$observed" ]]; then
+            pass=$((pass + 1)); mark="pass"
+        else
+            fail=$((fail + 1)); mark="fail"
+            echo "FAILURE: $label (expected $expected, got $observed)" >> "$fail_log"
+        fi
+        printf '  %s  %s: %s\n' "$mark" "$label" "$observed"
+    }
+
+    echo ""
+    echo "REAL datasets (correctness):"
+    ensure_real_data
+    local real_dir="$EDGE_DIR/real" ds source view PYTHON
+    PYTHON="$(report_python)"
+    mkdir -p "$real_dir"
+    for ds in Genome Transcriptome Proteome; do
+        source="${REAL_DATASETS[$ds]:-}"
+        [[ -n "$source" ]] || continue
+        view="$real_dir/${source##*/}"
+        ln -sfn "$source" "$view"
+        rm -f "$view.fai" "$view.zfi"
+        "$SAMTOOLS" faidx "$source" --fai-idx "$real_dir/$ds.samtools.fai"
+        "$ZFASTA" index --emit-fai "$view" > "$real_dir/$ds.emit.fai" 2>/dev/null
+        run_real_case "$ds --emit-fai (samtools)" same "$(cmp -s "$real_dir/$ds.samtools.fai" "$real_dir/$ds.emit.fai" && echo same || echo different)"
+        TMPDIR="$real_dir" "$ZFASTA" index "$view" > /dev/null 2>&1
+        run_real_case "$ds .zfi entries (samtools)" same "$("$PYTHON" - "$view.zfi" "$real_dir/$ds.samtools.fai" <<'PY'
+import struct, sys
+data = open(sys.argv[1], "rb").read()
+magic, count, _size = struct.unpack_from("<4sIQ", data, 0)
+assert magic == b"ZFI\x02", magic
+identity, _mtime, footer, blob_len = struct.unpack_from("<4sQ4sQ", data, len(data) - 24)
+assert identity == b"ZFID" and footer == b"ZFNM", (identity, footer)
+table_len = 4 * (count + count // 4 + 1)
+blob = len(data) - 24 - table_len - blob_len
+rows = []
+for i in range(count):
+    bits = int.from_bytes(data[16 + 24 * i:16 + 24 * (i + 1)], "little")
+    field = lambda start, width: (bits >> start) & ((1 << width) - 1)
+    assert not field(191, 1), "samtools-comparable records are uniform"
+    seq_offset, name_len, seq_len, name_offset = field(0, 48), field(48, 16), field(64, 48), field(112, 40)
+    line_bases = field(152, 32)
+    line_bytes = line_bases + field(184, 7)
+    name = data[blob + name_offset:blob + name_offset + name_len].decode()
+    rows.append("\t".join(map(str, (name, seq_len, seq_offset, line_bases, line_bytes))))
+expected = [line.rstrip("\n") for line in open(sys.argv[2])]
+print("same" if rows == expected else f"different ({len(rows)} entries, {len(expected)} in samtools)")
+PY
+)"
+    done
+    ensure_messy_perf
+    local messy="$MESSY_ZEBRAC_DIR/mixed_widths.fasta"
+    if [[ -f "$messy" ]]; then
+        local code out_bytes
+        code="$("$ZFASTA" index --emit-fai --error-format=json "$messy" 2>&1 > "$real_dir/messy.out" | "$PYTHON" -c 'import json, sys; print(json.load(sys.stdin)["failure"]["primary"]["code"])')"
+        out_bytes="$(wc -c < "$real_dir/messy.out" | tr -d ' ')"
+        run_real_case "mixed_widths --error-format=json" "index.nonuniform_fai; 0 bytes" "$code; $out_bytes bytes"
+    fi
+
     echo ""
     echo "  Correctness: $pass / $((total - review)) match ($fail diff, $review review)"
     echo "  CSV: $csv"
@@ -615,7 +639,7 @@ PY
     return 0
 }
 
-# Zebrac performance: real datasets and scaling.
+# --- Performance ---
 
 run_benchmarks() {
     bench_require_tool zebrac
@@ -679,7 +703,6 @@ run_benchmarks() {
             shopt -u nullglob
         fi
         ensure_scaling
-        # Fail closed if any required family is still missing (stamp/path bugs).
         local missing=false mb c
         for mb in "${SIZE_MBS[@]}"; do [[ -f "$SCALING_DIR/size_${mb}mb.fasta" ]] || missing=true; done
         for c in "${SEQ_BUDGET_COUNTS[@]}"; do [[ -f "$SCALING_DIR/seqs_budget_${c}.fasta" ]] || missing=true; done
@@ -728,7 +751,7 @@ run_benchmarks() {
 
 }
 
-# Messy FASTA zebrac using proteome-derived cache fixtures.
+# --- Messy performance ---
 
 ensure_messy_perf() {
     bench_ensure_messy --perf
@@ -775,7 +798,7 @@ run_messy_zebrac() {
     ZEBRAC_ALLOW_FAILURES="$saved_allow_failures"
 }
 
-# Report generation.
+# --- Report ---
 
 run_report() {
     local py
@@ -790,7 +813,7 @@ run_report() {
     fi
 }
 
-# Main.
+# --- Main ---
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 

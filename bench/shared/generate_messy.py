@@ -30,7 +30,6 @@ WIDTHS = (40, 60, 70, 80, 100)
 PERF_VARIANTS = ("mixed_widths", "trailing_whitespace", "mixed_crlf", "all_messy")
 PERF_LAYOUT_VERSION = "messy-perf.v2"
 
-# Exact correctness fixtures (shared vocabulary). Edit here, then --force.
 FIXTURES: dict[str, bytes] = {
     "uniform": (
         b">uniform same-width body with short final line\n"
@@ -260,7 +259,6 @@ def main() -> None:
     )
     ap.add_argument("--force", action="store_true", help="rebuild even if cache exists")
     args = ap.parse_args()
-    # Neither flag => both. One flag => that mode only.
     if args.fixtures or args.perf:
         do_fixtures, do_perf = args.fixtures, args.perf
     else:

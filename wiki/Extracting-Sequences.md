@@ -84,7 +84,9 @@ printf 'chr1\nchr2\n' | z-fasta get genome.fa --names -
 
 Names input streams in reusable batches and has no whole-input row limit.
 
-Seekable names and BED files are read twice: first to collect unique requested identifiers, then to emit requests in their original order. GET validates the complete sidecar while retaining only matching records, names, and required non-uniform side tables. Lookup memory grows with the unique requested identifiers rather than the complete index. Repeated requests still produce repeated output. Stdin and named FIFOs load the full index because their requests cannot be replayed.
+With a `.zfi`, GET finds each identifier through the index's name table and checks the index header, source identity, and layout plus every record and side table a request uses, so its time and memory depend on the requests, not on the index size. Run `z-fasta validate --index` to check every entry. Repeated requests still produce repeated output.
+
+With a `.fai`, seekable names and BED files are read twice: first to collect unique requested identifiers, then to emit requests in their original order. GET reads the `.fai` until it has the first line for every requested identifier, and checks and keeps only those lines, so lookup memory grows with the unique requested identifiers. Stdin and named FIFOs map the whole `.fai` into a name map because their requests cannot be replayed; each line is still parsed and checked only when a request uses it.
 
 ## Identifiers containing colons
 

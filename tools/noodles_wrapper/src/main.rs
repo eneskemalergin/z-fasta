@@ -29,8 +29,11 @@ use std::io::{self, BufRead, BufReader, Write, BufWriter};
 use noodles_core::Region;
 use noodles_fasta::{fai, fs, io::{IndexedReader, Reader}};
 
-#[path = "../../stats_peer.rs"]
-mod stats_peer;
+#[path = "../../peer_stats.rs"]
+mod peer_stats;
+#[path = "../../peer_get.rs"]
+mod peer_get;
+use peer_get::{parse_get_args, revcomp, GetConfig, GetMode};
 
 const PEER_VERSION: &str = "0.66.0";
 
@@ -53,79 +56,9 @@ fn usage() -> ! {
 //  Argument parsing
 // ════════════════════════════════════════════════════════════════════
 
-struct GetConfig<'a> {
-    fasta: &'a str,
-    mode: GetMode<'a>,
-    rc: bool,
-    honor_strand: bool,
-}
-
-enum GetMode<'a> {
-    Regions(Vec<&'a str>),
-    Bed(&'a str),
-    Names(&'a str),
-}
-
-fn parse_get_args<'a>(args: &'a [String]) -> Result<GetConfig<'a>, String> {
-    if args.is_empty() {
-        return Err("get requires at least a FASTA path".into());
-    }
-
-    let fasta = &args[0];
-    let mut rc = false;
-    let mut honor_strand = false;
-    let mut regions: Vec<&'a str> = Vec::new();
-    let mut bed_file: Option<&'a str> = None;
-    let mut names_file: Option<&'a str> = None;
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--rc" => rc = true,
-            "--honor-strand" => honor_strand = true,
-            "--bed" => {
-                i += 1;
-                bed_file = args.get(i).map(|s| s.as_str());
-            }
-            "--names" => {
-                i += 1;
-                names_file = args.get(i).map(|s| s.as_str());
-            }
-            reg => regions.push(reg),
-        }
-        i += 1;
-    }
-
-    let mode = if let Some(bed) = bed_file {
-        GetMode::Bed(bed)
-    } else if let Some(names) = names_file {
-        GetMode::Names(names)
-    } else if !regions.is_empty() {
-        GetMode::Regions(regions)
-    } else {
-        return Err("no regions, --bed, or --names specified".into());
-    };
-
-    Ok(GetConfig { fasta, mode, rc, honor_strand })
-}
-
 // ════════════════════════════════════════════════════════════════════
 //  Helpers
 // ════════════════════════════════════════════════════════════════════
-
-fn revcomp(seq: &[u8]) -> Vec<u8> {
-    seq.iter().rev().map(|&b| match b {
-        b'A' => b'T', b'C' => b'G', b'G' => b'C', b'T' => b'A',
-        b'U' => b'A', b'W' => b'W', b'S' => b'S', b'M' => b'K',
-        b'K' => b'M', b'R' => b'Y', b'Y' => b'R', b'B' => b'V',
-        b'D' => b'H', b'H' => b'D', b'V' => b'B', b'N' => b'N',
-        b'a' => b't', b'c' => b'g', b'g' => b'c', b't' => b'a',
-        b'u' => b'a', b'w' => b'w', b's' => b's', b'm' => b'k',
-        b'k' => b'm', b'r' => b'y', b'y' => b'r', b'b' => b'v',
-        b'd' => b'h', b'h' => b'd', b'v' => b'b', b'n' => b'n',
-        _ => b'N',
-    }).collect()
-}
 
 fn open_reader(fasta_path: &str) -> io::Result<IndexedReader<BufReader<File>>> {
     let fai_path = format!("{fasta_path}.fai");
@@ -313,7 +246,7 @@ fn cmd_stats(fasta_path: &str) -> io::Result<()> {
         }
     }
 
-    stats_peer::write_report(io::stdout().lock(), &names, &lengths, &counts, lowercase)
+    peer_stats::write_report(io::stdout().lock(), &names, &lengths, &counts, lowercase)
 }
 
 // ════════════════════════════════════════════════════════════════════
