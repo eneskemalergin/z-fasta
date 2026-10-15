@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Single version gate so the four-way matrix does not re-parse tag/zon/VERSION.
+  # Single version gate so the four-way matrix does not re-parse the tag and build.zig.zon.
   gate:
     name: Version gate
     runs-on: ubuntu-24.04
@@ -27,7 +27,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Check tag matches package versions
+      - name: Check tag matches the package version
         id: ver
         shell: bash
         run: |
@@ -39,9 +39,8 @@ jobs:
           }
           version="${tag#v}"
           zon=$(sed -n 's/^[[:space:]]*\.version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' build.zig.zon | head -n1)
-          main=$(sed -n 's/^const VERSION = "\([^"]*\)";.*/\1/p' src/main.zig | head -n1)
-          [[ "$zon" == "$version" && "$main" == "$version" ]] || {
-            echo "version mismatch: tag=$version zon=$zon main=$main" >&2
+          [[ "$zon" == "$version" ]] || {
+            echo "version mismatch: tag=$version zon=$zon" >&2
             exit 1
           }
           git fetch --no-tags origin main

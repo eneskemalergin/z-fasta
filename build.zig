@@ -2,6 +2,7 @@
 //! Command tests run in a build-owned copy of the declared fixtures, never in `tests/data/`.
 
 const std = @import("std");
+const package = @import("build.zig.zon");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -32,7 +33,12 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", package.version);
+    const build_options_module = build_options.createModule();
+
     exe.root_module.addImport("diagnostics", diagnostics_module);
+    exe.root_module.addImport("build_options", build_options_module);
     if (optimize == .ReleaseSmall) {
         const unsupported = b.addFail("ReleaseSmall is unsupported for the z-fasta executable; use -Doptimize=ReleaseFast (strips by default)");
         exe.step.dependOn(&unsupported.step);
@@ -54,9 +60,11 @@ pub fn build(b: *std.Build) void {
     });
 
     main_module.addImport("diagnostics", diagnostics_module);
+    main_module.addImport("build_options", build_options_module);
     const test_options = b.addOptions();
     test_options.addOptionPath("binary_path", exe.getEmittedBin());
     test_options.addOption([]const u8, "build_root", b.pathFromRoot("."));
+    test_options.addOption([]const u8, "version", package.version);
     const test_options_module = test_options.createModule();
 
     const test_index_module = b.createModule(.{

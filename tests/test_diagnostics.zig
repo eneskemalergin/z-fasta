@@ -72,7 +72,7 @@ const HELP_STDOUT =
     \\  z-fasta validate --json genome.fa
     \\
 ;
-const VERSION_STDOUT = "z-fasta 0.3.5\n";
+const VERSION_STDOUT = "z-fasta " ++ @import("test_options").version ++ "\n";
 
 fn retainTemporaryLabel(failure: *diagnostics.Failure) void {
     var local_path = [_]u8{ 't', 'e', 'm', 'p', '/', 'a', 0xff };

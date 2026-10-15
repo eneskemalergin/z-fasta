@@ -51,9 +51,8 @@ jobs:
           python3 -m compileall -q bench
           .ci-tools/actionlint
           version=$(sed -n 's/^[[:space:]]*\.version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' build.zig.zon | head -n1)
-          cli_version=$(sed -n 's/^const VERSION = "\([^"]*\)";.*/\1/p' src/main.zig | head -n1)
-          [[ -n "$version" && "$cli_version" == "$version" ]] || {
-            echo "version mismatch: zon=$version main=$cli_version" >&2
+          [[ -n "$version" ]] || {
+            echo "build.zig.zon has no version" >&2
             exit 1
           }
           .github/scripts/changelog_section.sh CHANGELOG.md "$version" > /dev/null

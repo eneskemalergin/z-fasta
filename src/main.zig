@@ -34,7 +34,7 @@ pub fn main(init: std.process.Init.Minimal) void {
     if (status != 0) std.process.exit(status);
 }
 
-const VERSION = "0.3.5";
+const VERSION = @import("build_options").version;
 const STRAND_AWARE_FLAG = "--strand-aware";
 const STRAND_AWARE_ALIAS = "--honor-strand";
 const RC_FLAG = "--rc";
