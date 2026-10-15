@@ -26,9 +26,9 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[3]
 OUT = Path(__file__).resolve().parents[1]
-INDEX = ROOT / "bench/index/results/perf_20261010_140037"
-GET = ROOT / "bench/get/results/perf_pos_20261010_143023"
-STATS = ROOT / "bench/stats/results/perf_full_20261010_143519"
+INDEX = ROOT / "bench/index/results/perf_20261015_121432"
+GET = ROOT / "bench/get/results/perf_pos_20261015_124422"
+STATS = ROOT / "bench/stats/results/perf_full_20261015_124934"
 
 DATASETS = ["Genome", "Transcriptome", "Proteome"]
 TASKS = ["INDEX", "GET", "STATS"]

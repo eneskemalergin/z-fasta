@@ -13,7 +13,7 @@ Zebrac is Linux-only. It is similar to `hyperfine`, but it also records process 
 - [Stats benchmark report](stats/REPORT.md)
 - [Validate benchmark report](validate/REPORT.md)
 
-The index, GET, and stats reports and figures describe the measured 0.3.5 runs. The validate report describes the run named in its provenance section.
+All four reports and their figures describe the 0.4.0 release runs listed under [v0.4.0 measurements](#v040-measurements).
 
 Each report describes its own methods, field coverage, correctness checks, measurements, and figures. The suites do not all compare the same operation: stats has complete wrapper lanes and partial SeqKit/Seqtk reference lanes, while GET and index have their own compatibility limits.
 
@@ -46,7 +46,7 @@ Each suite has one entrypoint: `bash bench/<index|get|stats|validate>/run.sh`. I
 
 The benchmark scripts resolve commands from `tools/bin/` by default. Set `SAMTOOLS`, `BEDTOOLS`, `SEQKIT`, or another tool variable when you intentionally want to compare a different executable. `bench/shared/install_tools.sh` only verifies the local bundle and pinned versions; it does not silently fall back to a command found elsewhere on `PATH`.
 
-The v0.3.5 refresh uses Zig 0.16.0 and zebrac 0.6.2 from `PATH`, with `ZEBRAC="$(command -v zebrac)"` passed to each suite. Index, GET, and stats run in that order without overlapping measurements. Each main section uses five measured samples, three warmups, and a 5,000 ms budget per command. The suites' default warmups differ, so pass these settings explicitly. Messy sections retain their separately documented sampling settings. The validate suite runs after stats with the same settings.
+The v0.4.0 refresh uses Zig 0.16.0 and zebrac 0.6.2 from `PATH`, with `ZEBRAC="$(command -v zebrac)"` passed to each suite. Index, GET, stats, and validate run in that order without overlapping measurements. Each main section uses five measured samples, three warmups, and a 5,000 ms budget per command. The suites' default warmups differ, so pass these settings explicitly. Messy sections retain their separately documented sampling settings. The validate suite runs after stats with the same settings.
 
 The common skips are `--skip-tests`, `--skip-benchmarks`, `--skip-report`, and `--skip-messy`. The last one skips messy performance work only. It does not skip messy correctness cases.
 
@@ -141,11 +141,11 @@ These wrappers add argument parsing, indexing or index reading, output formattin
 
 ## Binary sizes
 
-These sizes describe the Linux x86_64 tool bundle used for the 0.3.5 reports. Compiler versions, link mode, debug information, stripping, and dependency versions all change the sizes. Every compiled executable in this historical table was stripped. The table compares that build bundle; it does not rank the projects.
+These sizes describe the Linux x86_64 tool bundle used for the 0.4.0 reports. Compiler versions, link mode, debug information, stripping, and dependency versions all change the sizes. Every compiled executable in this historical table was stripped. The table compares that build bundle; it does not rank the projects.
 
 | Command | Version | Bytes |
 | --- | --- | ---: |
-| `z-fasta` | 0.3.5 | 819,416 |
+| `z-fasta` | 0.4.0 | 924,808 |
 | `noodles` | noodles-fasta 0.66.0 | 449,712 |
 | `rustbio` | rust-bio 4.0.1 | 492,712 |
 | `samtools` | 1.24 | 869,232 |
@@ -233,6 +233,29 @@ Stripped ReleaseFast binary bytes, attributed by building with one command's ent
 
 The binary is 12.8% larger than v0.3.5 and within the 1 MiB release limit. The validate rewrite accounts for 70% of the growth; the code `index` and `validate` now share in `fasta.zig` counts as shared.
 
+## v0.4.0 measurements
+
+The release runs are index `20261015_121432`, GET `20261015_124422`, stats `20261015_124934`, and validate `20261015_130219`: source `faf505d`, the stripped 924,808-byte ReleaseFast binary, five measured samples after three warmups, and a 5,000 ms budget, on the same host as the v0.3.5 runs (load average about 4 to 5 on 32 cores). The manifests mark the checkout dirty because documentation was being edited; no source or build file differed from `faf505d`, and the binary's hash was checked after every suite. Correctness: GET 483, stats 66, and validate 81 checks passed; index matched the peers on 24 edge cases, with the expected review of binary input, which z-fasta rejects, and every messy layout passed through `.zfi`.
+
+- **Against the v0.3.5 reports:**
+  - Index: human genome `.fai` 327.9 ms (382.4 ms); 1,000,000 fixed sequences 253.4 ms and 3.6 MiB (445.8 ms and 19.2 MiB).
+  - GET on the transcriptome: one 1 kbp region 2.2 ms and 3.8 MiB through `.zfi` (8.2 ms and 22.5 MiB), 11.1 ms through `.fai` (28.3 ms); 1,000 regions 11.9 ms (38.8 ms).
+  - Stats: human genome 0.413 s (2.840 s); transcriptome through `.zfi` 88.9 ms and 3.6 MiB (396 ms and 12.5 MiB).
+- **Against peers in the same batch:** z-fasta is fastest in every index, GET, stats, and validate workload in which a peer completes. On the four messy index layouts every peer exits nonzero, except one that indexes `mixed_crlf` in 26.1 ms against 19.0 ms.
+- **Against v0.3.4 and v0.3.5 in one batch** ([#34](https://github.com/eneskemalergin/z-fasta/issues/34)): the three versions were built stripped at their tags and timed interleaved by zebrac, 10 samples after three warmups, each indexing its own symlink to the same input. Medians in milliseconds; peak RSS stayed within 0.1 MiB except the transcriptome, where 0.4.0 uses 3.7 MiB against 5.8 MiB for v0.3.4:
+
+| Input                | v0.3.4 | v0.3.5 | v0.4.0 |
+| -------------------- | -----: | -----: | -----: |
+| Genome `.fai`        |  353.1 |  356.5 |  326.5 |
+| Genome `.zfi`        |  351.3 |  361.0 |  326.3 |
+| Transcriptome `.fai` |  143.3 |  156.9 |  123.1 |
+| Transcriptome `.zfi` |  177.0 |  194.8 |  168.6 |
+| Proteome `.fai`      |    8.3 |    9.3 |    7.1 |
+| Proteome `.zfi`      |   11.0 |   11.4 |   11.0 |
+
+- `.zfi` sizes, version 2 against v0.3.5's version 1: genome 7,397 bytes (9,529), transcriptome 36,477,118 (39,271,886), proteome 1,030,891 (1,258,059), name table included.
+- The stripped binary is 924,808 bytes, 12.7% over v0.3.5 built the same way (820,616); see the attribution under v0.4.0 baseline and [#37](https://github.com/eneskemalergin/z-fasta/issues/37).
+
 ---
 
 ## High-level benchmark summary figures
@@ -241,7 +264,7 @@ The individual reports above are the source for methods, correctness checks, com
 
 These three views therefore use the same selected index, GET, and stats runs but organize them differently. Every view keeps wall time beside peak RSS, covers the same human genome, transcriptome, and proteome inputs, and identifies partial or reference work instead of quietly ranking it as equivalent. They are not three independent benchmark claims and they are not a combined winner score.
 
-The selected v0.3.5 runs are index `20261010_140037`, GET `20261010_143023`, and stats `20261010_143519`. Summary RSS uses decimal MB (1,000,000 bytes); the individual reports use MiB (1,048,576 bytes). GET summaries select a single 1 kbp positional request. The seekable BED and names changes in [#14](https://github.com/eneskemalergin/z-fasta/issues/14) affect batch lookup; their measurements are in the [GET report](get/REPORT.md#performance-bed-batch).
+The selected v0.4.0 runs are index `20261015_121432`, GET `20261015_124422`, and stats `20261015_124934`. Summary RSS uses decimal MB (1,000,000 bytes); the individual reports use MiB (1,048,576 bytes). GET summaries select a single 1 kbp positional request. The seekable BED and names changes in [#14](https://github.com/eneskemalergin/z-fasta/issues/14) affect batch lookup; their measurements are in the [GET report](get/REPORT.md#performance-bed-batch).
 
 GitHub selects the dark or light SVG to match the reader's color scheme.
 
