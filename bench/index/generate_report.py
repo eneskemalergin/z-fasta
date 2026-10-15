@@ -51,7 +51,7 @@ class ReportCounters:
         self.figure += 1
         return n
 
-# Styling.
+# --- Styling ---
 COLORS = {
     "z-fasta-fai": "#F7A41D",  # Zig gold (peer-comparable)
     "z-fasta-zfi": "#E65100",  # deep orange (first-class)
@@ -100,7 +100,6 @@ EDGE_CONTRACT_CLASSES = {
 }
 EDGE_MESSY_CASES = {"uniform", "mixed_widths", "trailing_whitespace", "blank_lines", "mixed_crlf"}
 DATASET_ORDER = ["Genome", "Transcriptome", "Proteome"]
-# Real benchmark datasets (bench/shared/data; see bench/shared/download_data.sh).
 REAL_DATASETS = [
     {
         "id": "Genome",
@@ -116,14 +115,12 @@ REAL_DATASETS = [
     },
 ]
 
-# Product section: both output formats on the record-rich real datasets.
 PRODUCT_WORKLOADS = ("Transcriptome", "Proteome")
 PRODUCT_COMPARISON_TOOLS = [
     "z-fasta-fai",
     "z-fasta-zfi",
 ]
 
-# Headline real-dataset chart: peer-comparable z-fasta (.fai) plus competitors.
 HEADLINE_PERF_TOOLS = [
     "z-fasta-fai",
     "noodles",
@@ -215,7 +212,7 @@ def md_tool_pivot_table(
     return _ordered_pivot(pivot, tools, sort_index=sort_index).to_markdown()
 
 
-# Data loading.
+# --- Data loading ---
 
 
 def load_metadata(results_dir: Path, manifest: dict | None = None) -> pd.DataFrame | None:
@@ -406,7 +403,6 @@ def discover_latest(results_dir: Path, prefix: str, manifest: dict | None = None
                 raise ValueError(f"missing declared {section_key} section: {candidate}")
             return candidate
 
-    # Unmapped prefixes (e.g. tests_*.csv): pin to the run timestamp.
     if manifest is not None:
         ts = manifest.get("timestamp")
         if not ts:
@@ -550,7 +546,7 @@ def load_tests(results_dir: Path, manifest: dict | None = None) -> pd.DataFrame 
     return pd.read_csv(p)
 
 
-# Figures.
+# --- Figures ---
 
 
 def draw_tool_bar(ax, xpos: float, val: float, std: float, *, width: float, color: str, styled: bool = False) -> None:
@@ -1381,7 +1377,7 @@ def fig_edge_heatmap(df: pd.DataFrame, out: Path) -> Path:
     return _save(fig, out)
 
 
-# Markdown report.
+# --- Markdown report ---
 
 
 def normalize_markdown(chunks: list[str]) -> str:
@@ -2071,7 +2067,6 @@ def md_messy_table(df: pd.DataFrame) -> str:
         "pyfaidx",
     ]
     tools = [t for t in messy_order if t in df["tool"].values]
-    # append any unexpected tools at end
     for t in df["tool"].unique():
         if t not in tools and t != "seqtk":
             tools.append(t)
@@ -2256,7 +2251,7 @@ def md_tools_tested(tools: dict[str, str] | None = None, z_fasta: str | None = N
     return "\n".join(lines)
 
 
-# Main.
+# --- Main ---
 
 
 def main():
@@ -2489,7 +2484,6 @@ def main():
         )
         generated_figs.append(str(p))
 
-    # Write report.
     if not has_results:
         raise SystemExit(
             "No benchmark result data found. Run at least one benchmark or correctness "

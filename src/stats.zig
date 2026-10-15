@@ -172,8 +172,6 @@ fn medianSorted(comptime T: type, values: []const T) u64 {
     return lower + (values[middle] - lower) / 2;
 }
 
-/// Record lengths in index order: `u32` while every one fits, then `u64`, so the usual case keeps
-/// half the memory and sorts in fewer passes.
 const Lengths = struct {
     narrow: std.ArrayList(u32) = .empty,
     wide: std.ArrayList(u64) = .empty,
@@ -206,8 +204,6 @@ const Lengths = struct {
     }
 };
 
-// Ascending, in place: an American flag sort on the highest used byte, each bucket then sorted on
-// the next byte; buckets of at most 32 by insertion. Each level keeps 4 KiB of counts on the stack.
 fn sortLengths(comptime T: type, keys: []T) void {
     var used: T = 0;
     for (keys) |key| used |= key;
@@ -492,7 +488,7 @@ const ComputedStats = struct {
     summary: LengthSummary,
     comp: CompositionStats,
     composition: CompositionSummary,
-    /// Owned copies; `deinit` frees them.
+    // Owned copies; `deinit` frees them.
     shortest_name: []u8,
     longest_name: []u8,
     fasta_size: u64,
@@ -575,7 +571,6 @@ fn computeStats(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8
     diag.failure.work_complete = true;
 }
 
-// `scanSideTableRecord` with the side table read through the stream, a line at a time.
 fn scanStreamedSides(stream: *index_format.EntryStream, reader: *BoundedFastaReader, rec: IndexRecord, comp: *CompositionStats) diagnostics.Error!void {
     const count = try stream.sideLineCount(rec);
     var index: u64 = 0;
@@ -667,8 +662,6 @@ fn scanUniformRecord(reader: *BoundedFastaReader, rec: IndexRecord, comp: *Compo
     const span_end = std.math.add(u64, rec.seq_offset, span_len) catch return reader.diag.consistency(.traversal_position);
     if (span_end > reader.file_size) return reader.diag.span(span_end, reader.file_size, null);
 
-    // The span holds the record's lines and their terminators; whitespace is not counted, and the
-    // caller compares the total with the index.
     try scanSpan(reader, rec.seq_offset, span_end, comp);
 }
 
@@ -779,11 +772,7 @@ fn countFiltered(data: []const u8, comp: *CompositionStats, diag: *Diagnostics) 
     }
 }
 
-// Counts every byte above ' '. A 32-byte block of only A, C, G, T, N in either case and whitespace,
-// nearly every block of a genome, is counted with vector compares into byte-wide lanes, summed every
-// 255 blocks; A, C, G, T, N land in their upper-case slots, which the report adds to the lower-case
-// ones. Any other block goes into the byte table whole, whitespace included, since only bytes above
-// ' ' are ever read back from it.
+// ACGTN in either case count into upper-case slots, which the report folds; whitespace is never read back.
 fn countSymbols(data: []const u8, comp: *CompositionStats) void {
     const Block = @Vector(32, u8);
     const Lanes = @Vector(32, u8);
@@ -895,7 +884,6 @@ test "[property] - [stats composition]: vector blocks match a byte-by-byte count
     const random = prng.random();
     var data: [700]u8 = undefined;
     for (0..3) |round| {
-        // Round 0 is every byte value; the others are genome-like text, mostly in the fast blocks.
         for (&data, 0..) |*byte, i| byte.* = if (round == 0) @truncate(i) else if (random.uintLessThan(u8, 40) == 0) "\n\r Rx*"[random.uintLessThan(usize, 6)] else "ACGTNacgtn"[random.uintLessThan(usize, 10)];
         for (0..data.len + 1) |len| {
             var expected: [256]u64 = .{0} ** 256;
@@ -912,7 +900,6 @@ test "[property] - [stats composition]: vector blocks match a byte-by-byte count
             try std.testing.expectEqual(expected_total, comp.total_bases);
             try std.testing.expectEqual(expected_lowercase, comp.lowercase_count);
             for (' ' + 1..256) |byte| {
-                // Counts of A, C, G, T, N may sit in either case's slot; the report adds both.
                 const folds = std.mem.indexOfScalar(u8, "ACGTN", std.ascii.toUpper(@intCast(byte))) != null;
                 if (folds and byte >= 'a') continue;
                 const both = if (folds) expected[byte] + expected[byte | 0x20] else expected[byte];

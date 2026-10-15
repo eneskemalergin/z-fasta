@@ -1,35 +1,12 @@
 #!/usr/bin/env bash
-# GET benchmark runner: correctness (run_tests), then zebrac perf and report.
-#
-# Usage:
-#   bash bench/get/run.sh [options]
-#
-# Defaults: correctness first (418 checks), then perf (--runs 5, --warmup 5, --duration 5000).
-# A full perf pass (all sections, default zebrac settings) typically takes several hours.
-# Multi-region seqtk/fastahack reference loops are omitted by default (O(N) subprocesses;
-# cost grows linearly and duplicates positional seqtk reference data). Set
-# GET_MULTI_REFERENCE=1 to re-enable them for a one-off reference sweep.
-# Use --skip-* for partial re-runs; resume with GET_RUN_TIMESTAMP=<ts> and GET_MULTI_COUNTS.
-# Use --skip-tests to run perf/report only. Correctness failure aborts before perf or report.
-# --skip-messy skips messy zebrac perf only (never skips messy cases inside run_tests).
-# --focused runs the complete development benchmark without regenerating the checked report.
-#
-# Canonical flags (index-aligned): --skip-tests --skip-benchmarks --skip-messy --skip-report
-#
-#   bash bench/get/run.sh
-#   bash bench/get/run.sh --skip-tests --skip-report   # perf only
-#   bash bench/get/run.sh --skip-messy --skip-bed
-#   bash bench/get/run.sh --focused --skip-tests --runs 5 --warmup 5
-#   bash bench/get/run.sh --regenerate-fixtures
-#   bash bench/get/run.sh --skip-benchmarks --skip-report   # correctness only
-#
-# ── Workload fixtures (generated; bench/get/data/ is gitignored) ───
-#   regions/{Dataset}_{label}.txt        positional slices on REAL_* (incl. 1kbp_mid for RC)
-#   regions/{Dataset}_regions_N{n}.txt   multi-region lists
-#   bed/{Dataset}_{n}.bed                BED batch (+ .regions.txt for samtools)
-#   Created on demand by generate_get_fixtures in this script.
-#
-#   -h|--help  print this header
+# GET benchmark: correctness against peers, positional, multi-region, BED, RC, and messy runs.
+# Usage: bash bench/get/run.sh [options]   (ZFASTA, ZEBRAC select the binaries)
+#   --runs N --warmup N --duration MS      sampling (defaults 5, 5, 5000)
+#   --messy-runs N --messy-warmup N --messy-duration MS   messy sampling (50, 10, 30000)
+#   --skip-tests --skip-benchmarks --skip-messy --skip-report
+#   --skip-pos --skip-multi --skip-bed --skip-rc   leave out a benchmark group
+#   --regenerate-fixtures   rebuild the fixtures; --focused   every benchmark, no report
+# GET_RUN_TIMESTAMP resumes a run; GET_MULTI_COUNTS and GET_MULTI_REFERENCE set the sweep.
 
 set -euo pipefail
 
@@ -50,8 +27,6 @@ source "$BENCH_ROOT/shared/runner_common.sh"
 RUNS=5
 WARMUP=5
 ZEBRAC_DURATION_MS="${ZEBRAC_DURATION_MS:-5000}"
-# Messy GET uses sub-millisecond timings on small slices; large proteome fixtures use
-# higher sampling. Override via GET_MESSY_* or --messy-runs etc.
 MESSY_RUNS="${GET_MESSY_RUNS:-50}"
 MESSY_WARMUP="${GET_MESSY_WARMUP:-10}"
 MESSY_DURATION_MS="${GET_MESSY_DURATION_MS:-30000}"
@@ -71,12 +46,10 @@ TEST_DATA_DIR=""
 declare -A ZFI_VIEWS=()
 declare -A FAI_VIEWS=()
 
-# Multi-region perf sweep (log-spaced). 15/16 boundary lives in run_tests, not timed here.
 MULTI_COUNTS=(1 10 100 1000)
 BED_COUNTS=(10 100 1000 10000)
 POS_LABELS=(100bp 1kbp_mid 10kbp full_seq)
 
-# Count GET bases with indexed bounds; closed messy-fixture ranges are prevalidated.
 region_span_bases() {
     local region="$1"
     local fasta="${2:-}"
@@ -172,7 +145,7 @@ while [[ $# -gt 0 ]]; do
         --regenerate-fixtures) REGENERATE_FIXTURES=true; shift ;;
         --focused) FOCUSED=true; DO_MESSY=false; DO_REPORT=false; shift ;;
         -h|--help)
-            sed -n '2,/^set -euo pipefail$/p' "$0" | head -n -1
+            sed -n '2,/^set -euo pipefail$/{/^#/s/^# \{0,1\}//p}' "$0"
             exit 0
             ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -251,8 +224,6 @@ multi_positional_get_cmd() {
     echo "$(multi_positional_get_core "$1" "$2" "$3") > /dev/null"
 }
 
-# The package lane: bench/get/library.zig opens a reference once with `IndexedReader` and fetches
-# every region in a file. `zig build bench-library` installs it beside the CLI.
 LIBRARY="$PROJECT_ROOT/zig-out/bin/z-fasta-library"
 
 build_library_lane() {
@@ -260,7 +231,6 @@ build_library_lane() {
         || { echo "error: could not build the package lane" >&2; return 1; }
 }
 
-# The lane must print exactly what `z-fasta get` prints for the same regions before it is timed.
 check_library_positional() {
     local fasta="$1" regions="$2"
     local -a regs
@@ -614,13 +584,10 @@ PY
 
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  Correctness: z-fasta get vs oracles
-# ══════════════════════════════════════════════════════════════════════
+# --- Correctness ---
 
 SKIP_INDEX=false SKIP_GET=false SKIP_MULTI=false SKIP_BED=false SKIP_RC=false SKIP_EDGE=false SKIP_REAL=false
 
-# Correctness fixture paths (distinct from perf MESSY_DIR=shared/cache/messy_perf)
 MESSY_TEST_DIR="$BENCH_ROOT/shared/cache/messy_fixtures"
 
 MESSY_POS_CASES=(
@@ -646,10 +613,7 @@ diff_oracle() {
     diff -q "$1" "$2" >/dev/null 2>&1 && pass "$3" || fail "$3" "${4:-$1}" "$2"
 }
 
-# samtools 1.24 formats extracted FASTA at a fixed 60-column width. Older
-# samtools releases followed the source record's wrapping, which is also what
-# z-fasta and the wrappers emit. Compare headers and bases here while leaving
-# the repository's own byte-level index/output checks unchanged.
+# samtools 1.24 rewraps output at 60 columns, so headers and bases are compared, not bytes.
 diff_fasta_oracle() {
     local expected="$1" got="$2" label="$3"
     if python3 - "$expected" "$got" <<'PY'
@@ -691,7 +655,6 @@ ensure_index() {
     [[ -f "${f}.zfi" ]] || "$ZFASTA" index "$f" 2>/dev/null
 }
 
-# Messy-FASTA oracles (region/rc/rev/comp/bed). argv: MODE FASTA ... OUT
 oracle() {
     python3 - "$@" <<'PY'
 import sys
@@ -778,8 +741,7 @@ _zfasta_get() {
 
 names_to_regions() { awk '!/^[[:space:]]*$|^#/{sub(/\r$/,""); print}' "$1"; }
 
-# Split name:start-end on the last ':' (handles sp|P12345|PROT_HUMAN:1-10).
-# Sets PARSE_NAME, PARSE_START, PARSE_END; returns 0 when coords present.
+# Splits on the last ':' so a name like sp|P12345|PROT_HUMAN:1-10 parses.
 parse_region_spec() {
     local region="$1"
     PARSE_NAME="" PARSE_START="" PARSE_END=""
@@ -898,8 +860,6 @@ verify_open_ended_region() {
     fi
 }
 
-# verify_index_cross: byte-identical get with `.zfi` present vs `.fai` selected.
-# Optional third arg: existing file → read GET input from stdin (e.g. BED via pipe).
 verify_index_cross() {
     local desc="$1" src="$2"
     shift 2
@@ -1240,7 +1200,6 @@ seq1	2	8	overlap_minus	0	-
 seq2	0	4	short_plus	0	+
 BED
 
-    # Spot checks with samtools oracle on both index paths.
     verify_index positional "$simple" "seq1:1-10" "sub-region"
     verify_index positional "$simple" "seq1" "full sequence"
     verify_index positional "$TEST_DATA_DIR/single.fasta" "single_sequence:1-4" "single record"
@@ -1744,7 +1703,6 @@ section5() {
 }
 
 # --- run_tests ---
-# Sequences only, one per line, in order: compares tools that name regions differently.
 fasta_sequences() {
     awk '/^>/ { if (n) print seq; seq = ""; n = 1; next } { gsub(/[ \t\r]/, ""); seq = seq $0 } END { if (n) print seq }' "$1"
 }
@@ -1753,8 +1711,6 @@ same_sequences() {
     cmp -s <(fasta_sequences "$1") <(fasta_sequences "$2")
 }
 
-# Every option on the REAL datasets, against samtools, bedtools, or a transform of output that
-# samtools has already checked; through the `.zfi` and the `.fai`.
 section6_real() {
     section_hdr 6 "REAL datasets"
     ensure_real_data
@@ -1782,7 +1738,6 @@ section6_real() {
         "$BEDTOOLS" getfasta -fi "$dir/fai/${source##*/}" -bed "$bed" > "$dir/bedtools.fa"
         IFS=$'\t' read -r first_name first_len _ < "$dir/fai/${source##*/}.fai"
         total="$(awk -F'[:-]' '{ n += $(NF) - $(NF - 1) + 1 } END { print n }' "$regions")"
-        # The package's `RecordReader` streams every record as `get --names` prints them all.
         cut -f1 "$dir/fai/${source##*/}.fai" > "$dir/all_names.txt"
         cmp -s <("$LIBRARY" --records "$source" "$(awk -F'\t' '{ if ($2 > m) m = $2 } END { print m + 65536 }' "$dir/fai/${source##*/}.fai")") \
             <("$ZFASTA" get "$dir/zfi/${source##*/}" --names "$dir/all_names.txt") \
@@ -2454,7 +2409,7 @@ run_perf_rc() {
     qr="$(quote_arg "$RUSTBIO")"
 
     local ds fa zfi_fa fai_fa region_file region workload json qzfi qfai qrgn nbytes out_bases
-    # Nucleotide datasets only: Proteome omitted (--rc / complement N/A; reverse-only is trivial).
+    # Nucleotide datasets only: complement does not apply to protein.
     for ds in Genome Transcriptome; do
         fa="${REAL_DATASETS[$ds]:-}"
         [[ -n "$fa" ]] || continue
@@ -2499,7 +2454,6 @@ run_perf_messy() {
 
     bench_ensure_messy --perf
 
-    # Drop stale JSON from prior messy perf formats (e.g. verify-region spans).
     while IFS= read -r stale; do
         rm -f "$out_dir/$stale"
     done < <(python3 - "$out_dir" "$MESSY_PERF_JSON" <<'PY'

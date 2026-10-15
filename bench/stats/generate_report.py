@@ -31,7 +31,6 @@ RESULTS_DIR = SCRIPT_DIR / "results"
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
 FIGURES_DIR = RESULTS_DIR / "figures"
 
-# Facet / table order matches index REPORT (Genome | Transcriptome | Proteome).
 DATASET_ORDER = ["Genome", "Transcriptome", "Proteome"]
 
 BASELINE = "z-fasta-zfi"
@@ -52,7 +51,6 @@ SCALING_TOOLS = [
     "rustbio",
 ]
 
-# Cleaner legend/table labels for scaling.
 SCALING_DISPLAY = {
     "z-fasta-zfi": "z-fasta (.zfi)",
     "z-fasta-fai": "z-fasta (.fai)",
@@ -80,13 +78,11 @@ STATS_DISPLAY = {
     "seqtk": "seqtk comp (partial)",
 }
 
-# In peer-only full section, shorten the baseline label.
 FULL_SECTION_DISPLAY = {
     **STATS_DISPLAY,
     "z-fasta-zfi": "z-fasta (.zfi)",
 }
 
-# Gap between wall | RSS | faults metric facets (GET RC / messy style).
 FACET_WSPACE = 0.28
 
 REPORT_FIGURES = frozenset(
@@ -111,7 +107,6 @@ def load_index_report():
     spec.loader.exec_module(mod)
     mod.COLORS.update(STATS_COLORS)
     mod.DISPLAY_NAMES.update(STATS_DISPLAY)
-    # Shared ratio tables use _format_speedup; keep stats REPORT WRITING.md-safe.
     mod._format_speedup = _format_ratio
     return mod
 
@@ -188,7 +183,6 @@ def load_zebrac_json(path: Path, metadata_df: pd.DataFrame | None, ir) -> pd.Dat
         section = meta.get("section", "")
         tool = meta.get("tool")
         if not tool:
-            # Fallback from filename: Genome__z-fasta-zfi.json
             stem = path.stem
             if "__" in stem:
                 tool = stem.split("__", 1)[1]
@@ -201,7 +195,6 @@ def load_zebrac_json(path: Path, metadata_df: pd.DataFrame | None, ir) -> pd.Dat
             input_mib = float(input_bytes) / (1024.0 * 1024.0)
             if mean_s > 0:
                 throughput_mibs = input_mib / mean_s
-        # REAL sections: workload is the dataset name.
         dataset = workload if workload in DATASET_ORDER else None
         rows.append(
             {
@@ -594,7 +587,6 @@ def _finish_scaling_figure(fig, axes_row, tools, ir, title: str, note: str, xlab
         ax.set_xlabel(xlabel, fontsize=10)
         ax.tick_params(axis="both", labelsize=8.5)
     fig.subplots_adjust(left=0.07, right=0.98, bottom=0.18, top=0.84, wspace=FACET_WSPACE)
-    # Title + note left-aligned to first panel y-axis.
     pos = axes_row[0].get_position()
     fig.text(pos.x0, 0.965, title, ha="left", va="top", fontsize=12, fontweight="bold")
     fig.text(pos.x0, 0.922, note, ha="left", va="top", fontsize=8.5, color="#444444", style="italic")
@@ -1208,7 +1200,6 @@ def main() -> None:
 
     results_dir = Path(args.results_dir)
     ir = load_index_report()
-    # Keep index helper dataset sort aligned with stats facet order.
     ir.DATASET_ORDER = list(DATASET_ORDER)
 
     manifest = ir.load_run_manifest(results_dir)

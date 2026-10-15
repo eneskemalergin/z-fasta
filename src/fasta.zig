@@ -65,7 +65,6 @@ pub fn findNameDelimiter(data: []const u8, start: usize) usize {
     return position;
 }
 
-/// The rule `index` uses: a symbol is any byte above space.
 pub const Bases = struct {
     pub const countOutside = countWhitespace;
 
@@ -74,18 +73,11 @@ pub const Bases = struct {
     }
 };
 
-/// IUPAC nucleotide symbols with both T and U, in either case.
 pub const NUCLEOTIDE_SYMBOLS = "ACGTUNRYWSMKHBVDacgtunrywsmkhbvd";
-/// IUPAC DNA symbols, without U, in either case.
 pub const DNA_SYMBOLS = "ACGTNRYWSMKHBVDacgtnrywsmkhbvd";
-/// IUPAC RNA symbols, U instead of T, in either case.
 pub const RNA_SYMBOLS = "ACGUNRYWSMKHBVDacgunrywsmkhbvd";
-/// The 26 letters, `*` for a stop, and `-` for a gap, in either case.
 pub const PROTEIN_SYMBOLS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ*-abcdefghijklmnopqrstuvwxyz";
 
-/// The common symbols of a nucleotide alphabet, which a vector check accepts: `letters` (lowercase)
-/// in either case. Other IUPAC symbols count as outside, so callers check them through the full
-/// alphabet.
 fn PlainLetters(comptime letters: []const u8) type {
     return struct {
         pub fn countOutside(comptime vector_len: usize, data: []const u8) usize {
@@ -109,7 +101,6 @@ pub const PlainNucleotides = PlainLetters("acgtun");
 pub const PlainDna = PlainLetters("acgtn");
 pub const PlainRna = PlainLetters("acgun");
 
-/// Exactly `PROTEIN_SYMBOLS`.
 pub const ProteinSymbols = struct {
     pub fn countOutside(comptime vector_len: usize, data: []const u8) usize {
         return countOutsideWith(vector_len, data, isProteinSymbol);
@@ -126,27 +117,22 @@ pub const ProteinSymbols = struct {
     }
 };
 
-/// True when a line of `line_bases` symbols plus an LF or CRLF fills exactly `line_bytes`.
 fn isDenseLineGeometry(line_bases: u32, line_bytes: u32) bool {
     if (line_bases == 0 or line_bytes <= line_bases) return false;
     const sep_len = line_bytes - line_bases;
     return (sep_len == 1 or sep_len == 2) and line_bases + sep_len == line_bytes;
 }
 
-/// Counts whole lines from `start` that repeat the geometry: `line_bases` bytes that `Symbols`
-/// accepts, then the same LF or CRLF. Stops at a header, a short line, or any other byte.
 pub fn countDenseLines(comptime Symbols: type, data: []const u8, start: usize, line_bases: u32, line_bytes: u32) usize {
     return countDenseLinesWith(DENSE_VECTOR_LEN, Symbols, data, start, line_bases, line_bytes);
 }
 
-/// Nucleotide when IUPAC nucleotide letters are more than 90% of `total`; empty is nucleotide.
 pub fn detectType(counts: *const [256]u64, total: u64) SequenceType {
     var nucleotides: u64 = 0;
     for (IUPAC_NUCLEOTIDE_LETTERS) |letter| nucleotides += counts[letter] + counts[std.ascii.toLower(letter)];
     return typeFromCounts(nucleotides, total);
 }
 
-/// `detectType` from the number of IUPAC nucleotide letters among `total` symbols.
 pub fn typeFromCounts(nucleotides: u64, total: u64) SequenceType {
     if (total == 0) return .nucleotide;
     return if (@as(u128, nucleotides) * 10 > @as(u128, total) * 9) .nucleotide else .protein;
@@ -172,11 +158,8 @@ pub fn complement(byte: u8) u8 {
 
 const Block = @Vector(32, u8);
 
-// `complement` on 32 bytes: letters fold to upper case, swap with their partner, and get their
-// case back; every other byte is left as it is.
 fn complementBlock(block: Block) Block {
     const upper = block & @as(Block, @splat(0xDF));
-    // Blocks of A, C, G, T, and N in either case, nearly every block of a genome, swap by XOR.
     const at = (upper == @as(Block, @splat('A'))) | (upper == @as(Block, @splat('T')));
     const cg = (upper == @as(Block, @splat('C'))) | (upper == @as(Block, @splat('G')));
     const plain = at | cg | (upper == @as(Block, @splat('N'))) | (block < @as(Block, @splat('A')));
@@ -213,7 +196,7 @@ pub fn complementInto(dst: []u8, src: []const u8) void {
     }
 }
 
-/// `src` written backwards into `dst`, complemented when `do_complement`; they must not overlap.
+/// `dst` and `src` must not overlap.
 pub fn reverseInto(dst: []u8, src: []const u8, do_complement: bool) void {
     std.debug.assert(dst.len == src.len);
     var i: usize = 0;
@@ -245,7 +228,6 @@ pub const RecordReader = struct {
         sequence: []const u8,
     };
 
-    /// `storage` holds one record: the bytes of its header line before LF, then its bases.
     pub fn init(source: *std.Io.Reader, storage: []u8, failure: *diagnostics.Failure) RecordReader {
         failure.reset(.index);
         return .{ .source = source, .storage = storage, .failure = failure };
@@ -431,8 +413,7 @@ pub const RecordReader = struct {
 
 // --- Record layout ---
 
-/// The layout of one line of a record that does not follow the uniform formula. The same 32 bytes
-/// as `index_format.SideTableLine`, which `index` checks at compile time.
+/// Same layout as `index_format.SideTableLine`; `index` checks it at compile time.
 pub const LineEntry = extern struct {
     base_start: u64,
     byte_offset: u64,
@@ -440,8 +421,7 @@ pub const LineEntry = extern struct {
     line_bases: u32,
 };
 
-/// A record with bases, as `RecordScannerWith` found it. Slices borrow the scanner until the next
-/// record.
+/// Slices borrow the scanner until the next record.
 pub const ScannedRecord = struct {
     name: []const u8,
     header_offset: u64,
@@ -451,14 +431,10 @@ pub const ScannedRecord = struct {
     line_bases: u32,
     line_bytes: u32,
     uses_uniform_formula: bool,
-    /// A `u64` line count, then one `LineEntry` per line; empty under the uniform formula.
     side_table: []const u8,
     nonuniform_reason: diagnostics.NonuniformReason,
 };
 
-/// `index`'s record scanner: windows in, one `ScannedRecord` per record with bases out. Line
-/// geometry and side-table lines use `u32` widths. `Diag` provides `at`, `oom`, `lineLimit`,
-/// `consistency`, and `identifierTooLong`.
 pub fn RecordScannerWith(comptime Diag: type) type {
     return struct {
         const Self = @This();
@@ -761,7 +737,6 @@ pub fn RecordScannerWith(comptime Diag: type) type {
             self.at_line_start = true;
         }
 
-        /// Emits the record in progress when it has bases; empty records are skipped.
         pub fn emitRecord(self: *Self, ctx: anytype, comptime emit: fn (@TypeOf(ctx), ScannedRecord) anyerror!void) !void {
             try self.commitPendingLine(false);
             const metrics = self.line_builder.finish();
@@ -805,7 +780,6 @@ pub fn RecordScannerWith(comptime Diag: type) type {
             });
         }
 
-        /// Reads the next window, which starts at `file_offset`. `max_name_len` limits identifiers.
         pub fn processChunk(
             state: *Self,
             data: []const u8,
@@ -1022,9 +996,6 @@ fn sequenceLengthInfoFromMetrics(metrics: LineMetrics) SequenceLengthInfo {
 
 // --- Identifier sets ---
 
-/// Exact identifier set that copies names into 128 KiB blocks. `Diag` reports failures in the
-/// caller's codes: it provides `at` and the `oom`, `capacity`, `fail`, `consistency`, and
-/// `recordLimit` methods.
 pub fn PackedNamesWith(comptime Diag: type) type {
     return struct {
         diag: Diag,
@@ -1101,12 +1072,9 @@ pub fn PackedNamesWith(comptime Diag: type) type {
 
 const CACHE_BYTES = 512 * 1024;
 const CACHE_BLOCK_BYTES: usize = 128 * 1024;
-/// The longest name the set takes: cached names store their length in two bytes.
 pub const MAX_NAME_BYTES = std.math.maxInt(u16);
 
-/// Exact identifier set over a seekable source: a fingerprint and a source offset per name, with
-/// early names cached. Names are re-read from the source only on a fingerprint match. `Diag` as
-/// for `PackedNamesWith`. Caller assumes every name is at most `MAX_NAME_BYTES` long.
+/// Caller assumes every name is at most `MAX_NAME_BYTES` long.
 pub fn SourceDedupWith(comptime Diag: type) type {
     return struct {
         diag: Diag,
@@ -1155,8 +1123,6 @@ pub fn SourceDedupWith(comptime Diag: type) type {
             return self.observeFingerprint(name, offset, fingerprintOf(name));
         }
 
-        /// The fingerprint `observeFingerprint` takes for `name`. The table slots its probe starts
-        /// at are prefetched, so a caller that observes later finds them in cache.
         pub fn prefetch(self: *@This(), name: []const u8) u32 {
             const fingerprint = fingerprintOf(name);
             switch (self.tables) {
@@ -1545,7 +1511,6 @@ fn denseBlockLines(comptime vector_len: usize, comptime Symbols: type, data: []c
     return 0;
 }
 
-// Lines of `block` that start with no `>` and end in `separator`; `block` holds whole lines.
 fn separatedLines(comptime separator: []const u8, block: []const u8, line_bases: usize, line_bytes: usize) usize {
     var line_start: usize = 0;
     while (line_start != block.len) : (line_start += line_bytes) {
@@ -1586,8 +1551,7 @@ fn anyOutsideWith(comptime vector_len: usize, data: []const u8, comptime inside:
     }.outside);
 }
 
-// Whether `matches` selects any byte: masks ORed across vectors, the last partial vector read as the
-// slice's final full vector.
+// The last partial vector is read as the slice's final full vector.
 fn anyVectorized(comptime vector_len: usize, data: []const u8, comptime matches: anytype) bool {
     const Vec = @Vector(vector_len, u8);
     if (data.len < vector_len) {
@@ -1603,8 +1567,7 @@ fn anyVectorized(comptime vector_len: usize, data: []const u8, comptime matches:
     return @reduce(.Or, found);
 }
 
-// Counts the bytes `matches` selects: u8 lanes summed per group, so no lane overflows, and a last
-// partial vector read as the slice's final full vector with its already-counted lanes masked off.
+// u8 lanes are summed per group so none overflows; the last partial vector rereads the final one, masked.
 fn countVectorized(comptime vector_len: usize, data: []const u8, comptime matches: anytype) usize {
     const Vec = @Vector(vector_len, u8);
     const Wide = @Vector(vector_len, u16);

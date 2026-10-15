@@ -18,7 +18,6 @@ pub const Options = struct {
     validation: ?*const Validation = null,
 };
 
-/// What `validate` found. Counts are exact; each code keeps only its first occurrence.
 pub const Validation = struct {
     completion: Completion,
     strict: bool,
@@ -28,27 +27,18 @@ pub const Validation = struct {
     examined: Examined,
     records_with_errors: u64,
     records_with_warnings: u64,
-    /// In report order; a code that did not occur has no occurrences and no first occurrence.
     findings: []const Finding,
-    /// Occurrences of each byte value outside the selected alphabet.
     invalid_symbols: *const [256]u64,
-    /// Set when the duplicate check reached its memory budget and stopped.
     name_budget_stop: ?BudgetStop = null,
-    /// Set when the FASTA was compared with its index.
     index: ?IndexComparison = null,
 
     pub const Completion = enum { complete, incomplete, interrupted };
     pub const Outcome = enum { clean, warnings, invalid, incomplete };
-    /// `failed` when the check found an error, `warnings` when it found only warnings.
     pub const CheckState = enum { passed, warnings, failed, incomplete };
-    /// The four checks every report has, by the category of the codes each reports; `index_match`
-    /// joins them when the FASTA was compared with its index.
     const CHECKS = [_]diagnostics.Category{ .structure, .identifiers, .alphabet, .format };
-    /// `records` counts headers seen; `records_completed`, records whose end was reached.
     pub const Examined = struct { bytes: u64 = 0, lines: u64 = 0, records: u64 = 0, records_completed: u64 = 0, symbols: u64 = 0 };
     const Totals = struct { errors: u64 = 0, warnings: u64 = 0 };
     pub const BudgetStop = struct { budget_bytes: u64, stopped_at_record: u64 };
-    /// `omitted_duplicates`: records the index leaves out because an earlier record has the name.
     pub const IndexComparison = struct { format: diagnostics.Format, entries: u64, matched: u64, omitted_duplicates: u64 };
 
     pub fn codes(self: *const Validation, severity: diagnostics.Severity) u64 {
@@ -59,7 +49,6 @@ pub const Validation = struct {
         return count;
     }
 
-    /// Occurrences by severity, over every code or over one category.
     pub fn totals(self: *const Validation, category: ?diagnostics.Category) Totals {
         var result: Totals = .{};
         for (self.findings) |finding| {
@@ -92,7 +81,6 @@ pub const Validation = struct {
 pub const Finding = struct {
     code: diagnostics.Code,
     occurrences: u64 = 0,
-    /// Distinct records with an occurrence; file-level and preamble occurrences belong to none.
     records: u64 = 0,
     first: ?Occurrence = null,
 };
@@ -104,7 +92,6 @@ pub const Occurrence = struct {
     identifier: ?Identifier = null,
 };
 
-/// A copied identifier prefix and the identifier's full length.
 pub const Identifier = struct {
     bytes: [diagnostics.PREVIEW_BYTES]u8,
     len: u16,
@@ -257,7 +244,6 @@ pub fn writeValidationText(writer: *std.Io.Writer, failure: *const diagnostics.F
     try writer.writeByte('\n');
 }
 
-/// Printable ASCII as is; controls, non-ASCII bytes, quotes, and backslashes escaped.
 pub fn writeEscapedBytes(writer: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Error!void {
     for (bytes) |byte| switch (byte) {
         '"', '\\' => {
@@ -608,7 +594,6 @@ fn textOpaque(writer: *std.Io.Writer, bytes: []const u8, original: u128, lower_b
     if (truncated) try writer.print(" ({s}{d} bytes)", .{ if (lower_bound) "at least " else "", original });
 }
 
-// The longest prefix of `bytes` that escapes to at most `width` characters.
 fn escapedPrefix(bytes: []const u8, width: usize) []const u8 {
     var escaped_bytes: usize = 0;
     for (bytes, 0..) |byte, index| {

@@ -9,7 +9,6 @@ comptime {
 
 pub const MappedBytes = []align(std.heap.page_size_min) const u8;
 
-/// Pages load on first access: the loaders read only the parts they check.
 pub fn mapFileReadOnly(io: std.Io, file: std.Io.File, len: usize) std.Io.File.MemoryMap.CreateError!std.Io.File.MemoryMap {
     return file.createMemoryMap(io, .{
         .len = len,
@@ -20,8 +19,7 @@ pub fn mapFileReadOnly(io: std.Io, file: std.Io.File, len: usize) std.Io.File.Me
 
 pub const OpenSidecarError = std.posix.OpenError || std.posix.UnexpectedError;
 
-/// Opens an index path derived from the FASTA. A FIFO there opens without waiting for a writer;
-/// the returned descriptor blocks as `openFile` would.
+/// A FIFO opens without waiting for a writer; the descriptor then blocks as `openFile`'s does.
 pub fn openSidecar(io: std.Io, path: []const u8) OpenSidecarError!std.Io.File {
     const handle = try std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0);
     const file = std.Io.File{ .handle = handle, .flags = .{ .nonblocking = false } };

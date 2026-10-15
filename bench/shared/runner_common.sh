@@ -36,8 +36,7 @@ ensure_real_data() {
     fi
 }
 
-# Rebuild when FASTA is newer, sidecar is missing, z-fasta binary is newer than .zfi,
-# or .zfi predates the embedded name-table footer (ZFNM).
+# Rebuild when the FASTA or the binary is newer than the index, or the index lacks its name-table footer.
 preload_indexes_for_file() {
     local fa="$1"
     [[ -f "$fa" ]] || return 1
@@ -59,8 +58,7 @@ preload_indexes_for_file() {
         echo "error: missing or empty ${fa}.zfi after preload" >&2
         return 1
     fi
-    # Validate only rebuilt indexes so reusable benchmark inputs are not given
-    # an extra scan that would change their page-cache state.
+    # Only rebuilt indexes are validated, so reused inputs keep their page-cache state.
     if $rebuilt_zfi; then
         local validation_error
         if ! validation_error="$("$ZFASTA" stats "$fa" 2>&1 >/dev/null)"; then
@@ -112,7 +110,6 @@ manifest_tool_version() {
     printf '%s\n' "${version:-unknown}"
 }
 
-# Core versions every suite manifest records.
 export_manifest_core_versions() {
     BENCH_VER_ZEBRAC="$(manifest_tool_version zebrac)"
     BENCH_VER_ZFASTA="$(manifest_tool_version z-fasta)"
@@ -120,13 +117,11 @@ export_manifest_core_versions() {
     export BENCH_VER_ZEBRAC BENCH_VER_ZFASTA BENCH_VER_SAMTOOLS
 }
 
-# Always export BENCH_VER_<TOOL> (unknown if missing). seqtk uses the first line only.
 export_manifest_required_tool_versions() {
     local tool upper ver
     for tool in "$@"; do
         case "$tool" in
             seqtk)
-                # Match prior stats behavior: empty stdout becomes "unknown".
                 ver="$(manifest_tool_version seqtk | head -1)"
                 export BENCH_VER_SEQTK="${ver:-unknown}"
                 ;;
@@ -138,7 +133,6 @@ export_manifest_required_tool_versions() {
     done
 }
 
-# Export BENCH_VER_<TOOL> only when the peer is installed.
 export_manifest_optional_tool_versions() {
     local tool upper
     for tool in "$@"; do

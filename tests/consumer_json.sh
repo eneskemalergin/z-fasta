@@ -19,7 +19,6 @@ for command in ("index", "get", "stats", "validate"):
     assert report["operation"]["complete"] is False
     assert report["accepted"] is False
     assert report["failure"]["primary"]["code"] == "usage.missing_argument"
-    # Missing/truncated machine objects cannot be accepted just from status.
     for broken in (b"", result.stderr[:-2]):
         try:
             json.loads(broken)
@@ -28,7 +27,6 @@ for command in ("index", "get", "stats", "validate"):
         else:
             raise AssertionError("Incomplete JSON was accepted")
 
-# Warning acceptance is explicit: the validate report on stdout says warnings, and the status is 2.
 with tempfile.TemporaryDirectory(prefix="zfasta-diagnostic-consumer-") as directory:
     reference = Path(directory) / "reference.fa"
     reference.write_bytes(b">seq1\nACGT\n")

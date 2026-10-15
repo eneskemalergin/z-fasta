@@ -162,9 +162,7 @@ build_bedtools() {
     extract_archive "$archive" "$source"
     work="$(prepare_worktree "$source" "bedtools-$BEDTOOLS_VERSION")"
     echo "build: bedtools $BEDTOOLS_VERSION"
-    # BEDTools' included fragments hard-code obj/<name> prerequisites. Build
-    # in the ignored work copy with its native obj/ and bin/ directories so
-    # those paths remain contained without modifying the upstream source.
+    # BEDTools' fragments hard-code obj/<name>; build in the ignored work copy so upstream stays untouched.
     make -C "$work" -j"$JOBS" bin/bedtools
     install -m 755 "$work/bin/bedtools" "$STAGE_BIN/bedtools"
 }

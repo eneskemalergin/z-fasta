@@ -1037,7 +1037,6 @@ test "[failure] - [get diagnostics]: releases allocation failures in positional 
     for ([_]main.getter.RequestSource{ .{ .positional = &.{"missing"} }, .{ .names = names }, .{ .bed = bed } }) |source|
         try std.testing.checkAllAllocationFailures(allocator, checkGetOperationAllocations, .{ "tests/data/simple.fasta", source });
 
-    // With only a `.fai`, the requested names are collected before the index loads.
     const fasta = try writeFastaArtifact(allocator, "get-oom-fai", ">seq1\nACGT\n");
     defer allocator.free(fasta);
     defer std.Io.Dir.cwd().deleteFile(io, fasta) catch {};

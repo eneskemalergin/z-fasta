@@ -10,8 +10,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     exit 1
 fi
 
-# Edge-case checks intentionally pass malformed inputs to peer tools. Keep a
-# peer crash from retaining a core image outside the benchmark directories.
+# Peers get malformed input on purpose; keep their core dumps out of the benchmark directories.
 ulimit -S -c 0 2>/dev/null || true
 
 BENCH_SHARED_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -98,13 +97,11 @@ bench_tool_version() {
     esac
 }
 
-# Portable file size in bytes (GNU and BSD stat).
 file_size_bytes() {
     local path="$1"
     stat --printf='%s' "$path" 2>/dev/null || stat -f '%z' "$path" 2>/dev/null || echo 0
 }
 
-# Generate messy layouts into bench/shared/cache/ (fixtures and/or perf).
 # Usage: bench_ensure_messy [--force] --fixtures|--perf|--fixtures --perf
 bench_ensure_messy() {
     local py
@@ -116,7 +113,6 @@ bench_ensure_messy() {
     "$py" "$BENCH_SHARED_DIR/generate_messy.py" "$@"
 }
 
-# Generate synthetic scaling FASTAs into bench/shared/cache/scaling/.
 # Usage: bench_ensure_scaling [--force] [--mode all|size|seq]
 bench_ensure_scaling() {
     local py

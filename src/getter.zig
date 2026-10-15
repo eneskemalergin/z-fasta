@@ -45,7 +45,7 @@ pub const Orientation = struct {
     }
 };
 
-/// Not validated here; callers pass only combinations the CLI accepts.
+/// Caller assumes a combination the CLI accepts.
 pub const Options = struct {
     source: RequestSource,
     honor_strand: bool = false,
@@ -54,14 +54,12 @@ pub const Options = struct {
     annotate_transform: bool = false,
 };
 
-/// A names or BED path of `-` reads stdin.
 pub const RequestSource = union(enum) {
     positional: []const []const u8,
     names: []const u8,
     bed: []const u8,
 };
 
-/// `elapsed_ns` is zero unless `measure_elapsed` was set.
 pub const Result = struct { region_count: usize, total_bases: u64, elapsed_ns: u64 };
 
 pub fn parseRegion(input: []const u8) Region {
@@ -123,7 +121,7 @@ pub fn extractRegion(idx: *const LoadedIndex, region_str: []const u8, writer: an
     failure.succeed();
 }
 
-/// Strict fetch behind `IndexedReader.fetchInto`; `input_buffer` must not alias `dst`.
+/// `input_buffer` must not alias `dst`.
 pub fn fetchSymbols(idx: *const LoadedIndex, ordinal: usize, start: u64, end: u64, dst: []u8, input_buffer: []u8, failure: *diagnostics.Failure) diagnostics.Error![]u8 {
     failure.reset(.get);
     failure.sources.set(.output, .{ .label = .{ .borrowed = "caller buffer" }, .kind = .memory });
@@ -464,7 +462,6 @@ fn detectRegionType(source: FastaSource, resolved: ResolvedRegion, diag: *Diagno
     return fasta.typeFromCounts(sample.nucleotides, sample.total);
 }
 
-// `detectRegionType` for a sample whose bytes are already in `bytes`, which start at `bytes_start`.
 fn detectBufferedType(resolved: ResolvedRegion, bytes: []const u8, bytes_start: u64, diag: *Diagnostics) diagnostics.Error!fasta.SequenceType {
     const span = try diskSpanForRegion(resolved, diag);
     if (span.start < bytes_start or span.end - bytes_start > bytes.len) return diag.consistency(.traversal_position);
@@ -494,11 +491,8 @@ const SampleCounts = struct {
     }
 };
 
-/// The type the last complement request found for its record, kept for the record's next requests.
 const TypedRecord = struct { record: usize, kind: fasta.SequenceType, sample: diagnostics.Sample };
 
-// Complement needs nucleotide input: the first `TYPE_SAMPLE_BASES` of a record's first
-// complemented region decide its type, read from `buffered` when that read already holds them.
 fn checkComplement(region: ResolvedRegion, typed: *?TypedRecord, buffered: ?struct { bytes: []const u8, start: u64 }, source: FastaSource, diag: *Diagnostics, buffers: *GetBuffers) diagnostics.Error!void {
     if (!region.orientation.complement) return;
     const known = if (typed.*) |record| record.record == region.record_index else false;
@@ -532,14 +526,11 @@ const REGION_OUTPUT_BUFFER_BYTES: usize = 64 * 1024;
 const REVERSED_BUFFER_BYTES: usize = 64 * 1024;
 const STDOUT_BUFFER_BYTES: usize = 64 * 1024;
 
-// One allocation per command, so no stack frame holds these.
 const GetBuffers = struct {
     input: [FASTA_INPUT_BUFFER_BYTES]u8,
     output: [REGION_OUTPUT_BUFFER_BYTES]u8,
-    /// Reverse output's bytes, reversed a piece at a time; touched only by reverse requests.
     reversed: [REVERSED_BUFFER_BYTES]u8,
     stdout: [STDOUT_BUFFER_BYTES]u8,
-    /// Request lines from stdin or the request file.
     request: [REQUEST_LINE_READER_BUFFER_BYTES]u8,
 };
 
@@ -550,8 +541,7 @@ const DiskSpan = struct {
     trailing_bases: u64,
 };
 
-// One read covering both spans wastes at most this many bytes between them; copying that much
-// costs about what a second read does.
+// Reading over a gap this size costs about what a second read does.
 const COALESCE_GAP_BYTES = 4096;
 
 fn spansNear(first_start: u64, first_end: u64, second_start: u64, second_end: u64) bool {
@@ -625,7 +615,6 @@ const RegionOutput = struct {
     bytes: []u8,
     diag: *Diagnostics,
     wrap: bool = true,
-    /// Unwrapped output checks that each uniform line piece is all bases; set when one is not.
     stray: bool = false,
 
     fn flush(self: *RegionOutput, writer: anytype) diagnostics.Error!void {
@@ -659,7 +648,6 @@ const RegionOutput = struct {
         }
     }
 
-    /// Writes `lines` whole input lines of `OUTPUT_LINE_BASES` bases and a `\n` each as they are.
     fn passLines(self: *RegionOutput, block: []const u8, lines: usize, writer: anytype) diagnostics.Error!void {
         std.debug.assert(self.wrap and self.line_pos == 0);
         try self.flush(writer);
@@ -677,7 +665,6 @@ const RegionOutput = struct {
     }
 };
 
-// Two overlapping vector moves per copy, instead of a call per output line.
 fn copyShort(dst: []u8, src: []const u8) void {
     std.debug.assert(dst.len == src.len and src.len <= 64);
     const n = src.len;
@@ -701,9 +688,6 @@ fn copyShort(dst: []u8, src: []const u8) void {
     }
 }
 
-// Forward bases of a uniform record from `bytes[pos]`, at `column` of its line, until the region or
-// `bytes` ends. Whole 60-base lines ending in `\n` that start where an output line starts are
-// already in output form, so they go out as read.
 fn forwardUniform(resolved: ResolvedRegion, bytes: []const u8, start_pos: usize, start_column: u64, output: *RegionOutput, writer: anytype) diagnostics.Error!usize {
     var pos = start_pos;
     var column = start_column;
@@ -713,8 +697,7 @@ fn forwardUniform(resolved: ResolvedRegion, bytes: []const u8, start_pos: usize,
     var pass = same_lines;
     while (output.bases_written < resolved.num_bases and pos < bytes.len) {
         if (same_lines and column != 0 and output.line_pos == 0) {
-            // An output line is the rest of this input line and the start of the next, so it is two
-            // 64-byte moves; the second overwrites what the first copied past the rest.
+            // An output line spans two input lines: two 64-byte moves, the second overwriting the overrun.
             const rest = OUTPUT_LINE_BASES - column;
             while (resolved.num_bases - output.bases_written >= OUTPUT_LINE_BASES and bytes.len - pos >= 2 * 64) {
                 if (output.bytes.len - output.len < 2 * 64) try output.flush(writer);
@@ -740,7 +723,6 @@ fn forwardUniform(resolved: ResolvedRegion, bytes: []const u8, start_pos: usize,
             }
         }
         var take: usize = @intCast(@min(line_bases - column, resolved.num_bases - output.bases_written, bytes.len - pos));
-        // Stopping at the output line's end leaves the next step at the start of an output line.
         if (same_lines) take = @min(take, OUTPUT_LINE_BASES - output.line_pos);
         if (!output.wrap and fasta.countBasesInLineSlice(bytes, pos, pos + take) != take) output.stray = true;
         try output.appendForward(bytes[pos..][0..take], resolved.orientation.complement, writer);
@@ -796,8 +778,6 @@ fn consumeForwardBytes(
     }
 }
 
-// The first index from `start` whose byte is a base when `base`, or is not when `!base`; the
-// length of `bytes` when there is none.
 fn findBaseOrNot(bytes: []const u8, start: usize, base: bool) usize {
     const Block = @Vector(32, u8);
     var pos = start;
@@ -846,9 +826,6 @@ fn consumeUniformForwardChunk(
     base_index.* = resolved.start - 1 + output.bases_written;
 }
 
-// Reverse output from `bytes`, which end at disk offset `bytes_end`: reversed (and complemented)
-// into `scratch` in vector blocks, the bases then read forward as from a forward region. In the
-// reversed bytes, a uniform line is its bases from the last to the first, then its terminator.
 fn consumeReversed(
     resolved: ResolvedRegion,
     bytes: []const u8,
@@ -1135,7 +1112,6 @@ fn requestReference(source: ?diagnostics.SourceId, line: ?u64, ordinal: u64) dia
     return .{ .source = source, .location = .{ .line = line }, .request = ordinal };
 }
 
-/// Smaller batches look names up one at a time.
 const PREFETCH_MIN_REQUESTS = 32;
 
 fn processParsedRequests(
@@ -1189,7 +1165,7 @@ const StreamRequestSource = union(enum) {
 
 const RequestedNames = struct {
     allocator: std.mem.Allocator,
-    /// Names read from a stream are copied here; names from a buffered file borrow its bytes.
+    // Names read from a stream are copied here; names from a buffered file borrow its bytes.
     copies: std.heap.ArenaAllocator,
     names: std.ArrayList([]const u8) = .empty,
     set: std.StringHashMapUnmanaged(void) = .empty,
@@ -1412,7 +1388,6 @@ fn runFileGet(backing_allocator: std.mem.Allocator, io: std.Io, fasta_path: []co
     var requested = RequestedNames.init(backing_allocator);
     defer requested.deinit();
     var idx = load: {
-        // A `.zfi` resolves any name through its name table, so only a `.fai` needs the names first.
         const load_mode: index_format.LoadMode = if (request_file != null and !zfiPresent(io, fasta_path)) matched: {
             const reader = if (buffered_requests != null) &small_reader else &request_reader.?.interface;
             const complete = requested.collect(reader, source, buffered_requests != null) catch return diag.oom(.request_collection);
@@ -1551,12 +1526,10 @@ test "[property] - [get extraction]: uniform copy matches a byte-by-byte copy ac
         for (0..@intCast(seq_len)) |k| {
             try file.append(allocator, "ACGTacgtN"[random.uintLessThan(usize, 9)]);
             if ((k + 1) % line_bases == 0 or k + 1 == seq_len) {
-                // Round 0 puts a stray byte where a terminator belongs, which the copy must skip.
                 try file.append(allocator, if (round == 0 and k / line_bases == 1) 'X' else if (line_bytes - line_bases == 2) '\r' else '\n');
                 if (line_bytes - line_bases == 2) try file.append(allocator, '\n');
             }
         }
-        // Even rounds start on a line, where whole lines can go out as read.
         const start = if (round == 0) 0 else if (round % 2 == 0) random.uintLessThan(u64, (seq_len + line_bases - 1) / line_bases) * line_bases else random.uintLessThan(u64, seq_len);
         const count = if (round == 0) seq_len else 1 + random.uintLessThan(u64, seq_len - start);
         const orientations = [_]Orientation{ .{}, .reverseComplement(), .reverseOnly(), .complementOnly() };
@@ -1682,7 +1655,6 @@ test "[edge] - [get requests]: retains the name crossing its byte target" {
     try std.testing.expect(workspace.names.capacity <= MAX_ACTIVE_NAME_BYTES);
 }
 
-// Streams `input` as `source` requests against `idx` into `out`.
 fn streamRequests(idx: *LoadedIndex, input: []const u8, source: StreamRequestSource, out: *std.Io.Writer) diagnostics.Error!BatchStats {
     var reader = std.Io.Reader.fixed(input);
     var failure: diagnostics.Failure = undefined;
@@ -1976,7 +1948,6 @@ test "[regression] - [get requests]: retries interrupted discovery with the full
     defer std.testing.allocator.free(path);
     const request_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/requests.txt", .{path});
     defer std.testing.allocator.free(request_path);
-    // Discovery runs only for a `.fai`; a `.zfi` finds any name without it.
     const fasta_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/ref.fa", .{path});
     defer std.testing.allocator.free(fasta_path);
     try directory.dir.writeFile(io, .{ .sub_path = "ref.fa", .data = ">seq1 test sequence\nACGTACGTACGT\nACGTACGTACGT\n>seq2 another sequence\nGGGGCCCCAAAA\n" });

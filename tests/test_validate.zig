@@ -87,7 +87,6 @@ fn expectFindings(report: *const validator.Report, expected: []const Expected) !
     }
 }
 
-// Alphabet policies may differ.
 fn expectSameFindings(a: *const validator.Report, b: *const validator.Report) !void {
     try std.testing.expectEqual(a.completion, b.completion);
     try std.testing.expectEqual(a.examined, b.examined);
@@ -965,7 +964,6 @@ test "[cli] - [validate fix]: writes the repaired copy and reports the input" {
     try std.testing.expectEqualStrings("warnings", parsed.value.object.get("validation").?.object.get("outcome").?.string);
     try std.testing.expectEqualStrings(">b\nACGTAC\n", try readTestFile(allocator, output));
 
-    // Under --strict, the published copy's repaired warnings no longer fail the run, in the status and in `accepted`.
     const strict = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "validate", "--json", "--strict", "--fix", "-o", output, warnings } });
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, strict.term);
     try std.testing.expect((try std.json.parseFromSlice(std.json.Value, allocator, strict.stdout, .{})).value.object.get("accepted").?.bool);
@@ -1218,7 +1216,6 @@ test "[cli] - [validate]: reads standard input" {
     try std.testing.expectEqualStrings(">a\nACGT\n>a\nAC\n", try readTestFile(allocator, output));
 }
 
-// Writes `fasta`, then a `.zfi` built from `indexed`, which has the same size, with the file's identity.
 fn discardValidateStdout(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
     return switch (operation) {
         .file_write_streaming => |write| blk: {
@@ -1305,7 +1302,6 @@ test "[cli] - [validate index]: matches the records index writes" {
         \\
     , .{uniform}), "");
 
-    // With both sidecars, `--index` takes the `.zfi` as `get` does, and `--index=PATH` the named one.
     try writeZfi(allocator, uniform, ">a\nACGT\nAC\n>b\nGG\n");
     defer deletePair(allocator, uniform, ".zfi");
     const explicit = try std.fmt.allocPrint(allocator, "--index={s}.fai", .{uniform});
@@ -1437,7 +1433,6 @@ test "[cli] - [validate index]: needs a file and a loadable index" {
     try writeZfi(allocator, stale, ">a\nAC\n");
     try support.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "validate", "--index", stale }, .@"index.source_size_mismatch");
 
-    // A damaged entry stops the scan where the index stream reaches it.
     const damaged = try writeFastaArtifact(allocator, "validate-index-damaged", ">a\nACGT\n>b\nGG\n");
     defer deletePair(allocator, damaged, ".zfi");
     try writeZfi(allocator, damaged, ">a\nACGT\n>b\nGG\n");

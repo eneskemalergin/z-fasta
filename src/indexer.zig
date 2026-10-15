@@ -242,14 +242,11 @@ const INDEX_OUTPUT_BUFFER_BYTES = 64 * 1024;
 const INDEX_PATH_BUFFER_BYTES = std.Io.Dir.max_path_bytes;
 const SMALL_INDEX_MAX_BYTES = 32 * 1024 * 1024;
 
-// One allocation per index command, so no stack frame holds these. A path touches only its own.
 const IndexBuffers = struct {
     file_io: [FILE_IO_BUFFER_BYTES]u8,
     read: [INDEX_READ_BUFFER_BYTES]u8,
     path: [INDEX_PATH_BUFFER_BYTES]u8,
-    /// The `.zfi` writer of the small path.
     output: [INDEX_OUTPUT_BUFFER_BYTES]u8,
-    /// `--emit-fai`: the spool writer, the stdout writer, and the copy between them.
     spool: [INDEX_OUTPUT_BUFFER_BYTES]u8,
     stdout: [INDEX_OUTPUT_BUFFER_BYTES]u8,
     copy: [INDEX_OUTPUT_BUFFER_BYTES]u8,
@@ -339,7 +336,6 @@ comptime {
     }
 }
 
-/// Applies the record limit to each scanned record, then emits it as an index record.
 fn IndexEmitter(comptime Ctx: type, comptime emitRecord: fn (Ctx, FastaRecordEmit) anyerror!void) type {
     return struct {
         ctx: Ctx,
@@ -885,7 +881,6 @@ const CompressedNames = struct {
         self.count += 1;
     }
 
-    /// `name_buffer` holds each name rebuilt from its block anchor.
     fn write(self: *@This(), writer: *std.Io.Writer, table: *index_format.NameTable.Builder, name_buffer: *[MAX_INDEX_NAME_LEN]u8) !void {
         try self.encoded.flush();
         var memory_reader = std.Io.Reader.fixed(self.encoded.bytes.items);
@@ -925,7 +920,7 @@ const StreamedCatalog = struct {
     names: StagedNames,
     sides: CatalogBytes,
     atomic_file: ?std.Io.File.Atomic = null,
-    /// Buffered records; once written, `finish` reuses it for its record batches and its writer.
+    // Once written, `finish` reuses it for its record batches and its writer.
     records: [INDEX_OUTPUT_BUFFER_BYTES]u8 align(@alignOf(index_format.ZfiRecord)) = undefined,
     buffered: usize = 0,
     record_bytes: u64 = 0,
@@ -1038,7 +1033,6 @@ const StreamedCatalog = struct {
 
 const StagedNames = struct {
     raw: CatalogBytes,
-    /// Each raw name's length, so `write` can find the names in the blob for the table.
     lengths: CatalogBytes,
     length_block: [1024]u16 = undefined,
     length_count: usize = 0,
@@ -1109,8 +1103,7 @@ const StagedNames = struct {
         self.length_count = 0;
     }
 
-    /// Writes the name blob and inserts each name into `table`, in record order. The catalogs read
-    /// back through their own write buffers, empty after the flushes below.
+    // The catalogs read back through their own write buffers, empty after the flushes below.
     fn write(self: *@This(), writer: *std.Io.Writer, table: *index_format.NameTable.Builder, name_buffer: *[MAX_INDEX_NAME_LEN]u8) !void {
         if (self.mode == .compressed) return self.compressed.write(writer, table, name_buffer);
         try self.flushLengths();
@@ -1130,7 +1123,6 @@ const StagedNames = struct {
             lengths_file = spool.file.reader(self.lengths.io, lengths_buffer);
             break :blk &lengths_file.interface;
         } else &lengths_memory;
-        // Names are hashed where they sit in the read buffer; the blob goes out a buffer at a time.
         var walked: usize = 0;
         var remaining: usize = self.count;
         while (remaining != 0) {

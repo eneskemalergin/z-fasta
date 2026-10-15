@@ -69,12 +69,10 @@ pub const IndexedReader = struct {
         self.* = undefined;
     }
 
-    /// Counts repeated names separately.
     pub fn recordCount(self: *const IndexedReader) usize {
         return self.index.records.len();
     }
 
-    /// Null past the last record. A `.zfi` record is checked when it is read.
     pub fn record(self: *IndexedReader, ordinal: usize, failure: *diagnostics.Failure) diagnostics.Error!?RecordInfo {
         failure.reset(.get);
         if (ordinal >= self.index.records.len()) {
@@ -86,7 +84,7 @@ pub const IndexedReader = struct {
         return .{ .ordinal = ordinal, .name = self.index.recordName(ordinal) orelse "", .length = rec.seq_len };
     }
 
-    /// First match wins. A `.zfi` lookup checks the table entries and names it reads.
+    /// First match wins.
     pub fn lookup(self: *IndexedReader, name: []const u8, failure: *diagnostics.Failure) diagnostics.Error!?RecordInfo {
         failure.reset(.get);
         const ordinal = try self.index.findName(name, failure) orelse {

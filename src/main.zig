@@ -20,12 +20,10 @@ pub const std_options: std.Options = .{
     .signal_stack_size = if (std.debug.default_enable_segfault_handler) 1 << 18 else null,
 };
 
-// Debug builds check every command's memory for leaks, double frees, and use after free.
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 const command_allocator = if (builtin.mode == .Debug) debug_allocator.allocator() else std.heap.page_allocator;
 const LEAK_STATUS = 3;
-// A reader that closes stdout early ends the run as SIGPIPE would: quietly, with 128 + 13, so
-// `| head` prints no error and `set -o pipefail` still sees the truncation.
+// As SIGPIPE would: no message, so `| head` stays quiet, and `pipefail` still sees the truncation.
 const BROKEN_PIPE_STATUS = 141;
 
 pub fn main(init: std.process.Init.Minimal) void {
@@ -461,7 +459,6 @@ fn runValidateCmd(cli: *Cli) diagnostics.Error!u8 {
     return result.status;
 }
 
-// `--index` is the index `get` would load; `--index=PATH` names one, and its suffix its format.
 fn indexSelection(cli: *Cli, arg: []const u8) diagnostics.Error!index_format.IndexSelection {
     if (arg.len == "--index".len) return .automatic;
     const path = arg["--index=".len..];

@@ -23,21 +23,18 @@ const DEFAULT_FIX_WIDTH: u64 = 60;
 
 pub const Schema = enum { none, uniprot, refseq };
 
-/// `auto` chooses nucleotide or protein from the first 100,000 symbols; `any` accepts every symbol.
 pub const Alphabet = enum { auto, dna, rna, protein, any };
 
-/// What the scan checks. `custom_alphabet` is an exact, case-sensitive byte set and cannot be
-/// combined with an `alphabet` other than `auto`.
+/// `custom_alphabet` cannot be combined with an `alphabet` other than `auto`.
 pub const Rules = struct {
     schema: Schema = .none,
     alphabet: Alphabet = .auto,
     custom_alphabet: ?[]const u8 = null,
     max_header_bytes: u64 = DEFAULT_MAX_HEADER_BYTES,
-    /// Bytes the duplicate check may hold; past it the check stops and the report is `incomplete`.
     max_name_bytes: ?u64 = null,
 };
 
-/// Not validated here: `output_path` and `width` apply only with `fix`, and `width` is at least 1.
+/// Caller assumes `output_path` and `width` come only with `fix`, and `width` is at least 1.
 pub const Options = struct {
     rules: Rules = .{},
     strict: bool = false,
@@ -45,19 +42,17 @@ pub const Options = struct {
     fix: bool = false,
     output_path: ?[]const u8 = null,
     width: u64 = DEFAULT_FIX_WIDTH,
-    /// The index to compare the FASTA with: `.automatic` is the one `get` would load. Needs a
-    /// file, not stdin.
+    /// Needs a file, not stdin.
     index: ?index_format.IndexSelection = null,
     /// Producer version in a JSON report: trusted UTF-8 of at most 32 bytes.
     producer_version: ?[]const u8 = null,
 };
 
-/// Where the duplicate check re-reads names from; without one, names are copied into memory.
 pub const NameSource = struct { io: std.Io, file: std.Io.File, size: u64 };
 
 pub const Result = struct { status: u8, fix_written: bool };
 
-/// One input's counts and first occurrences; `validation` returns a view that borrows it.
+/// `validation` returns a view that borrows it.
 pub const Report = struct {
     completion: reporting.Validation.Completion = .interrupted,
     findings: [REPORT_CODES.len]reporting.Finding = blk: {
@@ -94,8 +89,6 @@ pub const Report = struct {
         return &self.findings[comptime reportSlot(code)];
     }
 
-    /// 0 clean, 2 warnings only, 1 for errors, warnings under `strict`, or an unfinished report.
-    /// `repaired` leaves out the format warnings a published `--fix` copy no longer has.
     pub fn status(self: *const Report, strict: bool, repaired: bool) u8 {
         if (self.completion != .complete) return 1;
         var warnings = false;
@@ -163,8 +156,7 @@ pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const
     return .{ .status = report.status(options.strict, options.fix), .fix_written = options.fix };
 }
 
-/// Fills `report` from `source`, read through `buffer`. After a failure, `report` covers what was
-/// examined and is `interrupted`.
+/// After a failure, `report` covers what was examined and is `interrupted`.
 pub fn validate(allocator: std.mem.Allocator, source: *std.Io.Reader, buffer: []u8, names: ?NameSource, rules: Rules, report: *Report, failure: *diagnostics.Failure) diagnostics.Error!void {
     failure.reset(.validate);
     failure.sources.set(.fasta, .{ .label = .{ .borrowed = "validated input" }, .kind = .stream });
@@ -172,9 +164,7 @@ pub fn validate(allocator: std.mem.Allocator, source: *std.Io.Reader, buffer: []
     failure.succeed();
 }
 
-/// Validates as `validate` does and writes the repaired copy to `output` in the same pass:
-/// headers as they are, symbols wrapped at `width`, LF line ends. On any error, including
-/// `repair.blocked`, the caller discards what `output` received.
+/// On any error, including `repair.blocked`, the caller discards what `output` received.
 pub fn repair(allocator: std.mem.Allocator, source: *std.Io.Reader, buffer: []u8, names: ?NameSource, rules: Rules, width: u64, output: *std.Io.Writer, report: *Report, failure: *diagnostics.Failure) diagnostics.Error!void {
     failure.reset(.validate);
     failure.sources.set(.fasta, .{ .label = .{ .borrowed = "validated input" }, .kind = .stream });
@@ -266,7 +256,6 @@ fn customSymbols(custom: []const u8) [32]u8 {
     return bits;
 }
 
-// `repaired`: a `--fix` copy was published, as `Report.status` takes it.
 // `buffer` is the scan's read buffer, idle once the scan ends.
 fn writeReportOutput(io: std.Io, report: *const Report, options: Options, repaired: bool, buffer: []u8, failure: *diagnostics.Failure) diagnostics.Error!void {
     var stdout_fw = std.Io.File.Writer.initStreaming(.stdout(), io, buffer);
@@ -298,7 +287,6 @@ const Staged = struct {
         self.writer = self.atomic.file.writer(io, self.buffer);
     }
 
-    // `source` is null for stdin, which has no metadata to compare.
     fn publish(self: *Staged, io: std.Io, source: ?struct { file: std.Io.File, before: std.Io.File.Stat }, failure: *diagnostics.Failure) diagnostics.Error!void {
         if (diagnostics.flushOutput(&self.writer, &failure.outputs.file)) |cause| return failure.fail(.{ .details = .{ .@"io.flush_failed" = {} }, .stage = .flush, .at = .{ .source = .output }, .cause = .{ .zig = cause } });
         if (source) |input| try checkRewriteSource(io, input.file, input.before, failure);
@@ -318,7 +306,6 @@ const Staged = struct {
 
 const FixBlocker = struct { blocker: diagnostics.Blocker, at: diagnostics.Reference };
 
-// Duplicates and symbols outside the alphabet do not block: the rewrite copies them.
 fn fixBlocker(report: *const Report) ?FixBlocker {
     if (report.finding(.@"fasta.no_records").occurrences != 0) return .{ .blocker = .{ .no_records = {} }, .at = .{ .source = .fasta } };
     var best: ?FixBlocker = null;
@@ -338,7 +325,6 @@ fn keepEarliest(best: *?FixBlocker, blocker: diagnostics.Blocker, at: diagnostic
 const Rewrite = struct {
     writer: *std.Io.Writer,
     width: u64,
-    // Its `err` holds the cause when a write through `writer` fails.
     file: ?*std.Io.File.Writer = null,
     column: u64 = 0,
 
@@ -370,8 +356,6 @@ const Rewrite = struct {
         }
     }
 
-    // `count` lines of `width` symbols, each followed by its ending, `line_bytes` apart. Lines already
-    // at the output width with LF endings are copied as they are.
     fn wholeLines(self: *Rewrite, data: []const u8, width: usize, line_bytes: usize, count: usize) std.Io.Writer.Error!void {
         if (width != self.width or line_bytes != width + 1 or (self.column != 0 and self.column != width)) {
             for (0..count) |k| try self.symbols(data[k * line_bytes ..][0..width]);
@@ -387,8 +371,7 @@ const Rewrite = struct {
         self.column = 0;
     }
 
-    // Fills the buffer before each flush, so the file is written in whole buffers: a write that
-    // ends inside a page costs a filesystem about twice as much as one that ends on a boundary.
+    // Fills the buffer before each flush: a write that ends inside a page costs a filesystem twice.
     fn write(self: *Rewrite, bytes: []const u8) std.Io.Writer.Error!void {
         var rest = bytes;
         while (rest.len != 0) {
@@ -448,14 +431,11 @@ fn scan(allocator: std.mem.Allocator, source: *std.Io.Reader, buffer: []u8, name
 
 const LineEnding = enum { lf, crlf };
 
-// Where a line or header starts. Plain numbers, so the per-line state is copied as words; `Scan.inRecord`
-// makes the reference when a finding needs one.
 const Position = struct { offset: u64, line: u64, column: u64 };
 
 const SymbolLine = struct {
     symbols: u64,
     start: Position,
-    // Every byte was in the fast set, so the next lines may be checked in blocks.
     dense: bool,
     ending: ?LineEnding,
 };
@@ -468,7 +448,6 @@ const Candidate = struct {
 
 const Record = struct {
     ordinal: u64 = 0,
-    // `Scan.name_buf` holds the identifier, up to `MAX_INDEX_NAME_BYTES`, until the next header.
     named: bool = false,
     identifier_bytes: u64 = 0,
     header: Position = .{ .offset = 0, .line = 0, .column = 0 },
@@ -488,7 +467,7 @@ const Line = struct {
     len: u64 = 0,
     content_at: ?u64 = null,
     in_identifier: bool = false,
-    /// The whole identifier's length; `Scan.name_buf` keeps at most `MAX_INDEX_NAME_BYTES` of it.
+    // The whole identifier; `Scan.name_buf` keeps at most `MAX_INDEX_NAME_BYTES` of it.
     identifier_bytes: u64 = 0,
     controls: u64 = 0,
     first_control: ?struct { byte: u8, index: u64 } = null,
@@ -537,7 +516,6 @@ const ScanDiag = struct {
     }
 };
 
-// Refuses an allocation that would take the duplicate check past `limit` live bytes.
 const NameBudget = struct {
     child: std.mem.Allocator,
     limit: u64,
@@ -594,9 +572,6 @@ comptime {
 }
 const NO_ENTRY = std.math.maxInt(u32);
 
-// The `--index` comparison: `index`'s scanner runs on the same windows, and each record it would
-// write is matched with an index entry. Entries stream in file order through fixed buffers while
-// names agree; the first record out of order loads the index's catalog and a name lookup over it.
 const Pair = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -604,7 +579,6 @@ const Pair = struct {
     fasta_path: []const u8,
     selection: index_format.IndexSelection,
     stream: *index_format.EntryStream,
-    // The next entry in file order, read but not yet taken.
     head: ?*const index_format.EntryStream.Entry = null,
     catalog: ?index_format.LoadedIndex = null,
     lookup: ?Lookup = null,
@@ -614,7 +588,6 @@ const Pair = struct {
     matched: u64 = 0,
     omitted: u64 = 0,
 
-    // `heads` maps a name to its first entry not yet taken; `next` chains entries by name.
     const Lookup = struct {
         heads: std.StringHashMapUnmanaged(u32),
         next: []u32,
@@ -653,7 +626,6 @@ const Pair = struct {
         if (self.catalog) |*catalog| catalog.deinit();
     }
 
-    // Entries read so far: every entry once the scan completes, fewer when it stops early.
     fn entriesRead(self: *const Pair) u64 {
         return if (self.catalog) |*catalog| catalog.records.len() else self.stream.ordinal;
     }
@@ -662,7 +634,6 @@ const Pair = struct {
         return if (self.stream.source == .zfi) .zfi else .fai;
     }
 
-    // A later duplicate the index left out is `omitted`; so is any name whose entries are taken.
     fn associate(self: *Pair, name: []const u8, duplicate: bool) diagnostics.Error!Association {
         if (self.lookup == null) {
             if (self.head == null) self.head = try self.stream.next();
@@ -709,7 +680,6 @@ const Pair = struct {
         self.lookup = lookup;
     }
 
-    // The first difference between the indexed side table of `record` and the scanned one.
     fn sideTableDifference(self: *Pair, record: index_format.IndexRecord, observed: []const u8) diagnostics.Error!?diagnostics.SideTableMismatch {
         const lines = (observed.len - @sizeOf(u64)) / @sizeOf(fasta.LineEntry);
         const mapped: ?[]const index_format.SideTableLine = if (self.catalog) |*catalog| catalog.sideTableLines(record) else null;
@@ -736,7 +706,6 @@ const Scan = struct {
     budget: ?NameBudget = null,
     name_buf: std.ArrayList(u8) = .empty,
     first_duplicate: ?[]u8 = null,
-    // The fingerprint of the current record's identifier while its duplicate check waits.
     pending_name: ?u32 = null,
     file: ?NameSource,
     classes: [256]u8,
@@ -745,7 +714,6 @@ const Scan = struct {
     chosen: ?u1 = null,
     sample_counts: [256]u64 = @splat(0),
     sample_total: u64 = 0,
-    // Counts every byte of a line holding a symbol outside the alphabet; only outside bytes are read.
     byte_counts: [256]u64 = @splat(0),
     candidates: [2]Candidate = .{ .{}, .{} },
     last_records: [REPORT_CODES.len]u64 = @splat(0),
@@ -1177,8 +1145,7 @@ const Scan = struct {
         self.names = .stopped;
     }
 
-    // The duplicate check `endHeader` deferred, so the table slots it prefetched have arrived. It
-    // runs before anything reads `record.duplicate`: the next header, or the end of input.
+    // Runs before anything reads `record.duplicate`: at the next header or the end of input.
     fn checkPendingDuplicate(self: *Scan) diagnostics.Error!void {
         const fingerprint = self.pending_name orelse return;
         self.pending_name = null;
@@ -1270,7 +1237,6 @@ const Scan = struct {
         if (entry.first == null) entry.first = .{ .details = details, .at = at, .identifier = if (at.record != null) self.identifierPreview() else null };
     }
 
-    // Re-reading the source up to the first duplicate costs nothing on files without one.
     fn resolveFirstDefinition(self: *Scan) diagnostics.Error!void {
         const name = self.first_duplicate orelse return;
         const source = self.file orelse return;
@@ -1319,8 +1285,7 @@ const Scan = struct {
         }
     }
 
-    // Feeds `index`'s scanner the current window up to `to`. Fed through a header's `>`, it emits
-    // the record before that header while `record` still holds it.
+    // Fed through a header's `>`, the scanner emits the record before it while `record` holds it.
     fn advancePair(self: *Scan, to: u64) diagnostics.Error!void {
         const pair = self.pair orelse return;
         if (to <= pair.fed) return;
@@ -1389,7 +1354,6 @@ const Scan = struct {
         return .{ .offset = offset, .line = self.line_number, .column = offset - self.origin + 1 };
     }
 
-    // `start` in the current record, or in no record before the first header.
     fn inRecord(self: *const Scan, start: Position) diagnostics.Reference {
         return .{ .source = .fasta, .location = .{ .offset = start.offset, .line = start.line, .column = start.column }, .record = if (self.record.ordinal == 0) null else self.record.ordinal };
     }
@@ -1401,12 +1365,10 @@ const Scan = struct {
         return preview;
     }
 
-    // `offset` on the current line, in the current record.
     fn recordAt(self: *const Scan, offset: u64) diagnostics.Reference {
         return self.inRecord(self.position(offset));
     }
 
-    // `offset` on the current line, for a finding about the whole file.
     fn fileAt(self: *const Scan, offset: u64) diagnostics.Reference {
         const at = self.position(offset);
         return fileReference(at.offset, at.line, at.column);

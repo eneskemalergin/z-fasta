@@ -16,7 +16,6 @@ pub const diagnostics = @import("diagnostics");
 pub const ZFI_MAGIC: [4]u8 = .{ 'Z', 'F', 'I', 0x02 };
 
 pub const MAX_SIDE_TABLE_OFFSET = (1 << 39) - 1;
-/// The largest FASTA byte offset or sequence length a `.zfi` record holds.
 pub const MAX_ZFI_SOURCE_OFFSET = (1 << 48) - 1;
 pub const MAX_ZFI_NAME_OFFSET = (1 << 40) - 1;
 
@@ -62,8 +61,6 @@ pub const SideTableLine = extern struct {
     line_bases: u32,
 };
 
-/// Name offsets point into the `.zfi` blob or the mapped `.fai`; prefer `LoadedIndex.recordName`.
-/// A non-uniform record keeps no line geometry; its side table holds it.
 pub const IndexRecord = extern struct {
     name_offset: u64,
     name_len: u16,
@@ -108,10 +105,6 @@ pub fn encodeZfiHeader(header: ZfiHeader) [ZFI_HEADER_BYTES]u8 {
     return out;
 }
 
-/// A `.zfi` record. Bits 0-47 hold the sequence offset, 48-63 the name length, 64-111 the
-/// sequence length, and 112-151 the name's offset in the blob. Bit 191 marks a non-uniform record,
-/// whose side-table offset fills bits 152-190; a uniform record keeps its symbols per line in bits
-/// 152-183 and its line ending's bytes in 184-190.
 pub const ZfiRecord = extern struct {
     words: [3]u64,
 
@@ -151,11 +144,9 @@ pub const ZfiRecord = extern struct {
     }
 };
 
-/// Index entries: mapped in place from a `.zfi`, or held in memory.
 pub const Records = union(enum) {
     mapped: []const ZfiRecord,
     owned: []const IndexRecord,
-    /// A `.zfi` read on demand: only `LoadedIndex.checkedRecord` reaches its records.
     on_demand: usize,
 
     pub fn len(self: Records) usize {
@@ -174,11 +165,6 @@ pub const Records = union(enum) {
     }
 };
 
-/// The name table after the name blob: `slotCount(record_count)` little-endian `u32` slots. A
-/// slot is 0 when empty; otherwise its low `ordinalBits` bits hold a record's ordinal plus 1 and the
-/// bits above hold the low bits of the name's XXH3-64 hash (seed 0). A lookup starts at `home` and
-/// moves forward, wrapping. Records go in by ordinal, so the first match is the first record with
-/// that name.
 pub const NameTable = struct {
     pub fn slotCount(record_count: u64) u64 {
         return record_count + record_count / 4 + 1;
@@ -204,8 +190,6 @@ pub const NameTable = struct {
         slots: []u32,
         ordinal_bits: u6,
         count: u64 = 0,
-        /// Hashes not placed yet, oldest at `head`; their home slots were prefetched on arrival, so
-        /// the random slot reads overlap instead of stalling one at a time.
         queue: [QUEUE]u64 = undefined,
         head: usize = 0,
         queued: usize = 0,
@@ -229,7 +213,6 @@ pub const NameTable = struct {
             self.insertHash(hash(name));
         }
 
-        /// `insert` for a name whose `hash` the caller already has.
         pub fn insertHash(self: *Builder, name_hash: u64) void {
             @prefetch(&self.slots[@intCast(home(name_hash, self.slots.len))], .{ .rw = .write });
             if (self.queued == QUEUE) {
@@ -242,7 +225,6 @@ pub const NameTable = struct {
             }
         }
 
-        /// The finished table, every inserted name placed.
         pub fn finish(self: *Builder) []u32 {
             for (0..self.queued) |i| self.place(self.queue[(self.head + i) % QUEUE]);
             self.head = 0;
@@ -259,7 +241,6 @@ pub const NameTable = struct {
             self.count += 1;
             const entry: u32 = @intCast(fingerprint(name_hash, self.ordinal_bits) << self.ordinal_bits | self.count);
             var slot: usize = @intCast(home(name_hash, self.slots.len));
-            // Sixteen slots per step while they fit before the end; the single-slot walk wraps.
             while (slot + 16 <= self.slots.len) : (slot += 16) {
                 const window: @Vector(16, u32) = self.slots[slot..][0..16].*;
                 const empty: u16 = @bitCast(window == @as(@Vector(16, u32), @splat(0)));
@@ -281,24 +262,15 @@ pub const IndexSelection = union(enum) {
 };
 
 pub const LoadMode = union(enum) {
-    /// Finds any name: a `.zfi` through its name table, a `.fai` through a full map.
     lookup_full_map,
-    /// Checks every record and the `.zfi` name table, without a `.fai` lookup map.
     catalog,
-    /// Checks every record and keeps no names; a `.fai` is streamed.
     stats_scan,
-    /// A `.zfi` read on demand; from a `.fai`, only the first line for each name, checked. The
-    /// index borrows `names`, which must outlive it.
+    /// The index borrows `names`, which must outlive it.
     requested: []const []const u8,
-    /// Makes the file checks and leaves every entry to the stream, which checks each as it reads it.
     stream: StreamTarget,
-    /// A mapped `.zfi` with only its file checks; `checkedRecord` checks each record and side
-    /// table the first time it reads it, and lookups check what they probe. A `.fai` loads as for
-    /// `lookup_full_map`.
     on_access,
 };
 
-/// The stream a `.stream` load opens, and whether it rebuilds the `.zfi` name table to compare it.
 const StreamTarget = struct { entries: *EntryStream, check_name_table: bool = true };
 
 pub const LoadedIndex = struct {
@@ -317,20 +289,14 @@ pub const LoadedIndex = struct {
     zfi_side_end: usize = 0,
     name_table: []const u8 = &.{},
     name_table_offset: usize = 0,
-    /// Set for a `.zfi` loaded for `get`; every other load but `on_access` checks all records first.
     on_demand: ?*ZfiOnDemand = null,
-    /// One bit per record of an `on_access` `.zfi` or a lazily loaded `.fai`, set once
-    /// `checkedRecord` checked it.
     checked_records: []usize = &.{},
-    /// Where each line of a lazily loaded `.fai` starts; `checkedRecord` parses it when asked.
     fai_lines: []const FaiLine = &.{},
     source: IndexSource,
     arena: std.heap.ArenaAllocator,
 
     pub const IndexSource = enum { zfi, fai };
 
-    /// Record `rec_idx`; a `.zfi` loaded for `get` or `on_access` checks it and its side table
-    /// first.
     pub fn checkedRecord(self: *const LoadedIndex, rec_idx: usize, failure: *diagnostics.Failure) diagnostics.Error!IndexRecord {
         var context = Diagnostics{ .failure = failure, .at = .{ .source = .zfi } };
         if (self.on_demand) |zfi| return zfi.checked(rec_idx, &context);
@@ -345,8 +311,6 @@ pub const LoadedIndex = struct {
         return rec;
     }
 
-    /// The first record named `name`. A `.zfi` looks it up in its name table, and a damaged table
-    /// entry or record name fails with its index diagnostic.
     pub fn findName(self: *const LoadedIndex, name: []const u8, failure: *diagnostics.Failure) diagnostics.Error!?usize {
         if (self.on_demand) |zfi| {
             var context = Diagnostics{ .failure = failure, .at = .{ .source = .zfi } };
@@ -368,15 +332,13 @@ pub const LoadedIndex = struct {
         }
     }
 
-    /// Resolves a request batch's names with few reads through `buffer`, for `findNameAt` with the
-    /// same slices; the results borrow the bytes of `names` until `clearPrefetch`.
+    /// The results borrow `names` until `clearPrefetch`.
     pub fn prefetchNames(self: *const LoadedIndex, names: []const []const u8, buffer: []u8) void {
         const zfi = self.on_demand orelse return;
         zfi.prefetch(names, buffer) catch zfi.clearPrefetch();
     }
 
-    /// `findName` for request `request` of the batch given to `prefetchNames`; `name` must be that
-    /// request's slice. The record it finds is the one `checkedRecord` reads next.
+    /// `name` must be the slice of request `request` given to `prefetchNames`.
     pub fn findNameAt(self: *const LoadedIndex, request: usize, name: []const u8, failure: *diagnostics.Failure) diagnostics.Error!?usize {
         const zfi = self.on_demand orelse return self.findName(name, failure);
         var context = Diagnostics{ .failure = failure, .at = .{ .source = .zfi } };
@@ -416,7 +378,6 @@ pub const LoadedIndex = struct {
         return if (self.source == .zfi) self.name_blob.? else self.fai_data.?;
     }
 
-    /// Null when the load mode did not keep this record's name.
     pub fn recordName(self: *const LoadedIndex, rec_idx: usize) ?[]const u8 {
         if (rec_idx >= self.records.len() or self.on_demand != null) return null;
         if (self.name_slices.len > 0) {
@@ -461,7 +422,7 @@ pub const LoadedIndex = struct {
         self.fasta_file.close(self.io);
     }
 
-    /// The first record named `name`; null also when a `.zfi` name table entry is damaged.
+    /// Null also when a `.zfi` name table entry is damaged.
     pub fn lookupName(self: *const LoadedIndex, name: []const u8) ?usize {
         if (self.on_demand != null) {
             var failure: diagnostics.Failure = undefined;
@@ -514,14 +475,11 @@ pub const LoadedIndex = struct {
     }
 };
 
-/// A `.zfi` loaded for `get`, read through small positional reads: memory stays with what the
-/// requests reach. Each record and side table is checked on first use, and each name-table entry
-/// and name when a lookup reaches it, with the diagnostics a whole-file check would report.
 const ZfiOnDemand = struct {
     io: std.Io,
     file: std.Io.File,
     backing_allocator: std.mem.Allocator,
-    /// Side tables and the name table copy; lives at the struct's fixed heap address.
+    // The struct must not move: its arena holds the side tables it hands out.
     arena: std.heap.ArenaAllocator,
     record_count: u32,
     fasta_size: u64,
@@ -532,9 +490,7 @@ const ZfiOnDemand = struct {
     table_start: usize,
     table_slots: u64,
     side_tables: std.AutoHashMapUnmanaged(u64, CheckedSides) = .empty,
-    /// The record a lookup last read, which a request checks next.
     last: ?struct { index: usize, record: IndexRecord } = null,
-    /// What `prefetch` found for each request of the current batch, with the start of its name.
     prefetched: []const Prefetched = &.{},
     prefetched_names: []const [*]const u8 = &.{},
     prefetched_candidates: []const Candidate = &.{},
@@ -547,14 +503,11 @@ const ZfiOnDemand = struct {
 
     const CheckedSides = struct { seq_offset: u64, seq_len: u64, lines: []const SideTableLine };
 
-    /// `unknown` leaves the request to `find`, which reports any damage on its path; `found` names
-    /// the candidate that matched.
     const Prefetched = struct {
         state: enum(u8) { unknown, missing, found } = .missing,
         candidate: u32 = 0,
     };
 
-    /// A table entry whose stored hash bits match a requested name.
     const Candidate = struct { request: u32, ordinal: u32, record: ZfiRecord = undefined };
 
     fn read(self: *ZfiOnDemand, offset: u64, buffer: []u8, context: *Diagnostics) diagnostics.Error![]u8 {
@@ -596,8 +549,6 @@ const ZfiOnDemand = struct {
         return rec;
     }
 
-    // Checks `lines`, the side table of `rec` that starts at `count_end`, and keeps it for the
-    // record's later requests.
     fn keepSideTable(self: *ZfiOnDemand, rec: IndexRecord, count_end: usize, lines: []const SideTableLine, context: *Diagnostics) diagnostics.Error!void {
         var validation = SideTableValidation{};
         for (lines, 0..) |line, i| {
@@ -608,8 +559,6 @@ const ZfiOnDemand = struct {
         self.side_tables.put(self.arena.allocator(), rec.sideTableOffset(), .{ .seq_offset = rec.seq_offset, .seq_len = rec.seq_len, .lines = lines }) catch return context.allocation(.side_tables, null);
     }
 
-    // The side tables of the records `prefetch` found, in file order through merged reads; a table
-    // that is damaged or does not fit a read is left to `checked`, which reports why.
     fn prefetchSideTables(self: *ZfiOnDemand, keys: []u64, scratch: []u64, candidates: []const Candidate, buffer: []u8) error{OutOfMemory}!void {
         radixSort(keys, scratch[0..keys.len], 24);
         var failure: diagnostics.Failure = undefined;
@@ -641,13 +590,8 @@ const ZfiOnDemand = struct {
         }
     }
 
-    /// Resolves `names` with reads sorted by position and merged across gaps of at most
-    /// `PREFETCH_GAP_BYTES`, through `buffer`, so a large request batch costs few reads. The results
-    /// borrow the bytes of `names`. Best effort: a name whose table entries, record, or bytes are
-    /// damaged or unreadable stays `unknown`, and its sequential lookup reports why.
     fn prefetch(self: *ZfiOnDemand, names: []const []const u8, buffer: []u8) error{OutOfMemory}!void {
         self.clearPrefetch();
-        // Each sort key holds a position (home slot, ordinal, name offset) above an item index.
         const request_bits = 30;
         if (names.len >= 1 << request_bits or buffer.len < PREFETCH_PROBE_SLOTS * 4) return;
         const allocator = self.prefetch_arena.allocator();
@@ -665,13 +609,10 @@ const ZfiOnDemand = struct {
         }
         radixSort(keys, scratch, request_bits);
 
-        // Name table. A window starts at the first slot a probe needs and reaches the homes that
-        // follow it closely; a probe that runs past its end reads a new one.
         var candidates: std.ArrayList(Candidate) = .empty;
         const buffer_slots = buffer.len / 4;
         var window_start: u64 = 0;
         var window_len: u64 = 0;
-        // A repeated name shares the lookup of its first request; repeats sort next to each other.
         const leader = try allocator.alloc(u32, names.len);
         var previous: ?u32 = null;
         var previous_home: u64 = 0;
@@ -719,9 +660,6 @@ const ZfiOnDemand = struct {
                     results[request].state = .unknown;
                     break;
                 }
-                // The first entry with the name's hash bits is almost always the name: other names
-                // share those bits once in 2^(32 - ordinal bits) entries. When it is not, the name
-                // goes to `find`, which walks on.
                 if (value >> ordinal_bits == wanted[request]) {
                     try candidates.append(allocator, .{ .request = request, .ordinal = @intCast(ordinal_plus_one - 1) });
                     break;
@@ -731,7 +669,6 @@ const ZfiOnDemand = struct {
         }
         if (candidates.items.len >= 1 << 24) return self.clearPrefetch();
 
-        // Records, in ordinal order; a candidate whose name length matches moves on to the names.
         const order = try allocator.alloc(u64, candidates.items.len);
         if (scratch.len < order.len) scratch = try allocator.alloc(u64, order.len);
         for (order, candidates.items, 0..) |*key, candidate, c| key.* = @as(u64, candidate.ordinal) << 32 | c;
@@ -771,7 +708,6 @@ const ZfiOnDemand = struct {
             i = j + 1;
         }
 
-        // Names, in blob order; a stored name that differs leaves its request to `find`.
         const matches = order[0..named];
         radixSort(matches, scratch[0..named], 24);
         const nameEnd = struct {
@@ -852,7 +788,6 @@ const ZfiOnDemand = struct {
         return self.find(name, context);
     }
 
-    // Compares the stored name at `offset` with `name`, a buffer at a time.
     fn nameEquals(self: *ZfiOnDemand, offset: u64, name: []const u8, context: *Diagnostics) diagnostics.Error!bool {
         var done: usize = 0;
         while (done < name.len) {
@@ -906,10 +841,6 @@ const ZfiOnDemand = struct {
     }
 };
 
-/// Sorts `keys` ascending by their bits from `low_bit` up, 11 bits per pass, or 8 below 4,096 keys,
-/// where clearing the larger count table would cost more than the extra passes. Each pass is
-/// stable, so keys equal above `low_bit` keep their order: callers put an item index below it.
-/// For the key counts a request batch makes, this beats `std.mem.sortUnstable` several times over.
 fn radixSort(keys: []u64, scratch: []u64, low_bit: u7) void {
     std.debug.assert(scratch.len == keys.len);
     var used: u64 = 0;
@@ -939,9 +870,7 @@ fn radixSort(keys: []u64, scratch: []u64, low_bit: u7) void {
     if (source.ptr != keys.ptr) @memcpy(keys, source);
 }
 
-/// Every index entry in file order, through fixed buffers. `open` makes `loadIndex`'s file checks;
-/// `next` checks each entry as `loadIndex` does, so a damaged one fails where it is read. An
-/// `EntryStream` must not move after `open`.
+/// Must not move after `open`.
 pub const EntryStream = struct {
     io: std.Io,
     file: std.Io.File,
@@ -956,7 +885,6 @@ pub const EntryStream = struct {
     blob_start: usize = 0,
     blob_len: usize = 0,
     table_start: usize = 0,
-    /// The name table rebuilt from the entries read so far; compared with the stored one at the end.
     table: ?NameTable.Builder = null,
     allocator: std.mem.Allocator = undefined,
     previous_side_end: usize = 0,
@@ -965,8 +893,7 @@ pub const EntryStream = struct {
     row: u64 = 0,
     entry: Entry = undefined,
 
-    /// `next` returns the stream's copy, valid until the next call. `name` borrows the stream;
-    /// `offset` is where the entry starts in the index file, and `ordinal` counts entries from 1.
+    /// Valid until the next `next`; `name` borrows the stream.
     pub const Entry = struct { record: IndexRecord, name: []const u8, offset: u64, ordinal: u64 };
 
     pub fn open(self: *EntryStream, allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, selection: IndexSelection, failure: *diagnostics.Failure) diagnostics.Error!void {
@@ -974,9 +901,7 @@ pub const EntryStream = struct {
         shell.deinit();
     }
 
-    /// `open` without the `.zfi` name-table check, keeping the FASTA the index was checked against
-    /// open for the caller, who closes it. `.zfi` entries then come without names; `entryName`
-    /// reads one.
+    /// Leaves the FASTA open for the caller to close; `.zfi` entries then come without names.
     pub fn openWithFasta(self: *EntryStream, allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, selection: IndexSelection, failure: *diagnostics.Failure) diagnostics.Error!std.Io.File {
         var shell = try loadIndex(allocator, io, fasta_path, selection, .{ .stream = .{ .entries = self, .check_name_table = false } }, failure);
         shell.arena.deinit();
@@ -996,20 +921,17 @@ pub const EntryStream = struct {
         };
     }
 
-    /// The entry's name, read from a `.zfi` opened by `openWithFasta`; it borrows the stream until
-    /// the next call.
+    /// Borrows the stream until the next call.
     pub fn entryName(self: *EntryStream, entry: *const Entry) diagnostics.Error![]const u8 {
         if (self.source == .fai or self.table != null) return entry.name;
         self.context.at = .{ .source = .zfi, .record = entry.ordinal, .location = .{ .offset = entry.offset } };
         return self.names.take(self.blob_start + entry.record.name_offset, entry.record.name_len, &self.context);
     }
 
-    /// The side table of a `.zfi` entry that does not use the uniform formula: its line count.
     pub fn sideLineCount(self: *EntryStream, record: IndexRecord) diagnostics.Error!u64 {
         return std.mem.readInt(u64, (try self.sides.take(record.sideTableOffset(), 8, &self.context))[0..8], .little);
     }
 
-    /// Line `index`, from 0, of the entry's side table; lines read in order cost one read per window.
     pub fn sideLine(self: *EntryStream, record: IndexRecord, index: u64) diagnostics.Error!SideTableLine {
         const offset = record.sideTableOffset() + 8 + index * @sizeOf(SideTableLine);
         return std.mem.bytesToValue(SideTableLine, try self.sides.take(offset, @sizeOf(SideTableLine), &self.context));
@@ -1021,7 +943,7 @@ pub const EntryStream = struct {
         self.reader = file.reader(io, &self.buffers[0]);
     }
 
-    // The checks `tryLoadZfi` makes before its records, in its order.
+    // Mirrors `tryLoadZfi`'s checks before its records, in its order.
     fn startZfi(self: *EntryStream, allocator: std.mem.Allocator, io: std.Io, path: []const u8, zfi_size: u64, fasta_size: u64, fasta_mtime_ns: i96, check_name_table: bool, context: *Diagnostics) diagnostics.Error!void {
         try self.start(io, path, .zfi, fasta_size, context);
         errdefer self.file.close(io);
@@ -1057,7 +979,7 @@ pub const EntryStream = struct {
         self.remaining = header.record_count;
     }
 
-    // The checks `validateZfiRecords` makes for one record, in its order.
+    // Mirrors `validateZfiRecords`'s checks for one record, in its order.
     fn nextZfi(self: *EntryStream) diagnostics.Error!?*const Entry {
         if (self.remaining == 0) {
             if (self.table) |*table| {
@@ -1079,7 +1001,6 @@ pub const EntryStream = struct {
             }
         };
         const record = std.mem.bytesToValue(ZfiRecord, bytes).decode();
-        // A sound uniform record, nearly every one, is checked without the diagnostic context.
         const plain = record.isUniformWidth() and nameExtentDefect(record, self.blob_len) == null and uniformGeometryDefect(record, self.fasta_size) == null;
         if (!plain) {
             context.at = .{ .source = .zfi, .record = self.ordinal + 1, .location = .{ .offset = offset } };
@@ -1119,7 +1040,7 @@ pub const EntryStream = struct {
         }
     }
 
-    // The checks `tryLoadFai` makes for one row, in its order.
+    // Mirrors `tryLoadFai`'s checks for one row, in its order.
     fn nextFai(self: *EntryStream) diagnostics.Error!?*const Entry {
         const context = &self.context;
         while (true) {
@@ -1158,7 +1079,6 @@ pub const EntryStream = struct {
     }
 };
 
-// What `loadIndex` returns in `.stream` mode: the open FASTA, with every entry left to the stream.
 fn streamShell(allocator: std.mem.Allocator, io: std.Io, fasta_file: std.Io.File, fasta_size: u64, source: LoadedIndex.IndexSource) LoadedIndex {
     return .{ .io = io, .fasta_file = fasta_file, .records = .{ .owned = &.{} }, .fasta_size = fasta_size, .zfi_data = null, .source = source, .arena = .init(allocator) };
 }
@@ -1171,7 +1091,6 @@ pub fn loadIndex(
     mode: LoadMode,
     failure: *diagnostics.Failure,
 ) diagnostics.Error!LoadedIndex {
-    // A second load of the same index in one operation keeps the first registration.
     switch (selection) {
         .automatic => {},
         .zfi => |path| if (failure.sources.get(.zfi) == null) failure.sources.set(.zfi, .{ .label = .{ .borrowed = path }, .kind = .path }),
@@ -1244,7 +1163,6 @@ const ZfiTrailingMeta = struct {
     source_mtime_offset: usize,
 };
 
-// The source identity and name footer that end `zfi_data`.
 fn parseZfiTrailingMeta(zfi_data: []const u8) ?ZfiTrailingMeta {
     if (zfi_data.len < ZFI_TRAILER_BYTES) return null;
     const trailer = zfi_data[zfi_data.len - ZFI_TRAILER_BYTES ..];
@@ -1362,8 +1280,6 @@ const Diagnostics = struct {
 
 const ZfiNameRegions = struct { blob_start: usize, blob_len: usize, table_start: usize, table_len: usize };
 
-// The name blob and name table that end at `payload_end`: the table's size follows from the record
-// count, and the blob ends where the table starts.
 fn zfiNameRegions(payload_end: usize, name_blob_len: u64, record_count: u32, records_end: usize) union(enum) { regions: ZfiNameRegions, invalid: diagnostics.Details } {
     const table_len: usize = @intCast(NameTable.slotCount(record_count) * 4);
     if (payload_end < records_end or payload_end - records_end < table_len) return .{ .invalid = .{ .@"index.truncated" = .{ .section = .name_table, .required_end = @as(u128, records_end) + table_len, .available_end = payload_end } } };
@@ -1393,7 +1309,6 @@ fn tryLoadZfi(
         error.FileNotFound => return null,
         else => return context.ioFailure(.open, err),
     };
-    // An index read on demand keeps the file.
     var keep_file = false;
     defer if (!keep_file) zfi_file.close(io);
 
@@ -1495,8 +1410,6 @@ fn tryLoadZfi(
     };
 }
 
-// The file checks of `tryLoadZfi`, in its order, through positional reads; records are left for
-// `ZfiOnDemand` to check as requests reach them.
 fn openZfiOnDemand(backing_allocator: std.mem.Allocator, io: std.Io, file: std.Io.File, zfi_size: u64, fasta_file: std.Io.File, fasta_stat: std.Io.File.Stat, context: *Diagnostics) diagnostics.Error!LoadedIndex {
     const size = std.math.cast(usize, zfi_size) orelse return context.capacity(.map_bytes, std.math.maxInt(usize), zfi_size);
     context.at.location.offset = 0;
@@ -1666,7 +1579,6 @@ fn sideTableExtent(rec: IndexRecord, side_start: usize, side_end: usize, count: 
     return end;
 }
 
-// Checks a side table read through `source`; returns its end, with the location at its start.
 fn checkSideTable(source: anytype, rec: IndexRecord, side_start: usize, side_end: usize, fasta_len: u64, context: *Diagnostics) diagnostics.Error!usize {
     const count_end = try sideTableExtent(rec, side_start, side_end, null, context);
     const offset: usize = @intCast(rec.sideTableOffset());
@@ -1693,7 +1605,6 @@ const MappedSideTables = struct {
     }
 };
 
-// A streamed `.zfi` header: magic, source size, record count, and room for the records.
 fn checkZfiHeader(header: ZfiHeader, fasta_size: u64, zfi_size: usize, context: *Diagnostics) diagnostics.Error!usize {
     try checkZfiMagic(header.magic, context);
     context.at.location.offset = 8;
@@ -1720,8 +1631,6 @@ fn checkSourceTime(stored: u64, actual: i128, context: *Diagnostics) diagnostics
 
 const ZfiNameBlob = struct { regions: ZfiNameRegions, trailing: ZfiTrailingMeta };
 
-// The name blob and table of a `.zfi` from the file's last bytes (`tail_bytes`, which start at
-// `tail_start`). A trailer that cannot be followed comes back as `invalid`.
 fn locateZfiNameBlob(tail_bytes: []const u8, tail_start: usize, zfi_size: usize, record_count: u32, records_end: usize, context: *Diagnostics) union(enum) { blob: ZfiNameBlob, invalid: diagnostics.Details } {
     context.at.location.offset = zfi_size;
     var trailing = parseZfiTrailingMeta(tail_bytes) orelse return .{ .invalid = .{ .@"index.name_footer_missing" = {} } };
@@ -1870,8 +1779,6 @@ fn faiLineName(line: []const u8) []const u8 {
     return line;
 }
 
-// The lines of a mapped `.fai`, for any-name lookups: each name goes into the name map (first line
-// wins) and each line's start is kept; `checkedRecord` parses and checks a line when it is used.
 fn loadFaiLazy(allocator: std.mem.Allocator, data: []const u8, context: *Diagnostics) diagnostics.Error!struct { lines: []const FaiLine, map: std.StringHashMapUnmanaged(u32), checked: []usize } {
     var lines: std.ArrayList(FaiLine) = .empty;
     var map: std.StringHashMapUnmanaged(u32) = .empty;
@@ -1958,7 +1865,7 @@ fn loadFaiStreamed(
         var long_fields: ?FaiLineFields = null;
         const available = file_reader.interface.buffered();
         var name_end: ?usize = null;
-        // Inlined: as a call per line, the scan of a transcriptome `.fai` took 7 M more instructions.
+        // Inlined: a call per line is a measured cost on large `.fai` files.
         const maybe_line = if (@call(.always_inline, faiLineBreaks, .{available})) |breaks| buffered: {
             file_reader.interface.toss(breaks.end + 1);
             name_end = breaks.tab orelse breaks.end;
@@ -1979,7 +1886,6 @@ fn loadFaiStreamed(
         context.at.record = record_number;
         saw_record = true;
 
-        // GET parses and checks only the lines it retains, and stops once every name is found.
         var matched: ?std.StringHashMapUnmanaged(u32).Entry = null;
         if (mode != .stats_scan) {
             const name = if (long_fields != null) line else line[0 .. name_end orelse std.mem.findScalar(u8, line, '\t') orelse line.len];
@@ -2099,7 +2005,6 @@ fn faiIntegerFailure(text: []const u8, field: diagnostics.FaiField, max: u64, co
     return context.fail(.{ .@"index.fai.integer_out_of_range" = .{ .field = field, .max_value = max, .value = preview } });
 }
 
-// The end of the first line of `bytes` and the tab before it, if any, in one pass.
 fn faiLineBreaks(bytes: []const u8) ?struct { tab: ?usize, end: usize } {
     const Block = @Vector(32, u8);
     var tab: ?usize = null;
@@ -2120,8 +2025,6 @@ fn faiLineBreaks(bytes: []const u8) ?struct { tab: ?usize, end: usize } {
     return null;
 }
 
-/// A 65,536-bit filter over requested names, keyed by length and the first 16 and last 8 bytes;
-/// a `.fai` line whose name it rules out skips the hash lookup.
 const NamePrefilter = struct {
     bits: [1024]u64 = .{0} ** 1024,
 
@@ -2270,8 +2173,6 @@ fn recordReference(index: usize) diagnostics.Reference {
     return .{ .source = .zfi, .record = index + 1, .location = .{ .offset = ZFI_HEADER_BYTES + index * ZFI_INDEX_RECORD_BYTES } };
 }
 
-// Checks record `index` of a mapped `.zfi`: its name, then its geometry or its whole side table.
-// Returns the side table's end, or null for a uniform record.
 fn checkZfiRecord(data: []const u8, rec: IndexRecord, index: usize, fasta_len: u64, blob_len: usize, side_start: usize, side_end: usize, context: *Diagnostics) diagnostics.Error!?usize {
     context.at = recordReference(index);
     try checkNameExtent(rec, blob_len, context);
@@ -2283,7 +2184,6 @@ fn checkZfiRecord(data: []const u8, rec: IndexRecord, index: usize, fasta_len: u
     return try checkSideTable(MappedSideTables{ .data = data }, rec, side_start, side_end, fasta_len, context);
 }
 
-// Rebuilds the name table from the records and compares it with the stored one, slot by slot.
 fn verifyNameTable(allocator: std.mem.Allocator, records: Records, blob: []const u8, table: []const u8, table_offset: usize, context: *Diagnostics) diagnostics.Error!void {
     var expected = NameTable.Builder.init(allocator, records.len()) catch return context.allocation(.name_map, table.len);
     defer expected.deinit(allocator);
@@ -2291,7 +2191,6 @@ fn verifyNameTable(allocator: std.mem.Allocator, records: Records, blob: []const
     try compareNameTable(expected.bytes(), table, table_offset, 0, context);
 }
 
-// Compares the table bytes from `first_byte` on; both slices start at the same slot boundary.
 fn compareNameTable(expected: []const u8, stored: []const u8, table_start: usize, first_byte: usize, context: *Diagnostics) diagnostics.Error!void {
     std.debug.assert(expected.len == stored.len and first_byte % 4 == 0);
     if (std.mem.indexOfDiff(u8, expected, stored)) |byte| {

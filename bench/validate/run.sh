@@ -1,42 +1,9 @@
 #!/usr/bin/env bash
-# Validate benchmark runner: correctness, then zebrac time and memory, then REPORT.md.
-#
-# Usage:
-#   bash bench/validate/run.sh [options]
-#
-# Sampling:
-#   --runs 5              measured samples per command
-#   --warmup 3            unmeasured warmups before sampling
-#   --duration 5000       sampling budget per command, capped by --runs
-#
-# Correctness runs `z-fasta validate --json` on proteome copies with one injected defect each
-# and on the shared messy layouts, and compares the exit status and finding codes with values
-# derived from how each input is built. It checks that validate accepts the real
-# and messy files that `index` accepts and that `validate --index` matches each index built,
-# and compares verdicts with samtools faidx (line layout) and SeqKit seq -v (alphabet) where
-# their rules match validate's.
-#
-# Common invocations:
-#   bash bench/validate/run.sh
-#   bash bench/validate/run.sh --skip-benchmarks --skip-report   # correctness only
-#   bash bench/validate/run.sh --skip-tests --skip-report         # performance only
-#
-# Skip flags:
-#   --skip-tests --skip-benchmarks --skip-messy --skip-report
-#   --skip-messy is accepted for suite parity; this suite has no messy performance section.
-#
-# Outputs:
-#   results/run_<ts>.json          run settings, tool versions, and sections
-#   results/metadata_<ts>.jsonl    command and workload metadata
-#   results/perf_<ts>/             raw zebrac JSON
-#   results/tests_<ts>.tsv         correctness checks
-#   results/verify_<ts>.log        correctness log
-#   results/LATEST                 newest run
-#   REPORT.md                      benchmark report
-#
-# Work files live under bench/validate/data/ (ignored) and are overwritten by each run.
-#
-#   -h|--help  print this header
+# Validate benchmark: correctness against index, samtools faidx, and seqkit, then performance.
+# Usage: bash bench/validate/run.sh [options]   (ZFASTA, ZEBRAC select the binaries)
+#   --runs N --warmup N --duration MS      sampling (defaults 5, 3, 5000)
+#   --skip-tests --skip-benchmarks --skip-report   (--skip-messy is accepted; no messy section)
+# Results go to results/, the report to REPORT.md.
 
 set -euo pipefail
 
@@ -68,7 +35,7 @@ while [[ $# -gt 0 ]]; do
         --skip-messy) shift ;;
         --skip-report) DO_REPORT=false; shift ;;
         -h|--help)
-            sed -n '2,/^set -euo pipefail$/p' "$0" | head -n -1
+            sed -n '2,/^set -euo pipefail$/{/^#/s/^# \{0,1\}//p}' "$0"
             exit 0
             ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -107,8 +74,7 @@ observe() {
 
 section_hdr() { echo ""; echo "--- [$1] $2 ---"; }
 
-# Prints "<exit>\t<errors>\t<codes>" for one validate run: whether any error-level code
-# occurred ("yes" or "no"), and the codes that occurred, sorted, or "none".
+# Prints "<exit>\t<errors>\t<codes>" for one validate run.
 validate_summary() {
     local file="$1"; shift
     local json status=0
@@ -169,7 +135,6 @@ index_verdict() {
     if TMPDIR="$WORK_DIR" "$ZFASTA" index "$WORK_DIR/$name" > /dev/null 2>&1; then echo accept; else echo reject; fi
 }
 
-# The index_match state validate --index reports for a file index_verdict indexed in WORK_DIR.
 pair_verdict() {
     "$ZFASTA" validate --json --index "$WORK_DIR/$1" 2>/dev/null | "$PYTHON" -c '
 import json, sys
@@ -240,12 +205,10 @@ for name, data in cases.items():
 PY
 }
 
-# Bytes of sequence lines outside the byte set $2 (line ends and spaces excluded), by tr.
 outside_count() {
     LC_ALL=C grep -v '^>' "$1" | LC_ALL=C tr -d "$2"$'\n\r \t' | wc -c | tr -d ' '
 }
 
-# One value from validate's JSON report: the Python expression $2 over `v` (the validation object).
 validate_value() {
     local file="$1" expr="$2"; shift 2
     "$ZFASTA" validate --json "$@" "$file" 2>/dev/null | "$PYTHON" -c '
@@ -256,7 +219,7 @@ occ = lambda code: int(codes[code]["occurrences"]) if code in codes else 0
 print(eval(sys.argv[1]))' "$expr"
 }
 
-# Each record joined onto one line after its header, so two layouts of the same records compare equal.
+# Each record on one line after its header, so two layouts of the same records compare equal.
 joined_records() {
     LC_ALL=C tr -d '\r \t' < "$1" | awk '/^>/ { if (n) print seq; print; seq = ""; n = 1; next } { seq = seq $0 } END { if (n) print seq }'
 }
@@ -291,7 +254,6 @@ check_real_flags() {
     esac
     record flags "$ds" "--type any" 0 "$(validate_value "$file" 'occ("sequence.invalid_symbol")' --type any)"
 
-    # A repaired copy keeps every record, wraps at the width, and is clean.
     if [[ "$ds" != Genome ]]; then
         local fixed="$WORK_DIR/fixed_$ds.fa"
         "$ZFASTA" validate --fix --width 80 -o "$fixed" "$file" > /dev/null 2>&1 || true
@@ -302,7 +264,6 @@ check_real_flags() {
             "$( [[ "$same" == yes ]] && echo same || echo different ) records; widest $widest; exit $("$ZFASTA" validate --strict "$fixed" > /dev/null 2>&1; echo $?)"
     fi
 
-    # --index=PATH checks the named .fai although a .zfi sits beside the FASTA.
     local view="$WORK_DIR/explicit_$ds.fa"
     ln -sfn "$file" "$view"
     TMPDIR="$WORK_DIR" "$ZFASTA" index "$view" > /dev/null 2>&1
@@ -310,7 +271,6 @@ check_real_flags() {
     record flags "$ds" "--index=PATH" "fai; passed" \
         "$(validate_value "$view" 'v["index"]["format"] + "; " + v["checks"]["index_match"]' "--index=$WORK_DIR/explicit_$ds.fai")"
 
-    # A refused repair is a JSON failure on stderr and leaves the input as it was.
     local before after code
     before="$(stat -c '%s %Y' "$file")"
     code="$("$ZFASTA" validate --error-format=json --fix -o "$file" "$file" 2>&1 > /dev/null | "$PYTHON" -c 'import json, sys; print(json.load(sys.stdin)["failure"]["primary"]["code"])')"

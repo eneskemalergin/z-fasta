@@ -348,17 +348,12 @@ fn expectCorruptFaiFixture(allocator: std.mem.Allocator, stem: []const u8, code:
     try expectLoadFailure(std.testing.allocator, paths.fasta_path, .catalog, code);
 }
 
-// Record `i` through `checkedRecord`, which every load mode answers.
 fn recordAt(index: *const main.index_format.LoadedIndex, i: usize) !main.index_format.IndexRecord {
     var failure: diagnostics.Failure = undefined;
     failure.reset(.get);
     return index.checkedRecord(i, &failure);
 }
 
-// A load that checks every record must fail with `code`; a `.zfi` load that checks records only as
-// requests reach them must fail with it at the first damaged record.
-
-// A load that fails before returning an index, with `code` as its primary failure.
 fn expectLoadFailure(allocator: std.mem.Allocator, path: []const u8, mode: main.index_format.LoadMode, code: diagnostics.Code) !void {
     var failure: diagnostics.Failure = undefined;
     failure.reset(if (mode == .stats_scan) .stats else .get);
@@ -366,7 +361,6 @@ fn expectLoadFailure(allocator: std.mem.Allocator, path: []const u8, mode: main.
     try std.testing.expectEqual(code, failure.primary().?.code());
 }
 
-// Moves the index's time past the FASTA's, so a check after the age check decides.
 fn keepIndexNewer(index_path: []const u8, fasta_path: []const u8) !void {
     const later = std.Io.Timestamp.fromNanoseconds(@as(i96, @intCast(try statMtimeNs(fasta_path) + std.time.ns_per_s)));
     try std.Io.Dir.cwd().setTimestamps(io, index_path, .{ .modify_timestamp = .{ .new = later } });
@@ -3782,7 +3776,6 @@ test "[failure] - [index]: every allocation failure is reported and released" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    // Side tables for `.zfi`; uniform lines, which `--emit-fai` needs.
     for ([_][]const u8{ ">a\nACGT\nAC\n>b\nGG\nG\nGG\n", ">a\nACGT\nAC\n>b\nGGG\n" }, [_]bool{ false, true }) |data, emit_fai| {
         const path = try writeFastaArtifact(allocator, "index-allocation", data);
         defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
@@ -4093,7 +4086,6 @@ test "[failure] - [zfi name table]: a damaged table fails in every mode that rea
     const original = try zfiBytes(allocator, &index, fasta.len, 0);
     const table_len = 4 * main.index_format.NameTable.slotCount(3);
     const table_start = original.len - 24 - table_len;
-    // An entry that names record 9 of 3, then a valid table shuffled so `b` points at `c`.
     for ([_]enum { out_of_range, wrong_record }{ .out_of_range, .wrong_record }) |defect| {
         const bytes = try allocator.dupe(u8, original);
         var slot: usize = 0;
@@ -4262,7 +4254,6 @@ test "[failure] - [zfi name table]: batch prefetch leaves a damaged side table t
     const allocator = arena.allocator();
     const fasta = ">a\nACG\nTACGT\nA\n>b\nGG\nGGG\nG\n>c\nT\n";
     var index = try main.indexer.scanZfiData(allocator, fasta);
-    // The second side table's first line now covers no bytes.
     const second = index.records.items[1].sideTableOffset() - (16 + index.records.items.len * 24);
     std.mem.writeInt(u32, index.side_tables.items[@intCast(second + 8 + 16)..][0..4], 0, .little);
     const bytes = try zfiBytes(allocator, &index, fasta.len, 0);
@@ -4290,8 +4281,7 @@ test "[edge] - [zfi name table]: batch prefetch hands a hash-bit match with anot
     const fasta = ">a\nACGT\n>b\nGG\n>c\nT\n";
     var index = try main.indexer.scanZfiData(allocator, fasta);
     const bytes = try zfiBytes(allocator, &index, fasta.len, 0);
-    // Rebuild the table with an entry at b's home slot that has b's hash bits but points at a, as a
-    // name whose hash bits match b's would.
+    // An entry at b's home slot with b's hash bits that points at a, as a colliding name's would.
     const slots = main.index_format.NameTable.slotCount(3);
     const table = bytes[bytes.len - 24 - slots * 4 ..][0 .. slots * 4];
     @memset(table, 0);

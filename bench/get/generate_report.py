@@ -29,7 +29,6 @@ DATASET_ORDER = ["Genome", "Transcriptome", "Proteome"]
 BASELINE = "z-fasta-default"
 BASELINE_LABEL = "z-fasta (.zfi)"
 
-# Positional charts: indexed tools + reference seqtk + fastahack on full_seq.
 POS_CHART_TOOLS = [
     "z-fasta-default",
     "z-fasta-fai",
@@ -49,15 +48,11 @@ REGION_LABELS = {
 
 REFERENCE_TOOLS = frozenset({"seqtk-reference", "fastahack-reference"})
 
-# RC chart only: plain z-fasta is a no-transform baseline (hatch like seqtk)
-# so it does not blend with the three transform modes.
 RC_BASELINE_TOOLS = frozenset({"z-fasta-default"})
 
-# BED batch: 1 kbp per row (see run.sh / verify bed fixtures).
 BED_BASES_PER_ROW = 1000
 BED_ROW_ORDER = [10, 100, 1000, 10000]
 
-# BED chart and table peers.
 BED_HEADLINE_TOOLS = [
     "z-fasta-default",
     "z-fasta-fai",
@@ -67,7 +62,6 @@ BED_HEADLINE_TOOLS = [
     "samtools",
     "bedtools",
 ]
-# Multi-region headline peers (reference loops omitted from default timed runs).
 MULTI_HEADLINE_TOOLS = [
     "z-fasta-default",
     "z-fasta-fai",
@@ -92,11 +86,9 @@ BED_REPORT_FIGURES = frozenset(
     }
 )
 
-# RC overhead: nucleotide REAL datasets only (Proteome excluded; see md_rc_section).
 RC_DATASET_ORDER = ["Genome", "Transcriptome"]
 RC_EXCLUDED_DATASETS = frozenset({"Proteome"})
 
-# Plain + RC-capable peers on a fixed 1 kbp region per RC dataset.
 RC_HEADLINE_TOOLS = [
     "z-fasta-default",
     "z-fasta-rc",
@@ -108,18 +100,13 @@ RC_HEADLINE_TOOLS = [
     "seqtk-reference",
 ]
 
-# Consistent ratio wording in tables, figure notes, and reading sections.
 LABEL_PEER_RATIO = "peer / z-fasta (.zfi)"
 
-# Horizontal gap between Genome / Transcriptome / Proteome facet panels.
 GROUPED_BAR_WSPACE = 0.10
-# Gap between RC / messy multi-facet columns.
 FACET_WSPACE = 0.28
-# BED grouped-bar bottom margin and legend gap (two-line x labels; never rotated).
 BED_FIG_BOTTOM = 0.28
 BED_FIG_LEGEND_GAP = 0.055
 
-# Figures always written when the corresponding section has data.
 CORE_REPORT_FIGURES = frozenset(
     {
         "perf_pos_wall.png",
@@ -208,7 +195,6 @@ GET_COLORS = {
     "z-fasta-fai": "#FFC45C",
     "z-fasta-fai-rc": "#FFC45C",
     "z-fasta-library": "#B8860B",
-    # RC transform modes: darker / mid / pale shades of brand gold (#F7A41D).
     "z-fasta-rc": "#C67A00",
     "z-fasta-complement-only": "#F5B041",
     "z-fasta-reverse-only": "#FFE082",

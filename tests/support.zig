@@ -8,7 +8,6 @@ const diagnostics = main.index_format.diagnostics;
 const test_options = @import("test_options");
 pub const ZFASTA_BIN = if (std.fs.path.isAbsolute(test_options.binary_path)) test_options.binary_path else test_options.build_root ++ std.fs.path.sep_str ++ test_options.binary_path;
 
-/// Loads with automatic selection, for tests that need a loaded index; a failure fails the test.
 pub fn loadIndex(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, mode: main.index_format.LoadMode) diagnostics.Error!main.index_format.LoadedIndex {
     var failure: diagnostics.Failure = undefined;
     failure.reset(if (mode == .stats_scan) .stats else .get);
@@ -40,7 +39,6 @@ pub fn expectCliResult(
     try std.testing.expectEqualStrings(expected_stderr, result.stderr);
 }
 
-/// Runs `argv` with `stdin` as its standard input.
 pub fn expectCliStdinResult(
     allocator: std.mem.Allocator,
     argv: []const []const u8,
@@ -132,7 +130,6 @@ pub fn expectUnknownOptionRejected(
     try expectCliFailure(allocator, argv, 1, expected);
 }
 
-/// How a text diagnostic names `path`: its first 48 bytes, then its length when it is longer.
 pub fn textLabel(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     if (path.len <= 48) return std.fmt.allocPrint(allocator, "\"{s}\"", .{path});
     return std.fmt.allocPrint(allocator, "\"{s}\" ({d} bytes)", .{ path[0..48], path.len });

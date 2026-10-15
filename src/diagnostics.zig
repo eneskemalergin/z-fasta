@@ -206,7 +206,6 @@ pub const Argument = enum {
     read_buffer,
 };
 pub const Arguments = std.EnumSet(Argument);
-/// `index_path`: a path ending in `.zfi` or `.fai`, which names its format.
 pub const Expected = enum { path, request_source, schema, alphabet, sequence_type, positive_usize, nonempty_buffer, index_path };
 pub const Requirement = enum { bed, transform_or_strand, fix, output, fasta_file };
 pub const AllocationRole = enum {
@@ -297,12 +296,10 @@ pub const SourceChange = struct {
     changed_fields: ChangedFields,
     before: FileSnapshot,
     after: ?FileSnapshot,
-    /// The file was gone, as opposed to unreadable.
     disappeared: bool = false,
 };
 
 pub const Format = enum { zfi, fai };
-/// `controls_except_tab`: every byte below 0x20 except tab.
 pub const Grammar = enum { controls_except_tab };
 pub const Alphabet = enum { dna, rna, nucleotide, protein, any, custom };
 pub const AlphabetSelection = enum { explicit, automatic, custom };
@@ -357,7 +354,6 @@ pub const NonuniformReason = enum {
     nonuniform_layout,
 };
 pub const LookupScope = enum { complete_catalog, retained_matches };
-/// `preserve_symbols`: the rewrite keeps every header byte and every symbol, and refuses otherwise.
 pub const RepairPolicy = enum { preserve_symbols };
 pub const IdentityComparison = enum { lexical_path, canonical_path };
 pub const Component = enum { cli, indexer, index_loader, getter, stats, validator };
@@ -433,10 +429,8 @@ pub const RegionMismatch = struct { requested_symbols: u64, observed_symbols: u6
 pub const TotalMismatch = struct { indexed_total: u64, observed_total: u64 };
 pub const SequenceLengthMismatch = struct { indexed_length: u64, observed_length: u64 };
 pub const OffsetMismatch = struct { indexed_offset: u64, observed_offset: u64 };
-/// `side_table`: line positions come from the record's side table rather than the formula.
 pub const LineLayout = enum { uniform, side_table };
 pub const GeometryMismatch = struct { indexed_line_bases: u64, indexed_line_bytes: u64, indexed_layout: LineLayout, observed_line_bases: u64, observed_line_bytes: u64, observed_layout: LineLayout };
-/// `line` is the first line, counted from 1, where the tables differ or one of them ends.
 pub const SideTableMismatch = struct { indexed_lines: u64, observed_lines: u64, line: u64 };
 pub const MissingSequence = struct { lookup_scope: LookupScope, index_source: SourceId, identifier: ?Preview = null };
 pub const StartAfter = struct { start: u64, sequence_length: u64 };
@@ -656,7 +650,6 @@ pub const Failure = struct {
         return self.retainPrefix(bytes, .{ .exact = bytes.len }, limit);
     }
 
-    /// `original` is the full length, exact or a lower bound; `limit` may be zero.
     pub fn retainPrefix(self: *Failure, prefix: []const u8, original: ByteLength, limit: u16) Preview {
         const original_bytes = switch (original) {
             .exact, .at_least => |bytes| bytes,
@@ -681,7 +674,6 @@ pub const Failure = struct {
         return self.previews[reference.start..end];
     }
 
-    /// Base label without the static sidecar suffix.
     pub fn sourceLabel(self: *const Failure, id: SourceId) ?[]const u8 {
         const source = self.sources.get(id) orelse return null;
         return switch (source.label) {
@@ -786,7 +778,6 @@ pub fn readFailure(requested: u64, received: ?u64) Details {
         .{ .@"io.read_failed" = .{ .requested_bytes = requested } };
 }
 
-/// After a failed read of the FASTA, replaces a generic read cause with the file reader's own error.
 pub fn retainReaderCause(failure: *Failure, reader: *const std.Io.File.Reader) void {
     if (!failure.has_primary) return;
     const primary = &failure.primary_storage;
@@ -795,8 +786,6 @@ pub fn retainReaderCause(failure: *Failure, reader: *const std.Io.File.Reader) v
     }
 }
 
-/// Flushes `writer` and records the outcome in `state`; returns the error to report when the flush fails.
-/// Labels a temporary file in role `role` as `directory/name`, unless the role has a label.
 pub fn registerTemporaryPath(failure: *Failure, role: SourceId, directory: []const u8, name: []const u8) void {
     if (failure.sources.get(role) != null) return;
     var prefix: [64]u8 = undefined;
@@ -809,8 +798,7 @@ pub fn registerTemporaryPath(failure: *Failure, role: SourceId, directory: []con
     failure.sources.set(role, .{ .label = .{ .retained = failure.retainPrefix(prefix[0..retained], .{ .exact = directory.len + 1 + name.len }, 64) }, .kind = .path });
 }
 
-/// Closes and deletes a staged file that was not published. A failed delete is recorded as
-/// `io.cleanup_failed`, labelled with the staged name in the directory of `owner`'s path.
+/// A failed delete is recorded as `io.cleanup_failed`.
 pub fn discardStaged(file: *std.Io.File.Atomic, io: std.Io, failure: ?*Failure, owner: SourceId) void {
     if (file.file_open) {
         file.file.close(io);

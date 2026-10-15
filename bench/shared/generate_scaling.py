@@ -122,7 +122,6 @@ def generate(*, mode: str, force: bool) -> None:
             if force or not path.is_file():
                 write_fixed(count, path)
 
-    # Stamp always reflects full param set (not mode subset).
     STAMP.write_text(stamp_payload(), encoding="utf-8")
     print(f"wrote scaling FASTAs -> {OUT_DIR} ({mode})")
 

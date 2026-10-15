@@ -6,7 +6,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/runner_common.sh"
 
-# Metadata tests use controlled version probes and never launch a measurement.
 (
     bench_tool_version() { return 1; }
     export_manifest_core_versions

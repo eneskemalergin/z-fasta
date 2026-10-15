@@ -64,7 +64,6 @@ fn discardStdout(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Canc
     return backend.vtable.operate(userdata, operation);
 }
 
-// Fails at open, before any output: `path` names no file, or is longer than the OS accepts.
 fn expectOpenFailure(failure: *const diagnostics.Failure, operation: diagnostics.Operation, path: []const u8) !void {
     const primary = failure.primary().?;
     try std.testing.expectEqual(operation, failure.operation);
