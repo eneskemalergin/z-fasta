@@ -132,6 +132,12 @@ pub fn expectUnknownOptionRejected(
     try expectCliFailure(allocator, argv, 1, expected);
 }
 
+/// How a text diagnostic names `path`: its first 48 bytes, then its length when it is longer.
+pub fn textLabel(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    if (path.len <= 48) return std.fmt.allocPrint(allocator, "\"{s}\"", .{path});
+    return std.fmt.allocPrint(allocator, "\"{s}\" ({d} bytes)", .{ path[0..48], path.len });
+}
+
 pub fn uniqueArtifactPath(allocator: std.mem.Allocator, stem: []const u8, ext: []const u8) ![]u8 {
     const io = std.testing.io;
     try std.Io.Dir.cwd().createDirPath(io, "zig-cache/test-artifacts");

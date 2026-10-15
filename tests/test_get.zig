@@ -375,7 +375,7 @@ test "[cli] - [get names]: rejects a request name above the index limit" {
         try std.Io.File.writeStreamingAll(names_file, io, name);
     }
 
-    const expected_delivery = try std.fmt.allocPrint(allocator, "error [request.identifier_too_long] get: \"zig-cache/test-artifacts\" ({d} bytes):1 column=1 offset=0 request=1: Request identifier exceeds its byte limit. identifier_bytes=65536 limit_bytes=65535\nhint: Correct the reported request or select the intended index.\n", .{names_path.len});
+    const expected_delivery = try std.fmt.allocPrint(allocator, "error [request.identifier_too_long] get: {s}:1 column=1 offset=0 request=1: Request identifier exceeds its byte limit. identifier_bytes=65536 limit_bytes=65535\nhint: Correct the reported request or select the intended index.\n", .{try support.textLabel(allocator, names_path)});
     defer allocator.free(expected_delivery);
     try expectCliFailure(
         allocator,
@@ -390,10 +390,10 @@ test "[cli] - [get]: missing FASTA path returns an exact error" {
     defer arena.deinit();
     const allocator = arena.allocator();
     const missing = "tests/data/definitely-missing-cli-failure.fasta";
-    const expected = "error [io.file_not_found] get: \"tests/data/definitely-mi\" (47 bytes): Required file was not found.; cause=\"FileNotFound\"\nhint: Check the named input/output and retained I/O cause.\n";
+    const expected = "error [io.file_not_found] get: \"tests/data/definitely-missing-cli-failure.fasta\": Required file was not found.; cause=\"FileNotFound\"\nhint: Check the named input/output and retained I/O cause.\n";
 
     try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", missing, "seq1" }, 1, expected);
-    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta/child", "seq1" }, 1, "error [io.open_failed] get: \"tests/data/simple.fasta/\" (29 bytes): Could not open the required input.; cause=\"NotDir\"\nhint: Check the named input/output and retained I/O cause.\n");
+    try expectCliFailure(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta/child", "seq1" }, 1, "error [io.open_failed] get: \"tests/data/simple.fasta/child\": Could not open the required input.; cause=\"NotDir\"\nhint: Check the named input/output and retained I/O cause.\n");
 }
 
 test "[cli] - [get]: validates FASTA and sidecar before request input" {
@@ -405,19 +405,19 @@ test "[cli] - [get]: validates FASTA and sidecar before request input" {
         allocator,
         &.{ ZFASTA_BIN, "get", "tests/data/definitely-missing-source-order.fasta", "--names", "also-missing.txt" },
         1,
-        "error [io.file_not_found] get: \"tests/data/definitely-mi\" (48 bytes): Required file was not found.; cause=\"FileNotFound\"\nhint: Check the named input/output and retained I/O cause.\n",
+        "error [io.file_not_found] get: \"tests/data/definitely-missing-source-order.fasta\": Required file was not found.; cause=\"FileNotFound\"\nhint: Check the named input/output and retained I/O cause.\n",
     );
     try expectCliFailure(
         allocator,
         &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", "tests/data/also-missing.txt" },
         1,
-        "error [io.file_not_found] get: \"tests/data/also-missing.\" (27 bytes): Required file was not found.; cause=\"FileNotFound\"\nhint: Check the named input/output and retained I/O cause.\n",
+        "error [io.file_not_found] get: \"tests/data/also-missing.txt\": Required file was not found.; cause=\"FileNotFound\"\nhint: Check the named input/output and retained I/O cause.\n",
     );
     try expectCliFailure(
         allocator,
         &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--names", "tests/data/simple.fasta/child" },
         1,
-        "error [io.open_failed] get: \"tests/data/simple.fasta/\" (29 bytes): Could not open the required input.; cause=\"NotDir\"\nhint: Check the named input/output and retained I/O cause.\n",
+        "error [io.open_failed] get: \"tests/data/simple.fasta/child\": Could not open the required input.; cause=\"NotDir\"\nhint: Check the named input/output and retained I/O cause.\n",
     );
 }
 
@@ -688,7 +688,7 @@ test "[cli] - [get bed]: reports parser boundary errors" {
         &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--bed", bed_path },
         ">seq1:1-1\nA\n",
     );
-    const expected_delivery = try std.fmt.allocPrint(allocator, "error [request.bed.invalid_strand] get: \"zig-cache/test-artifacts\" ({d} bytes):1 column=17 offset=16 request=1: Selected BED strand is invalid. strand=\"?\" accepted=plus_minus_dot_or_absent\nhint: Correct the reported request or select the intended index.\n", .{bed_path.len});
+    const expected_delivery = try std.fmt.allocPrint(allocator, "error [request.bed.invalid_strand] get: {s}:1 column=17 offset=16 request=1: Selected BED strand is invalid. strand=\"?\" accepted=plus_minus_dot_or_absent\nhint: Correct the reported request or select the intended index.\n", .{try support.textLabel(allocator, bed_path)});
     defer allocator.free(expected_delivery);
     try expectCliFailure(
         allocator,
@@ -1012,7 +1012,9 @@ test "[cli] - [get diagnostics]: discards pending stdout after a later malformed
     var expected = std.Io.Writer.Allocating.init(allocator);
     defer expected.deinit();
     for (0..8192) |_| try expected.writer.writeAll(">seq1:1-1\nA\n");
-    const expected_delivery = try std.fmt.allocPrint(allocator, "error [request.bed.field_missing] get: \"zig-cache/test-artifacts\" ({d} bytes):8193 column=5 offset=73732 request=8193: A required BED field is missing or empty. field=start column_number=2\nhint: Correct the reported request or select the intended index.\n", .{path.len});
+    const label = try support.textLabel(allocator, path);
+    defer allocator.free(label);
+    const expected_delivery = try std.fmt.allocPrint(allocator, "error [request.bed.field_missing] get: {s}:8193 column=5 offset=73732 request=8193: A required BED field is missing or empty. field=start column_number=2\nhint: Correct the reported request or select the intended index.\n", .{label});
     defer allocator.free(expected_delivery);
     try support.expectCliResult(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "--bed", path, "--summary" }, 1, expected.written()[0..65537], expected_delivery);
 }

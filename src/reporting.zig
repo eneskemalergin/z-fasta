@@ -608,18 +608,19 @@ fn textOpaque(writer: *std.Io.Writer, bytes: []const u8, original: u128, lower_b
     if (truncated) try writer.print(" ({s}{d} bytes)", .{ if (lower_bound) "at least " else "", original });
 }
 
-fn causeTextPrefix(bytes: []const u8) []const u8 {
+// The longest prefix of `bytes` that escapes to at most `width` characters.
+fn escapedPrefix(bytes: []const u8, width: usize) []const u8 {
     var escaped_bytes: usize = 0;
-    for (bytes[0..@min(bytes.len, CAUSE_PREFIX_BYTES)], 0..) |byte, index| {
+    for (bytes, 0..) |byte, index| {
         const cost: usize = switch (byte) {
             '"', '\\' => 2,
             0x20...0x21, 0x23...0x5b, 0x5d...0x7e => 1,
             else => 4,
         };
-        if (escaped_bytes + cost > CAUSE_PREFIX_BYTES) return bytes[0..index];
+        if (escaped_bytes + cost > width) return bytes[0..index];
         escaped_bytes += cost;
     }
-    return bytes[0..@min(bytes.len, CAUSE_PREFIX_BYTES)];
+    return bytes;
 }
 
 fn textValue(writer: *std.Io.Writer, failure: *const diagnostics.Failure, value: anytype) std.Io.Writer.Error!void {
@@ -632,7 +633,7 @@ fn textValue(writer: *std.Io.Writer, failure: *const diagnostics.Failure, value:
         switch (value) {
             .zig => |err| {
                 const name = @errorName(err);
-                const prefix = causeTextPrefix(name);
+                const prefix = escapedPrefix(name[0..@min(name.len, CAUSE_PREFIX_BYTES)], CAUSE_PREFIX_BYTES);
                 try textOpaque(writer, prefix, name.len, false, prefix.len != name.len);
             },
             .native => |native| try writer.print("{s}:{d}", .{ @tagName(native.domain), native.number }),
@@ -697,8 +698,9 @@ fn textReference(writer: *std.Io.Writer, failure: *const diagnostics.Failure, re
         if (failure.sources.get(id) != null) {
             var buffer: [SOURCE_PREFIX_BYTES]u8 = undefined;
             const label = sourcePrefix(failure, id, &buffer);
-            const count = @min(label.bytes.len, 24);
-            try textOpaque(writer, label.bytes[0..count], label.original, label.lower_bound, label.truncated or count != label.bytes.len);
+            // A plain path shows every retained byte; escaped bytes stop it at the text budget.
+            const shown = escapedPrefix(label.bytes, 2 * SOURCE_PREFIX_BYTES);
+            try textOpaque(writer, shown, label.original, label.lower_bound, label.truncated or shown.len != label.bytes.len);
         } else try writer.writeAll(@tagName(id));
     }
     if (reference.location.line) |line| try writer.print(":{d}", .{line});

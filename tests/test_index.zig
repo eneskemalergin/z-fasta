@@ -488,13 +488,13 @@ test "[cli] - [index]: rejects multiple and nonexistent FASTA paths" {
         allocator,
         &.{ ZFASTA_BIN, "index", "tests/data/definitely-missing-cli-failure.fasta" },
         1,
-        "error [io.file_not_found] index: \"tests/data/definitely-mi\" (47 bytes): Required file was not found.; cause=\"FileNotFound\"\nhint: Check the named input/output and retained I/O cause.\n",
+        "error [io.file_not_found] index: \"tests/data/definitely-missing-cli-failure.fasta\": Required file was not found.; cause=\"FileNotFound\"\nhint: Check the named input/output and retained I/O cause.\n",
     );
     try expectCliFailure(
         allocator,
         &.{ ZFASTA_BIN, "index", "tests/data/simple.fasta/child" },
         1,
-        "error [io.open_failed] index: \"tests/data/simple.fasta/\" (29 bytes): Could not open the required input.; cause=\"NotDir\"\nhint: Check the named input/output and retained I/O cause.\n",
+        "error [io.open_failed] index: \"tests/data/simple.fasta/child\": Could not open the required input.; cause=\"NotDir\"\nhint: Check the named input/output and retained I/O cause.\n",
     );
 }
 
