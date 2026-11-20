@@ -16,6 +16,10 @@ All notable changes to z-fasta will be documented in this file.
 - **`.fai` rows may end in CRLF.** One CR before a row's newline is ignored in every `.fai` reader, as samtools does; such a file used to fail with `index.fai.invalid_integer` on `line_bytes`.
 - **`validate --json --fix` reports a discarded output as `aborted`.** On a failed repair the staged output is discarded before the stdout report is written, so the report's file state matches stderr, and a cleanup failure appears in both.
 
+### Changed
+
+- **Decimal numbers are ASCII digits only.** Region bounds (`chr1:1_0-2_0`, `chr1:+2-+4`) and the values of `--width`, `--max-header-len`, and `--max-name-memory` no longer accept a sign or `_` separators, matching BED coordinates. Such a region is now looked up as a literal name; such an option value fails with `usage.invalid_option_value`.
+
 ## [0.4.0]
 
 The 0.4.0 update is a huge one. It makes z-fasta also a rudimentary library, so other Zig projects can take it as a package dependency. Another large change is the error codes and diagnostic flexibility I wanted to provide: begun in 0.3.5, they now cover `validate` too, which is rebuilt as one streaming pass. They have ballooned the binary size, but I believe they serve pipeline usage better and make it easy to track what went wrong. Alongside this I've made various improvements, especially around speed and memory footprint (`get`, `stats`, and `validate --fix` are several times faster), and fixed the issues and bugs that I could find.

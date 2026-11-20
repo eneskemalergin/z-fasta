@@ -469,7 +469,10 @@ fn indexSelection(cli: *Cli, arg: []const u8) diagnostics.Error!index_format.Ind
 
 fn positiveValue(cli: *Cli, option: diagnostics.Argument) diagnostics.Error!u64 {
     const raw = try cli.value(option, .positive_usize);
-    const value = std.fmt.parseInt(u64, raw, 10) catch 0;
+    const value = switch (bed_parser.parseCoordinate(raw)) {
+        .value => |parsed| parsed,
+        .invalid, .out_of_range => 0,
+    };
     if (value == 0) return cli.fail(.{ .@"usage.invalid_option_value" = .{ .option = option, .expected = .positive_usize, .value = cli.failure.retain(raw, 32) } });
     return value;
 }

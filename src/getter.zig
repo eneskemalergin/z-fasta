@@ -374,12 +374,17 @@ fn parseRangeSuffix(suffix: []const u8) ?ParsedRange {
     const start_str = suffix[0..dash_pos];
     const end_str = suffix[dash_pos + 1 ..];
 
-    if (start_str.len == 0) return null;
-    const start = std.fmt.parseInt(u64, start_str, 10) catch return null;
+    const start = switch (bed_parser.parseCoordinate(start_str)) {
+        .value => |value| value,
+        .invalid, .out_of_range => return null,
+    };
 
     if (end_str.len == 0) return .{ .start = start, .end = null };
 
-    const end = std.fmt.parseInt(u64, end_str, 10) catch return null;
+    const end = switch (bed_parser.parseCoordinate(end_str)) {
+        .value => |value| value,
+        .invalid, .out_of_range => return null,
+    };
     return .{ .start = start, .end = end };
 }
 
@@ -1487,6 +1492,18 @@ fn checkGetRequestAllocations(allocator: std.mem.Allocator) !void {
         return err;
     };
     try std.testing.expectEqual(@as(u64, 4), result.total_bases);
+}
+
+test "[unit] - [get regions]: range bounds are ASCII digits only" {
+    const ranged = parseRegion("a:3-5");
+    try std.testing.expectEqualStrings("a", ranged.name);
+    try std.testing.expectEqual(@as(u64, 3), ranged.start);
+    try std.testing.expectEqual(@as(?u64, 5), ranged.end);
+    for ([_][]const u8{ "a:1_0-1_2", "a:+2-+4", "a:3-+5", "a: 3-5", "a:3-5 ", "a:-3", "a:99999999999999999999-1" }) |text| {
+        const region = parseRegion(text);
+        try std.testing.expectEqualStrings(text, region.name);
+        try std.testing.expect(region.is_full);
+    }
 }
 
 test "[failure] - [get requests]: releases partial collection" {

@@ -77,9 +77,11 @@ const BedDiagnostics = struct {
     }
 };
 
-const Coordinate = union(enum) { value: u64, invalid, out_of_range };
+pub const Coordinate = union(enum) { value: u64, invalid, out_of_range };
 
-fn parseCoordinate(field: []const u8) Coordinate {
+/// The one decimal grammar for coordinates and numeric options: ASCII digits only, so no sign,
+/// no `_` separator, and no empty field.
+pub fn parseCoordinate(field: []const u8) Coordinate {
     if (field.len == 0) return .invalid;
     var value: u64 = 0;
     for (field, 0..) |byte, i| {

@@ -31,7 +31,7 @@ The output header uses the indexed identifier, not the original description.
 z-fasta get genome.fa chr1:1000-2000
 ```
 
-Regions are 1-based inclusive. `1000-2000` contains 1001 symbols.
+Regions are 1-based inclusive. `1000-2000` contains 1001 symbols. Bounds are plain ASCII digits; a suffix with a sign, `_`, or spaces does not parse as a range and stays part of the name.
 
 Open-ended ranges continue through record end:
 
