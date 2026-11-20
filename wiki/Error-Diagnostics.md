@@ -26,7 +26,7 @@ Running `z-fasta get --error-format=json` returns exit 1 and one newline-termina
 
 ```json
 {
-  "catalog_revision": "0.4.0-1",
+  "catalog_revision": "0.4.1-1",
   "producer": {
     "name": "z-fasta",
     "version": "0.4.0"
@@ -70,7 +70,7 @@ Read `failure.primary.code`, not the English message or the numeric Zig error ta
 
 ## Interpret the report
 
-`catalog_revision` identifies the code definitions (`0.4.0-1` for this catalog), and `producer.version` identifies the executable. They are separate values. Preserve unknown codes and fields when forwarding a report; do not turn an unknown code into success or infer a retry policy from its category or suggested `action`.
+`catalog_revision` identifies the code definitions (`0.4.1-1` for this catalog), and `producer.version` identifies the executable. They are separate values. Preserve unknown codes and fields when forwarding a report; do not turn an unknown code into success or infer a retry policy from its category or suggested `action`.
 
 `operation.work_complete` records whether the command's work finished. `operation.complete` also requires its required side effects to finish. `accepted` cannot be true for incomplete work or a blocking failure. A failed notice can therefore return exit 1 after data has already reached stdout.
 
@@ -167,6 +167,7 @@ A field ending in `offset` or describing a byte extent refers to bytes in its na
   - `fasta.content_before_header`: finding per line; fields `content_bytes`.
   - `fasta.header_control_byte`: finding per byte; fields `byte`, `grammar`.
   - `fasta.sequence_control_byte`: finding per byte; fields `byte`, `grammar`.
+  - `fasta.sequence_header_marker`: finding per byte; no fields.
   - `fasta.empty_record`: finding per record; no fields.
   - `fasta.empty_identifier`: finding per record; no fields.
   - `fasta.duplicate_identifier`: finding per record; fields `identifier`.

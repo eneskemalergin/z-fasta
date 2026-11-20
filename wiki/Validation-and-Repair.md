@@ -56,6 +56,7 @@ Validate reads FASTA the way `index` does, so the two agree on what a symbol and
   - `sequence.invalid_symbol`, per byte.
 - Warnings:
   - `fasta.empty_record` and `fasta.long_header`, per record;
+  - `fasta.sequence_header_marker`, per `>` byte inside a sequence line, which `index` and `get` read as a symbol but a rewrapped copy could place at a line start, where it starts a header;
   - `header.convention_mismatch`, per record, with `--schema`;
   - `format.sequence_whitespace` and `format.blank_sequence_line`, per line;
   - `format.inconsistent_wrapping`, per record;
@@ -220,7 +221,8 @@ Repair refuses, and leaves any existing destination unchanged, when the file has
 
 - no records;
 - content before the first header, which the copy could not keep;
-- a control byte in a header or a sequence line.
+- a control byte in a header or a sequence line;
+- a `>` byte inside a sequence line (`fasta.sequence_header_marker`), which wrapping could move to a line start.
 
 The report is still printed, and the refusal goes to stderr as `repair.blocked` with the first blocking finding.
 

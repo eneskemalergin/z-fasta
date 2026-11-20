@@ -191,6 +191,7 @@ const REPORT_CODES = [_]diagnostics.Code{
     .@"fasta.content_before_header",
     .@"fasta.header_control_byte",
     .@"fasta.sequence_control_byte",
+    .@"fasta.sequence_header_marker",
     .@"fasta.empty_record",
     .@"fasta.empty_identifier",
     .@"fasta.duplicate_identifier",
@@ -225,6 +226,8 @@ fn reportSlot(comptime code: diagnostics.Code) usize {
 // Bit `n` of a byte's class marks a symbol outside candidate `n` (nucleotide, protein, or custom twice).
 const WHITESPACE: u8 = 1 << 2;
 const CONTROL: u8 = 1 << 3;
+// `>` inside a sequence line: rewrapping could move it to a line start, where it reads as a header.
+const MARKER: u8 = 1 << 4;
 
 fn outsideBit(candidate: u1) u8 {
     return @as(u8, 1) << candidate;
@@ -318,6 +321,7 @@ fn fixBlocker(report: *const Report) ?FixBlocker {
     if (report.finding(.@"fasta.content_before_header").first) |first| keepEarliest(&best, .{ .content_before_header = first.details.@"fasta.content_before_header" }, first.at);
     if (report.finding(.@"fasta.header_control_byte").first) |first| keepEarliest(&best, .{ .header_control_byte = first.details.@"fasta.header_control_byte" }, first.at);
     if (report.finding(.@"fasta.sequence_control_byte").first) |first| keepEarliest(&best, .{ .sequence_control_byte = first.details.@"fasta.sequence_control_byte" }, first.at);
+    if (report.finding(.@"fasta.sequence_header_marker").first) |first| keepEarliest(&best, .{ .sequence_header_marker = {} }, first.at);
     return best;
 }
 
@@ -751,6 +755,7 @@ const Scan = struct {
         for (&classes, 0..) |*class, index| {
             const byte: u8 = @intCast(index);
             class.* = if (byte == ' ' or byte == '\t') WHITESPACE else if (byte < ' ') CONTROL else @as(u8, @intFromBool(!alphabets[0][index])) | @as(u8, @intFromBool(!alphabets[1][index])) << 1;
+            if (byte == '>') class.* |= MARKER;
         }
         var self = Scan{
             .allocator = allocator,
@@ -1013,7 +1018,7 @@ const Scan = struct {
             .plain_dna => !fasta.PlainDna.anyOutside(fasta.DENSE_VECTOR_LEN, bytes),
             .plain_rna => !fasta.PlainRna.anyOutside(fasta.DENSE_VECTOR_LEN, bytes),
             .protein => !fasta.ProteinSymbols.anyOutside(fasta.DENSE_VECTOR_LEN, bytes),
-            .any => !fasta.Bases.anyOutside(fasta.DENSE_VECTOR_LEN, bytes),
+            .any => !fasta.Bases.anyOutside(fasta.DENSE_VECTOR_LEN, bytes) and std.mem.findScalar(u8, bytes, '>') == null,
         };
         if (all_fast) {
             self.line.symbols += bytes.len;
@@ -1025,6 +1030,7 @@ const Scan = struct {
         const outside: u8 = if (self.chosen) |chosen| outsideBit(chosen) else outsideBit(0) | outsideBit(1);
         var classes: u8 = 0;
         for (bytes) |byte| classes |= self.classes[byte];
+        if (classes & MARKER != 0) self.countMarkers(bytes, at);
         if (classes & (WHITESPACE | CONTROL) != 0) {
             try self.irregularContent(bytes, at, outside);
         } else {
@@ -1047,6 +1053,13 @@ const Scan = struct {
             if (self.rewrite) |sink| sink.symbols(bytes) catch |err| return self.writeFailed(err);
         }
         if (self.chosen == null and self.sample_total == TYPE_SAMPLE_SYMBOLS) self.chooseAlphabet(@intFromBool(fasta.detectType(&self.sample_counts, self.sample_total) == .protein));
+    }
+
+    fn countMarkers(self: *Scan, bytes: []const u8, at: u64) void {
+        @branchHint(.cold);
+        for (bytes, 0..) |byte, index| {
+            if (byte == '>') self.count(.{ .@"fasta.sequence_header_marker" = {} }, self.recordAt(at + index));
+        }
     }
 
     fn irregularContent(self: *Scan, bytes: []const u8, at: u64, outside: u8) diagnostics.Error!void {

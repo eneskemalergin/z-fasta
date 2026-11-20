@@ -979,6 +979,34 @@ test "[cli] - [validate fix]: writes the repaired copy and reports the input" {
     try std.testing.expect(!(try std.json.parseFromSlice(std.json.Value, allocator, unrepaired.stdout, .{})).value.object.get("accepted").?.bool);
 }
 
+test "[unit] - [validate repair]: a '>' inside a sequence line is reported and blocks repair" {
+    const allocator = std.testing.allocator;
+    // The long line exercises the vector check; the second record starts its line with whitespace.
+    const long = "ACGT" ** 40 ++ ">" ++ "ACGT" ** 40;
+    const data = ">a\nAB>CD\n" ++ long ++ "\n>b\n >X\n";
+    for ([_]validator.Rules{ .{}, .{ .alphabet = .any }, .{ .custom_alphabet = "ABCDGTX>" } }) |rules| {
+        const report = try reportBytes(allocator, data, rules);
+        defer allocator.destroy(report);
+        const marker = report.finding(.@"fasta.sequence_header_marker");
+        try std.testing.expectEqual(@as(u64, 3), marker.occurrences);
+        try std.testing.expectEqual(@as(u64, 2), marker.records);
+        try std.testing.expectEqual(@as(?u64, 5), marker.first.?.at.location.offset);
+    }
+
+    const report = try allocator.create(validator.Report);
+    defer allocator.destroy(report);
+    const buffer = try allocator.alloc(u8, 4096);
+    defer allocator.free(buffer);
+    var reader = std.Io.Reader.fixed(">a\nAB>CD\n");
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    var failure: diagnostics.Failure = undefined;
+    try std.testing.expectError(error.RepairRefused, validator.repair(allocator, &reader, buffer, null, .{ .alphabet = .any }, 2, &output.writer, report, &failure));
+    const blocked = failure.primary().?.details.@"repair.blocked";
+    try std.testing.expectEqual(diagnostics.Code.@"fasta.sequence_header_marker", blocked.blocker.code());
+    try std.testing.expectEqual(@as(?u64, 5), failure.primary().?.at.location.offset);
+}
+
 test "[cli] - [validate fix]: refuses blocked rewrites and keeps the destination" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

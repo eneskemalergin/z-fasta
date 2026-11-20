@@ -14,10 +14,12 @@ All notable changes to z-fasta will be documented in this file.
 - **A directory where a file belongs fails first.** A directory at a sidecar path, at the `.zfi` path `index` writes, or at the `validate --fix` output fails with `io.invalid_path` (`reason=directory`) before any work. A sidecar used to fail as `io.map_failed` with the directory's size, and an output only after the whole scan, as `io.publish_failed`.
 - **`fasta.duplicate_identifier` fills `data.identifier`.** A validation report's duplicate entry carries the duplicated identifier in `data`, as the catalog lists, instead of `null`; it equals `first.identifier`.
 - **`.fai` rows may end in CRLF.** One CR before a row's newline is ignored in every `.fai` reader, as samtools does; such a file used to fail with `index.fai.invalid_integer` on `line_bytes`.
+- **`validate --fix` no longer turns a `>` symbol into a header.** A sequence line holding `>` blocks repair with `repair.blocked` (`reason_code=fasta.sequence_header_marker`); rewrapping used to be able to move it to a line start, so the copy gained a record and lost the byte while validating clean.
 - **`validate --json --fix` reports a discarded output as `aborted`.** On a failed repair the staged output is discarded before the stdout report is written, so the report's file state matches stderr, and a cleanup failure appears in both.
 
 ### Changed
 
+- **Catalog revision `0.4.1-1`.** It adds `fasta.sequence_header_marker`, a validate warning for each `>` inside a sequence line, and the matching `repair.blocked` reason.
 - **Decimal numbers are ASCII digits only.** Region bounds (`chr1:1_0-2_0`, `chr1:+2-+4`) and the values of `--width`, `--max-header-len`, and `--max-name-memory` no longer accept a sign or `_` separators, matching BED coordinates. Such a region is now looked up as a literal name; such an option value fails with `usage.invalid_option_value`.
 
 ## [0.4.0]

@@ -132,7 +132,7 @@ pub fn writeJson(writer: *std.Io.Writer, failure: *const diagnostics.Failure, op
     }
     var json: std.json.Stringify = .{ .writer = writer };
     try json.beginObject();
-    try field(&json, "catalog_revision", "0.4.0-1");
+    try field(&json, "catalog_revision", "0.4.1-1");
     try json.objectField("producer");
     try json.beginObject();
     try field(&json, "name", "z-fasta");
@@ -652,9 +652,12 @@ fn textValue(writer: *std.Io.Writer, failure: *const diagnostics.Failure, value:
             .at_least => |number| try writer.print("at least {d}", .{number}),
         }
     } else if (T == diagnostics.RepairBlock) {
-        try writer.print("reason_code={s} ", .{@tagName(value.blocker.code())});
+        try writer.print("reason_code={s}", .{@tagName(value.blocker.code())});
         switch (value.blocker) {
-            inline else => |facts| try textValue(writer, failure, facts),
+            inline else => |facts| if (@TypeOf(facts) != void) {
+                try writer.writeByte(' ');
+                try textValue(writer, failure, facts);
+            },
         }
         try writer.print(" repair_policy={s}", .{@tagName(value.repair_policy)});
     } else switch (@typeInfo(T)) {
@@ -833,6 +836,7 @@ fn message(code: diagnostics.Code) []const u8 {
         .@"fasta.no_records" => "No FASTA records were found.",
         .@"fasta.content_before_header" => "Content appears before the first FASTA header.",
         .@"fasta.header_control_byte" => "Header contains a prohibited control byte.",
+        .@"fasta.sequence_header_marker" => "Sequence line contains '>', which starts a header at a line start.",
         .@"fasta.sequence_control_byte" => "Sequence contains a prohibited control byte.",
         .@"fasta.empty_record" => "FASTA record contains no sequence symbols.",
         .@"fasta.empty_identifier" => "Header has an empty identifier.",
