@@ -29,7 +29,7 @@ Create it with:
 z-fasta index --emit-fai genome.fa > genome.fa.fai
 ```
 
-Each FASTA record is one tab-separated line containing name, sequence length, first-base byte offset, line bases, and line bytes.
+Each FASTA record is one tab-separated line containing name, sequence length, first-base byte offset, line bases, and line bytes. When reading a `.fai`, a row may end in LF or CRLF.
 
 `.fai` can represent ordinary fixed-width records whose final sequence line may be shorter. It cannot represent arbitrary mixed widths, interior blank lines, or sequence-line whitespace.
 

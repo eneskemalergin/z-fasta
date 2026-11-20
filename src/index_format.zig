@@ -2064,7 +2064,9 @@ const NamePrefilter = struct {
     }
 };
 
-fn parseFaiIndexLine(line: []const u8, context: *Diagnostics) diagnostics.Error!FaiLineFields {
+/// A row may end in CRLF, as samtools accepts: one CR before the newline is not part of `line_bytes`.
+fn parseFaiIndexLine(row: []const u8, context: *Diagnostics) diagnostics.Error!FaiLineFields {
+    const line = if (row.len != 0 and row[row.len - 1] == '\r') row[0 .. row.len - 1] else row;
     const name_end = std.mem.findScalar(u8, line, '\t') orelse {
         var field_context = faiFieldContext(context, line.len);
         return missingFaiField(&field_context, .length);
@@ -2124,6 +2126,7 @@ fn takeLongFaiLine(file_reader: *std.Io.File.Reader, buffer: []u8, context: *Dia
             error.EndOfStream => break,
         };
         if (byte == '\n') break;
+        if (byte == '\r' and (reader.peekByte() catch 0) == '\n') continue;
         if (field == values.len) continue;
         if (byte == '\t') {
             var field_context = faiFieldContext(context, field_start);

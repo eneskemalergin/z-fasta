@@ -3050,6 +3050,32 @@ test "[failure] - [index loader]: a directory sidecar fails as a directory path 
     }
 }
 
+test "[integration] - [fai loader]: rows ending in CRLF load in every mode" {
+    const allocator = std.testing.allocator;
+    const fasta_path = try writeFastaArtifact(allocator, "fai-crlf", ">chr1\nACGTACGTAC\nACGT\n>chr2\nACGTACGT\n");
+    defer allocator.free(fasta_path);
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer allocator.free(fai_path);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = fai_path, .data = "chr1\t14\t6\t10\t11\r\nchr2\t8\t28\t8\t9\r\n" });
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+    for ([_]main.index_format.LoadMode{ .lookup_full_map, .catalog, .stats_scan, .{ .requested = &.{"chr2"} }, .{ .requested = &.{ "chr1", "chr2" } }, .on_access }) |mode| {
+        var failure: diagnostics.Failure = undefined;
+        failure.reset(.get);
+        var index = try main.index_format.loadIndex(allocator, io, fasta_path, .automatic, mode, &failure);
+        defer index.deinit();
+        try std.testing.expectEqual(main.index_format.LoadedIndex.IndexSource.fai, index.source);
+        // `stats_scan` and `catalog` hold every record in file order.
+        const ordinal = switch (mode) {
+            .stats_scan, .catalog => 1,
+            else => (try index.findName("chr2", &failure)).?,
+        };
+        const record = try index.checkedRecord(ordinal, &failure);
+        try std.testing.expectEqual(@as(u64, 8), record.seq_len);
+        try std.testing.expectEqual(@as(u32, 9), record.line_bytes);
+    }
+}
+
 test "[failure] - [index]: a directory at the .zfi path fails before the scan" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
