@@ -148,6 +148,11 @@ pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const
         scan(allocator, &reader.interface, read_buf, names, options.rules, null, compared, report, failure);
     scanned catch |err| {
         diagnostics.retainReaderCause(failure, &reader);
+        // Discard the staged output first, so the report states its final state and any cleanup failure.
+        if (staged_open) {
+            staged.cleanup(io, failure);
+            staged_open = false;
+        }
         writeReportOutput(io, report, options, false, read_buf, failure) catch {};
         return err;
     };

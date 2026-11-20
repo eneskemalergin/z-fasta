@@ -14,6 +14,7 @@ All notable changes to z-fasta will be documented in this file.
 - **A directory where a file belongs fails first.** A directory at a sidecar path, at the `.zfi` path `index` writes, or at the `validate --fix` output fails with `io.invalid_path` (`reason=directory`) before any work. A sidecar used to fail as `io.map_failed` with the directory's size, and an output only after the whole scan, as `io.publish_failed`.
 - **`fasta.duplicate_identifier` fills `data.identifier`.** A validation report's duplicate entry carries the duplicated identifier in `data`, as the catalog lists, instead of `null`; it equals `first.identifier`.
 - **`.fai` rows may end in CRLF.** One CR before a row's newline is ignored in every `.fai` reader, as samtools does; such a file used to fail with `index.fai.invalid_integer` on `line_bytes`.
+- **`validate --json --fix` reports a discarded output as `aborted`.** On a failed repair the staged output is discarded before the stdout report is written, so the report's file state matches stderr, and a cleanup failure appears in both.
 
 ## [0.4.0]
 

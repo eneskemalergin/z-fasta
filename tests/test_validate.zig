@@ -1423,6 +1423,30 @@ test "[cli] - [validate index]: reports each difference from the index" {
     }
 }
 
+test "[failure] - [validate repair]: a blocked repair reports its output as aborted on stdout and stderr" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const input = try writeFastaArtifact(allocator, "validate-blocked-json", "junk\n>a\nACGT\n");
+    defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
+    const output = try std.fmt.allocPrint(allocator, "{s}.out", .{input});
+    defer std.Io.Dir.cwd().deleteFile(io, output) catch {};
+    const result = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "validate", "--error-format=json", "--json", "--fix", "-o", output, input } });
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+    for ([_][]const u8{ result.stdout, result.stderr }) |envelope| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, envelope, .{});
+        try std.testing.expectEqualStrings("repair.blocked", parsed.value.object.get("failure").?.object.get("primary").?.object.get("code").?.string);
+        const outputs = parsed.value.object.get("outputs").?.array.items;
+        const file = for (outputs) |entry| {
+            if (std.mem.eql(u8, entry.object.get("destination").?.string, "file")) break entry.object;
+        } else return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings("aborted", file.get("state").?.string);
+    }
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, output, .{}));
+}
+
 test "[failure] - [validate repair]: a directory output fails before the scan, from a file or stdin" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
