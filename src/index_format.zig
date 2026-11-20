@@ -570,7 +570,7 @@ const ZfiOnDemand = struct {
             var last = window_start;
             var k = i + 1;
             while (k < keys.len and (keys[k] >> 24) - last <= 4 * PREFETCH_GAP_BYTES and (keys[k] >> 24) - window_start < buffer.len) : (k += 1) last = @intCast(keys[k] >> 24);
-            const window_len = @min(buffer.len, self.side_end - window_start, last - window_start + 4 * PREFETCH_GAP_BYTES);
+            const window_len = @min(buffer.len, self.side_end -| window_start, last - window_start + 4 * PREFETCH_GAP_BYTES);
             const got = std.Io.File.readPositionalAll(self.file, self.io, buffer[0..window_len], window_start) catch 0;
             if (got != window_len) return;
             var j = i;
@@ -1291,6 +1291,10 @@ fn zfiNameRegions(payload_end: usize, name_blob_len: u64, record_count: u32, rec
     return .{ .regions = .{ .blob_start = blob_start, .blob_len = blob_len, .table_start = table_start, .table_len = table_len } };
 }
 
+fn checkedRecordWords(record_count: u32) usize {
+    return (@as(usize, record_count) + @bitSizeOf(usize) - 1) / @bitSizeOf(usize);
+}
+
 fn zfiRecordsEnd(record_count: u32, context: *Diagnostics) diagnostics.Error!usize {
     const records_bytes = std.math.mul(usize, @as(usize, record_count), ZFI_INDEX_RECORD_BYTES) catch return context.overflow(.record_count, .multiply, record_count, ZFI_INDEX_RECORD_BYTES, std.math.maxInt(usize));
     return std.math.add(usize, @sizeOf(ZfiHeader), records_bytes) catch return context.overflow(.record_count, .add, @sizeOf(ZfiHeader), records_bytes, std.math.maxInt(usize));
@@ -1387,7 +1391,7 @@ fn tryLoadZfi(
     var arena = std.heap.ArenaAllocator.init(backing_allocator);
     errdefer arena.deinit();
     const checked_records: []usize = if (mode == .on_access) checked: {
-        const words = arena.allocator().alloc(usize, (header.record_count + @bitSizeOf(usize) - 1) / @bitSizeOf(usize)) catch return context.allocation(.records, null);
+        const words = arena.allocator().alloc(usize, checkedRecordWords(header.record_count)) catch return context.allocation(.records, null);
         @memset(words, 0);
         break :checked words;
     } else &.{};
@@ -2225,4 +2229,13 @@ test "[property] - [fai parser]: integer fields match a reference parse" {
             try std.testing.expect(got == null);
         }
     }
+}
+
+test "[edge] - [zfi loader]: check-bit words cover every u32 record count" {
+    try std.testing.expectEqual(@as(usize, 1), checkedRecordWords(1));
+    try std.testing.expectEqual(@as(usize, 1), checkedRecordWords(@bitSizeOf(usize)));
+    try std.testing.expectEqual(@as(usize, 2), checkedRecordWords(@bitSizeOf(usize) + 1));
+    const max = std.math.maxInt(u32);
+    try std.testing.expectEqual((@as(usize, max) + @bitSizeOf(usize) - 1) / @bitSizeOf(usize), checkedRecordWords(max));
+    try std.testing.expect(checkedRecordWords(max) * @bitSizeOf(usize) >= max);
 }

@@ -4274,6 +4274,30 @@ test "[failure] - [zfi name table]: batch prefetch leaves a damaged side table t
     try std.testing.expectEqual(diagnostics.Code.@"index.side_line_geometry_invalid", failure.primary().?.code());
 }
 
+test "[failure] - [zfi name table]: batch prefetch leaves a side table offset past its region to the record check" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const fasta = ">a\nACG\nTACGT\nA\n>b\nGG\nGGG\nG\n>c\nT\n";
+    var index = try main.indexer.scanZfiData(allocator, fasta);
+    try index.records.items[0].markNonUniform(1 << 38);
+    const bytes = try zfiBytes(allocator, &index, fasta.len, 0);
+    const paths = try writeFastaAndRawZfi(allocator, "zfi-prefetch-side-past", fasta, bytes);
+    defer std.Io.Dir.cwd().deleteFile(io, paths.fasta_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, paths.zfi_path) catch {};
+    var lazy = try support.loadIndex(std.testing.allocator, io, paths.fasta_path, .{ .requested = &.{} });
+    defer lazy.deinit();
+    const names = [_][]const u8{ "a", "b", "c" };
+    var buffer: [64 * 1024]u8 = undefined;
+    lazy.prefetchNames(&names, &buffer);
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.get);
+    try std.testing.expectEqual(@as(?usize, 0), try lazy.findNameAt(0, names[0], &failure));
+    try std.testing.expectError(error.InvalidIndex, lazy.checkedRecord(0, &failure));
+    try std.testing.expectEqual(diagnostics.Code.@"index.side_table_offset_out_of_bounds", failure.primary().?.code());
+    try std.testing.expectEqual(index.records.items[1].seq_len, (try lazy.checkedRecord(1, &failure)).seq_len);
+}
+
 test "[edge] - [zfi name table]: batch prefetch hands a hash-bit match with another name to the sequential lookup" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

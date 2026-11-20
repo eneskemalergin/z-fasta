@@ -4,6 +4,12 @@
 
 All notable changes to z-fasta will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **Damaged `.zfi` files.** Two size computations on values read from an index are bounded, so a damaged `.zfi` read by `get` or opened by `IndexedReader` fails with its coded error in every build mode.
+
 ## [0.4.0]
 
 The 0.4.0 update is a huge one. It makes z-fasta also a rudimentary library, so other Zig projects can take it as a package dependency. Another large change is the error codes and diagnostic flexibility I wanted to provide: begun in 0.3.5, they now cover `validate` too, which is rebuilt as one streaming pass. They have ballooned the binary size, but I believe they serve pipeline usage better and make it easy to track what went wrong. Alongside this I've made various improvements, especially around speed and memory footprint (`get`, `stats`, and `validate --fix` are several times faster), and fixed the issues and bugs that I could find.
