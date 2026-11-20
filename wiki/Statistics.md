@@ -50,7 +50,7 @@ Stats describes the records in the selected index. z-fasta indexes every non-emp
 - Ties for shortest and longest keep the first indexed record.
 - Mean uses integer division.
 - Even-count median uses the midpoint rounded down.
-- Q1 and Q3 are medians of the lower and upper halves.
+- Q1 and Q3 are medians of the lower and upper halves. With an odd count, the middle value belongs to neither half; with one sequence, Q1 and Q3 equal its length.
 - Nx accumulation sorts lengths from longest to shortest and stops at the requested percentage of total symbols.
 - auN is `sum(length * length) / total_symbols`.
 

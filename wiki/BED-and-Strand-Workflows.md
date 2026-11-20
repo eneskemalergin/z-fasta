@@ -104,7 +104,7 @@ Minus-strand BED requires reverse-complement and is rejected when the requested 
 ## BED limits
 
 - Chromosome or record name: at most 65535 bytes.
-- Interval values: unsigned `u64`, subject to coordinate validation against record length.
+- Interval values: unsigned `u64`. An end past the record is clamped to the record's end, and the header keeps the requested end (`s:6-100`); a start at or past the record's end fails with `request.start_after_sequence`.
 - Row buffering: a newline must appear within 69631 bytes.
 - Request order: preserved across batches.
 

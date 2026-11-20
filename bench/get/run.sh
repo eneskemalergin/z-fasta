@@ -613,7 +613,8 @@ diff_oracle() {
     diff -q "$1" "$2" >/dev/null 2>&1 && pass "$3" || fail "$3" "${4:-$1}" "$2"
 }
 
-# samtools 1.24 rewraps output at 60 columns, so headers and bases are compared, not bytes.
+# samtools 1.24 wraps output at the record's line width, not at 60, so headers and bases are
+# compared, not bytes.
 diff_fasta_oracle() {
     local expected="$1" got="$2" label="$3"
     if python3 - "$expected" "$got" <<'PY'

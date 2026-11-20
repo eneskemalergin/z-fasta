@@ -3,8 +3,9 @@
 //! An index older than its FASTA is rejected. `.zfi` also stores the FASTA size and mtime.
 //! `.zfi` version 2, little-endian: a 16-byte header, 24-byte records, side tables, the name
 //! blob, the name table, then the FASTA's mtime and the blob's length. Everything is read in
-//! place. A load for `get` checks the file's frame and each record a request uses; `stats`, the
-//! package, and `validate --index` check every record, and the latter two the name table.
+//! place. A load for `get` checks the file's frame and each record a request uses, and the
+//! package's `IndexedReader` each record the first time it reads it; `stats` checks every record
+//! at load, and `validate --index` every record and the name table.
 //! `LoadedIndex.deinit` releases the FASTA descriptor, mappings, and arena; names and records
 //! borrow them until then. Loaders never reset the caller's `Failure`.
 

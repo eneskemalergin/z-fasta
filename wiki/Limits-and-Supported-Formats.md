@@ -78,7 +78,7 @@ Validate uses the same rule: spaces and tabs in a sequence line are not symbols 
 
 ## Index limits
 
-`.zfi` record counts are stored as `u32` and cannot be zero. Names use `u16` lengths. Side-table absolute offsets use 40 bits. Other persisted offsets and lengths use `u64`, with range checks against actual files.
+`.zfi` record counts are stored as `u32` and cannot be zero. Names use `u16` lengths. In a `.zfi` record, sequence offsets and lengths use 48 bits, name offsets 40 bits, and side-table offsets 39 bits. `.fai` offsets and lengths are `u64`. All are range-checked against the actual files.
 
 These format widths are implementation limits, not recommended operating targets.
 

@@ -113,7 +113,7 @@ These flags are mutually exclusive.
 - `--reverse-only`: reverse order without complementing.
 - `--complement-only`: complement without changing order.
 
-The complement map covers uppercase and lowercase IUPAC nucleotide symbols and maps `U/u` to `A/a`. Unknown bytes pass through the table, but complement-based transforms first classify up to 256 requested bases. Protein classification is rejected. Reverse-only remains available for protein.
+The complement map covers uppercase and lowercase IUPAC nucleotide symbols and maps `U/u` to `A/a`. Unknown bytes pass through the table, but complement-based transforms first classify up to 256 bases of the first complemented request on a record, and fail when that sample classifies as protein. The sample is reused for the requests on that record that directly follow it, so a short region whose letters are all nucleotide symbols can let a protein record through. Reverse-only remains available for protein.
 
 ## Annotate transformed headers
 
@@ -141,7 +141,7 @@ z-fasta get genome.fa --names ids.txt --summary \
 
 The summary includes region count, total bases, elapsed seconds, and regions per second. Timing starts before index loading and includes request acquisition.
 
-If any request fails, no summary is printed. Names and BED streams may already have emitted complete earlier records before a later failure.
+If any request fails, no summary is printed. Names and BED streams may already have written output before a later failure; output is flushed in 64 KiB blocks, so it can end inside a record.
 
 ## Output compatibility
 

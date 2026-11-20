@@ -2,7 +2,8 @@
 //! Requests are one-based inclusive; an end past the record is clamped, and a suffix that does
 //! not parse as a range stays part of the name. Lookups are first-wins.
 //! Byte spans come from the uniform line formula or a side-table search; reads are positional.
-//! Output is wrapped at 60 and written per record, so a later failure can leave a valid prefix.
+//! Output is wrapped at 60 and flushed every 64 KiB, so a later failure can leave a prefix that
+//! ends inside a record.
 
 const std = @import("std");
 const fasta = @import("fasta.zig");
