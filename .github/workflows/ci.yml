@@ -21,12 +21,12 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
           cache-key: hygiene
@@ -42,10 +42,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zig fmt --check build.zig build.zig.zon src tests
+          zig fmt --check build.zig build.zig.zon src tests bench/get/library.zig
           while IFS= read -r -d '' script; do
             bash -n "$script"
-          done < <(find .github bench tests -type f -name '*.sh' -print0)
+          done < <(find .github bench tests -type f -name '*.sh' -print0; find tools -maxdepth 1 -type f -name '*.sh' -print0)
           shellcheck .github/scripts/*.sh
           bash bench/shared/test_zebrac_runner.sh --metadata-only
           python3 -m compileall -q bench
@@ -80,12 +80,12 @@ jobs:
             binary: ./zig-out/bin/z-fasta
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
           cache-key: ${{ matrix.name }}
@@ -151,12 +151,12 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
           cache-key: package-check
