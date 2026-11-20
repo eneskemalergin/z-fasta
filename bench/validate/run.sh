@@ -2,7 +2,7 @@
 # Validate benchmark: correctness against index, samtools faidx, and seqkit, then performance.
 # Usage: bash bench/validate/run.sh [options]   (ZFASTA, ZEBRAC select the binaries)
 #   --runs N --warmup N --duration MS      sampling (defaults 5, 3, 5000)
-#   --skip-tests --skip-benchmarks --skip-report   (--skip-messy is accepted; no messy section)
+#   --skip-tests --skip-benchmarks --skip-report   (--skip-messy is accepted and ignored; the messy checks always run)
 # Results go to results/, the report to REPORT.md.
 
 set -euo pipefail
@@ -518,6 +518,9 @@ run_report() {
 }
 
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+if $DO_BENCHMARKS; then
+    bench_prepare_subject || exit 1
+fi
 TESTS_TSV="$RESULTS_DIR/tests_${TIMESTAMP}.tsv"
 mkdir -p "$RESULTS_DIR"
 

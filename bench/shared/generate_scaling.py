@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -58,6 +59,13 @@ def write_size(mb: int, path: Path) -> None:
             write_wrapped(handle, max(MIN_SEQ_LEN, total // SIZE_SEQ_COUNT - 50))
 
 
+def write_atomic(path: Path, writer, arg: int) -> None:
+    """Write beside `path`, then rename, so an interrupted run never leaves a truncated fixture."""
+    partial = path.with_name(path.name + ".partial")
+    writer(arg, partial)
+    os.replace(partial, path)
+
+
 def expected_paths(mode: str) -> list[Path]:
     paths: list[Path] = []
     if mode in ("all", "size"):
@@ -105,22 +113,24 @@ def generate(*, mode: str, force: bool) -> None:
     if outputs_ready(mode) and not force:
         print(f"scaling cache ok: {OUT_DIR} ({mode})")
         return
+    # Fixtures made with other parameters are stale even when present.
+    rebuild = force or not stamp_ok()
 
     if mode in ("all", "size"):
         for mb in SIZE_MBS:
             path = OUT_DIR / f"size_{mb}mb.fasta"
-            if force or not path.is_file():
-                write_size(mb, path)
+            if rebuild or not path.is_file():
+                write_atomic(path, write_size, mb)
     if mode in ("all", "seq", "budget"):
         for count in BUDGET_COUNTS:
             path = OUT_DIR / f"seqs_budget_{count}.fasta"
-            if force or not path.is_file():
-                write_budget(count, path)
+            if rebuild or not path.is_file():
+                write_atomic(path, write_budget, count)
     if mode in ("all", "seq", "fixed"):
         for count in FIXED_COUNTS:
             path = OUT_DIR / f"seqs_fixed_{count}.fasta"
-            if force or not path.is_file():
-                write_fixed(count, path)
+            if rebuild or not path.is_file():
+                write_atomic(path, write_fixed, count)
 
     STAMP.write_text(stamp_payload(), encoding="utf-8")
     print(f"wrote scaling FASTAs -> {OUT_DIR} ({mode})")

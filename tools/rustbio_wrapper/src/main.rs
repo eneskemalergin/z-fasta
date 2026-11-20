@@ -65,12 +65,10 @@ fn parse_region(s: &str) -> (&str, Option<(u64, u64)>) {
     if let Some(colon) = s.find(':') {
         let chrom = &s[..colon];
         let coords = &s[colon + 1..];
-        if let Some(dash) = coords.find('-') {
-            let start: u64 = coords[..dash].parse().unwrap_or(0);
-            let end: u64 = coords[dash + 1..].parse().unwrap_or(0);
-            (chrom, Some((start, end)))
-        } else {
-            (s, None)
+        // A bound that does not parse leaves the whole text a name, as z-fasta does.
+        match coords.find('-').map(|dash| (coords[..dash].parse::<u64>(), coords[dash + 1..].parse::<u64>())) {
+            Some((Ok(start), Ok(end))) => (chrom, Some((start, end))),
+            _ => (s, None),
         }
     } else {
         (s, None)
@@ -140,16 +138,24 @@ fn write_fasta(
 //  cmd_index  (unchanged strict-FAI scanner)
 // ════════════════════════════════════════════════════════════════════
 
-fn fail_index(writer: &mut BufWriter<File>, err: io::Error) -> io::Error {
-    let _ = writer.get_mut().set_len(0);
+fn fail_index(_writer: &mut BufWriter<File>, err: io::Error) -> io::Error {
     err
 }
 
+/// A failed index leaves no `.fai`: the writer is dropped (and flushed) before the file is removed.
 fn cmd_index(fasta: &str) -> io::Result<()> {
+    let fai_path = format!("{fasta}.fai");
+    let result = write_index(fasta, &fai_path);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&fai_path);
+    }
+    result
+}
+
+fn write_index(fasta: &str, fai_path: &str) -> io::Result<()> {
     let src = File::open(fasta)?;
     let reader = BufReader::new(src);
-    let fai_path = format!("{fasta}.fai");
-    let mut writer = BufWriter::new(File::create(&fai_path)?);
+    let mut writer = BufWriter::new(File::create(fai_path)?);
 
     let mut file_offset: u64 = 0;
     let mut seq_len: u64 = 0;

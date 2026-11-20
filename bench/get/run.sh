@@ -235,6 +235,8 @@ check_library_positional() {
     local fasta="$1" regions="$2"
     local -a regs
     mapfile -t regs < "$regions"
+    [[ -n "$("$ZFASTA" get "$fasta" "${regs[@]}" | head -c 1)" ]] \
+        || { echo "error: z-fasta get printed nothing for $regions ($fasta)" >&2; return 1; }
     cmp -s <("$ZFASTA" get "$fasta" "${regs[@]}") <("$LIBRARY" "$fasta" "$regions") \
         || { echo "error: the package lane differs from z-fasta get on $regions ($fasta)" >&2; return 1; }
 }
@@ -586,8 +588,6 @@ PY
 
 # --- Correctness ---
 
-SKIP_INDEX=false SKIP_GET=false SKIP_MULTI=false SKIP_BED=false SKIP_RC=false SKIP_EDGE=false SKIP_REAL=false
-
 MESSY_TEST_DIR="$BENCH_ROOT/shared/cache/messy_fixtures"
 
 MESSY_POS_CASES=(
@@ -609,7 +609,9 @@ fail() {
     echo "    got:";      head -3 "$gf" 2>/dev/null | sed 's/^/      /'
 }
 
+# An empty expected output is a broken reference, never agreement.
 diff_oracle() {
+    [[ -s "$1" ]] || { fail "$3 (empty expected output)"; return 0; }
     diff -q "$1" "$2" >/dev/null 2>&1 && pass "$3" || fail "$3" "${4:-$1}" "$2"
 }
 
@@ -617,6 +619,7 @@ diff_oracle() {
 # compared, not bytes.
 diff_fasta_oracle() {
     local expected="$1" got="$2" label="$3"
+    [[ -s "$expected" ]] || { fail "$label (empty expected output)"; return 0; }
     if python3 - "$expected" "$got" <<'PY'
 import sys
 from pathlib import Path
@@ -787,9 +790,12 @@ normalize_bed_output() {
     ' "$raw_in" > "$fasta_out"
 }
 
+# z-fasta reports a failure with exit 1; any other status, a signal included, is a crash.
 expect_fail() {
     local label="$1"; shift
-    "$@" >/dev/null 2>/dev/null && fail "$label (expected error)" || pass "$label"
+    local status=0
+    "$@" >/dev/null 2>/dev/null || status=$?
+    if [[ $status -eq 1 ]]; then pass "$label"; else fail "$label (expected exit 1, got $status)"; fi
 }
 
 verify_oracle_transform() {
@@ -1023,7 +1029,8 @@ parity_bed_rc_composed() {
 # --- optional wrapper cross-checks ---
 wrapper_vs() {
     local desc="$1" cmp="$2" bin="$3"; shift 3
-    [[ -x "$bin" ]] || return 0
+    [[ -x "$bin" ]] || { fail "$desc (wrapper not installed: $bin)"; return 0; }
+    [[ -s "$cmp" ]] || { fail "$desc (empty reference)"; return 0; }
     if "$bin" "$@" > "$TMPDIR/wrapper.tmp" 2>/dev/null; then
         diff_fasta_oracle "$cmp" "$TMPDIR/wrapper.tmp" "$desc"
     else
@@ -1039,7 +1046,7 @@ wrapper_region() {
 
 wrapper_regions() {
     local desc="$1" fasta="$2"; shift 2
-    "$SAMTOOLS" faidx "$fasta" "$@" > "$TMPDIR/expected.tmp" 2>/dev/null || return 0
+    "$SAMTOOLS" faidx "$fasta" "$@" > "$TMPDIR/expected.tmp" 2>/dev/null || { fail "$desc (samtools reference failed)"; return 0; }
     wrapper_vs "$desc noodles" "$TMPDIR/expected.tmp" "$NOODLES" get "$fasta" "$@"
     wrapper_vs "$desc rustbio" "$TMPDIR/expected.tmp" "$RUSTBIO" get "$fasta" "$@"
 }
@@ -1047,7 +1054,7 @@ wrapper_regions() {
 wrapper_rc() {
     local desc="$1" fasta="$2" region="$3"
     local st
-    st=$("$SAMTOOLS" faidx -i --mark-strand no "$fasta" "$region" 2>/dev/null) || return 0
+    st=$("$SAMTOOLS" faidx -i --mark-strand no "$fasta" "$region" 2>/dev/null) || { fail "$desc (samtools reference failed)"; return 0; }
     printf "%s\n" "$st" > "$TMPDIR/expected.tmp"
     wrapper_vs "$desc noodles" "$TMPDIR/expected.tmp" "$NOODLES" get "$fasta" "$region" --rc
     wrapper_vs "$desc rustbio" "$TMPDIR/expected.tmp" "$RUSTBIO" get "$fasta" "$region" --rc
@@ -1056,10 +1063,10 @@ wrapper_rc() {
 wrapper_bed() {
     local desc="$1" bed="$2" fasta="${3:-$TEST_DATA_DIR/simple.fasta}"
     bed_to_regions "$bed" > "$TMPDIR/st_regions.txt"
-    "$SAMTOOLS" faidx -r "$TMPDIR/st_regions.txt" "$fasta" > "$TMPDIR/expected.tmp" 2>/dev/null || return 0
+    "$SAMTOOLS" faidx -r "$TMPDIR/st_regions.txt" "$fasta" > "$TMPDIR/expected.tmp" 2>/dev/null || { fail "$desc (samtools reference failed)"; return 0; }
     for pair in "noodles:$NOODLES" "rustbio:$RUSTBIO"; do
         IFS=: read -r name bin <<< "$pair"
-        [[ -x "$bin" ]] || continue
+        [[ -x "$bin" ]] || { fail "$desc $name (wrapper not installed: $bin)"; continue; }
         if "$bin" get "$fasta" --bed "$bed" > "$TMPDIR/${name}.raw" 2>/dev/null; then
             normalize_bed_output "$TMPDIR/expected.tmp" "$bed" 0 "$TMPDIR/st.norm"
             normalize_bed_output "$TMPDIR/${name}.raw" "$bed" 0 "$TMPDIR/${name}.norm"
@@ -1826,19 +1833,18 @@ run_tests() {
     echo "  z-fasta:  $ZFASTA"
     echo "  samtools: $(command -v "$SAMTOOLS" 2>/dev/null || echo missing)"
     echo "  bedtools: $(command -v "$BEDTOOLS" 2>/dev/null || echo missing)"
-    echo "  skip: index=$SKIP_INDEX get=$SKIP_GET multi=$SKIP_MULTI bed=$SKIP_BED rc=$SKIP_RC edge=$SKIP_EDGE"
 
     cd "$PROJECT_ROOT"
     [[ -x "$ZFASTA" ]] || { echo "Error: z-fasta not found"; rm -rf "$TMPDIR"; return 1; }
     command -v "$SAMTOOLS" &>/dev/null || { echo "Error: samtools not found"; rm -rf "$TMPDIR"; return 1; }
 
-    ! $SKIP_INDEX && section0_index
-    ! $SKIP_GET   && section1
-    ! $SKIP_MULTI && section2
-    ! $SKIP_BED   && section3
-    ! $SKIP_RC    && section4
-    ! $SKIP_EDGE  && section5
-    ! $SKIP_REAL  && section6_real
+    section0_index
+    section1
+    section2
+    section3
+    section4
+    section5
+    section6_real
 
     echo ""
     echo "Results: $PASS passed, $FAIL failed"
@@ -2623,6 +2629,9 @@ run_report() {
 }
 
 TIMESTAMP="${GET_RUN_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
+if $DO_BENCHMARKS; then
+    bench_prepare_subject || exit 1
+fi
 mkdir -p "$RESULTS_DIR"
 trap cleanup_benchmark_views EXIT
 

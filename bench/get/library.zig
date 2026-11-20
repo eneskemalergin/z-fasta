@@ -29,6 +29,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
 fn fetchRegions(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, regions_path: []const u8, out: *std.Io.Writer) !void {
     var failure: zfasta.diagnostics.Failure = undefined;
+    failure.reset(.get);
+    errdefer printFailure(&failure);
     var reader = try zfasta.IndexedReader.open(allocator, io, fasta_path, .{}, &failure);
     defer reader.deinit();
     const regions = try std.Io.Dir.cwd().readFileAlloc(io, regions_path, allocator, .unlimited);
@@ -56,8 +58,16 @@ fn streamRecords(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u
     const storage = try allocator.alloc(u8, storage_bytes);
     defer allocator.free(storage);
     var failure: zfasta.diagnostics.Failure = undefined;
+    failure.reset(.get);
+    errdefer printFailure(&failure);
     var records = zfasta.RecordReader.init(&source.interface, storage, &failure);
     while (try records.next()) |record| try writeRecord(out, record.id, record.sequence);
+}
+
+// The package never prints; name the recorded code so a failed lane says why.
+fn printFailure(failure: *const zfasta.diagnostics.Failure) void {
+    const primary = failure.primary() orelse return;
+    std.debug.print("error [{s}]\n", .{@tagName(primary.code())});
 }
 
 fn writeRecord(out: *std.Io.Writer, header: []const u8, sequence: []const u8) !void {

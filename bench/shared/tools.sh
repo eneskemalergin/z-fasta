@@ -57,12 +57,13 @@ bench_has_tool() {
     [[ -n "$path" && -x "$path" ]]
 }
 
+# Exits, not returns: callers run under `if` or in a pipe, where `set -e` would ignore a status.
 bench_require_tool() {
     local name="$1"
     if ! bench_has_tool "$name"; then
         echo "error: required benchmark tool not found or not executable: $name" >&2
         echo "       resolved path: $(bench_tool_path "$name" 2>/dev/null || echo '<unknown>')" >&2
-        return 1
+        exit 1
     fi
 }
 
