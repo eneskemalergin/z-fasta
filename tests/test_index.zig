@@ -3888,6 +3888,38 @@ test "[failure] - [index diagnostics]: retains original record for nonuniform FA
     try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);
 }
 
+test "[failure] - [index diagnostics]: nonuniform FAI rejection reports the first offending line" {
+    const Case = struct {
+        fasta: []const u8,
+        reason: diagnostics.NonuniformReason,
+        expected: ?diagnostics.Geometry,
+        observed: diagnostics.Geometry,
+    };
+    const cases = [_]Case{
+        .{ .fasta = ">s\nACGTACGT\nACGT\nACGTACGT\n", .reason = .interior_short_line, .expected = .{ .line_bases = 8, .line_bytes = 9 }, .observed = .{ .line_bases = 4, .line_bytes = 5 } },
+        .{ .fasta = ">s\nACGT\nACGTACGT\nACGT\n", .reason = .wider_line, .expected = .{ .line_bases = 4, .line_bytes = 5 }, .observed = .{ .line_bases = 8, .line_bytes = 9 } },
+        .{ .fasta = ">s\nACGT\r\nACGT\nACGT\n", .reason = .mixed_line_endings, .expected = .{ .line_bases = 4, .line_bytes = 6 }, .observed = .{ .line_bases = 4, .line_bytes = 5 } },
+        .{ .fasta = ">s\nACGT\nAC\n\nACGT\n", .reason = .interior_short_line, .expected = .{ .line_bases = 4, .line_bytes = 5 }, .observed = .{ .line_bases = 2, .line_bytes = 3 } },
+        .{ .fasta = ">s\nACGT\n\nACGT\n", .reason = .interior_blank_line, .expected = .{ .line_bases = 4, .line_bytes = 5 }, .observed = .{ .line_bases = 0, .line_bytes = 1 } },
+        .{ .fasta = ">s\nACGT\nAC GT\nACGT\n", .reason = .sequence_whitespace, .expected = .{ .line_bases = 4, .line_bytes = 5 }, .observed = .{ .line_bases = 4, .line_bytes = 6 } },
+        .{ .fasta = ">s\nACGT\nACGT\nACGTAC", .reason = .wider_line, .expected = .{ .line_bases = 4, .line_bytes = 5 }, .observed = .{ .line_bases = 6, .line_bytes = 7 } },
+        .{ .fasta = ">s\nAC GT\nACGT\n", .reason = .sequence_whitespace, .expected = null, .observed = .{ .line_bases = 4, .line_bytes = 6 } },
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    for (cases) |case| {
+        const path = try writeFastaArtifact(allocator, "nonuniform-offending-line", case.fasta);
+        defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+        var failure: diagnostics.Failure = undefined;
+        try expectIndexRunCode(io, path, true, .@"index.nonuniform_fai", &failure);
+        const facts = failure.primary().?.details.@"index.nonuniform_fai";
+        try std.testing.expectEqual(case.reason, facts.reason);
+        try std.testing.expectEqual(case.expected, facts.expected);
+        try std.testing.expectEqual(@as(?diagnostics.Geometry, case.observed), facts.observed);
+    }
+}
+
 test "[integration] - [index diagnostics]: completes ZFI publication before returning success" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

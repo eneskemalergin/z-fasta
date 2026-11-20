@@ -37,6 +37,7 @@ pub const FastaRecordEmit = struct {
     name: []const u8,
     source_reference: ?*const diagnostics.Reference = null,
     nonuniform_reason: diagnostics.NonuniformReason = .nonuniform_layout,
+    nonuniform_line: ?diagnostics.Geometry = null,
     uses_uniform_formula: bool,
     side_table: []const u8 = &.{},
 };
@@ -362,6 +363,7 @@ fn IndexEmitter(comptime Ctx: type, comptime emitRecord: fn (Ctx, FastaRecordEmi
                 .name = info.name,
                 .source_reference = info.reference,
                 .nonuniform_reason = info.nonuniform_reason,
+                .nonuniform_line = info.nonuniform_line,
                 .uses_uniform_formula = info.uses_uniform_formula,
                 .side_table = info.side_table,
             });
@@ -453,7 +455,12 @@ const FaiEmitBuffer = struct {
     fn emitRecord(self: *FaiEmitBuffer, emit_info: FastaRecordEmit) !void {
         if (!emit_info.uses_uniform_formula) {
             const scan_diag = self.diag.forRecord(emit_info);
-            return scan_diag.fail(.{ .@"index.nonuniform_fai" = .{ .reason = emit_info.nonuniform_reason, .observed = .{ .line_bases = emit_info.record.line_bases, .line_bytes = emit_info.record.line_bytes } } }, .scan, .fasta, null);
+            const established: diagnostics.Geometry = .{ .line_bases = emit_info.record.line_bases, .line_bytes = emit_info.record.line_bytes };
+            const facts: diagnostics.Nonuniform = if (emit_info.nonuniform_line) |offending|
+                .{ .reason = emit_info.nonuniform_reason, .expected = established, .observed = offending }
+            else
+                .{ .reason = emit_info.nonuniform_reason, .observed = established };
+            return scan_diag.fail(.{ .@"index.nonuniform_fai" = facts }, .scan, .fasta, null);
         }
         const rec = emit_info.record;
         var suffix_buf: [FAI_SUFFIX_BUFFER_BYTES]u8 = undefined;
@@ -1280,6 +1287,7 @@ test "[edge] - [fasta scanner]: rejects excess records before emitting" {
         .uses_uniform_formula = true,
         .side_table = &.{},
         .nonuniform_reason = .nonuniform_layout,
+        .nonuniform_line = null,
     };
     var ctx = Ctx{};
     var count: u32 = std.math.maxInt(u32) - 1;

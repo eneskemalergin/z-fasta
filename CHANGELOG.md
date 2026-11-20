@@ -9,6 +9,7 @@ All notable changes to z-fasta will be documented in this file.
 ### Fixed
 
 - **Damaged `.zfi` files.** Two size computations on values read from an index are bounded, so a damaged `.zfi` read by `get` or opened by `IndexedReader` fails with its coded error in every build mode.
+- **`index.nonuniform_fai` names the offending line.** `observed` holds the first line that breaks the record's width, and `expected` the width the record set; `reason` describes the same line. `observed` used to carry the record's first line, and `expected` was empty.
 
 ## [0.4.0]
 

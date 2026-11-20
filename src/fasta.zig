@@ -433,6 +433,8 @@ pub const ScannedRecord = struct {
     uses_uniform_formula: bool,
     side_table: []const u8,
     nonuniform_reason: diagnostics.NonuniformReason,
+    /// Geometry of the first line that breaks the record's established width, or null when the first line itself is not dense.
+    nonuniform_line: ?diagnostics.Geometry,
 };
 
 pub fn RecordScannerWith(comptime Diag: type) type {
@@ -653,6 +655,7 @@ pub fn RecordScannerWith(comptime Diag: type) type {
             self.line_builder.pending_bases = bases;
             self.line_builder.pending_actual_bytes = line_bytes;
             self.line_builder.pending_content_len = self.line_builder.first_content_len;
+            self.line_builder.pending_has_lf = true;
             self.line_builder.have_pending = true;
             self.at_line_start = true;
         }
@@ -777,6 +780,7 @@ pub fn RecordScannerWith(comptime Diag: type) type {
                 .uses_uniform_formula = seq_info.uses_uniform_formula,
                 .side_table = side_table_slice,
                 .nonuniform_reason = if (!metrics.first_content_dense) .sequence_whitespace else self.line_builder.nonuniform_reason,
+                .nonuniform_line = if (!metrics.first_content_dense) null else self.line_builder.nonuniform_line,
             });
         }
 
@@ -920,31 +924,52 @@ fn findLineFeed(data: []const u8, start: usize, end: usize) usize {
 const LineMetricsBuilder = struct {
     metrics: LineMetrics = .{},
     nonuniform_reason: diagnostics.NonuniformReason = .nonuniform_layout,
+    /// Geometry of the line behind `nonuniform_reason`; line_bytes counts a missing final newline as one byte, like `metrics.line_bytes`.
+    nonuniform_line: ?diagnostics.Geometry = null,
     first_actual_bytes: u32 = 0,
     first_content_len: u32 = 0,
     pending_bases: u32 = 0,
     pending_actual_bytes: u32 = 0,
     pending_content_len: u32 = 0,
+    pending_has_lf: bool = false,
     have_pending: bool = false,
     blank_after_bases: bool = false,
+    blank_bytes: u32 = 0,
+
+    fn markNonuniform(self: *LineMetricsBuilder, reason: diagnostics.NonuniformReason, bases: u32, actual_bytes: u32, has_lf: bool) void {
+        @branchHint(.cold);
+        if (self.metrics.is_uniform_width) {
+            self.nonuniform_reason = reason;
+            self.nonuniform_line = .{ .line_bases = bases, .line_bytes = if (has_lf) actual_bytes else @as(u64, actual_bytes) + 1 };
+        }
+        self.metrics.is_uniform_width = false;
+    }
 
     fn ingestLine(self: *LineMetricsBuilder, bases: u32, actual_bytes: u32, has_lf: bool, content_len: u32) void {
         if (bases == 0) {
-            if (self.metrics.line_count > 0) {
+            if (self.metrics.line_count > 0 and !self.blank_after_bases) {
                 self.blank_after_bases = true;
+                self.blank_bytes = actual_bytes;
             }
             return;
         }
+        // Lines are checked in file order: the pending line, then a blank line after it, then this line.
+        if (self.metrics.line_count > 1 and self.have_pending) {
+            if (self.pending_bases != self.metrics.line_bases or
+                self.pending_actual_bytes != self.first_actual_bytes)
+            {
+                const reason: diagnostics.NonuniformReason = if (self.pending_bases < self.metrics.line_bases) .interior_short_line else if (self.pending_bases > self.metrics.line_bases) .wider_line else .mixed_line_endings;
+                self.markNonuniform(reason, self.pending_bases, self.pending_actual_bytes, self.pending_has_lf);
+            }
+        }
         if (self.blank_after_bases) {
-            self.metrics.is_uniform_width = false;
-            self.nonuniform_reason = .interior_blank_line;
+            self.markNonuniform(.interior_blank_line, 0, self.blank_bytes, true);
             self.blank_after_bases = false;
         }
         self.metrics.seq_len += bases;
         self.metrics.line_count += 1;
         if (bases != content_len) {
-            if (self.metrics.is_uniform_width) self.nonuniform_reason = .sequence_whitespace;
-            self.metrics.is_uniform_width = false;
+            self.markNonuniform(.sequence_whitespace, bases, actual_bytes, has_lf);
         }
 
         if (self.metrics.line_count == 1) {
@@ -954,18 +979,12 @@ const LineMetricsBuilder = struct {
             self.metrics.line_bytes = if (has_lf) actual_bytes else actual_bytes + 1;
             const sep_len = if (has_lf) actual_bytes -| content_len else @as(u32, 1);
             self.metrics.first_content_dense = bases == content_len and (sep_len == 1 or sep_len == 2);
-        } else if (self.have_pending) {
-            if (self.pending_bases != self.metrics.line_bases or
-                self.pending_actual_bytes != self.first_actual_bytes)
-            {
-                if (self.metrics.is_uniform_width) self.nonuniform_reason = if (self.pending_bases < self.metrics.line_bases) .interior_short_line else if (self.pending_bases > self.metrics.line_bases) .wider_line else .mixed_line_endings;
-                self.metrics.is_uniform_width = false;
-            }
         }
 
         self.pending_bases = bases;
         self.pending_actual_bytes = actual_bytes;
         self.pending_content_len = content_len;
+        self.pending_has_lf = has_lf;
         self.have_pending = true;
     }
 
@@ -975,8 +994,7 @@ const LineMetricsBuilder = struct {
             if (self.pending_bases > self.metrics.line_bases or
                 self.pending_content_len > self.first_content_len)
             {
-                if (self.metrics.is_uniform_width) self.nonuniform_reason = .wider_line;
-                self.metrics.is_uniform_width = false;
+                self.markNonuniform(.wider_line, self.pending_bases, self.pending_actual_bytes, self.pending_has_lf);
             }
         }
         return self.metrics;
