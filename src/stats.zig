@@ -266,7 +266,8 @@ fn summarizeLengths(comptime T: type, lengths: []T, diag: *Diagnostics) diagnost
         total = std.math.add(u64, total, length) catch return diag.overflow(.total_symbols, total, length, std.math.maxInt(u64), diag.index_source);
         if (narrow < lengths[shortest_index]) shortest_index = i;
         if (narrow > lengths[longest_index]) longest_index = i;
-        aun_numerator = std.math.add(u128, aun_numerator, @as(u128, length) * length) catch return diag.consistency(.numeric_buffer);
+        // Cannot overflow: the lengths sum to under 2^64, so their squares sum to under 2^128.
+        aun_numerator += @as(u128, length) * length;
     }
     const shortest_length: u64 = lengths[shortest_index];
     const longest_length: u64 = lengths[longest_index];
@@ -572,14 +573,27 @@ fn computeStats(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8
 }
 
 fn scanStreamedSides(stream: *index_format.EntryStream, reader: *BoundedFastaReader, rec: IndexRecord, comp: *CompositionStats) diagnostics.Error!void {
-    const count = try stream.sideLineCount(rec);
+    const Lines = struct {
+        stream: *index_format.EntryStream,
+        rec: IndexRecord,
+        fn get(self: @This(), index: u64) diagnostics.Error!SideTableLine {
+            return self.stream.sideLine(self.rec, index);
+        }
+    };
+    try scanSideLines(reader, try stream.sideLineCount(rec), Lines{ .stream = stream, .rec = rec }, comp);
+}
+
+/// Scans a non-uniform record's lines, joining adjacent lines into spans of at most one buffer.
+/// `lines.get(i)` returns line `i`, from a mapped table or a stream.
+fn scanSideLines(reader: *BoundedFastaReader, count: u64, lines: anytype, comp: *CompositionStats) diagnostics.Error!void {
+    if (count == 0) return reader.diag.consistency(.missing_side_table);
     var index: u64 = 0;
     while (index < count) {
-        const first = try stream.sideLine(rec, index);
+        const first = try lines.get(index);
         var end = std.math.add(u64, first.byte_offset, first.line_bytes) catch return reader.diag.consistency(.side_table_state);
         index += 1;
         while (index < count) {
-            const line = try stream.sideLine(rec, index);
+            const line = try lines.get(index);
             if (line.byte_offset != end) break;
             const next_end = std.math.add(u64, end, line.line_bytes) catch return reader.diag.consistency(.side_table_state);
             if (next_end - first.byte_offset > reader.buffer.len) break;
@@ -679,23 +693,13 @@ fn scanSideTableRecord(
     lines: []const SideTableLine,
     comp: *CompositionStats,
 ) diagnostics.Error!void {
-    if (lines.len == 0) return reader.diag.consistency(.missing_side_table);
-
-    var line_index: usize = 0;
-    while (line_index < lines.len) {
-        const start = lines[line_index].byte_offset;
-        var end = std.math.add(u64, start, lines[line_index].line_bytes) catch return reader.diag.consistency(.side_table_state);
-        line_index += 1;
-
-        while (line_index < lines.len and lines[line_index].byte_offset == end) {
-            const next_end = std.math.add(u64, end, lines[line_index].line_bytes) catch return reader.diag.consistency(.side_table_state);
-            if (next_end - start > reader.buffer.len) break;
-            end = next_end;
-            line_index += 1;
+    const Lines = struct {
+        lines: []const SideTableLine,
+        fn get(self: @This(), index: u64) diagnostics.Error!SideTableLine {
+            return self.lines[@intCast(index)];
         }
-        if (end > reader.file_size) return reader.diag.span(end, reader.file_size, line_index);
-        try scanSpan(reader, start, end, comp);
-    }
+    };
+    try scanSideLines(reader, lines.len, Lines{ .lines = lines }, comp);
 }
 
 fn scanRecord(

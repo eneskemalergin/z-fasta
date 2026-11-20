@@ -594,7 +594,9 @@ const ZfiOnDemand = struct {
     fn prefetch(self: *ZfiOnDemand, names: []const []const u8, buffer: []u8) error{OutOfMemory}!void {
         self.clearPrefetch();
         const request_bits = 30;
-        if (names.len >= 1 << request_bits or buffer.len < PREFETCH_PROBE_SLOTS * 4) return;
+        // Name-blob spans are read into the buffer, and a span starts with one whole name of up
+        // to 65,535 bytes; a smaller buffer skips prefetch and leaves each lookup to `findNameAt`.
+        if (names.len >= 1 << request_bits or buffer.len < std.math.maxInt(u16)) return;
         const allocator = self.prefetch_arena.allocator();
         const count: u64 = self.record_count;
         const ordinal_bits = NameTable.ordinalBits(count);
@@ -975,6 +977,10 @@ pub const EntryStream = struct {
         self.table_start = blob.regions.table_start;
         self.allocator = allocator;
         if (check_name_table) self.table = NameTable.Builder.init(allocator, header.record_count) catch return context.allocation(.name_map, blob.regions.table_len);
+        errdefer if (self.table) |*table| {
+            table.deinit(allocator);
+            self.table = null;
+        };
         self.previous_side_end = self.records_end;
         self.reader.seekTo(ZFI_HEADER_BYTES) catch |err| return context.ioFailure(.read, err);
         self.remaining = header.record_count;

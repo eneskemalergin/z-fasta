@@ -244,13 +244,23 @@ pub fn writeValidationText(writer: *std.Io.Writer, failure: *const diagnostics.F
     try writer.writeByte('\n');
 }
 
+/// The bytes one input byte takes when escaped: `"` and `\` get a backslash, other printable
+/// ASCII stays, and everything else becomes `\xHH`.
+fn escapedLen(byte: u8) usize {
+    return switch (byte) {
+        '"', '\\' => 2,
+        0x20...0x21, 0x23...0x5b, 0x5d...0x7e => 1,
+        else => 4,
+    };
+}
+
 pub fn writeEscapedBytes(writer: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Error!void {
-    for (bytes) |byte| switch (byte) {
-        '"', '\\' => {
+    for (bytes) |byte| switch (escapedLen(byte)) {
+        1 => try writer.writeByte(byte),
+        2 => {
             try writer.writeByte('\\');
             try writer.writeByte(byte);
         },
-        0x20...0x21, 0x23...0x5b, 0x5d...0x7e => try writer.writeByte(byte),
         else => try writer.print("\\x{x:0>2}", .{byte}),
     };
 }
@@ -605,11 +615,7 @@ fn textOpaque(writer: *std.Io.Writer, bytes: []const u8, original: u128, lower_b
 fn escapedPrefix(bytes: []const u8, width: usize) []const u8 {
     var escaped_bytes: usize = 0;
     for (bytes, 0..) |byte, index| {
-        const cost: usize = switch (byte) {
-            '"', '\\' => 2,
-            0x20...0x21, 0x23...0x5b, 0x5d...0x7e => 1,
-            else => 4,
-        };
+        const cost = escapedLen(byte);
         if (escaped_bytes + cost > width) return bytes[0..index];
         escaped_bytes += cost;
     }

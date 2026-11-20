@@ -19,7 +19,6 @@ pub const INDEX_READ_BUFFER_BYTES = 256 * 1024;
 pub const MAX_INDEX_NAME_LEN = std.math.maxInt(u16);
 
 const ScanOptions = struct {
-    max_name_len: ?usize = null,
     collect_side_tables: bool = false,
     require_initial_header: bool = false,
     failure: *diagnostics.Failure,
@@ -161,7 +160,7 @@ pub fn scanFastaReader(
     defer if (options.collect_side_tables) state.side_table.deinit(allocator);
     var record_count: u32 = 0;
     var emitter = IndexEmitter(@TypeOf(ctx), emitRecord){ .ctx = ctx, .record_count = &record_count, .diag = state.diag };
-    const max_name_len = @min(options.max_name_len orelse MAX_INDEX_NAME_LEN, MAX_INDEX_NAME_LEN);
+    const max_name_len: usize = MAX_INDEX_NAME_LEN;
     var file_offset: u64 = 0;
 
     while (true) {

@@ -928,6 +928,8 @@ fn copyRegion(
     writer: anytype,
     diag: *Diagnostics,
 ) diagnostics.Error!void {
+    // An empty buffer would make no progress; every caller passes at least one read window.
+    std.debug.assert(input_buffer.len != 0);
     var skip = if (resolved.orientation.reverse) span.trailing_bases else span.leading_bases;
     var base_index = if (resolved.orientation.reverse)
         resolved.start - 1 + resolved.num_bases - 1
@@ -1098,8 +1100,7 @@ fn appendBedLineRequest(allocator: std.mem.Allocator, workspace: *RequestWorkspa
 
 fn appendNamesLine(allocator: std.mem.Allocator, workspace: *RequestWorkspace, line: []const u8, line_number: usize, orientation: Orientation, diag: *Diagnostics) diagnostics.Error!void {
     diag.at.location.line = line_number;
-    const name = if (line.len > 0 and line[line.len - 1] == '\r') line[0 .. line.len - 1] else line;
-    if (name.len == 0 or name[0] == '#') return;
+    const name = bed_parser.requestText(line) orelse return;
     if (name.len > MAX_REQUEST_NAME_BYTES) return diag.fail(.{ .@"request.identifier_too_long" = .{
         .identifier_bytes = name.len,
         .limit_bytes = MAX_REQUEST_NAME_BYTES,
@@ -1201,11 +1202,7 @@ const RequestedNames = struct {
                 break :buffered available[0..end];
             } else (reader.takeDelimiter('\n') catch return false) orelse return true;
             const name = switch (source) {
-                .names => blk: {
-                    const name = if (line.len > 0 and line[line.len - 1] == '\r') line[0 .. line.len - 1] else line;
-                    if (name.len == 0 or name[0] == '#') continue;
-                    break :blk name;
-                },
+                .names => bed_parser.requestText(line) orelse continue,
                 .bed => bed_parser.requestChrom(line) orelse continue,
             };
             if (name.len > MAX_REQUEST_NAME_BYTES) return false;

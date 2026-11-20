@@ -164,9 +164,16 @@ fn parseLine(line: []const u8, diag: BedDiagnostics) diagnostics.Error!ParseResu
     } };
 }
 
-fn requestLine(line: []const u8) ?[]const u8 {
+/// The line rules `--names` and `--bed` share: one terminal CR is dropped, and a blank line or
+/// one starting with `#` holds no request.
+pub fn requestText(line: []const u8) ?[]const u8 {
     const trimmed = if (line.len > 0 and line[line.len - 1] == '\r') line[0 .. line.len - 1] else line;
     if (trimmed.len == 0 or trimmed[0] == '#') return null;
+    return trimmed;
+}
+
+fn requestLine(line: []const u8) ?[]const u8 {
+    const trimmed = requestText(line) orelse return null;
     if (std.mem.eql(u8, trimmed, "track") or std.mem.startsWith(u8, trimmed, "track ")) return null;
     if (std.mem.eql(u8, trimmed, "browser") or std.mem.startsWith(u8, trimmed, "browser ")) return null;
     return trimmed;

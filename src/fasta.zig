@@ -120,7 +120,7 @@ pub const ProteinSymbols = struct {
 fn isDenseLineGeometry(line_bases: u32, line_bytes: u32) bool {
     if (line_bases == 0 or line_bytes <= line_bases) return false;
     const sep_len = line_bytes - line_bases;
-    return (sep_len == 1 or sep_len == 2) and line_bases + sep_len == line_bytes;
+    return sep_len == 1 or sep_len == 2;
 }
 
 pub fn countDenseLines(comptime Symbols: type, data: []const u8, start: usize, line_bases: u32, line_bytes: u32) usize {
@@ -1058,7 +1058,9 @@ pub fn PackedNamesWith(comptime Diag: type) type {
             return self.blocks.items[ref.offset / BLOCK_BYTES][ref.offset % BLOCK_BYTES ..][0..ref.len];
         }
 
+        /// Callers pass identifiers of at most 65,535 bytes, so every name fits one block.
         pub fn observe(self: *@This(), name: []const u8) !bool {
+            std.debug.assert(name.len <= BLOCK_BYTES);
             self.map.ctx.owner = self;
             const entry = self.map.getOrPutAdapted(name, Lookup{ .owner = self }) catch return self.diag.oom(.dedup_table, null);
             if (entry.found_existing) return true;
@@ -1394,10 +1396,6 @@ pub fn SourceDedupWith(comptime Diag: type) type {
                     }
                     self.buckets = buckets;
                     self.metadata = metadata;
-                }
-
-                pub fn observe(self: *@This(), source: *SourceDedup, name: []const u8, offset: Offset) !bool {
-                    return self.observeWithFingerprint(source, name, offset, @truncate(std.hash_map.hashString(name)));
                 }
 
                 pub fn observeWithFingerprint(self: *@This(), source: *SourceDedup, name: []const u8, offset: Offset, fingerprint: u32) !bool {

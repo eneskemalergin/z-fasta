@@ -248,7 +248,6 @@ pub const CapacityRole = enum {
 pub const Counter = enum {
     source_bytes,
     total_symbols,
-    aun_numerator,
     physical_lines,
     records,
     requests,
