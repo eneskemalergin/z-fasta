@@ -696,12 +696,6 @@ run_benchmarks() {
     fi
 
     if ! $SKIP_SCALING; then
-        if $REGENERATE_FIXTURES; then
-            shopt -s nullglob
-            legacy=("$RESULTS_DIR"/scale_seqs_*)
-            ((${#legacy[@]})) && rm -rf "${legacy[@]}"
-            shopt -u nullglob
-        fi
         ensure_scaling
         local missing=false mb c
         for mb in "${SIZE_MBS[@]}"; do [[ -f "$SCALING_DIR/size_${mb}mb.fasta" ]] || missing=true; done

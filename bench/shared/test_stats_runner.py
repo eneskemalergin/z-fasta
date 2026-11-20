@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 class StatsRunnerTests(unittest.TestCase):
     def test_fai_view_preserves_shared_files_and_cleans_up(self):
         source = (ROOT / "bench/stats/run.sh").read_text()
-        function = source.split("# A private FAI-only view", 1)[1].split("# Timed tools for one FASTA.", 1)[0]
+        function = source.split("# A private FAI-only view", 1)[1].split("\nrun_stats_tools()", 1)[0]
         function = function[function.index("run_zebrac_tool_fai()") :]
         for mode, expected in (("success", 0), ("failure", 7), ("term", 143), ("int", 130)):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:

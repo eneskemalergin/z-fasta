@@ -271,10 +271,12 @@ check_real_flags() {
     record flags "$ds" "--index=PATH" "fai; passed" \
         "$(validate_value "$view" 'v["index"]["format"] + "; " + v["checks"]["index_match"]' "--index=$WORK_DIR/explicit_$ds.fai")"
 
-    local before after code
-    before="$(stat -c '%s %Y' "$file")"
-    code="$("$ZFASTA" validate --error-format=json --fix -o "$file" "$file" 2>&1 > /dev/null | "$PYTHON" -c 'import json, sys; print(json.load(sys.stdin)["failure"]["primary"]["code"])')"
-    after="$(stat -c '%s %Y' "$file")"
+    # The output-is-input refusal runs on a small copy, so a regression cannot rewrite the dataset.
+    local before after code refuse="$WORK_DIR/refuse_$ds.fa"
+    head -n 200 "$file" > "$refuse"
+    before="$(stat -c '%s %Y' "$refuse") $(sha256sum < "$refuse")"
+    code="$("$ZFASTA" validate --error-format=json --fix -o "$refuse" "$refuse" 2>&1 > /dev/null | "$PYTHON" -c 'import json, sys; print(json.load(sys.stdin)["failure"]["primary"]["code"])')"
+    after="$(stat -c '%s %Y' "$refuse") $(sha256sum < "$refuse")"
     record flags "$ds" "--error-format=json" "repair.output_is_input; unchanged" "$code; $( [[ "$before" == "$after" ]] && echo unchanged || echo changed )"
 }
 

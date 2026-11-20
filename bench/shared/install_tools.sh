@@ -19,7 +19,6 @@ PANDAS_PIN="$PANDAS_VERSION"
 TABULATE_PIN="$TABULATE_VERSION"
 SEQTK_PIN="$SEQTK_DISPLAY_VERSION"
 SEQKIT_PIN="$SEQKIT_VERSION"
-FASTAHACK_PIN="$FASTAHACK_VERSION"
 SAMTOOLS_PIN="$SAMTOOLS_VERSION"
 BEDTOOLS_PIN="$BEDTOOLS_VERSION"
 NOODLES_PIN="$NOODLES_VERSION"
@@ -100,7 +99,7 @@ check_tool() {
         seqtk)
             local got
             got="$(bench_tool_version seqtk 2>/dev/null | awk '{print $2}' || true)"
-            if [[ -n "$got" && "$got" != "$SEQTK_PIN" ]]; then
+            if [[ "$got" != "$SEQTK_PIN" ]]; then
                 fail "seqtk pin is $SEQTK_PIN; got $got"
                 return 1
             fi
@@ -108,21 +107,16 @@ check_tool() {
         seqkit)
             local got
             got="$(bench_tool_version seqkit 2>/dev/null || true)"
-            if [[ -n "$got" && "$got" != *"v$SEQKIT_PIN"* ]]; then
+            if [[ "$got" != *"v$SEQKIT_PIN"* ]]; then
                 fail "seqkit pin is v$SEQKIT_PIN; got $got"
                 return 1
             fi
             ;;
-        fastahack)
-            if [[ "$(bench_tool_version fastahack 2>/dev/null || true)" != *"$FASTAHACK_PIN"* ]]; then
-                fail "fastahack pin is $FASTAHACK_PIN"
-                return 1
-            fi
-            ;;
+        # fastahack reports no version; tools/install.sh builds the pinned tag.
         samtools)
             local got
             got="$(bench_tool_version samtools 2>/dev/null | awk '{print $2}' || true)"
-            if [[ -n "$got" && "$got" != "$SAMTOOLS_PIN" ]]; then
+            if [[ "$got" != "$SAMTOOLS_PIN" ]]; then
                 fail "samtools latest pin is $SAMTOOLS_PIN; got $got"
                 return 1
             fi
@@ -130,7 +124,7 @@ check_tool() {
         bedtools)
             local got
             got="$(bench_tool_version bedtools 2>/dev/null | sed -n 's/.*v\([0-9][0-9.]*\).*/\1/p' || true)"
-            if [[ -n "$got" && "$got" != "$BEDTOOLS_PIN" ]]; then
+            if [[ "$got" != "$BEDTOOLS_PIN" ]]; then
                 fail "bedtools latest pin is $BEDTOOLS_PIN; got $got"
                 return 1
             fi
@@ -138,7 +132,7 @@ check_tool() {
         noodles)
             local got
             got="$(bench_tool_version noodles 2>/dev/null | awk '{print $2}' || true)"
-            if [[ -n "$got" && "$got" != "$NOODLES_PIN" ]]; then
+            if [[ "$got" != "$NOODLES_PIN" ]]; then
                 fail "noodles-fasta pin is $NOODLES_PIN; got $got"
                 return 1
             fi
@@ -146,7 +140,7 @@ check_tool() {
         rustbio)
             local got
             got="$(bench_tool_version rustbio 2>/dev/null | awk '{print $2}' || true)"
-            if [[ -n "$got" && "$got" != "$RUSTBIO_PIN" ]]; then
+            if [[ "$got" != "$RUSTBIO_PIN" ]]; then
                 fail "rust-bio pin is $RUSTBIO_PIN; got $got"
                 return 1
             fi
