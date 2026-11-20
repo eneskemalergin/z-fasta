@@ -3019,7 +3019,7 @@ test "[integration] - [zfi loader]: rejects zero geometry from the gate fixture"
     try expectLoadFailure(std.testing.allocator, fasta_path, .catalog, .@"index.invalid_line_geometry");
 }
 
-test "[failure] - [index loader]: a directory sidecar fails as unmappable in every mode, empty or not" {
+test "[failure] - [index loader]: a directory sidecar fails as a directory path in every mode, empty or not" {
     const allocator = std.testing.allocator;
     const fasta_path = try writeFastaArtifact(allocator, "directory-sidecar", ">a\nACGT\n");
     defer allocator.free(fasta_path);
@@ -3041,11 +3041,58 @@ test "[failure] - [index loader]: a directory sidecar fails as unmappable in eve
                 var failure: diagnostics.Failure = undefined;
                 failure.reset(.get);
                 try std.testing.expectError(error.Io, main.index_format.loadIndex(allocator, io, fasta_path, .automatic, mode, &failure));
-                try std.testing.expectEqual(diagnostics.Code.@"io.map_failed", failure.primary().?.code());
+                try std.testing.expectEqual(diagnostics.Code.@"io.invalid_path", failure.primary().?.code());
+                try std.testing.expectEqual(diagnostics.PathReason.directory, failure.primary().?.details.@"io.invalid_path".reason);
+                try std.testing.expectEqual(diagnostics.Stage.open, failure.primary().?.stage);
                 try std.testing.expectEqual(null, failure.primary().?.cause);
             }
         }
     }
+}
+
+test "[failure] - [index]: a directory at the .zfi path fails before the scan" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const fasta_path = try writeFastaArtifact(allocator, "directory-zfi-output", ">a\nACGT\n");
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    try std.Io.Dir.cwd().createDirPath(io, zfi_path);
+    defer std.Io.Dir.cwd().deleteDir(io, zfi_path) catch {};
+    var failure: diagnostics.Failure = undefined;
+    try expectIndexRunCode(io, fasta_path, false, .@"io.invalid_path", &failure);
+    const primary = failure.primary().?;
+    try std.testing.expectEqual(diagnostics.PathReason.directory, primary.details.@"io.invalid_path".reason);
+    try std.testing.expectEqual(diagnostics.SourceId.zfi, primary.at.source);
+    try std.testing.expectEqual(.not_started, failure.outputs.file.state);
+}
+
+test "[failure] - [index loader]: a dangling .zfi link blocks .fai fallback in every mode" {
+    const allocator = std.testing.allocator;
+    const fasta_path = try writeFastaArtifact(allocator, "dangling-zfi", ">a\nACGT\n");
+    defer allocator.free(fasta_path);
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer allocator.free(fai_path);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = fai_path, .data = "a\t4\t3\t4\t5\n" });
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    defer allocator.free(zfi_path);
+    try std.Io.Dir.cwd().symLink(io, "missing-target.zfi", zfi_path, .{});
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+    for ([_]main.index_format.LoadMode{ .lookup_full_map, .catalog, .stats_scan, .{ .requested = &.{"a"} }, .on_access }) |mode| {
+        var failure: diagnostics.Failure = undefined;
+        failure.reset(.get);
+        try std.testing.expectError(error.Io, main.index_format.loadIndex(allocator, io, fasta_path, .automatic, mode, &failure));
+        try std.testing.expectEqual(diagnostics.Code.@"io.file_not_found", failure.primary().?.code());
+        try std.testing.expectEqual(diagnostics.SourceId.zfi, failure.primary().?.at.source);
+    }
+    // With the link gone, the same `.fai` loads.
+    try std.Io.Dir.cwd().deleteFile(io, zfi_path);
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.get);
+    var index = try main.index_format.loadIndex(allocator, io, fasta_path, .automatic, .lookup_full_map, &failure);
+    index.deinit();
 }
 
 test "[integration] - [zfi loader]: lookups find first matches through the name table" {

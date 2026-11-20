@@ -1418,6 +1418,19 @@ test "[cli] - [validate index]: reports each difference from the index" {
     }
 }
 
+test "[failure] - [validate repair]: a directory output fails before the scan, from a file or stdin" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const input = try writeFastaArtifact(allocator, "validate-directory-output", ">a\nAC GT\n");
+    defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
+    const output = try std.fmt.allocPrint(allocator, "{s}.out", .{input});
+    try std.Io.Dir.cwd().createDirPath(io, output);
+    defer std.Io.Dir.cwd().deleteDir(io, output) catch {};
+    try support.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "validate", "--fix", "-o", output, input }, .@"io.invalid_path");
+    try support.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "validate", "--fix", "-o", output, "-" }, .@"io.invalid_path");
+}
+
 test "[cli] - [validate index]: needs a file and a loadable index" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

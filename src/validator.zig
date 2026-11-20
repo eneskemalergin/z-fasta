@@ -126,6 +126,7 @@ pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const
     var rewrite: ?Rewrite = null;
     if (options.fix) {
         const output_path = options.output_path orelse return failure.fail(.{ .details = .{ .@"usage.option_requires" = .{ .option = .fix, .required = .output } }, .stage = .arguments, .at = .{ .source = .fasta } });
+        try checkOutputNotDirectory(io, output_path, failure);
         if (!from_stdin) try checkRewriteDestination(io, fasta_path, output_path, failure);
         try staged.create(allocator, io, output_path, failure);
         staged_open = true;
@@ -1434,6 +1435,12 @@ fn unknownOutputIdentity(failure: *diagnostics.Failure, source: diagnostics.Sour
         .cause = .{ .zig = cause },
     });
 }
+/// A directory destination fails before the scan; publishing over it could only fail after all the work.
+fn checkOutputNotDirectory(io: std.Io, output_path: []const u8, failure: *diagnostics.Failure) diagnostics.Error!void {
+    const stat = std.Io.Dir.cwd().statFile(io, output_path, .{}) catch return;
+    if (stat.kind == .directory) return failure.fail(.{ .details = .{ .@"io.invalid_path" = .{ .reason = .directory } }, .stage = .create, .at = .{ .source = .output } });
+}
+
 fn checkRewriteDestination(io: std.Io, input_path: []const u8, output_path: []const u8, failure: *diagnostics.Failure) diagnostics.Error!void {
     if (std.mem.eql(u8, input_path, output_path)) return failure.fail(.{
         .details = .{ .@"repair.output_is_input" = .{ .input = .fasta, .output = .output, .comparison = .lexical_path } },

@@ -123,7 +123,7 @@ In a pipeline with `set -o pipefail`, an early-closing reader makes the pipeline
 
 - `io.file_not_found`: the named FASTA, sidecar, names, or BED file does not exist.
 - `io.access_denied`: the file exists but cannot be opened with the current permissions.
-- `io.invalid_path`: the path is too long or otherwise rejected before opening; `reason` and `limit_bytes` say which.
+- `io.invalid_path`: the path is too long, or names a directory where a file is needed (a sidecar, the `.zfi` that `index` writes, or the `--fix` output); `reason` and `limit_bytes` say which. It is reported before any work.
 
 The report's source label says which input failed, and `cause` keeps the operating-system reason.
 

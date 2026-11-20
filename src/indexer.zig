@@ -644,8 +644,12 @@ fn noIndexableRecords(diag: Diagnostics) anyerror {
     return diag.fail(.{ .@"index.no_indexable_records" = {} }, .scan, .fasta, null);
 }
 
-fn zfiOutputPath(buffer: []u8, path: []const u8, diag: Diagnostics) ![]const u8 {
-    return std.fmt.bufPrint(buffer, "{s}.zfi", .{path}) catch return diag.fail(.{ .@"io.invalid_path" = .{ .reason = .too_long, .limit_bytes = buffer.len } }, .create, .zfi, null);
+/// A directory at the `.zfi` path fails before the scan; publishing over it could only fail after all the work.
+fn zfiOutputPath(io: std.Io, buffer: []u8, path: []const u8, diag: Diagnostics) ![]const u8 {
+    const zfi_path = std.fmt.bufPrint(buffer, "{s}.zfi", .{path}) catch return diag.fail(.{ .@"io.invalid_path" = .{ .reason = .too_long, .limit_bytes = buffer.len } }, .create, .zfi, null);
+    const existing = std.Io.Dir.cwd().statFile(io, zfi_path, .{}) catch return zfi_path;
+    if (existing.kind == .directory) return diag.fail(.{ .@"io.invalid_path" = .{ .reason = .directory } }, .create, .zfi, null);
+    return zfi_path;
 }
 
 fn retainScanCause(destination: *diagnostics.Failure, reader: *std.Io.File.Reader, writer: ?*std.Io.File.Writer) void {
@@ -703,7 +707,7 @@ fn indexFai(
 fn runIndexSmall(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, path: []const u8, options: Options, file: std.Io.File, stat: std.Io.File.Stat, diag: Diagnostics, buffers: *IndexBuffers) !u32 {
     var file_reader = file.reader(io, &buffers.file_io);
     if (options.emit_fai) return indexFai(allocator, io, environ, path, stat, &file_reader, buffers, diag);
-    const zfi_path = try zfiOutputPath(&buffers.path, path, diag);
+    const zfi_path = try zfiOutputPath(io, &buffers.path, path, diag);
     var index = scanZfiReader(allocator, &file_reader.interface, &buffers.read, .{ .require_initial_header = true, .failure = diag.failure }) catch |err| {
         retainScanCause(diag.failure, &file_reader, null);
         return err;
@@ -736,7 +740,7 @@ fn publishZfi(atomic: *std.Io.File.Atomic, io: std.Io, path: []const u8, stat: s
 fn runIndexLarge(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, path: []const u8, options: Options, file: std.Io.File, stat: std.Io.File.Stat, diag: Diagnostics, buffers: *IndexBuffers) !u32 {
     var reader = file.reader(io, &buffers.file_io);
     if (options.emit_fai) return indexFai(allocator, io, environ, path, stat, &reader, buffers, diag);
-    const zfi_path = try zfiOutputPath(&buffers.path, path, diag);
+    const zfi_path = try zfiOutputPath(io, &buffers.path, path, diag);
     var deferred = diag;
     deferred.deferred = true;
     deferred.at = .{ .source = .fasta };
@@ -1733,7 +1737,7 @@ test "[failure] - [index diagnostics]: reports the known ZFI path buffer limit" 
     var failure: diagnostics.Failure = undefined;
     failure.reset(.index);
     var buffer: [8]u8 = undefined;
-    try std.testing.expectError(error.Io, zfiOutputPath(&buffer, "input", .{ .failure = &failure }));
+    try std.testing.expectError(error.Io, zfiOutputPath(std.testing.io, &buffer, "input", .{ .failure = &failure }));
     const primary = failure.primary().?;
     try std.testing.expectEqual(diagnostics.Code.@"io.invalid_path", primary.code());
     try std.testing.expectEqual(diagnostics.Stage.create, primary.stage);

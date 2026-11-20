@@ -1244,6 +1244,11 @@ const Diagnostics = struct {
         return self.failure.fail(.{ .details = .{ .@"io.map_failed" = .{ .map_bytes = bytes } }, .stage = .map, .at = self.at, .cause = if (err) |cause| .{ .zig = cause } else null });
     }
 
+    fn directoryPath(self: *const Diagnostics) diagnostics.Error {
+        @branchHint(.cold);
+        return self.failure.fail(.{ .details = .{ .@"io.invalid_path" = .{ .reason = .directory } }, .stage = .open, .at = self.at });
+    }
+
     fn pathLimit(self: *const Diagnostics, limit: u64) diagnostics.Error {
         @branchHint(.cold);
         return self.failure.fail(.{ .details = .{ .@"io.invalid_path" = .{ .reason = .too_long, .limit_bytes = limit } }, .stage = .open, .at = self.at });
@@ -1306,7 +1311,11 @@ fn tryLoadZfi(
     context: *Diagnostics,
 ) diagnostics.Error!?LoadedIndex {
     const zfi_file = platform.openSidecar(io, zfi_path) catch |err| switch (err) {
-        error.FileNotFound => return null,
+        // Only an absent entry falls back to `.fai`; a dangling link is an inaccessible `.zfi`.
+        error.FileNotFound => {
+            _ = std.Io.Dir.cwd().statFile(io, zfi_path, .{ .follow_symlinks = false }) catch return null;
+            return context.ioFailure(.open, err);
+        },
         else => return context.ioFailure(.open, err),
     };
     var keep_file = false;
@@ -1314,7 +1323,7 @@ fn tryLoadZfi(
 
     const zfi_stat = zfi_file.stat(io) catch |err| return context.ioFailure(.stat, err);
 
-    if (zfi_stat.kind == .directory) return context.mapping(zfi_stat.size, null);
+    if (zfi_stat.kind == .directory) return context.directoryPath();
     if (zfi_stat.size == 0) {
         return context.truncated(.header, ZFI_HEADER_BYTES, zfi_stat.size);
     }
@@ -1658,7 +1667,7 @@ fn tryLoadFai(
     defer fai_file.close(io);
 
     const fai_stat = fai_file.stat(io) catch |err| return context.ioFailure(.stat, err);
-    if (fai_stat.kind == .directory) return context.mapping(fai_stat.size, null);
+    if (fai_stat.kind == .directory) return context.directoryPath();
 
     if (fai_stat.mtime.nanoseconds < fasta_stat.mtime.nanoseconds) {
         return context.fail(.{ .@"index.older_than_source" = .{ .index_mtime_ns = fai_stat.mtime.nanoseconds, .source_mtime_ns = fasta_stat.mtime.nanoseconds } });
