@@ -50,7 +50,7 @@ pub const Options = struct {
 
 pub const NameSource = struct { io: std.Io, file: std.Io.File, size: u64 };
 
-pub const Result = struct { status: u8, fix_written: bool };
+pub const Result = struct { status: u8 };
 
 /// `validation` returns a view that borrows it.
 pub const Report = struct {
@@ -153,7 +153,7 @@ pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const
     if (options.fix) try staged.publish(io, if (before) |stat| .{ .file = file, .before = stat } else null, failure);
     failure.succeed();
     try writeReportOutput(io, report, options, options.fix, read_buf, failure);
-    return .{ .status = report.status(options.strict, options.fix), .fix_written = options.fix };
+    return .{ .status = report.status(options.strict, options.fix) };
 }
 
 /// After a failure, `report` covers what was examined and is `interrupted`.

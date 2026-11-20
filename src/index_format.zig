@@ -1195,7 +1195,6 @@ comptime {
 const Diagnostics = struct {
     failure: *diagnostics.Failure,
     at: diagnostics.Reference,
-    deferred: bool = false,
 
     fn failureStage(details: diagnostics.Details) diagnostics.Stage {
         return switch (std.meta.activeTag(details)) {
@@ -1208,12 +1207,7 @@ const Diagnostics = struct {
 
     fn fail(self: *const Diagnostics, details: diagnostics.Details) diagnostics.Error {
         @branchHint(.cold);
-        const diagnostic = diagnostics.Diagnostic{ .details = details, .stage = failureStage(details), .at = self.at };
-        if (self.deferred) {
-            self.failure.deferFailure(diagnostic);
-            return diagnostics.metadata(diagnostic.code()).returned_error;
-        }
-        return self.failure.fail(diagnostic);
+        return self.failure.fail(.{ .details = details, .stage = failureStage(details), .at = self.at });
     }
 
     const IoStage = enum { open, stat, read };
@@ -1274,6 +1268,7 @@ const Diagnostics = struct {
     }
 
     fn truncated(self: *const Diagnostics, section: diagnostics.Section, required: u128, available: u64) diagnostics.Error {
+        @branchHint(.cold);
         return self.fail(.{ .@"index.truncated" = .{ .section = section, .required_end = required, .available_end = available } });
     }
 };

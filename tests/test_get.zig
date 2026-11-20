@@ -491,7 +491,9 @@ test "[cli] - [get names]: failures preserve only valid output prefixes" {
     try std.testing.expect(result.stdout.len > 0);
     try support.expectDiagnostic(allocator, result.stderr, .@"request.sequence_not_found");
     const one_output = ">seq1\nACGTACGTACGTACGTACGTACGT\n";
-    try std.testing.expect(result.stdout.len <= one_output.len * 65536);
+    // The failing request discards what the writer still buffers, at most one stdout and one region buffer.
+    try std.testing.expect(result.stdout.len < one_output.len * 65536);
+    try std.testing.expect(one_output.len * 65536 - result.stdout.len <= 2 * 64 * 1024);
     for (result.stdout, 0..) |byte, i| {
         try std.testing.expectEqual(one_output[i % one_output.len], byte);
     }
@@ -1182,14 +1184,24 @@ test "[cli] - [get]: many .zfi lookups keep every record's bytes, uniform or not
     var fasta: std.ArrayList(u8) = .empty;
     var names: std.ArrayList(u8) = .empty;
     var expected: std.ArrayList(u8) = .empty;
+    // Each record's 10 bases spell its ordinal in base 4, so a lookup that returns another record's bytes fails.
+    var bases: [600][10]u8 = undefined;
+    for (&bases, 0..) |*seq, i| {
+        var rest = i;
+        for (seq) |*base| {
+            base.* = "ACGT"[rest % 4];
+            rest /= 4;
+        }
+    }
     for (0..600) |i| {
+        const seq: []const u8 = &bases[i];
         try fasta.print(allocator, ">rec{d}\n", .{i});
-        if (i % 3 == 0) try fasta.appendSlice(allocator, "ACG\nTACGT\nAC\n") else try fasta.appendSlice(allocator, "ACGT\nACGT\nAC\n");
+        if (i % 3 == 0) try fasta.print(allocator, "{s}\n{s}\n{s}\n", .{ seq[0..3], seq[3..8], seq[8..] }) else try fasta.print(allocator, "{s}\n{s}\n{s}\n", .{ seq[0..4], seq[4..8], seq[8..] });
     }
     for (0..600) |k| {
         const i = (k * 7) % 600;
         try names.print(allocator, "rec{d}\n", .{i});
-        try expected.print(allocator, ">rec{d}\n{s}\n", .{ i, if (i % 3 == 0) "ACGTACGTAC" else "ACGTACGTAC" });
+        try expected.print(allocator, ">rec{d}\n{s}\n", .{ i, &bases[i] });
     }
     const fasta_path = try writeFastaArtifact(allocator, "get-many-lookups", fasta.items);
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};

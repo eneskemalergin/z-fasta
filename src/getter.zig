@@ -1787,8 +1787,6 @@ test "[failure] - [get requests]: keeps original rows and ordinals across skippe
     try std.testing.expect(primary.at.location.offset == null);
     try std.testing.expectEqualStrings("missing", failure.preview(primary.details.@"request.sequence_not_found".identifier.?));
     try std.testing.expectEqual(@as(usize, 12 * BED_REQUEST_BATCH_SIZE), output.written().len);
-    const PreviousRequest = struct { name_offset: u32, name_len: u16, start: u64, end: u64, orientation: Orientation };
-    try std.testing.expectEqual(@sizeOf(PreviousRequest) + 8, @sizeOf(OwnedRequest));
 }
 
 test "[failure] - [get requests]: rejects repeated-request overflow before writing another region" {
