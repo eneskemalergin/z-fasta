@@ -694,6 +694,11 @@ test "[unit] - [validate json]: identifiers keep their bytes" {
         try std.testing.expectEqualSlices(u8, want.bytes, bytes);
         try std.testing.expectEqualStrings(want.original, identifier.get("original_bytes").?.string);
         try std.testing.expect(!identifier.get("truncated").?.bool);
+        if (std.mem.eql(u8, want.code, "fasta.duplicate_identifier")) {
+            const data_identifier = code.object.get("first").?.object.get("data").?.object.get("identifier").?.object;
+            try std.testing.expectEqualStrings(value, data_identifier.get("value").?.string);
+            try std.testing.expectEqualStrings(want.original, data_identifier.get("original_bytes").?.string);
+        }
     }
 
     const long_input = ">" ++ long_name ++ "\n";

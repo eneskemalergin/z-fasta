@@ -473,7 +473,15 @@ fn jsonValidation(json: *std.json.Stringify, failure: *const diagnostics.Failure
                 try json.endObject();
             } else try json.write(null);
             try json.objectField("data");
-            try jsonDetails(json, failure, first.details);
+            if (first.details == .@"fasta.duplicate_identifier") {
+                // The scan keeps the identifier once, on `first`; the duplicate's own field repeats it.
+                try json.beginObject();
+                try json.objectField("identifier");
+                if (first.identifier) |identifier| {
+                    try writeOpaque(json, identifier.slice(), identifier.original_bytes, false, identifier.len != identifier.original_bytes);
+                } else try json.write(null);
+                try json.endObject();
+            } else try jsonDetails(json, failure, first.details);
             try json.endObject();
         } else try json.write(null);
         try json.endObject();

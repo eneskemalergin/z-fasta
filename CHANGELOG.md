@@ -12,6 +12,7 @@ All notable changes to z-fasta will be documented in this file.
 - **`index.nonuniform_fai` names the offending line.** `observed` holds the first line that breaks the record's width, and `expected` the width the record set; `reason` describes the same line. `observed` used to carry the record's first line, and `expected` was empty.
 - **A dangling `.zfi` link blocks `.fai` fallback.** A `.zfi` symlink whose target is gone fails with `io.file_not_found` on the `.zfi` instead of silently using the `.fai` beside it, as the index precedence rule says for any inaccessible `.zfi`.
 - **A directory where a file belongs fails first.** A directory at a sidecar path, at the `.zfi` path `index` writes, or at the `validate --fix` output fails with `io.invalid_path` (`reason=directory`) before any work. A sidecar used to fail as `io.map_failed` with the directory's size, and an output only after the whole scan, as `io.publish_failed`.
+- **`fasta.duplicate_identifier` fills `data.identifier`.** A validation report's duplicate entry carries the duplicated identifier in `data`, as the catalog lists, instead of `null`; it equals `first.identifier`.
 
 ## [0.4.0]
 

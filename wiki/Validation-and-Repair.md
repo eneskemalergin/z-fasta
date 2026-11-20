@@ -151,7 +151,14 @@ z-fasta validate --json genome.fa
       "original_bytes": "4"
     },
     "related": { "offset": "1", "line": "1", "column": "2", "record": "1" },
-    "data": { "identifier": null }
+    "data": {
+      "identifier": {
+        "encoding": "utf8",
+        "value": "chr1",
+        "truncated": false,
+        "original_bytes": "4"
+      }
+    }
   }
 }
 ```
