@@ -637,3 +637,16 @@ test "[cli] - [stats]: names and the path are escaped as diagnostics escape them
     try std.testing.expect(std.mem.find(u8, report, "  longest_name: x\\x1b[31mRED\\x07\\xff\n") != null);
     for (report) |byte| try std.testing.expect(byte == '\n' or (byte >= 0x20 and byte < 0x7f));
 }
+
+test "[cli] - [stats]: a gapped nucleotide alignment classifies as nucleotide" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const path = try support.writeFastaArtifact(allocator, "stats-gapped", ">al\nACGT--------ACGT--------\n");
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{path});
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+    try support.expectCliResult(allocator, &.{ ZFASTA_BIN, "index", path }, 0, "", try std.fmt.allocPrint(allocator, "wrote {s} (1 sequences)\n", .{zfi_path}));
+    const report = try runStatsAndCapture(allocator, path);
+    try std.testing.expect(std.mem.find(u8, report, "  type: nucleotide") != null);
+}

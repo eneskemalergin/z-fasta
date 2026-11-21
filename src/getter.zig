@@ -96,6 +96,8 @@ pub const ResolvedRegion = struct {
     line_bytes: u32,
     side_table: []const index_format.SideTableLine,
     record_index: usize,
+    /// The whole record's length; the complement guard samples the record's own first bases.
+    record_len: u64,
     orientation: Orientation,
     annotate_transform: bool,
 };
@@ -155,6 +157,7 @@ pub fn fetchSymbols(idx: *const LoadedIndex, ordinal: usize, start: u64, end: u6
         .line_bytes = rec.line_bytes,
         .side_table = side_table,
         .record_index = ordinal,
+        .record_len = rec.seq_len,
         .orientation = .{},
         .annotate_transform = false,
     };
@@ -444,18 +447,21 @@ fn resolveParsedRequest(
         .line_bytes = rec.line_bytes,
         .side_table = side_table,
         .record_index = rec_idx,
+        .record_len = rec.seq_len,
         .orientation = request.orientation,
         .annotate_transform = annotate_transform,
     };
 }
 
-fn detectRegionType(source: FastaSource, resolved: ResolvedRegion, diag: *Diagnostics, buffers: *GetBuffers) diagnostics.Error!fasta.SequenceType {
+/// Reads into its own small buffer: the caller's read window may still hold the region it is about to write.
+fn detectRegionType(source: FastaSource, resolved: ResolvedRegion, diag: *Diagnostics) diagnostics.Error!fasta.SequenceType {
     const span = try diskSpanForRegion(resolved, diag);
     if (span.end > source.size) return diag.span(span.end, source.size);
     if (span.start >= span.end) return diag.consistency(.traversal_position);
 
     var sample = SampleCounts{ .skip = span.leading_bases, .wanted = resolved.num_bases };
-    const input = &buffers.input;
+    var local: [4096]u8 = undefined;
+    const input = &local;
     var offset = span.start;
     while (offset < span.end and sample.total < resolved.num_bases) {
         const wanted: usize = @intCast(@min(@as(u64, input.len), span.end - offset));
@@ -465,7 +471,7 @@ fn detectRegionType(source: FastaSource, resolved: ResolvedRegion, diag: *Diagno
         offset += got;
     }
     if (sample.total != resolved.num_bases) return diag.mismatch(resolved, span, sample.total);
-    return fasta.typeFromCounts(sample.nucleotides, sample.total);
+    return fasta.typeFromCounts(sample.nucleotides, sample.classified);
 }
 
 fn detectBufferedType(resolved: ResolvedRegion, bytes: []const u8, bytes_start: u64, diag: *Diagnostics) diagnostics.Error!fasta.SequenceType {
@@ -474,11 +480,14 @@ fn detectBufferedType(resolved: ResolvedRegion, bytes: []const u8, bytes_start: 
     var sample = SampleCounts{ .skip = span.leading_bases, .wanted = resolved.num_bases };
     sample.add(bytes[@intCast(span.start - bytes_start)..@intCast(span.end - bytes_start)]);
     if (sample.total != resolved.num_bases) return diag.mismatch(resolved, span, sample.total);
-    return fasta.typeFromCounts(sample.nucleotides, sample.total);
+    return fasta.typeFromCounts(sample.nucleotides, sample.classified);
 }
 
+// Gap (`-`) and stop (`*`) bytes are sampled but not classified, so an aligned nucleotide
+// region with gaps still reads as nucleotide.
 const SampleCounts = struct {
     nucleotides: u64 = 0,
+    classified: u64 = 0,
     total: u64 = 0,
     skip: u64,
     wanted: u64,
@@ -491,21 +500,27 @@ const SampleCounts = struct {
                 self.skip -= 1;
                 continue;
             }
-            self.nucleotides += @intFromBool(fasta.isIupacNucleotide(byte));
             self.total += 1;
+            if (byte == '-' or byte == '*') continue;
+            self.nucleotides += @intFromBool(fasta.isIupacNucleotide(byte));
+            self.classified += 1;
         }
     }
 };
 
 const TypedRecord = struct { record: usize, kind: fasta.SequenceType, sample: diagnostics.Sample };
 
-fn checkComplement(region: ResolvedRegion, typed: *?TypedRecord, buffered: ?struct { bytes: []const u8, start: u64 }, source: FastaSource, diag: *Diagnostics, buffers: *GetBuffers) diagnostics.Error!void {
+fn checkComplement(region: ResolvedRegion, typed: *?TypedRecord, buffered: ?struct { bytes: []const u8, start: u64 }, source: FastaSource, diag: *Diagnostics) diagnostics.Error!void {
     if (!region.orientation.complement) return;
     const known = if (typed.*) |record| record.record == region.record_index else false;
     if (!known) {
+        // The sample is the record's first bases, whichever region asks first, so every request
+        // on a record gets the same verdict.
         var sample = region;
-        sample.num_bases = @min(sample.num_bases, TYPE_SAMPLE_BASES);
-        const kind = if (buffered) |read| try detectBufferedType(sample, read.bytes, read.start, diag) else try detectRegionType(source, sample, diag, buffers);
+        sample.start = 1;
+        sample.num_bases = @min(region.record_len, TYPE_SAMPLE_BASES);
+        const inside = region.start == 1 and region.num_bases >= sample.num_bases;
+        const kind = if (buffered != null and inside) try detectBufferedType(sample, buffered.?.bytes, buffered.?.start, diag) else try detectRegionType(source, sample, diag);
         typed.* = .{ .record = region.record_index, .kind = kind, .sample = .{ .symbols = @intCast(sample.num_bases), .rule = .nucleotide_above_90_percent, .interval = .{ .start = sample.start, .end = sample.start + sample.num_bases - 1 }, .request = diag.at.request } };
     }
     const record = typed.*.?;
@@ -1018,7 +1033,7 @@ fn emitResolvedBatch(
             for (resolved[i..group_end], i..) |region, ordinal| {
                 diag.at = requestReference(request_source, request_entries[ordinal].lineNumber(), request_base + ordinal + 1);
                 const next_total = try diag.add(.total_symbols, total_bases, region.num_bases);
-                try checkComplement(region, &typed, .{ .bytes = shared[0..got], .start = shared_start }, source, diag, buffers);
+                try checkComplement(region, &typed, .{ .bytes = shared[0..got], .start = shared_start }, source, diag);
                 const span = try diskSpanForRegion(region, diag);
                 try emitRegionFromSpan(region, span, shared_start, shared[0..got], buffers, writer, diag);
                 total_bases = next_total;
@@ -1028,7 +1043,7 @@ fn emitResolvedBatch(
         }
 
         const next_total = try diag.add(.total_symbols, total_bases, resolved[i].num_bases);
-        try checkComplement(resolved[i], &typed, null, source, diag, buffers);
+        try checkComplement(resolved[i], &typed, null, source, diag);
         try emitRegion(resolved[i], source, buffers, writer, diag);
         total_bases = next_total;
         i += 1;
@@ -1549,7 +1564,7 @@ test "[property] - [get extraction]: uniform copy matches a byte-by-byte copy ac
         const count = if (round == 0) seq_len else 1 + random.uintLessThan(u64, seq_len - start);
         const orientations = [_]Orientation{ .{}, .reverseComplement(), .reverseOnly(), .complementOnly() };
         for (orientations) |orientation| for ([_]bool{ true, false }) |wrap| {
-            const resolved = ResolvedRegion{ .name = "r", .start = start + 1, .display_end = start + count, .is_full = false, .seq_offset = seq_offset, .num_bases = count, .line_bases = line_bases, .line_bytes = line_bytes, .side_table = &.{}, .record_index = 0, .orientation = orientation, .annotate_transform = false };
+            const resolved = ResolvedRegion{ .name = "r", .start = start + 1, .display_end = start + count, .is_full = false, .seq_offset = seq_offset, .num_bases = count, .line_bases = line_bases, .line_bytes = line_bytes, .side_table = &.{}, .record_index = 0, .record_len = start + count, .orientation = orientation, .annotate_transform = false };
             expected.clearRetainingCapacity();
             for (0..@intCast(count)) |i| {
                 const k = if (orientation.reverse) start + count - 1 - i else start + i;
@@ -1618,7 +1633,7 @@ test "[property] - [get extraction]: side-table byte filter keeps exactly the ba
         var sink = std.Io.Writer.Allocating.init(allocator);
         defer sink.deinit();
         var output = RegionOutput{ .bytes = &output_storage, .diag = &context, .wrap = false };
-        const resolved = ResolvedRegion{ .name = "r", .start = skip_start + 1, .display_end = skip_start + count, .is_full = false, .seq_offset = 0, .num_bases = count, .line_bases = 0, .line_bytes = 0, .side_table = &.{}, .record_index = 0, .orientation = .{}, .annotate_transform = false };
+        const resolved = ResolvedRegion{ .name = "r", .start = skip_start + 1, .display_end = skip_start + count, .is_full = false, .seq_offset = 0, .num_bases = count, .line_bases = 0, .line_bytes = 0, .side_table = &.{}, .record_index = 0, .record_len = skip_start + count, .orientation = .{}, .annotate_transform = false };
         var skip = skip_start;
         try consumeForwardBytes(resolved, bytes[0..len], &skip, &output, &sink.writer);
         try output.flush(&sink.writer);

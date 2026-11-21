@@ -76,7 +76,7 @@ The requested sample classified as protein. Complement-based transforms are nucl
 
 ## How is sequence type detected?
 
-Case-insensitive IUPAC nucleotide symbols must be strictly more than 90 percent of counted symbols. Stats uses the full indexed population, validate samples the first 100000 symbols unless `--type` names the alphabet, and GET samples up to 256 requested bases per record for complement eligibility.
+Case-insensitive IUPAC nucleotide symbols must be strictly more than 90 percent of counted symbols. Stats uses the full indexed population, validate samples the first 100000 symbols unless `--type` names the alphabet, and GET samples each record's first 256 bases for complement eligibility. Stats and GET leave gap (`-`) and stop (`*`) bytes out of the count, so a gapped nucleotide alignment reads as nucleotide. Validate counts them, since it is choosing the alphabet to check against and only the protein alphabet holds `-` and `*`; pass `--type any` or `--custom-alphabet` for alignments.
 
 ## Can names or BED come from stdin?
 

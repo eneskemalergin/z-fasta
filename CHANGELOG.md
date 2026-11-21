@@ -23,6 +23,7 @@ All notable changes to z-fasta will be documented in this file.
 
 ### Changed
 
+- **The complement guard samples each record's own first 256 bases.** Every request on a record gets the same verdict, so a short region of nucleotide letters inside a protein no longer lets later requests complement it. Gap (`-`) and stop (`*`) bytes are left out of the count, so a gapped nucleotide alignment can be complemented, as samtools does, and `stats` reports it as nucleotide. `validate` still counts them when it chooses an alphabet.
 - **Catalog revision `0.4.1-1`.** It adds `fasta.sequence_header_marker`, a validate warning for each `>` inside a sequence line, and the matching `repair.blocked` reason.
 - **Decimal numbers are ASCII digits only.** Region bounds (`chr1:1_0-2_0`, `chr1:+2-+4`) and the values of `--width`, `--max-header-len`, and `--max-name-memory` no longer accept a sign or `_` separators, matching BED coordinates. Such a region is now looked up as a literal name; such an option value fails with `usage.invalid_option_value`.
 

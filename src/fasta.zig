@@ -127,10 +127,18 @@ pub fn countDenseLines(comptime Symbols: type, data: []const u8, start: usize, l
     return countDenseLinesWith(DENSE_VECTOR_LEN, Symbols, data, start, line_bases, line_bytes);
 }
 
+/// Counts every symbol. `validate` uses it to choose an alphabet, and only the protein alphabet
+/// holds `-` and `*`.
 pub fn detectType(counts: *const [256]u64, total: u64) SequenceType {
     var nucleotides: u64 = 0;
     for (IUPAC_NUCLEOTIDE_LETTERS) |letter| nucleotides += counts[letter] + counts[std.ascii.toLower(letter)];
     return typeFromCounts(nucleotides, total);
+}
+
+/// Leaves gap (`-`) and stop (`*`) bytes out of the count, so a gapped nucleotide alignment reads
+/// as nucleotide. `stats` and `get`'s complement guard classify this way.
+pub fn detectSequenceType(counts: *const [256]u64, total: u64) SequenceType {
+    return detectType(counts, total -| (counts['-'] + counts['*']));
 }
 
 pub fn typeFromCounts(nucleotides: u64, total: u64) SequenceType {

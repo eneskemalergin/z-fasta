@@ -59,7 +59,7 @@ The implementation uses checked `u64` totals and `u128` intermediate arithmetic 
 
 ## Sequence classification
 
-Stats counts the complete indexed symbol population and classifies it as nucleotide when case-insensitive IUPAC nucleotide symbols are strictly more than 90 percent of all symbols.
+Stats counts the complete indexed symbol population and classifies it as nucleotide when case-insensitive IUPAC nucleotide symbols are strictly more than 90 percent of all symbols other than gap (`-`) and stop (`*`) bytes.
 
 The nucleotide set includes:
 

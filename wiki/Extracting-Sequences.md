@@ -113,7 +113,7 @@ These flags are mutually exclusive.
 - `--reverse-only`: reverse order without complementing.
 - `--complement-only`: complement without changing order.
 
-The complement map covers uppercase and lowercase IUPAC nucleotide symbols and maps `U/u` to `A/a`. Unknown bytes pass through the table, but complement-based transforms first classify up to 256 bases of the first complemented request on a record, and fail when that sample classifies as protein. The sample is reused for the requests on that record that directly follow it, so a short region whose letters are all nucleotide symbols can let a protein record through. Reverse-only remains available for protein.
+The complement map covers uppercase and lowercase IUPAC nucleotide symbols and maps `U/u` to `A/a`. Unknown bytes pass through the table, but complement-based transforms first classify the record's first 256 bases (the whole record when shorter), and fail when that sample classifies as protein. Every request on a record gets the same verdict, whatever region it asks for. Gap (`-`) and stop (`*`) bytes are left out of the count, so a gapped nucleotide alignment can be complemented. Reverse-only remains available for protein.
 
 ## Annotate transformed headers
 

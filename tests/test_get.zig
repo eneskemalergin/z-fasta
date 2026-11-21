@@ -755,6 +755,26 @@ test "[cli] - [get]: each orientation is exact across the lines of a non-uniform
     }
 }
 
+test "[cli] - [get]: the complement guard samples each record's first bases and skips gaps" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    // `ADKTNVKAAW` (bases 6-15) is all nucleotide letters inside a protein.
+    const fasta = ">prot\nMKVLAADKTNVKAAWLLQHRSTEFIL\n>gap\nACGTACGT--------\n";
+    const fasta_path = try writeFastaArtifact(allocator, "get-complement-sample", fasta);
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+    try support.expectCliResult(allocator, &.{ ZFASTA_BIN, "index", fasta_path }, 0, "", try std.fmt.allocPrint(allocator, "wrote {s} (2 sequences)\n", .{zfi_path}));
+    for ([_][]const []const u8{
+        &.{ ZFASTA_BIN, "get", fasta_path, "prot:6-15", "--rc" },
+        &.{ ZFASTA_BIN, "get", fasta_path, "prot:6-15", "prot", "--rc" },
+        &.{ ZFASTA_BIN, "get", fasta_path, "prot:6-15", "--complement-only" },
+    }) |argv| try support.expectCliFailureCode(allocator, argv, .@"transform.complement_on_protein");
+    try expectCliSuccess(allocator, &.{ ZFASTA_BIN, "get", fasta_path, "gap", "--rc" }, ">gap\n--------ACGTACGT\n");
+    try expectCliSuccess(allocator, &.{ ZFASTA_BIN, "get", fasta_path, "prot:6-15", "--reverse-only" }, ">prot:6-15\nWAAKVNTKDA\n");
+}
+
 test "[cli] - [get bed]: annotations describe the composed orientation" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1026,9 +1046,10 @@ test "[failure] - [get diagnostics]: captures the actual protein sample and sour
         .orientation = main.getter.Orientation.complementOnly(),
     }, &failure));
     const detail = failure.primary().?.details.@"transform.complement_on_protein";
-    try std.testing.expectEqual(@as(u32, 10), detail.sample.symbols);
+    // The sample is the record's first bases (all 51 here), not the 10 requested.
+    try std.testing.expectEqual(@as(u32, 51), detail.sample.symbols);
     try std.testing.expectEqual(@as(?u64, 1), detail.sample.request);
-    try std.testing.expectEqual(diagnostics.Interval{ .start = 1, .end = 10 }, detail.sample.interval.?);
+    try std.testing.expectEqual(diagnostics.Interval{ .start = 1, .end = 51 }, detail.sample.interval.?);
     try std.testing.expect(detail.transform.complement and !detail.transform.reverse);
     try std.testing.expectEqualStrings("sp|P12345|PROT_HUMAN", failure.preview(detail.identifier.?));
     try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);

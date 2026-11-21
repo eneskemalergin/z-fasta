@@ -553,7 +553,7 @@ fn computeStats(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8
     diag.record = null;
     if (lengths.len() == 0) return diag.fail(.{ .@"index.no_records" = .{ .format = if (stream.source == .zfi) .zfi else .fai } }, .scan, diag.index_source, null, null);
     if (in_file_order) {
-        computed.comp.seq_type = fasta.detectType(&computed.comp.counts, computed.comp.total_bases);
+        computed.comp.seq_type = fasta.detectSequenceType(&computed.comp.counts, computed.comp.total_bases);
     } else {
         // Spans are read in file order, so an index listing records out of it is loaded whole.
         var idx = try index_format.loadIndex(allocator, io, fasta_path, .automatic, .stats_scan, diag.failure);
@@ -748,7 +748,7 @@ fn scanComposition(allocator: std.mem.Allocator, idx: *const LoadedIndex, buffer
     }
 
     diag.record = null;
-    comp.seq_type = fasta.detectType(&comp.counts, comp.total_bases);
+    comp.seq_type = fasta.detectSequenceType(&comp.counts, comp.total_bases);
 }
 
 fn recordsInSeqOffsetOrder(records: Records) bool {
