@@ -29,6 +29,13 @@ z-fasta index --emit-fai genome.fa > genome.fa.fai
 
 Before writing stdout, z-fasta scans into an exclusive temporary spool. A scan failure does not replay a partial index. Shell redirection may still create an empty destination file.
 
+For an ordinary FASTA the rows match `samtools faidx`. They differ where the two tools apply different rules:
+
+- duplicate identifiers: z-fasta writes a row for every record, samtools keeps the first and warns;
+- identifiers: z-fasta's starts right after `>` and ends at a space, tab, CR, or LF, so `>\tseq` gives an empty identifier; samtools skips leading whitespace and ends at any whitespace byte;
+- a file with no record that has bases: z-fasta fails with `index.no_indexable_records`, samtools writes an empty `.fai`;
+- layouts: z-fasta accepts a header at the end of the file without a newline and a blank line before a record's first bases, which samtools refuses, and refuses a CRLF record whose last line holds one base more than the others, which samtools accepts by reading that base where the CR would be.
+
 ## What counts as a sequence name
 
 Given this header:

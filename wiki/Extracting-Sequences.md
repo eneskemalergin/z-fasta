@@ -145,7 +145,9 @@ If any request fails, no summary is printed. Names and BED streams may already h
 
 ## Output compatibility
 
-The verified positional path matches `samtools faidx` output bytes, including headers, end clamping, request order, and 60-symbol wrapping. Names and BED behavior has separate peer and project correctness coverage.
+Positional output has the same bases as `samtools faidx`, with end clamping and request order alike. Two things differ: GET always wraps at 60 symbols, while samtools wraps at the record's own line width; and GET writes a canonical header (`chr1:3-` prints as `>chr1:3-14`, `chr1:03-05` as `>chr1:3-5`), while samtools echoes the request text. For a FASTA wrapped at 60 and canonical requests the bytes are identical. Names and BED behavior has separate peer and project correctness coverage.
+
+GET copies the symbols it indexed, so a `>` byte inside a sequence line can land at the start of an output line, where a FASTA reader takes it for a header. `validate` reports each such byte as `fasta.sequence_header_marker`.
 
 ## Related pages
 

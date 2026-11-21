@@ -99,7 +99,7 @@ BED streams in batches of at most 4096 requests. There is no whole-input row cap
 
 ## Protein input
 
-Minus-strand BED requires reverse-complement and is rejected when the requested record is classified as protein. If you need byte reversal for protein data, use a non-strand request with `--reverse-only` and confirm that reversal matches the biological workflow.
+A minus-strand row is reverse-complemented, composed with any global transform. The request is rejected when the composed transform complements and the record is classified as protein; `--rc` on a minus row composes to the plain bases, and `--complement-only` to reversed bases, so both are allowed. If you need byte reversal for protein data, use a non-strand request with `--reverse-only` and confirm that reversal matches the biological workflow.
 
 ## BED limits
 

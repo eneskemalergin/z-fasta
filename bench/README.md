@@ -86,7 +86,7 @@ Every CLI option and package call, with the Zig tests that cover it (file and te
   - `--error-format=text`: `tests/test_diagnostics.zig`. No separate REAL check: the same failures render through the text encoder.
 - **index**
   - Default `.zfi`: `tests/test_index.zig` (`index`, `zfi writer`, `zfi loader`). REAL: index suite, a `.zfi` reader written from the format compares every entry with `samtools faidx`.
-  - `--emit-fai`: `tests/test_index.zig` (`fai output`). REAL: index suite, byte-identical to `samtools faidx`.
+  - `--emit-fai`: `tests/test_index.zig` (`fai output`). REAL: index suite, byte-identical to `samtools faidx` on the REAL datasets, which avoid the differences listed in `wiki/Indexing.md`.
   - Duplicate identifiers, all indexed: `tests/test_index.zig`, `tests/test_library.zig`. No REAL check: the REAL datasets have no duplicate identifiers. The stats suite checks the counts on a fixture with duplicates, and the GET suite that a duplicate resolves to its first record.
 - **get**
   - Positional regions: `tests/test_get.zig` (`get extraction`, `region resolution`). REAL: GET suite section 6, 100 regions against `samtools faidx`, through `.zfi` and `.fai`.
