@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use z-fasta, please cite it as below."
+type: software
+title: "z-fasta"
+abstract: "Index, extract, validate, and inspect uncompressed FASTA with one static executable built in Zig, also usable as a Zig package."
+authors:
+  - family-names: "Ergin"
+    given-names: "Enes Kemal"
+version: "0.4.0"
+date-released: "2026-10-15"
+license: MIT
+repository-code: "https://github.com/eneskemalergin/z-fasta"
+url: "https://github.com/eneskemalergin/z-fasta/wiki"
+keywords:
+  - FASTA
+  - bioinformatics
+  - sequence index
+  - samtools faidx
+  - Zig

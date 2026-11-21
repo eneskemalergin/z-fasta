@@ -27,7 +27,7 @@ z-fasta has a deliberately narrow input contract. Check this page before buildin
 > [!NOTE]
 > Use samtools, bedtools, SeqKit, or another suitable tool when a workflow needs compressed FASTA, FASTQ, BED12 blocks, GFF/VCF intervals, or broader format conversion. See [Choosing a FASTA tool](Choosing-a-FASTA-Tool).
 
-FASTQ is coming as a separate project, z-fastq, built around the same priorities: speed, low memory use, and portability. Supporting gzip or BGZF well would mean investing real time in Zig's deflate path or writing an efficient implementation myself. I have not been able to justify that work yet, but I would be happy to revisit it if enough people need it.
+FASTQ has its own project, [z-fastq](https://github.com/eneskemalergin/z-fastq), built around the same priorities: speed, low memory use, and portability. z-fasta reads uncompressed FASTA only, and gzip or BGZF input has no release target yet. [Zipir](https://github.com/eneskemalergin/zipir), the gzip implementation z-fastq reads through, is where that work would start, and I would be happy to revisit it if enough people need it.
 
 ## Input limits
 

@@ -6,6 +6,11 @@ All notable changes to z-fasta will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Citation file.** `CITATION.cff` gives the title, author, version, and release date, so GitHub shows "Cite this repository"; the FAQ says how to cite z-fasta.
+- **Social preview.** `assets/social-preview.png`, built by `tools/social_preview.sh` from the README logo and tagline.
+
 ### Fixed
 
 - **Damaged `.zfi` files.** Two size computations on values read from an index are bounded, so a damaged `.zfi` read by `get` or opened by `IndexedReader` fails with its coded error in every build mode.
@@ -26,6 +31,7 @@ All notable changes to z-fasta will be documented in this file.
 
 ### Changed
 
+- **z-fastq and Zipir are linked.** The README and wiki point FASTQ readers to [z-fastq](https://github.com/eneskemalergin/z-fastq), and say that gzip and BGZF FASTA input has no release target, with [Zipir](https://github.com/eneskemalergin/zipir) as where that work would start.
 - **The complement guard samples each record's own first 256 bases.** Every request on a record gets the same verdict, so a short region of nucleotide letters inside a protein no longer lets later requests complement it. Gap (`-`) and stop (`*`) bytes are left out of the count, so a gapped nucleotide alignment can be complemented, as samtools does, and `stats` reports it as nucleotide. `validate` still counts them when it chooses an alphabet.
 - **Blank lines before the first header are skipped.** `index` and the package's `RecordReader` accept leading lines of only spaces, tabs, or CR, as `validate` does; a validate-then-index pipeline no longer passes and then fails. Other content before the first header still fails, now naming the first byte that is not blank and the start of its line, and a file of blank lines only reports `fasta.no_records`, as `validate` does.
 - **Catalog revision `0.4.1-1`.** It adds `fasta.sequence_header_marker`, a validate warning for each `>` inside a sequence line, and the matching `repair.blocked` reason.

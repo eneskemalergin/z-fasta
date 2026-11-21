@@ -62,7 +62,7 @@ reference.fa
 
 ## Know the boundary
 
-I intentionally keep z-fasta focused on uncompressed FASTA. FASTQ is coming as a separate project, z-fastq, with the same focus on speed, low memory use, and portability. Supporting gzip or BGZF well would require real work on deflate performance, and I have not been able to justify that work yet. If your workflow starts outside that boundary, [Choosing a FASTA tool](Choosing-a-FASTA-Tool) will save you time.
+I intentionally keep z-fasta focused on uncompressed FASTA. FASTQ has its own project, [z-fastq](https://github.com/eneskemalergin/z-fastq), with the same focus on speed, low memory use, and portability. gzip and BGZF input have no release target yet; [Zipir](https://github.com/eneskemalergin/zipir), the gzip implementation z-fastq reads through, is where that work would start. If your workflow starts outside that boundary, [Choosing a FASTA tool](Choosing-a-FASTA-Tool) will save you time.
 
 ## The reading path I recommend
 

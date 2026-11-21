@@ -29,7 +29,7 @@ I built z-fasta around the four FASTA jobs I use most. One CLI, also usable as a
 - `stats`: Report indexed length, Nx, DNA, RNA, or protein statistics through a bounded sequence scan.
 - [Zig package](https://github.com/eneskemalergin/z-fasta/wiki/Library): `IndexedReader`, `RecordReader`, and `validation` give other Zig programs the same rules without the CLI.
 
-z-fasta accepts uncompressed FASTA and writes FASTA or reports. It does not currently handle FASTQ, gzip, or BGZF.
+z-fasta accepts uncompressed FASTA and writes FASTA or reports. It does not handle gzip or BGZF; for FASTQ, see [z-fastq](https://github.com/eneskemalergin/z-fastq).
 
 <p align="center">
   <a href="bench/README.md#high-level-benchmark-summary-figures">
@@ -46,9 +46,9 @@ z-fasta accepts uncompressed FASTA and writes FASTA or reports. It does not curr
 
 I would like to support Windows properly. Right now, keeping the native builds reliable takes more time than I can justify, and I would rather be honest about that than publish an executable I cannot support well. If you use Windows, you can still run z-fasta through WSL with the Linux release. I am sorry for the extra step.
 
-FASTQ is coming as a separate project, z-fastq, built around the same priorities: speed, low memory use, and portability (Please look forward to it).
+FASTQ has its own project, [z-fastq](https://github.com/eneskemalergin/z-fastq), built around the same priorities: speed, low memory use, and portability.
 
-Compressed FASTA is a different tradeoff. Supporting gzip or BGZF well would mean investing real time in Zig's deflate path or writing an efficient implementation myself. I have not been able to justify that work yet, but I would be happy to revisit it if enough people need it. (Might actuall work on it over z-fastq since there working on compressed files is a lot common, when I crack a optimized implementation will move it here)
+Compressed FASTA is a different tradeoff. z-fasta reads uncompressed FASTA only, and gzip or BGZF input has no release target yet. I wrote [Zipir](https://github.com/eneskemalergin/zipir), the gzip implementation z-fastq reads through, because compressed files are the norm for FASTQ; it is where compressed FASTA support would start, and I would be happy to revisit it if enough people need it.
 
 ## Start
 
