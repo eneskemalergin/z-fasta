@@ -229,6 +229,9 @@ pub const RecordReader = struct {
     headers: u64 = 0,
     byte: [1]u8 = undefined,
     byte_held: bool = false,
+    /// Position in the lines before the first header, which may hold only spaces, tabs, and CR.
+    preamble_line: u64 = 1,
+    preamble_line_start: u64 = 0,
 
     pub const Record = struct {
         id: []const u8,
@@ -261,12 +264,20 @@ pub const RecordReader = struct {
                         self.finish();
                         return null;
                     }
-                    if (bytes[0] != '>') return self.failure.fail(.{
-                        .details = .{ .@"fasta.content_before_header" = .{ .content_bytes = .{ .at_least = 1 } } },
-                        .stage = .scan,
-                        .at = .{ .source = .fasta, .location = .{ .offset = 0, .line = 1, .column = 1 } },
-                    });
-                    self.startHeader();
+                    switch (bytes[0]) {
+                        '>' => if (self.offset == self.preamble_line_start) self.startHeader() else return self.contentBeforeHeader(),
+                        ' ', '\t', '\r' => {
+                            self.consume(1);
+                            continue;
+                        },
+                        '\n' => {
+                            self.consume(1);
+                            self.preamble_line += 1;
+                            self.preamble_line_start = self.offset;
+                            continue;
+                        },
+                        else => return self.contentBeforeHeader(),
+                    }
                 },
             }
             const header_len = try self.readHeader();
@@ -372,6 +383,15 @@ pub const RecordReader = struct {
             self.byte_held = false;
         }
         self.offset +|= count;
+    }
+
+    fn contentBeforeHeader(self: *RecordReader) diagnostics.Error {
+        @branchHint(.cold);
+        return self.failure.fail(.{
+            .details = .{ .@"fasta.content_before_header" = .{ .content_bytes = .{ .at_least = 1 } } },
+            .stage = .scan,
+            .at = .{ .source = .fasta, .location = .{ .offset = self.preamble_line_start, .line = self.preamble_line, .column = 1 } },
+        });
     }
 
     fn startHeader(self: *RecordReader) void {

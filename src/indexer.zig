@@ -163,19 +163,39 @@ pub fn scanFastaReader(
     var emitter = IndexEmitter(@TypeOf(ctx), emitRecord){ .ctx = ctx, .record_count = &record_count, .diag = state.diag };
     const max_name_len: usize = MAX_INDEX_NAME_LEN;
     var file_offset: u64 = 0;
+    // Lines before the first header may hold only spaces, tabs, and CR, as validate allows.
+    var preamble = options.require_initial_header;
+    var preamble_line_start: u64 = 0;
 
     while (true) {
         var read_diag = state.diag;
         read_diag.at = .{ .source = .fasta, .location = .{ .offset = file_offset } };
         const n = reader.readSliceShort(read_buf) catch |err| return read_diag.fail(diagnostics.readFailure(read_buf.len, null), .read, .fasta, err);
         if (n == 0) break;
-        if (file_offset == 0 and options.require_initial_header and read_buf[0] != '>') {
-            return read_diag.fail(.{ .@"index.initial_header_required" = .{ .byte = read_buf[0] } }, .scan, .fasta, null);
+        if (preamble) {
+            for (read_buf[0..n], 0..) |byte, i| {
+                const at = file_offset + i;
+                switch (byte) {
+                    ' ', '\t', '\r' => {},
+                    '\n' => preamble_line_start = at + 1,
+                    else => {
+                        if (byte == '>' and at == preamble_line_start) {
+                            preamble = false;
+                            break;
+                        }
+                        read_diag.at.location.offset = at;
+                        return read_diag.fail(.{ .@"index.initial_header_required" = .{ .byte = byte, .required_offset = preamble_line_start } }, .scan, .fasta, null);
+                    },
+                }
+            }
         }
         const next_offset = std.math.add(u64, file_offset, n) catch return read_diag.fail(.{ .@"resource.count_overflow" = .{ .counter = .source_bytes, .max_value = std.math.maxInt(u64), .current = file_offset, .increment = n } }, .scan, .fasta, null);
         try state.processChunk(read_buf[0..n], file_offset, max_name_len, &emitter, @TypeOf(emitter).emit);
         file_offset = next_offset;
     }
+
+    // Blank lines and no header: an empty FASTA, as validate reports it.
+    if (preamble) return state.diag.fail(.{ .@"fasta.no_records" = {} }, .scan, .fasta, null);
 
     if (state.active) {
         try state.emitRecord(&emitter, @TypeOf(emitter).emit);

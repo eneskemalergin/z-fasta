@@ -84,7 +84,7 @@ try testing.expectEqualStrings(line1 ++ line2 ++ line3, first.sequence);
 
 - `storage` holds one record: its header line and its bases. A record that does not fit fails with `resource.line_buffer_exceeded`, which reports how many bytes it needed at least; nothing is allocated.
 - A record borrows `storage` until the next call. After a failure, every later call returns the same error.
-- Records follow `index`'s rules: the identifier ends at the first space, tab, CR, or LF; whitespace and line ends are dropped from the sequence; a record without bases is skipped; duplicates are all returned. Bytes before the first header, a BOM included, fail with `fasta.content_before_header`.
+- Records follow `index`'s rules: the identifier ends at the first space, tab, CR, or LF; whitespace and line ends are dropped from the sequence; a record without bases is skipped; duplicates are all returned. Lines before the first header may hold only spaces, tabs, and CR; anything else, a BOM included, fails with `fasta.content_before_header`.
 - A read failure is recorded as `io.read_failed` with the cause `ReadFailed`, since a `std.Io.Reader` does not carry the concrete error; read it from your source reader (for a file, its `err` field).
 
 ## Validate and repair with `validation`

@@ -859,7 +859,7 @@ fn message(code: diagnostics.Code) []const u8 {
         .@"format.leading_bom" => "File starts with a UTF-8 BOM.",
         .@"format.missing_terminal_newline" => "Nonempty file has no terminal newline.",
         .@"format.mixed_line_endings" => "File mixes LF and CRLF line endings.",
-        .@"index.initial_header_required" => "Indexing requires a FASTA header at byte zero.",
+        .@"index.initial_header_required" => "Indexing requires a FASTA header on the first line that is not blank.",
         .@"index.no_indexable_records" => "Every record is empty.",
         .@"index.identifier_too_long" => "Identifier exceeds the selected index limit.",
         .@"index.sequence_line_too_long" => "Sequence line exceeds its width limit.",

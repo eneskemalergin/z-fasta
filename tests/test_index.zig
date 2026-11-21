@@ -3116,6 +3116,60 @@ test "[integration] - [fai loader]: rows ending in CRLF load in every mode" {
     }
 }
 
+test "[edge] - [index]: a file of blank lines has no records" {
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{ "\n\n", " \t\r\n" }) |data| {
+        var reader = std.Io.Reader.fixed(data);
+        var read_buf: [main.indexer.INDEX_READ_BUFFER_BYTES]u8 = undefined;
+        var output: std.Io.Writer.Allocating = .init(allocator);
+        defer output.deinit();
+        var failure: diagnostics.Failure = undefined;
+        failure.reset(.index);
+        try std.testing.expectError(error.InvalidFasta, main.indexer.scanFaiReader(allocator, &reader, &read_buf, &output.writer, .{ .require_initial_header = true, .failure = &failure }));
+        try std.testing.expectEqual(diagnostics.Code.@"fasta.no_records", failure.primary().?.code());
+    }
+}
+
+test "[edge] - [index]: blank lines before the first header are skipped as validate skips them" {
+    const allocator = std.testing.allocator;
+    const Case = struct { data: []const u8, fai: ?[]const u8, byte: u8 = 0, required_offset: u64 = 0 };
+    for ([_]Case{
+        .{ .data = "\n>a\nACGT\n", .fai = "a\t4\t4\t4\t5\n" },
+        .{ .data = " \t\r\n\n>a\nACGT\n", .fai = "a\t4\t8\t4\t5\n" },
+        .{ .data = "x\n>a\nAC\n", .fai = null, .byte = 'x', .required_offset = 0 },
+        .{ .data = "  >a\nAC\n", .fai = null, .byte = '>', .required_offset = 0 },
+        .{ .data = "\n\njunk\n>a\nAC\n", .fai = null, .byte = 'j', .required_offset = 2 },
+    }) |case| {
+        var reader = std.Io.Reader.fixed(case.data);
+        var read_buf: [main.indexer.INDEX_READ_BUFFER_BYTES]u8 = undefined;
+        var output: std.Io.Writer.Allocating = .init(allocator);
+        defer output.deinit();
+        var failure: diagnostics.Failure = undefined;
+        failure.reset(.index);
+        const result = main.indexer.scanFaiReader(allocator, &reader, &read_buf, &output.writer, .{ .require_initial_header = true, .failure = &failure });
+        if (case.fai) |fai| {
+            _ = try result;
+            try std.testing.expectEqualStrings(fai, output.written());
+        } else {
+            try std.testing.expectError(error.InvalidIndex, result);
+            const facts = failure.primary().?.details.@"index.initial_header_required";
+            try std.testing.expectEqual(case.byte, facts.byte);
+            try std.testing.expectEqual(case.required_offset, facts.required_offset);
+        }
+        // `RecordReader` follows the same rule.
+        var source = std.Io.Reader.fixed(case.data);
+        var storage: [64]u8 = undefined;
+        var record_failure: diagnostics.Failure = undefined;
+        var records = main.fasta.RecordReader.init(&source, &storage, &record_failure);
+        if (case.fai != null) {
+            try std.testing.expectEqualStrings("a", (try records.next()).?.id);
+        } else {
+            try std.testing.expectError(error.InvalidFasta, records.next());
+            try std.testing.expectEqual(diagnostics.Code.@"fasta.content_before_header", record_failure.primary().?.code());
+        }
+    }
+}
+
 test "[failure] - [index]: a directory at the .zfi path fails before the scan" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
