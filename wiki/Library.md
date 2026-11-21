@@ -66,6 +66,7 @@ try testing.expect(try reader.record(2, &failure) == null);
 - `open` maps a `.zfi` and checks its header, source identity, and layout; it reads no records, and its only per-record cost is one check bit, zeroed at `open`; `record`, `lookup`, and `fetchInto` check each record, side table, table entry, and name the first time they read it, and fail with its index diagnostic. A `.fai` is mapped and its names read into a name map at `open`; each line is parsed and checked the first time it is used. Run `z-fasta validate --index` to check a whole index.
 - `record(ordinal, &failure)` and `lookup(name, &failure)` read no sequence and return null past the last record or for an unknown name. The returned `name` borrows the reader until `deinit`. `lookup` returns the first record with that name; later duplicates are reachable by ordinal.
 - `fetchInto` checks the ordinal, the interval, and that `dst` holds `end - start` bytes before it writes anything; a read failure after that can leave a prefix. It returns the slice of `dst` it filled.
+- `open` checks the FASTA's size and time once; `fetchInto` does not check them again. Keep the FASTA unchanged while a reader is open, or open a new reader after it changes.
 - A reader keeps the files open until `deinit`. It is not safe to share between threads, and its `io` must outlive it. A gzip input fails with `input.unsupported_format`.
 
 ## Stream records with `RecordReader`
@@ -84,6 +85,7 @@ try testing.expectEqualStrings(line1 ++ line2 ++ line3, first.sequence);
 - `storage` holds one record: its header line and its bases. A record that does not fit fails with `resource.line_buffer_exceeded`, which reports how many bytes it needed at least; nothing is allocated.
 - A record borrows `storage` until the next call. After a failure, every later call returns the same error.
 - Records follow `index`'s rules: the identifier ends at the first space, tab, CR, or LF; whitespace and line ends are dropped from the sequence; a record without bases is skipped; duplicates are all returned. Bytes before the first header, a BOM included, fail with `fasta.content_before_header`.
+- A read failure is recorded as `io.read_failed` with the cause `ReadFailed`, since a `std.Io.Reader` does not carry the concrete error; read it from your source reader (for a file, its `err` field).
 
 ## Validate and repair with `validation`
 

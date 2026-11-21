@@ -940,16 +940,17 @@ pub const EntryStream = struct {
         return std.mem.bytesToValue(SideTableLine, try self.sides.take(offset, @sizeOf(SideTableLine), &self.context));
     }
 
-    fn start(self: *EntryStream, io: std.Io, path: []const u8, source: LoadedIndex.IndexSource, fasta_size: u64, context: *Diagnostics) diagnostics.Error!void {
-        const file = platform.openSidecar(io, path) catch |err| return context.ioFailure(.open, err);
+    /// Takes ownership of `file`, the descriptor the loader already checked, so a path replaced
+    /// after those checks is never read.
+    fn start(self: *EntryStream, io: std.Io, file: std.Io.File, source: LoadedIndex.IndexSource, fasta_size: u64, context: *Diagnostics) void {
         self.* = .{ .io = io, .file = file, .source = source, .context = context.*, .fasta_size = fasta_size, .reader = undefined };
         self.reader = file.reader(io, &self.buffers[0]);
     }
 
     // Mirrors `tryLoadZfi`'s checks before its records, in its order.
-    fn startZfi(self: *EntryStream, allocator: std.mem.Allocator, io: std.Io, path: []const u8, zfi_size: u64, fasta_size: u64, fasta_mtime_ns: i96, check_name_table: bool, context: *Diagnostics) diagnostics.Error!void {
-        try self.start(io, path, .zfi, fasta_size, context);
-        errdefer self.file.close(io);
+    /// The caller keeps `file` on failure and closes it.
+    fn startZfi(self: *EntryStream, allocator: std.mem.Allocator, io: std.Io, file: std.Io.File, zfi_size: u64, fasta_size: u64, fasta_mtime_ns: i96, check_name_table: bool, context: *Diagnostics) diagnostics.Error!void {
+        self.start(io, file, .zfi, fasta_size, context);
         const size = std.math.cast(usize, zfi_size) orelse return context.capacity(.map_bytes, std.math.maxInt(usize), zfi_size);
         context.at.location.offset = 0;
         if (size < @sizeOf(ZfiHeader)) return context.truncated(.header, ZFI_HEADER_BYTES, size);
@@ -1339,7 +1340,9 @@ fn tryLoadZfi(
     }
 
     if (mode == .stream) {
-        try mode.stream.entries.startZfi(backing_allocator, io, zfi_path, zfi_stat.size, fasta_stat.size, fasta_stat.mtime.nanoseconds, mode.stream.check_name_table, context);
+        try mode.stream.entries.startZfi(backing_allocator, io, zfi_file, zfi_stat.size, fasta_stat.size, fasta_stat.mtime.nanoseconds, mode.stream.check_name_table, context);
+        keep_file = true;
+        errdefer mode.stream.entries.close();
         return streamShell(backing_allocator, io, fasta_file, fasta_stat.size, .zfi);
     }
 
@@ -1670,7 +1673,8 @@ fn tryLoadFai(
         error.FileNotFound => return null,
         else => return context.ioFailure(.open, err),
     };
-    defer fai_file.close(io);
+    var keep_file = false;
+    defer if (!keep_file) fai_file.close(io);
 
     const fai_stat = fai_file.stat(io) catch |err| return context.ioFailure(.stat, err);
     if (fai_stat.kind == .directory) return context.directoryPath();
@@ -1683,7 +1687,9 @@ fn tryLoadFai(
         return context.fail(.{ .@"index.no_records" = .{ .format = .fai } });
     }
     if (mode == .stream) {
-        try mode.stream.entries.start(io, fai_path, .fai, fasta_stat.size, context);
+        mode.stream.entries.start(io, fai_file, .fai, fasta_stat.size, context);
+        keep_file = true;
+        errdefer mode.stream.entries.close();
         return streamShell(backing_allocator, io, fasta_file, fasta_stat.size, .fai);
     }
 
