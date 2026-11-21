@@ -4103,8 +4103,8 @@ test "[failure] - [index loader]: a FIFO in place of a sidecar fails without wai
 
     const Case = struct { suffix: []const u8, code: diagnostics.Code };
     for ([_]Case{
-        .{ .suffix = "zfi", .code = .@"index.truncated" },
-        .{ .suffix = "fai", .code = .@"index.no_records" },
+        .{ .suffix = "zfi", .code = .@"io.invalid_path" },
+        .{ .suffix = "fai", .code = .@"io.invalid_path" },
     }) |case| {
         const sidecar = try std.fmt.allocPrintSentinel(allocator, "{s}.{s}", .{ fasta_path, case.suffix }, 0);
         try std.testing.expectEqual(std.os.linux.E.SUCCESS, std.os.linux.errno(std.os.linux.mknodat(std.os.linux.AT.FDCWD, sidecar, std.os.linux.S.IFIFO | 0o600, 0)));
@@ -4113,6 +4113,34 @@ test "[failure] - [index loader]: a FIFO in place of a sidecar fails without wai
             try expectLoadFailure(std.testing.allocator, fasta_path, mode, case.code);
         }
         try support.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "validate", "--index", fasta_path }, case.code);
+    }
+}
+
+test "[failure] - [index]: a FIFO or a directory as the FASTA names its kind in index, get, stats, and validate --index" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const fifo = try support.uniqueArtifactPath(allocator, "fifo-fasta", "fa");
+    const fifo_z = try allocator.dupeZ(u8, fifo);
+    try std.testing.expectEqual(std.os.linux.E.SUCCESS, std.os.linux.errno(std.os.linux.mknodat(std.os.linux.AT.FDCWD, fifo_z, std.os.linux.S.IFIFO | 0o600, 0)));
+    defer std.Io.Dir.cwd().deleteFile(io, fifo) catch {};
+    const directory = try support.uniqueArtifactPath(allocator, "directory-fasta", "fa");
+    try std.Io.Dir.cwd().createDirPath(io, directory);
+    defer std.Io.Dir.cwd().deleteDir(io, directory) catch {};
+    const Case = struct { path: []const u8, reason: diagnostics.PathReason };
+    for ([_]Case{ .{ .path = fifo, .reason = .not_regular_file }, .{ .path = directory, .reason = .directory } }) |case| {
+        for ([_][]const []const u8{
+            &.{ ZFASTA_BIN, "index", case.path },
+            &.{ ZFASTA_BIN, "index", "--emit-fai", case.path },
+            &.{ ZFASTA_BIN, "get", case.path, "a" },
+            &.{ ZFASTA_BIN, "stats", case.path },
+            &.{ ZFASTA_BIN, "validate", "--index", case.path },
+        }) |argv| try support.expectCliFailureCode(allocator, argv, .@"io.invalid_path");
+        var failure: diagnostics.Failure = undefined;
+        failure.reset(.get);
+        try std.testing.expectError(error.Io, main.index_format.loadIndex(allocator, io, case.path, .automatic, .lookup_full_map, &failure));
+        try std.testing.expectEqual(case.reason, failure.primary().?.details.@"io.invalid_path".reason);
     }
 }
 

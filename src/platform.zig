@@ -1,4 +1,4 @@
-//! Read-only file mapping and sidecar opening: the POSIX calls the commands share.
+//! Read-only file mapping, and opening an input without waiting on a FIFO: the POSIX calls the commands share.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -17,10 +17,10 @@ pub fn mapFileReadOnly(io: std.Io, file: std.Io.File, len: usize) std.Io.File.Me
     });
 }
 
-pub const OpenSidecarError = std.posix.OpenError || std.posix.UnexpectedError;
+pub const OpenWithoutWaitingError = std.posix.OpenError || std.posix.UnexpectedError;
 
 /// A FIFO opens without waiting for a writer; the descriptor then blocks as `openFile`'s does.
-pub fn openSidecar(io: std.Io, path: []const u8) OpenSidecarError!std.Io.File {
+pub fn openWithoutWaiting(io: std.Io, path: []const u8) OpenWithoutWaitingError!std.Io.File {
     const handle = try std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0);
     const file = std.Io.File{ .handle = handle, .flags = .{ .nonblocking = false } };
     errdefer file.close(io);

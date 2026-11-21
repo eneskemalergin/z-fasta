@@ -252,7 +252,7 @@ pub const Counter = enum {
     records,
     requests,
 };
-pub const PathReason = enum { too_long, directory };
+pub const PathReason = enum { too_long, directory, not_regular_file };
 pub const TemporaryPurpose = enum { fai, names, side_tables, catalog };
 pub const TemporaryPlace = enum { environment, system, current_directory };
 pub const TemporaryReason = enum { randomness, directory_open, creation, collisions };

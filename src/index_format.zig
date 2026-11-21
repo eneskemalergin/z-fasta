@@ -1116,9 +1116,11 @@ pub fn loadIndex(
         });
     }
     var context = Diagnostics{ .failure = failure, .at = .{ .source = .fasta } };
-    const fasta_file = std.Io.Dir.cwd().openFile(io, fasta_path, .{}) catch |err| return context.ioFailure(.open, err);
+    // Opened without blocking, so a FIFO is refused by its kind instead of waiting for a writer.
+    const fasta_file = platform.openWithoutWaiting(io, fasta_path) catch |err| return context.ioFailure(.open, err);
     errdefer fasta_file.close(io);
     const fasta_stat = fasta_file.stat(io) catch |err| return context.ioFailure(.stat, err);
+    if (fasta_stat.kind != .file) return context.notRegularFile(fasta_stat.kind, .stat);
     if (fasta_stat.size == 0) return context.fail(.{ .@"fasta.no_records" = {} });
 
     switch (selection) {
@@ -1251,9 +1253,10 @@ const Diagnostics = struct {
         return self.failure.fail(.{ .details = .{ .@"io.map_failed" = .{ .map_bytes = bytes } }, .stage = .map, .at = self.at, .cause = if (err) |cause| .{ .zig = cause } else null });
     }
 
-    fn directoryPath(self: *const Diagnostics) diagnostics.Error {
+    /// A sidecar or FASTA must be a regular file; anything else fails before it is read.
+    fn notRegularFile(self: *const Diagnostics, kind: std.Io.File.Kind, stage: diagnostics.Stage) diagnostics.Error {
         @branchHint(.cold);
-        return self.failure.fail(.{ .details = .{ .@"io.invalid_path" = .{ .reason = .directory } }, .stage = .open, .at = self.at });
+        return self.failure.fail(.{ .details = .{ .@"io.invalid_path" = .{ .reason = if (kind == .directory) .directory else .not_regular_file } }, .stage = stage, .at = self.at });
     }
 
     fn pathLimit(self: *const Diagnostics, limit: u64) diagnostics.Error {
@@ -1317,7 +1320,7 @@ fn tryLoadZfi(
     mode: LoadMode,
     context: *Diagnostics,
 ) diagnostics.Error!?LoadedIndex {
-    const zfi_file = platform.openSidecar(io, zfi_path) catch |err| switch (err) {
+    const zfi_file = platform.openWithoutWaiting(io, zfi_path) catch |err| switch (err) {
         // Only an absent entry falls back to `.fai`; a dangling link is an inaccessible `.zfi`.
         error.FileNotFound => {
             _ = std.Io.Dir.cwd().statFile(io, zfi_path, .{ .follow_symlinks = false }) catch return null;
@@ -1330,7 +1333,7 @@ fn tryLoadZfi(
 
     const zfi_stat = zfi_file.stat(io) catch |err| return context.ioFailure(.stat, err);
 
-    if (zfi_stat.kind == .directory) return context.directoryPath();
+    if (zfi_stat.kind != .file) return context.notRegularFile(zfi_stat.kind, .open);
     if (zfi_stat.size == 0) {
         return context.truncated(.header, ZFI_HEADER_BYTES, zfi_stat.size);
     }
@@ -1669,7 +1672,7 @@ fn tryLoadFai(
     mode: LoadMode,
     context: *Diagnostics,
 ) diagnostics.Error!?LoadedIndex {
-    const fai_file = platform.openSidecar(io, fai_path) catch |err| switch (err) {
+    const fai_file = platform.openWithoutWaiting(io, fai_path) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return context.ioFailure(.open, err),
     };
@@ -1677,7 +1680,7 @@ fn tryLoadFai(
     defer if (!keep_file) fai_file.close(io);
 
     const fai_stat = fai_file.stat(io) catch |err| return context.ioFailure(.stat, err);
-    if (fai_stat.kind == .directory) return context.directoryPath();
+    if (fai_stat.kind != .file) return context.notRegularFile(fai_stat.kind, .open);
 
     if (fai_stat.mtime.nanoseconds < fasta_stat.mtime.nanoseconds) {
         return context.fail(.{ .@"index.older_than_source" = .{ .index_mtime_ns = fai_stat.mtime.nanoseconds, .source_mtime_ns = fasta_stat.mtime.nanoseconds } });

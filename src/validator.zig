@@ -15,6 +15,7 @@ const fasta = @import("fasta.zig");
 const diagnostics = @import("diagnostics");
 const index_format = @import("index_format.zig");
 const reporting = @import("reporting.zig");
+const platform = @import("platform.zig");
 
 const TYPE_SAMPLE_SYMBOLS: u64 = 100_000;
 pub const READ_BUFFER_BYTES = 256 * 1024;
@@ -109,9 +110,13 @@ pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const
     failure.sources.set(.fasta, if (from_stdin) .{ .label = .{ .borrowed = "stdin" }, .kind = .stream } else .{ .label = .{ .borrowed = fasta_path }, .kind = .path });
     failure.sources.set(.stdout, .{ .label = .{ .borrowed = "stdout" }, .kind = .stream });
     if (options.output_path) |path| failure.sources.set(.output, .{ .label = .{ .borrowed = path }, .kind = .path });
-    const file = if (from_stdin) std.Io.File.stdin() else std.Io.Dir.cwd().openFile(io, fasta_path, .{}) catch |err| return failure.fail(.{ .details = diagnostics.openFailure(err), .stage = .open, .at = .{ .source = .fasta }, .cause = .{ .zig = err } });
+    // A FIFO is a stream validate can read, as stdin is, except with `--index`: an index needs a
+    // regular file, so that open must not wait for a writer.
+    const open_result = if (from_stdin) std.Io.File.stdin() else if (options.index != null) platform.openWithoutWaiting(io, fasta_path) else std.Io.Dir.cwd().openFile(io, fasta_path, .{});
+    const file = open_result catch |err| return failure.fail(.{ .details = diagnostics.openFailure(err), .stage = .open, .at = .{ .source = .fasta }, .cause = .{ .zig = err } });
     defer if (!from_stdin) file.close(io);
     const before: ?std.Io.File.Stat = if (from_stdin) null else file.stat(io) catch |err| return failure.fail(.{ .details = .{ .@"io.stat_failed" = {} }, .stage = .stat, .at = .{ .source = .fasta }, .cause = .{ .zig = err } });
+    if (options.index != null) if (before) |stat| if (stat.kind != .file) return failure.fail(.{ .details = .{ .@"io.invalid_path" = .{ .reason = if (stat.kind == .directory) .directory else .not_regular_file } }, .stage = .stat, .at = .{ .source = .fasta } });
 
     var pair: Pair = undefined;
     if (options.index) |selection| {

@@ -12,6 +12,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const index_format = @import("index_format.zig");
 const fasta = @import("fasta.zig");
+const platform = @import("platform.zig");
 const diagnostics = @import("diagnostics");
 
 pub const INDEX_READ_BUFFER_BYTES = 256 * 1024;
@@ -208,7 +209,8 @@ pub fn runIndex(
     failure.sources.set(.zfi, .{ .label = .{ .borrowed = path }, .kind = .path, .suffix = .zfi });
     failure.sources.set(.stdout, .{ .label = .{ .borrowed = "stdout" }, .kind = .stream });
     const diag = Diagnostics{ .failure = failure, .format = if (options.emit_fai) .fai else .zfi };
-    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| return failure.fail(.{
+    // Opened without blocking, so a FIFO is refused by its kind instead of waiting for a writer.
+    const file = platform.openWithoutWaiting(io, path) catch |err| return failure.fail(.{
         .details = diagnostics.openFailure(err),
         .stage = .open,
         .at = .{ .source = .fasta },
@@ -216,6 +218,8 @@ pub fn runIndex(
     });
     defer file.close(io);
     const stat = file.stat(io) catch |err| return failure.fail(.{ .details = .{ .@"io.stat_failed" = {} }, .stage = .stat, .at = .{ .source = .fasta }, .cause = .{ .zig = err } });
+    // Indexing needs a regular file: offsets must address it again later.
+    if (stat.kind != .file) return failure.fail(.{ .details = .{ .@"io.invalid_path" = .{ .reason = if (stat.kind == .directory) .directory else .not_regular_file } }, .stage = .stat, .at = .{ .source = .fasta } });
     if (stat.size == 0) return failure.fail(.{ .details = .{ .@"fasta.no_records" = {} }, .stage = .stat, .at = .{ .source = .fasta } });
     if (!options.emit_fai and stat.size > index_format.MAX_ZFI_SOURCE_OFFSET) return failure.fail(.{ .details = .{ .@"resource.capacity_limit_exceeded" = .{ .capacity_role = .input_bytes, .limit = index_format.MAX_ZFI_SOURCE_OFFSET, .required = .{ .exact = stat.size } } }, .stage = .stat, .at = .{ .source = .fasta } });
     const buffers = allocator.create(IndexBuffers) catch return diag.oom(.reader_buffer, @sizeOf(IndexBuffers));
