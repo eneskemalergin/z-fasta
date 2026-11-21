@@ -477,6 +477,16 @@ test "[edge] - [validate report]: a name budget stops only the duplicate check" 
     }
 }
 
+test "[unit] - [validate report]: an error found makes the outcome invalid even when the duplicate check stopped" {
+    const allocator = std.testing.allocator;
+    const report = try reportBytes(allocator, ">a\nAC?\n>b\n>b\n>c\nAC\n", .{ .max_name_bytes = 1 });
+    defer allocator.destroy(report);
+    try std.testing.expectEqual(reporting.Validation.Completion.incomplete, report.completion);
+    const view = report.validation(.{ .max_name_bytes = 1 }, false);
+    try std.testing.expectEqual(reporting.Validation.Outcome.invalid, view.outcome());
+    try std.testing.expectEqual(@as(u8, 1), report.status(false, false));
+}
+
 // --- Reading ---
 
 test "[property] - [validate scan]: read splits give identical reports" {
@@ -862,6 +872,7 @@ test "[cli] - [validate]: rejects invalid arguments with exact diagnostics" {
         .{ .argv = &.{ ZFASTA_BIN, "validate", "tests/data/simple.fasta/child" }, .stderr = "error [io.open_failed] validate: \"tests/data/simple.fasta/child\": Could not open the required input.; cause=\"NotDir\"\nhint: Check the named input/output and retained I/O cause.\n" },
         .{ .argv = &.{ ZFASTA_BIN, "validate", "tests/data/simple.fasta", "tests/data/single.fasta" }, .stderr = "error [usage.extra_argument] validate: Too many arguments. argument=fasta_path allowed_count=1" ++ hint },
         .{ .argv = &.{ ZFASTA_BIN, "validate", "-o" }, .stderr = "error [usage.missing_option_value] validate: A required option value is missing. option=output expected=path" ++ hint },
+        .{ .argv = &.{ ZFASTA_BIN, "validate", "--fix", "-o", "-", "tests/data/simple.fasta" }, .stderr = "error [usage.invalid_option_value] validate: Invalid option value. option=output expected=path value=\"-\"" ++ hint },
         .{ .argv = &.{ ZFASTA_BIN, "validate", "--schema" }, .stderr = "error [usage.missing_option_value] validate: A required option value is missing. option=schema expected=schema" ++ hint },
         .{ .argv = &.{ ZFASTA_BIN, "validate", "--schema", "ena", "tests/data/simple.fasta" }, .stderr = "error [usage.invalid_option_value] validate: Invalid option value. option=schema expected=schema value=\"ena\"" ++ hint },
         .{ .argv = &.{ ZFASTA_BIN, "validate", "--custom-alphabet" }, .stderr = "error [usage.missing_option_value] validate: A required option value is missing. option=custom_alphabet expected=alphabet" ++ hint },
@@ -1551,6 +1562,27 @@ test "[cli] - [validate index]: an identifier too long for any index is counted 
         }
     }
     try std.testing.expect(seen_long and seen_missing);
+}
+
+test "[cli] - [validate repair]: replacing an output keeps its permissions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const input = try writeFastaArtifact(allocator, "validate-mode-input", ">a\nAC GT\n");
+    defer std.Io.Dir.cwd().deleteFile(io, input) catch {};
+    const output = try writeFastaArtifact(allocator, "validate-mode-output", "previous\n");
+    defer std.Io.Dir.cwd().deleteFile(io, output) catch {};
+    {
+        const file = try std.Io.Dir.cwd().openFile(io, output, .{});
+        defer file.close(io);
+        try file.setPermissions(io, .fromMode(0o600));
+    }
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const result = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "validate", "--fix", "-o", output, input } });
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    try std.testing.expectEqualStrings(">a\nACGT\n", try readTestFile(allocator, output));
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), (try std.Io.Dir.cwd().statFile(io, output, .{})).permissions.toMode() & 0o777);
 }
 
 test "[cli] - [validate index]: needs a file and a loadable index" {

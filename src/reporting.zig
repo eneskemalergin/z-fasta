@@ -62,10 +62,12 @@ pub const Validation = struct {
         return result;
     }
 
+    /// An error found is final, so `invalid` wins over `incomplete`; without one, an unfinished
+    /// scan cannot claim `clean` or `warnings`.
     pub fn outcome(self: *const Validation) Outcome {
-        if (self.completion != .complete) return .incomplete;
         const all = self.totals(null);
         if (all.errors != 0) return .invalid;
+        if (self.completion != .complete) return .incomplete;
         return if (all.warnings != 0) .warnings else .clean;
     }
 

@@ -547,8 +547,13 @@ test "[cli] - [index]: atomically replaces ZFI and keeps duplicate names" {
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
     defer std.Io.Dir.cwd().deleteTree(io, tmp_path) catch {};
     try std.Io.Dir.cwd().createDir(io, tmp_path, .default_dir);
-    // A previous file at the `.zfi` path is replaced whole.
+    // A previous file at the `.zfi` path is replaced whole, and keeps its permissions.
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = zfi_path, .data = "previous index" });
+    {
+        const previous = try std.Io.Dir.cwd().openFile(io, zfi_path, .{});
+        defer previous.close(io);
+        try previous.setPermissions(io, .fromMode(0o600));
+    }
     const all_message = try std.fmt.allocPrint(allocator, "wrote {s} (2 sequences)\n", .{zfi_path});
     try expectCliResult(allocator, &.{ ZFASTA_BIN, "index", fasta_path }, 0, "", all_message);
     {
@@ -559,6 +564,7 @@ test "[cli] - [index]: atomically replaces ZFI and keeps duplicate names" {
         try std.testing.expectEqual(@as(u64, 2), (try recordAt(&idx, 1)).seq_len);
     }
     try std.Io.Dir.cwd().access(io, tmp_path, .{});
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), (try std.Io.Dir.cwd().statFile(io, zfi_path, .{})).permissions.toMode() & 0o777);
     for ([_][]const u8{ "--dedup", "--no-dedup" }) |option| {
         try support.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "index", option, fasta_path }, .@"usage.unknown_option");
     }

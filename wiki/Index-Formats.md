@@ -57,7 +57,7 @@ A `.zfi` written by an earlier z-fasta version fails with `index.unsupported_ver
 
 `.fai` has no embedded source identity. z-fasta can only check that the sidecar is not older than the FASTA.
 
-Sidecars are not full-content fingerprints, so size and time cannot see every change: a same-size rewrite that keeps the FASTA's timestamp, or lands within one filesystem timestamp tick, still looks fresh. Rebuild the index after any in-place edit. A sidecar is read through a memory map, so truncating it while z-fasta reads it ends the process with `SIGBUS`; replace sidecars by writing a new file and renaming it, as `index` does.
+Sidecars are not full-content fingerprints, so size and time cannot see every change: a same-size rewrite that keeps the FASTA's timestamp, or lands within one filesystem timestamp tick, still looks fresh. Rebuild the index after any in-place edit. A sidecar is read through a memory map, so truncating it while z-fasta reads it ends the process with `SIGBUS`; replace sidecars by writing a new file and renaming it, as `index` does (it keeps an existing `.zfi`'s permissions).
 
 ## Messy FASTA
 

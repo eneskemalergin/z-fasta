@@ -298,6 +298,13 @@ const Staged = struct {
         errdefer allocator.free(self.buffer);
         self.atomic = std.Io.Dir.cwd().createFileAtomic(io, path, .{ .replace = true }) catch |err| return failure.fail(.{ .details = .{ .@"io.create_failed" = {} }, .stage = .create, .at = .{ .source = .output }, .cause = .{ .zig = err } });
         failure.outputs.file.state = .staged;
+        // Replacing a file keeps its permissions, as writing over it in place would.
+        if (std.Io.Dir.cwd().statFile(io, path, .{})) |existing| {
+            self.atomic.file.setPermissions(io, existing.permissions) catch |err| {
+                diagnostics.discardStaged(&self.atomic, io, failure, .output);
+                return failure.fail(.{ .details = .{ .@"io.create_failed" = {} }, .stage = .create, .at = .{ .source = .output }, .cause = .{ .zig = err } });
+            };
+        } else |_| {}
         self.writer = self.atomic.file.writer(io, self.buffer);
     }
 

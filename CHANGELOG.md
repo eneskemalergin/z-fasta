@@ -19,6 +19,9 @@ All notable changes to z-fasta will be documented in this file.
 - **Many records sharing a name index in linear time (closes [#39](https://github.com/eneskemalergin/z-fasta/issues/39)).** Name-table placement skips filled slots instead of probing them one by one, so 200,000 records named `a` index in milliseconds instead of about 14 seconds, in `index` and in `validate --index`. The `.zfi` bytes are unchanged; building the table takes 4 more bytes of memory per table slot.
 - **A pipe, FIFO, or directory given as the FASTA or a sidecar names its kind (closes [#41](https://github.com/eneskemalergin/z-fasta/issues/41)).** `index`, `get`, `stats`, `validate --index`, and the package fail with `io.invalid_path` (`reason=not_regular_file` or `directory`) without waiting on a FIFO; they used to report `fasta.no_records`, or an index error for a sidecar.
 - **`validate --index` goes on past an over-long identifier (closes [#42](https://github.com/eneskemalergin/z-fasta/issues/42)).** A record whose identifier no index can hold is counted as `fasta.identifier_too_long` and left out of the index comparison; the report used to stop there as `interrupted` with `index.identifier_too_long`.
+- **A replaced output keeps its permissions.** `validate --fix` and `index` copy an existing destination's permissions to the new file before the atomic replace, so a `0600` file stays `0600`.
+- **`validate` outcome: an error wins.** A report with an error is `invalid` even when the duplicate check stopped at its name budget; only a report without errors reads `incomplete`.
+- **`validate --fix -o -` is refused** with `usage.invalid_option_value`; it used to create a file named `-`.
 - **`validate --json --fix` reports a discarded output as `aborted`.** On a failed repair the staged output is discarded before the stdout report is written, so the report's file state matches stderr, and a cleanup failure appears in both.
 
 ### Changed

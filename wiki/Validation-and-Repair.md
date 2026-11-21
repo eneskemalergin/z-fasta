@@ -122,7 +122,7 @@ z-fasta validate --json genome.fa
 
 `--json` prints one JSON object on stdout: the envelope described in [Error diagnostics](Error-Diagnostics), with `validation` filled. It holds:
 
-- `outcome`: `clean`, `warnings`, `invalid`, or `incomplete`;
+- `outcome`: `clean`, `warnings`, `invalid`, or `incomplete`. Any error makes it `invalid`, even when the scan did not finish; otherwise an unfinished scan is `incomplete`;
 - `completion` and the selected `policy`;
 - `checks`: `passed`, `warnings`, `failed`, or `incomplete` for structure, identifiers, alphabet, and format;
 - what was `examined`, finding totals, totals by category, and the records with errors and with warnings;
@@ -213,7 +213,7 @@ Repair writes in the same pass as validation:
 Duplicate identifiers, symbols outside the alphabet, and empty records are copied as they are and still reported. The report describes the input; after a published repair, the exit status leaves out the format warnings the copy no longer has.
 
 > [!WARNING]
-> Repair never overwrites the input, including an alternate path that resolves to the same existing file. It writes a separate destination through atomic replacement. Publication is refused if required output identity is unknown or an observed source size or mtime changes. Those observations do not prove byte-for-byte source identity. A refusal preserves the previous destination; replacing a separate hard-link path leaves the input inode intact.
+> Repair never overwrites the input, including an alternate path that resolves to the same existing file. It writes a separate destination through atomic replacement, which keeps an existing destination's permissions; `-o -` is refused, since `-` names stdin only as the input. Publication is refused if required output identity is unknown or an observed source size or mtime changes. Those observations do not prove byte-for-byte source identity. A refusal preserves the previous destination; replacing a separate hard-link path leaves the input inode intact.
 
 ## What repair refuses
 

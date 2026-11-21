@@ -643,6 +643,12 @@ fn sourceTimestamp(stat: std.Io.File.Stat, diag: Diagnostics) !u64 {
     return index_format.timestampToNs(stat.mtime) catch return diag.fail(.{ .@"index.source_timestamp_out_of_range" = .{ .timestamp_ns = stat.mtime.nanoseconds, .min_ns = 0, .max_ns = std.math.maxInt(u64) } }, .stat, .fasta, null);
 }
 
+/// Replacing a `.zfi` keeps its permissions, as writing over it in place would.
+fn keepPermissions(io: std.Io, dir: std.Io.Dir, path: []const u8, atomic: *std.Io.File.Atomic, diag: Diagnostics) !void {
+    const existing = dir.statFile(io, path, .{}) catch return;
+    atomic.file.setPermissions(io, existing.permissions) catch |err| return diag.fail(.{ .@"io.create_failed" = {} }, .create, .zfi, err);
+}
+
 fn noIndexableRecords(diag: Diagnostics) anyerror {
     return diag.fail(.{ .@"index.no_indexable_records" = {} }, .scan, .fasta, null);
 }
@@ -721,6 +727,7 @@ fn runIndexSmall(allocator: std.mem.Allocator, io: std.Io, environ: std.process.
     const mtime = try sourceTimestamp(stat, diag);
     var atomic = std.Io.Dir.cwd().createFileAtomic(io, zfi_path, .{ .replace = true }) catch |err| return diag.fail(.{ .@"io.create_failed" = {} }, .create, .zfi, err);
     defer diagnostics.discardStaged(&atomic, io, diag.failure, .zfi);
+    try keepPermissions(io, std.Io.Dir.cwd(), zfi_path, &atomic, diag);
     diag.failure.outputs.file.state = .staged;
     var output = atomic.file.writer(io, &buffers.output);
     writeZfiIndex(&output.interface, &index, stat.size, mtime) catch |err| return diag.fail(.{ .@"io.write_failed" = {} }, .write, .zfi, if (output.err) |cause| cause else err);
@@ -951,6 +958,7 @@ const StreamedCatalog = struct {
         if (self.atomic_file == null) {
             self.atomic_file = self.dir.createFileAtomic(self.io, self.path, .{ .replace = true }) catch |err| return self.diag.fail(.{ .@"io.create_failed" = {} }, .create, .zfi, err);
             self.diag.failure.outputs.file.state = .staged;
+            try keepPermissions(self.io, self.dir, self.path, &self.atomic_file.?, self.diag);
         }
         self.atomic_file.?.file.writePositionalAll(self.io, self.records[0..self.buffered], @sizeOf(ZfiHeader) + self.record_bytes - self.buffered) catch |err| return self.diag.fail(.{ .@"io.write_failed" = {} }, .write, .zfi, err);
         self.buffered = 0;
