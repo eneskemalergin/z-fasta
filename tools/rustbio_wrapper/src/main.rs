@@ -35,7 +35,7 @@ mod peer_stats;
 mod peer_get;
 use peer_get::{parse_get_args, revcomp, GetConfig, GetMode};
 
-const PEER_VERSION: &str = "4.0.1";
+const PEER_VERSION: &str = "4.2.2";
 
 fn print_version() {
     println!("rust-bio {PEER_VERSION} (custom indexer wrapper)");
