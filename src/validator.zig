@@ -619,7 +619,7 @@ const Pair = struct {
             .fasta_path = fasta_path,
             .selection = selection,
             .stream = stream,
-            .scanner = .{ .allocator = allocator, .collect_side_tables = format == .zfi, .diag = .{ .failure = failure, .format = format } },
+            .scanner = .{ .allocator = allocator, .collect_side_tables = format == .zfi, .skip_long_names = true, .diag = .{ .failure = failure, .format = format } },
         };
     }
 

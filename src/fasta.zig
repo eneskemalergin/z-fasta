@@ -452,6 +452,10 @@ pub fn RecordScannerWith(comptime Diag: type) type {
         diag: Diag,
         allocator: std.mem.Allocator,
         collect_side_tables: bool = false,
+        /// Skip, instead of failing on, a record whose identifier exceeds the limit; for a caller
+        /// that reports the identifier itself and goes on scanning.
+        skip_long_names: bool = false,
+        name_too_long: bool = false,
         active: bool = false,
         in_header: bool = false,
         parsing_name: bool = false,
@@ -523,6 +527,7 @@ pub fn RecordScannerWith(comptime Diag: type) type {
             self.source_reference.location.offset = header_start_offset;
             self.source_reference.record = self.source_record;
             self.name.clearRetainingCapacity();
+            self.name_too_long = false;
             self.seq_offset = 0;
             self.seq_offset_set = false;
             self.line_builder = .{};
@@ -769,6 +774,7 @@ pub fn RecordScannerWith(comptime Diag: type) type {
                 @memcpy(self.side_table.items[0..@sizeOf(u64)], std.mem.asBytes(&metrics.line_count));
                 side_table_slice = self.side_table.items;
             }
+            if (self.name_too_long) return;
             try emit(ctx, .{
                 .name = self.name.items,
                 .header_offset = self.header_start_offset,
@@ -830,11 +836,12 @@ pub fn RecordScannerWith(comptime Diag: type) type {
 
                         const fragment = data[i..name_end];
                         if (max_name_len) |limit| {
-                            if (state.name.items.len > limit or fragment.len > limit - state.name.items.len) {
-                                return identifierTooLong(state.recordDiagnostics(), @as(u128, state.name.items.len) + fragment.len, limit);
+                            if (state.name_too_long or state.name.items.len > limit or fragment.len > limit - state.name.items.len) {
+                                if (!state.skip_long_names) return identifierTooLong(state.recordDiagnostics(), @as(u128, state.name.items.len) + fragment.len, limit);
+                                state.name_too_long = true;
                             }
                         }
-                        state.name.appendSlice(state.allocator, fragment) catch return state.diag.oom(.names, fragment.len);
+                        if (!state.name_too_long) state.name.appendSlice(state.allocator, fragment) catch return state.diag.oom(.names, fragment.len);
                         i = name_end;
                         if (i >= data.len) return;
                         if (data[i] == '\n') {

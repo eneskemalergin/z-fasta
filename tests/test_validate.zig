@@ -1522,6 +1522,37 @@ test "[failure] - [validate repair]: a directory output fails before the scan, f
     try support.expectCliFailureCode(allocator, &.{ ZFASTA_BIN, "validate", "--fix", "-o", output, "-" }, .@"io.invalid_path");
 }
 
+test "[cli] - [validate index]: an identifier too long for any index is counted and the scan goes on" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const data = try std.mem.concat(allocator, u8, &.{ ">a\nAC\n>", "N" ** 70_000, "\nAC\n>b\nGT\n" });
+    const path = try writeFastaArtifact(allocator, "validate-index-long-name", data);
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{path});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = fai_path, .data = "a\t2\t3\t2\t3\n" });
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const result = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "validate", "--json", "--index", path } });
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+    const validation = (try std.json.parseFromSlice(std.json.Value, allocator, result.stdout, .{})).value.object.get("validation").?.object;
+    try std.testing.expectEqualStrings("complete", validation.get("completion").?.string);
+    var seen_long = false;
+    var seen_missing = false;
+    for (validation.get("codes").?.array.items) |code| {
+        const name = code.object.get("code").?.string;
+        if (std.mem.eql(u8, name, "fasta.identifier_too_long")) seen_long = true;
+        // The long record takes no part in the comparison; the later `b` is still compared.
+        if (std.mem.eql(u8, name, "pair.record_missing_from_index")) {
+            seen_missing = true;
+            try std.testing.expectEqualStrings("3", code.object.get("first").?.object.get("record").?.string);
+            try std.testing.expectEqualStrings("1", code.object.get("occurrences").?.string);
+        }
+    }
+    try std.testing.expect(seen_long and seen_missing);
+}
+
 test "[cli] - [validate index]: needs a file and a loadable index" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
