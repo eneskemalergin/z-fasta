@@ -2253,3 +2253,25 @@ test "[edge] - [zfi loader]: check-bit words cover every u32 record count" {
     try std.testing.expectEqual((@as(usize, max) + @bitSizeOf(usize) - 1) / @bitSizeOf(usize), checkedRecordWords(max));
     try std.testing.expect(checkedRecordWords(max) * @bitSizeOf(usize) >= max);
 }
+
+test "[property] - [zfi loader]: radix sort orders keys with 8-bit and 11-bit digits" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x7261_6469);
+    const random = prng.random();
+    // Below 4,096 keys the sort uses 8-bit digits; from 4,096 on, 11-bit digits.
+    for ([_]usize{ 1, 100, 4095, 4096, 5000 }) |count| {
+        for ([_]u7{ 0, 24 }) |low_bit| {
+            const keys = try allocator.alloc(u64, count);
+            defer allocator.free(keys);
+            const scratch = try allocator.alloc(u64, count);
+            defer allocator.free(scratch);
+            const low_mask = (@as(u64, 1) << @intCast(low_bit)) -% 1;
+            for (keys) |*key| key.* = random.int(u64) & ~low_mask;
+            const expected = try allocator.dupe(u64, keys);
+            defer allocator.free(expected);
+            std.mem.sort(u64, expected, {}, std.sort.asc(u64));
+            radixSort(keys, scratch, low_bit);
+            try std.testing.expectEqualSlices(u64, expected, keys);
+        }
+    }
+}

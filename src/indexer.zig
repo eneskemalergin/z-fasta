@@ -1376,7 +1376,7 @@ test "[integration] - [index]: detects path replacement" {
     failure.reset(.index);
     try std.testing.expectError(error.InputChanged, checkSourceUnchanged(std.testing.io, tmp.dir, "source.fa", before, .{ .failure = &failure }));
     const details = failure.primary().?.details.@"input.changed";
-    try std.testing.expect(details.changed_fields.size or details.changed_fields.mtime);
+    try std.testing.expect(details.changed_fields.size);
     try std.testing.expectEqual(before.size, details.before.bytes.?);
     try std.testing.expectEqual(before.mtime.nanoseconds, details.before.mtime_ns.?);
     try std.testing.expect(details.after != null);

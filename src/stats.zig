@@ -1134,6 +1134,51 @@ test "[property] - [stats lengths]: narrow and widened lengths sort and summariz
     }
 }
 
+test "[property] - [stats lengths]: quartiles and Nx match a direct reference" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x4e78);
+    const random = prng.random();
+    for ([_]usize{ 1, 2, 3, 4, 5, 10, 11, 101, 1000 }) |count| {
+        var failure: diagnostics.Failure = undefined;
+        failure.reset(.stats);
+        var diag = Diagnostics{ .failure = &failure };
+        const lengths = try allocator.alloc(u64, count);
+        defer allocator.free(lengths);
+        for (lengths) |*value| value.* = random.intRangeAtMost(u64, 1, if (random.boolean()) 20 else 1_000_000);
+        const sorted = try allocator.dupe(u64, lengths);
+        defer allocator.free(sorted);
+        std.mem.sort(u64, sorted, {}, std.sort.asc(u64));
+        const summary = try summarizeLengths(u64, lengths, &diag);
+
+        // Median: the middle value, or the floor of the two middle values' mean.
+        const median = struct {
+            fn of(values: []const u64) u64 {
+                const n = values.len;
+                if (n % 2 == 1) return values[n / 2];
+                return @intCast((@as(u128, values[n / 2 - 1]) + values[n / 2]) / 2);
+            }
+        }.of;
+        var total: u128 = 0;
+        for (sorted) |value| total += value;
+        try std.testing.expectEqual(median(sorted), summary.median);
+        const half = count / 2;
+        try std.testing.expectEqual(if (count == 1) sorted[0] else median(sorted[0..half]), summary.q1);
+        try std.testing.expectEqual(if (count == 1) sorted[0] else median(sorted[count - half ..]), summary.q3);
+        // Nx: the shortest of the fewest longest records holding at least x percent of the total.
+        for ([_]u8{ 50, 90 }) |percent| {
+            var held: u128 = 0;
+            var rank: usize = 0;
+            const length = while (rank < count) {
+                rank += 1;
+                held += sorted[count - rank];
+                if (held * 100 >= total * percent) break sorted[count - rank];
+            } else unreachable;
+            try std.testing.expectEqual(length, if (percent == 50) summary.n50 else summary.n90);
+            try std.testing.expectEqual(rank, if (percent == 50) summary.l50 else summary.l90);
+        }
+    }
+}
+
 test "[property] - [stats lengths]: in-place sort matches a reference sort" {
     const allocator = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(0x50a7);

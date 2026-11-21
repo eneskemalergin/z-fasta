@@ -715,6 +715,46 @@ test "[cli] - [get]: applies each orientation and names it on request" {
     }
 }
 
+test "[cli] - [get]: each orientation is exact across the lines of a non-uniform record" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    // Lines of 7, 3, 9, and 5 bases, one blank line, and a final line of 4: a side-table record.
+    const bases = "ACGTTGCAAGTCCATGGATCAGTTGACCA";
+    const fasta = ">nu\nACGTTGC\nAAG\nTCCATGGAT\n\nCAGTT\nGACCA\n";
+    const fasta_path = try writeFastaArtifact(allocator, "get-orientation-nonuniform", fasta);
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+    try support.expectCliResult(allocator, &.{ ZFASTA_BIN, "index", fasta_path }, 0, "", try std.fmt.allocPrint(allocator, "wrote {s} (1 sequences)\n", .{zfi_path}));
+
+    const Span = struct { start: usize, end: usize };
+    for ([_]Span{ .{ .start = 1, .end = 29 }, .{ .start = 6, .end = 12 }, .{ .start = 7, .end = 8 }, .{ .start = 18, .end = 25 }, .{ .start = 29, .end = 29 } }) |span| {
+        const forward = bases[span.start - 1 .. span.end];
+        const complement = try allocator.alloc(u8, forward.len);
+        for (forward, complement) |base, *out| out.* = switch (base) {
+            'A' => 'T',
+            'C' => 'G',
+            'G' => 'C',
+            'T' => 'A',
+            else => unreachable,
+        };
+        const reversed = try allocator.dupe(u8, forward);
+        std.mem.reverse(u8, reversed);
+        const reverse_complement = try allocator.dupe(u8, complement);
+        std.mem.reverse(u8, reverse_complement);
+        const region = try std.fmt.allocPrint(allocator, "nu:{d}-{d}", .{ span.start, span.end });
+        const cases = [_]struct { flag: []const u8, want: []const u8 }{
+            .{ .flag = "--rc", .want = reverse_complement },
+            .{ .flag = "--complement-only", .want = complement },
+            .{ .flag = "--reverse-only", .want = reversed },
+        };
+        for (cases) |case| {
+            try expectCliSuccess(allocator, &.{ ZFASTA_BIN, "get", fasta_path, region, case.flag }, try std.fmt.allocPrint(allocator, ">{s}\n{s}\n", .{ region, case.want }));
+        }
+    }
+}
+
 test "[cli] - [get bed]: annotations describe the composed orientation" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

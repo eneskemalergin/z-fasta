@@ -51,18 +51,28 @@ pub fn expectCliStdinResult(
     defer threaded.deinit();
     const io = threaded.io();
     var child = try std.process.spawn(io, .{ .argv = argv, .stdin = .pipe, .stdout = .pipe, .stderr = .pipe });
-    try child.stdin.?.writeStreamingAll(io, stdin);
-    child.stdin.?.close(io);
+    defer child.kill(io);
+    // stdin is written from its own thread while both outputs drain, so no pipe can fill and stall.
+    const Feeder = struct {
+        fn run(feed_io: std.Io, file: std.Io.File, bytes: []const u8) void {
+            file.writeStreamingAll(feed_io, bytes) catch {};
+            file.close(feed_io);
+        }
+    };
+    const feeder = try std.Thread.spawn(.{}, Feeder.run, .{ io, child.stdin.?, stdin });
     child.stdin = null;
-    var stdout_buffer: [4096]u8 = undefined;
-    var stdout_reader = child.stdout.?.readerStreaming(io, &stdout_buffer);
-    const stdout = try stdout_reader.interface.allocRemaining(allocator, .limited(64 * 1024));
-    defer allocator.free(stdout);
-    var stderr_buffer: [4096]u8 = undefined;
-    var stderr_reader = child.stderr.?.readerStreaming(io, &stderr_buffer);
-    const stderr = try stderr_reader.interface.allocRemaining(allocator, .limited(64 * 1024));
-    defer allocator.free(stderr);
+    var multi_reader_buffer: std.Io.File.MultiReader.Buffer(2) = undefined;
+    var multi_reader: std.Io.File.MultiReader = undefined;
+    multi_reader.init(allocator, io, multi_reader_buffer.toStreams(), &.{ child.stdout.?, child.stderr.? });
+    defer multi_reader.deinit();
+    try multi_reader.fillRemaining(.none);
+    feeder.join();
+    try multi_reader.checkAnyError();
     try std.testing.expectEqual(std.process.Child.Term{ .exited = exit_code }, try child.wait(io));
+    const stdout = try multi_reader.toOwnedSlice(0);
+    defer allocator.free(stdout);
+    const stderr = try multi_reader.toOwnedSlice(1);
+    defer allocator.free(stderr);
     try std.testing.expectEqualStrings(expected_stdout, stdout);
     try std.testing.expectEqualStrings(expected_stderr, stderr);
 }

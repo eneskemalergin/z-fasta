@@ -448,6 +448,29 @@ fn failIndexStdout(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Ca
     }
 }
 
+/// Scans `data` for `.fai` output, expects a rejection, and returns its code.
+fn faiScanCode(allocator: std.mem.Allocator, data: []const u8) !diagnostics.Code {
+    var reader = std.Io.Reader.fixed(data);
+    var read_buf: [main.indexer.INDEX_READ_BUFFER_BYTES]u8 = undefined;
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.index);
+    try std.testing.expectError(error.InvalidIndex, main.indexer.scanFaiReader(allocator, &reader, &read_buf, &output.writer, .{ .failure = &failure }));
+    try std.testing.expectEqual(@as(usize, 0), output.written().len);
+    return failure.primary().?.code();
+}
+
+/// Scans `data` for `.zfi` output, expects a rejection, and returns its code.
+fn zfiScanCode(allocator: std.mem.Allocator, data: []const u8) !diagnostics.Code {
+    var reader = std.Io.Reader.fixed(data);
+    var read_buf: [main.indexer.INDEX_READ_BUFFER_BYTES]u8 = undefined;
+    var failure: diagnostics.Failure = undefined;
+    failure.reset(.index);
+    try std.testing.expectError(error.InvalidIndex, main.indexer.scanZfiReader(allocator, &reader, &read_buf, .{ .failure = &failure }));
+    return failure.primary().?.code();
+}
+
 fn expectIndexRunCode(faulty_io: std.Io, path: []const u8, emit_fai: bool, code: diagnostics.Code, failure: *diagnostics.Failure) !void {
     try std.testing.expectError(diagnostics.metadata(code).returned_error, main.indexer.runIndex(std.testing.allocator, faulty_io, .empty, path, .{ .emit_fai = emit_fai }, failure));
     try std.testing.expectEqual(code, failure.primary().?.code());
@@ -524,6 +547,8 @@ test "[cli] - [index]: atomically replaces ZFI and keeps duplicate names" {
     defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
     defer std.Io.Dir.cwd().deleteTree(io, tmp_path) catch {};
     try std.Io.Dir.cwd().createDir(io, tmp_path, .default_dir);
+    // A previous file at the `.zfi` path is replaced whole.
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = zfi_path, .data = "previous index" });
     const all_message = try std.fmt.allocPrint(allocator, "wrote {s} (2 sequences)\n", .{zfi_path});
     try expectCliResult(allocator, &.{ ZFASTA_BIN, "index", fasta_path }, 0, "", all_message);
     {
@@ -1170,10 +1195,8 @@ test "[failure] - [fasta scanner]: rejects names above the u16 limit" {
     try fasta.appendNTimes(allocator, 'A', main.indexer.MAX_INDEX_NAME_LEN + 1);
     try fasta.appendSlice(allocator, "\nACGT\n");
 
-    var output = std.Io.Writer.Allocating.init(allocator);
-    defer output.deinit();
-
-    try std.testing.expectError(error.InvalidIndex, scanFaiData(allocator, fasta.items, &output.writer));
+    try std.testing.expectEqual(diagnostics.Code.@"index.identifier_too_long", try faiScanCode(allocator, fasta.items));
+    try std.testing.expectEqual(diagnostics.Code.@"index.identifier_too_long", try zfiScanCode(allocator, fasta.items));
 }
 
 test "[edge] - [fasta scanner]: starts the sequence at the first base-bearing line after a blank" {
@@ -1267,9 +1290,7 @@ test "[integration] - [fasta scanner]: preserves whitespace before the next head
         var writer = std.Io.Writer.fixed(&output);
         try main.getter.extractRegion(&loaded, "a:9-11", &writer, &failure);
         try std.testing.expectEqualStrings(">a:9-11\nAAA\n", writer.buffered());
-        var fai = std.Io.Writer.fixed(&output);
-        try std.testing.expectError(error.InvalidIndex, scanFaiData(allocator, data, &fai));
-        try std.testing.expectEqual(@as(usize, 0), fai.buffered().len);
+        try std.testing.expectEqual(diagnostics.Code.@"index.nonuniform_fai", try faiScanCode(allocator, data));
     }
 }
 
@@ -2741,7 +2762,20 @@ test "[edge] - [zfi scanner]: creates a side table for an interior short line" {
     var index = try main.indexer.scanZfiData(allocator, data);
     defer index.deinit(allocator);
     try std.testing.expect(!index.records.items[0].isUniformWidth());
-    try std.testing.expect(index.side_tables.items.len > 0);
+    // One `u64` line count, then one 24-byte entry per sequence line.
+    const Line = main.index_format.SideTableLine;
+    const table = index.side_tables.items;
+    try std.testing.expectEqual(@as(usize, 8 + 4 * @sizeOf(Line)), table.len);
+    try std.testing.expectEqual(@as(u64, 4), std.mem.readInt(u64, table[0..8], .little));
+    const want = [_]Line{
+        .{ .base_start = 0, .byte_offset = 5, .line_bytes = 5, .line_bases = 4 },
+        .{ .base_start = 4, .byte_offset = 10, .line_bytes = 5, .line_bases = 4 },
+        .{ .base_start = 8, .byte_offset = 15, .line_bytes = 3, .line_bases = 2 },
+        .{ .base_start = 10, .byte_offset = 18, .line_bytes = 5, .line_bases = 4 },
+    };
+    for (want, 0..) |line, k| {
+        try std.testing.expectEqual(line, std.mem.bytesToValue(Line, table[8 + k * @sizeOf(Line) ..][0..@sizeOf(Line)]));
+    }
 }
 
 test "[edge] - [zfi scanner]: marks a long final line non-uniform" {
@@ -2964,7 +2998,7 @@ test "[integration] - [fasta scanner]: enforces the header length boundary on th
     try std.testing.expectEqual(@as(u8, '>'), reject_data[0]);
     try std.testing.expectEqual(null, std.mem.findScalar(u8, reject_data, '\r'));
     try std.testing.expectEqual(main.indexer.MAX_INDEX_NAME_LEN + 1, std.mem.findScalar(u8, reject_data, '\n').? - 1);
-    try std.testing.expectError(error.InvalidIndex, main.indexer.scanZfiData(allocator, reject_data));
+    try std.testing.expectEqual(diagnostics.Code.@"index.identifier_too_long", try zfiScanCode(allocator, reject_data));
 }
 
 test "[integration] - [fasta scanner]: preserves invalid UTF-8 header bytes" {
@@ -4130,7 +4164,13 @@ test "[property] - [index loader]: an entry stream yields the catalog's entries 
         try support.writeZfi(allocator, path, data.items);
         try expectStreamMatchesCatalog(allocator, path, .{ .zfi = zfi_path });
         var fai: std.Io.Writer.Allocating = .init(allocator);
-        _ = scanFaiData(allocator, data.items, &fai.writer) catch continue;
+        // Only a non-uniform layout may refuse `.fai`, and only as nonuniform.
+        _ = scanFaiData(allocator, data.items, &fai.writer) catch |err| {
+            try std.testing.expect(!uniform);
+            try std.testing.expectEqual(error.InvalidIndex, err);
+            try std.testing.expectEqual(diagnostics.Code.@"index.nonuniform_fai", try faiScanCode(allocator, data.items));
+            continue;
+        };
         const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{path});
         defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
         {
@@ -4140,6 +4180,21 @@ test "[property] - [index loader]: an entry stream yields the catalog's entries 
         }
         try expectStreamMatchesCatalog(allocator, path, .{ .fai = fai_path });
     }
+}
+
+test "[integration] - [entry stream]: a .fai row longer than the read buffer streams like the catalog" {
+    const allocator = std.testing.allocator;
+    const name = "n" ** main.indexer.MAX_INDEX_NAME_LEN;
+    const fasta_path = try writeFastaArtifact(allocator, "fai-long-row", ">" ++ name ++ "\nACGT\n>b\nAC\n");
+    defer allocator.free(fasta_path);
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer allocator.free(fai_path);
+    // Zero padding pushes the first row past the stream's 65,600-byte buffer.
+    const padding = "0" ** 200;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = fai_path, .data = name ++ "\t" ++ padding ++ "4\t65537\t4\t5\r\nb\t2\t65545\t2\t3\n" });
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+    try expectStreamMatchesCatalog(allocator, fasta_path, .{ .fai = fai_path });
 }
 
 test "[property] - [zfi name table]: every lookup returns the first record with that name" {

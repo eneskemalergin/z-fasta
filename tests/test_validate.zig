@@ -540,6 +540,38 @@ test "[failure] - [validate report]: a read failure keeps what was examined" {
     try std.testing.expectEqual(@as(u8, 1), report.status(false, false));
 }
 
+test "[failure] - [validate repair]: a read failure mid-scan fails the repair with the read code" {
+    const data = ">a\nACGT\n>b\nACGT\n>c\nACGT\n";
+    var source = FailingSource.init(data, 13);
+    const report = try std.testing.allocator.create(validator.Report);
+    defer std.testing.allocator.destroy(report);
+    var buffer: [4]u8 = undefined;
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    var failure: diagnostics.Failure = undefined;
+    try std.testing.expectError(error.Io, validator.repair(std.testing.allocator, &source.reader, &buffer, null, .{}, 60, &output.writer, report, &failure));
+    try std.testing.expectEqual(diagnostics.Code.@"io.read_failed", failure.primary().?.code());
+    try std.testing.expectEqual(@as(?u64, 12), failure.primary().?.at.location.offset);
+    try std.testing.expectEqual(reporting.Validation.Completion.interrupted, report.completion);
+    // What the writer holds is a prefix of the copy; the caller discards it on any error.
+    try std.testing.expect(std.mem.startsWith(u8, ">a\nACGT\n>b\nACGT\n", output.written()));
+}
+
+test "[cli] - [validate report]: the validation header escapes the source label" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const path = try support.uniqueArtifactPath(allocator, "label\x1b[31m\"q", "fa");
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = ">a\nACGT\n" });
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const result = try std.process.run(allocator, threaded.io(), .{ .argv = &.{ ZFASTA_BIN, "validate", path } });
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    try std.testing.expect(std.mem.findScalar(u8, result.stdout, 0x1b) == null);
+    try std.testing.expect(std.mem.find(u8, result.stdout, "label\\x1b[31m\\\"q") != null);
+}
+
 test "[failure] - [validate report]: running out of memory interrupts the report" {
     var data: std.ArrayList(u8) = .empty;
     defer data.deinit(std.testing.allocator);
