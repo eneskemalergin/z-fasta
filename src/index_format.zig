@@ -190,6 +190,11 @@ pub const NameTable = struct {
     pub const Builder = struct {
         slots: []u32,
         ordinal_bits: u6,
+        allocator: std.mem.Allocator,
+        /// Skip links over filled slots: entry `i` holds `j + 1` for a slot `j` with every slot
+        /// from `i` up to it filled, or 0 for `i + 1`. They keep many records with one name from
+        /// probing past each other one slot at a time. Null when a `u32` cannot name every slot.
+        next: ?[]u32 = null,
         count: u64 = 0,
         queue: [QUEUE]u64 = undefined,
         head: usize = 0,
@@ -202,10 +207,18 @@ pub const NameTable = struct {
             const blocks: [*]align(4) volatile @Vector(16, u32) = @ptrCast(slots.ptr);
             for (0..slots.len / 16) |i| blocks[i] = @splat(0);
             @memset(slots[slots.len / 16 * 16 ..], 0);
-            return .{ .slots = slots, .ordinal_bits = ordinalBits(record_count) };
+            errdefer allocator.free(slots);
+            var next: ?[]u32 = null;
+            if (slots.len < std.math.maxInt(u32)) {
+                const links = try allocator.alloc(u32, slots.len);
+                @memset(links, 0);
+                next = links;
+            }
+            return .{ .slots = slots, .ordinal_bits = ordinalBits(record_count), .allocator = allocator, .next = next };
         }
 
         pub fn deinit(self: *Builder, allocator: std.mem.Allocator) void {
+            if (self.next) |next| allocator.free(next);
             allocator.free(self.slots);
         }
 
@@ -226,10 +239,13 @@ pub const NameTable = struct {
             }
         }
 
+        /// The caller may take the slots without `deinit`; the links are freed here.
         pub fn finish(self: *Builder) []u32 {
             for (0..self.queued) |i| self.place(self.queue[(self.head + i) % QUEUE]);
             self.head = 0;
             self.queued = 0;
+            if (self.next) |next| self.allocator.free(next);
+            self.next = null;
             return self.slots;
         }
 
@@ -237,21 +253,48 @@ pub const NameTable = struct {
             return std.mem.sliceAsBytes(self.finish());
         }
 
+        /// Windows scanned from the home slot before the skip links take over.
+        const DIRECT_WINDOWS = 4;
+
+        /// Puts the entry in the first empty slot at or after its home slot, wrapping at the end.
         fn place(self: *Builder, name_hash: u64) void {
             std.debug.assert(self.count + 1 < self.slots.len);
             self.count += 1;
             const entry: u32 = @intCast(fingerprint(name_hash, self.ordinal_bits) << self.ordinal_bits | self.count);
             var slot: usize = @intCast(home(name_hash, self.slots.len));
-            while (slot + 16 <= self.slots.len) : (slot += 16) {
+            var windows: usize = 0;
+            while (slot + 16 <= self.slots.len and windows < DIRECT_WINDOWS) : (slot += 16) {
                 const window: @Vector(16, u32) = self.slots[slot..][0..16].*;
                 const empty: u16 = @bitCast(window == @as(@Vector(16, u32), @splat(0)));
                 if (empty != 0) {
                     self.slots[slot + @ctz(empty)] = entry;
                     return;
                 }
+                windows += 1;
             }
-            while (self.slots[slot] != 0) slot = if (slot + 1 == self.slots.len) 0 else slot + 1;
-            self.slots[slot] = entry;
+            self.slots[self.firstEmpty(slot)] = entry;
+        }
+
+        fn after(self: *const Builder, slot: usize) usize {
+            if (self.next) |next| {
+                if (next[slot] != 0) return next[slot] - 1;
+            }
+            return if (slot + 1 == self.slots.len) 0 else slot + 1;
+        }
+
+        /// The first empty slot at or after `start`, wrapping; links every slot walked to it.
+        fn firstEmpty(self: *Builder, start: usize) usize {
+            @branchHint(.unlikely);
+            var slot = start;
+            while (self.slots[slot] != 0) slot = self.after(slot);
+            const next = self.next orelse return slot;
+            var walk = start;
+            while (walk != slot) {
+                const following = self.after(walk);
+                next[walk] = @intCast(slot + 1);
+                walk = following;
+            }
+            return slot;
         }
     };
 };
@@ -2283,4 +2326,46 @@ test "[property] - [zfi loader]: radix sort orders keys with 8-bit and 11-bit di
             try std.testing.expectEqualSlices(u64, expected, keys);
         }
     }
+}
+
+test "[property] - [zfi name table]: placement matches a plain first-empty-slot walk" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x6e74);
+    const random = prng.random();
+    // Few distinct names make long probe runs; the plain walk is the frozen placement rule.
+    for ([_]usize{ 1, 17, 300, 5000 }) |count| {
+        for ([_]u64{ 1, 3, 1000 }) |distinct| {
+            var builder = try NameTable.Builder.init(allocator, count);
+            defer builder.deinit(allocator);
+            const reference = try allocator.alloc(u32, builder.slots.len);
+            defer allocator.free(reference);
+            @memset(reference, 0);
+            for (1..count + 1) |ordinal| {
+                const name_hash = NameTable.hash(std.mem.asBytes(&random.uintLessThan(u64, distinct)));
+                builder.insertHash(name_hash);
+                const entry: u32 = @intCast(NameTable.fingerprint(name_hash, builder.ordinal_bits) << builder.ordinal_bits | ordinal);
+                var slot: usize = @intCast(NameTable.home(name_hash, reference.len));
+                while (reference[slot] != 0) slot = (slot + 1) % reference.len;
+                reference[slot] = entry;
+            }
+            try std.testing.expectEqualSlices(u32, reference, builder.finish());
+        }
+    }
+}
+
+test "[edge] - [zfi name table]: many records with one name place in near-linear time" {
+    const allocator = std.testing.allocator;
+    const count = 200_000;
+    var builder = try NameTable.Builder.init(allocator, count);
+    defer builder.deinit(allocator);
+    // A quadratic walk takes many seconds here even in ReleaseFast; skip links take milliseconds,
+    // so a 5-second bound fails only on a return to the quadratic walk.
+    const started = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+    for (0..count) |_| builder.insert("a");
+    const slots = builder.finish();
+    const elapsed = started.durationTo(std.Io.Clock.Timestamp.now(std.testing.io, .awake));
+    try std.testing.expect(elapsed.raw.toNanoseconds() < 5 * std.time.ns_per_s);
+    var filled: usize = 0;
+    for (slots) |slot| filled += @intFromBool(slot != 0);
+    try std.testing.expectEqual(@as(usize, count), filled);
 }
