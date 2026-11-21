@@ -6,6 +6,7 @@ const std = @import("std");
 
 const index_format = @import("index_format.zig");
 const fasta = @import("fasta.zig");
+const reporting = @import("reporting.zig");
 const diagnostics = @import("diagnostics");
 
 pub fn runStats(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, failure: *diagnostics.Failure) diagnostics.Error!void {
@@ -450,22 +451,20 @@ fn renderReport(
     comp: *const CompositionStats,
     composition: CompositionSummary,
 ) std.Io.Writer.Error!void {
+    // Names and the path are file bytes: they are escaped as diagnostics escape them, so no
+    // control byte reaches the terminal.
+    try writer.writeAll("File:\n  path: ");
+    try reporting.writeEscapedBytes(writer, fasta_path);
+    try writer.writeAll("\n  index: ");
+    try reporting.writeEscapedBytes(writer, fasta_path);
+    try writer.print("{s}\n  size_bytes: {d}\n\n", .{ index_extension, fasta_size });
+    try writer.print("Lengths:\n  indexed_records: {d}\n  total_symbols: {d}\n  shortest_length: {d}\n  shortest_name: ", .{ summary.record_count, summary.total_symbols, summary.shortest_length });
+    try reporting.writeEscapedBytes(writer, shortest_name);
+    try writer.print("\n  longest_length: {d}\n  longest_name: ", .{summary.longest_length});
+    try reporting.writeEscapedBytes(writer, longest_name);
     try writer.print(
-        "File:\n  path: {s}\n  index: {s}{s}\n  size_bytes: {d}\n\n",
-        .{ fasta_path, fasta_path, index_extension, fasta_size },
-    );
-    try writer.print(
-        "Lengths:\n  indexed_records: {d}\n  total_symbols: {d}\n" ++
-            "  shortest_length: {d}\n  shortest_name: {s}\n" ++
-            "  longest_length: {d}\n  longest_name: {s}\n" ++
-            "  mean: {d}\n  q1: {d}\n  median: {d}\n  q3: {d}\n  range: {d}\n\n",
+        "\n  mean: {d}\n  q1: {d}\n  median: {d}\n  q3: {d}\n  range: {d}\n\n",
         .{
-            summary.record_count,
-            summary.total_symbols,
-            summary.shortest_length,
-            shortest_name,
-            summary.longest_length,
-            longest_name,
             summary.mean,
             summary.q1,
             summary.median,

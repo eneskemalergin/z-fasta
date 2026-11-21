@@ -48,6 +48,7 @@ Stats describes the records in the selected index. z-fasta indexes every non-emp
 ## Length definitions
 
 - Ties for shortest and longest keep the first indexed record.
+- The path and both names are printed escaped, as diagnostics print them: `"` and `\` get a backslash, and bytes outside printable ASCII become `\xHH`.
 - Mean uses integer division.
 - Even-count median uses the midpoint rounded down.
 - Q1 and Q3 are medians of the lower and upper halves. With an odd count, the middle value belongs to neither half; with one sequence, Q1 and Q3 equal its length.

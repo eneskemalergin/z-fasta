@@ -617,3 +617,23 @@ test "[cli] - [stats]: ties go to the first indexed record, and an out-of-order 
     const reversed_rest = try std.mem.replaceOwned(u8, allocator, reversed, "  shortest_name: c\n", "");
     try std.testing.expectEqualStrings(ordered_rest, reversed_rest);
 }
+
+test "[cli] - [stats]: names and the path are escaped as diagnostics escape them" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const path = try support.uniqueArtifactPath(allocator, "stats-escape\nline", "fa");
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = ">x\x1b[31mRED\x07\xff\nACGT\n>y\"\\\nAC\n" });
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    try support.expectCliResult(allocator, &.{ ZFASTA_BIN, "index", "--emit-fai", path }, 0, "x\x1b[31mRED\x07\xff\t4\t13\t4\t5\ny\"\\\t2\t23\t2\t3\n", "");
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{path});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = fai_path, .data = "x\x1b[31mRED\x07\xff\t4\t13\t4\t5\ny\"\\\t2\t23\t2\t3\n" });
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+    const report = try runStatsAndCapture(allocator, path);
+    const escaped_path = try std.mem.replaceOwned(u8, allocator, path, "\n", "\\x0a");
+    const head = try std.fmt.allocPrint(allocator, "File:\n  path: {s}\n  index: {s}.fai\n", .{ escaped_path, escaped_path });
+    try std.testing.expect(std.mem.startsWith(u8, report, head));
+    try std.testing.expect(std.mem.find(u8, report, "  shortest_name: y\\\"\\\\\n") != null);
+    try std.testing.expect(std.mem.find(u8, report, "  longest_name: x\\x1b[31mRED\\x07\\xff\n") != null);
+    for (report) |byte| try std.testing.expect(byte == '\n' or (byte >= 0x20 and byte < 0x7f));
+}
