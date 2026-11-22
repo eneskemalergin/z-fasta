@@ -272,6 +272,8 @@ pub const NameTable = struct {
                 }
                 windows += 1;
             }
+            // The windows can run to the table's end; the walk then goes on from slot 0.
+            if (slot == self.slots.len) slot = 0;
             self.slots[self.firstEmpty(slot)] = entry;
         }
 
@@ -2332,7 +2334,8 @@ test "[property] - [zfi name table]: placement matches a plain first-empty-slot 
     const allocator = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(0x6e74);
     const random = prng.random();
-    // Few distinct names make long probe runs; the plain walk is the frozen placement rule.
+    // Few distinct names make long probe runs, and the names whose home lies in the last window
+    // reach the table's end; the plain walk is the frozen placement rule.
     for ([_]usize{ 1, 17, 300, 5000 }) |count| {
         for ([_]u64{ 1, 3, 1000 }) |distinct| {
             var builder = try NameTable.Builder.init(allocator, count);
@@ -2368,4 +2371,24 @@ test "[edge] - [zfi name table]: many records with one name place in near-linear
     var filled: usize = 0;
     for (slots) |slot| filled += @intFromBool(slot != 0);
     try std.testing.expectEqual(@as(usize, count), filled);
+}
+
+test "[edge] - [zfi name table]: a probe that fills the table's last window wraps to slot 0" {
+    const allocator = std.testing.allocator;
+    // 17 records give 22 slots; a name whose home is slot 6 fills 6..21 with 16 records, and the
+    // 17th must wrap to slot 0.
+    const count = 17;
+    var builder = try NameTable.Builder.init(allocator, count);
+    defer builder.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 22), builder.slots.len);
+    var name_buf: [16]u8 = undefined;
+    const name = for (0..100_000) |i| {
+        const candidate = try std.fmt.bufPrint(&name_buf, "n{d}", .{i});
+        if (NameTable.home(NameTable.hash(candidate), builder.slots.len) == 6) break candidate;
+    } else unreachable;
+    for (0..count) |_| builder.insert(name);
+    const slots = builder.finish();
+    for (slots[6..]) |slot| try std.testing.expect(slot != 0);
+    try std.testing.expect(slots[0] != 0);
+    try std.testing.expectEqual(@as(u64, count), slots[0] & ((@as(u64, 1) << builder.ordinal_bits) - 1));
 }
