@@ -438,7 +438,8 @@ test "[unit] - [record reader]: reads UniProt-shaped protein records" {
 }
 
 test "[failure] - [record reader]: content before the first header fails at offset zero" {
-    for ([_][]const u8{ "ACGT\n>a\nA\n", "\xEF\xBB\xBF>a\nA\n", "\n>a\nA\n" }) |input| {
+    // A blank line before the header is skipped, not content; the index tests cover it.
+    for ([_][]const u8{ "ACGT\n>a\nA\n", "\xEF\xBB\xBF>a\nA\n", "x\n\n>a\nA\n" }) |input| {
         var source: std.Io.Reader = .fixed(input);
         var storage: [16]u8 = undefined;
         var failure: diagnostics.Failure = undefined;

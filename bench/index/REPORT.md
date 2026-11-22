@@ -16,21 +16,21 @@ Correctness covers strict FAI compatibility and z-fasta's `.zfi` support for rag
 
 ## Run Provenance
 
-- **Build:** z-fasta v0.4.0; Zig 0.16.0; ReleaseFast; `x86_64-linux`.
+- **Build:** z-fasta v0.4.1; Zig 0.16.0; ReleaseFast; `x86_64-linux`.
 - **Benchmark:** zebrac v0.6.2; warm cache; 5 measured samples after 3 warmups; 5000 ms budget per command.
 **Source and executable facts**
 
 ```json
 {
-  "checkout_revision": "faf505d1a3f3404e18a2d4ad8744720af93ae71d",
+  "checkout_revision": "52483244ac933df5e6f7901cb492c5059b5aa4ba",
   "checkout_dirty": true,
   "executable": {
     "path": "zig-out/bin/z-fasta",
-    "size": 924808,
-    "mtime_ns": 1792091667689566327,
-    "ctime_ns": 1792091667745838707,
-    "device": 52,
-    "inode": 47976209
+    "size": 933608,
+    "mtime_ns": 1795317893551889311,
+    "ctime_ns": 1795318050878056176,
+    "device": 50,
+    "inode": 199116288
   },
   "declared_build": {
     "revision": null,
@@ -49,15 +49,15 @@ Correctness covers strict FAI compatibility and z-fasta's `.zfi` support for rag
 
 ## Tools Tested
 
-- **z-fasta (v0.4.0)**
+- **z-fasta (v0.4.1)**
   - `.fai`: peer-comparable cross-tool and scaling lane.
   - `.zfi`: default product mode.
-- **noodles (v0.66.0)**: Rust noodles-fasta wrapper.
-- **rust-bio (v4.0.1)**: Rust FASTA library.
-- **samtools (v1.24)**: reference FAI indexer.
-- **seqkit (v2.13.0)**: Go FASTA toolkit.
+- **noodles (v0.69.0)**: Rust noodles-fasta wrapper.
+- **rust-bio (v4.2.2)**: Rust FASTA library.
+- **samtools (v1.25)**: reference FAI indexer.
+- **seqkit (v2.14.0)**: Go FASTA toolkit.
 - **fastahack (v1.0.0)**: C++ FAI indexer.
-- **pyfaidx (v0.9.0.4)**: Python FAI indexer.
+- **pyfaidx (v0.9.2.3)**: Python FAI indexer.
 
 ## Edge Case Correctness
 
@@ -123,25 +123,25 @@ Proteome-derived messy FASTA fixtures. Each cell is zebrac with `--allow-failure
 
 Headline comparison on the three human reference datasets (see **Datasets**). **z-fasta (.fai)** is `index --emit-fai`. It constructs the peer-compatible output while discarding the emitted stream; peers write sidecar files, so output destinations are not identical. CLI default `index` writes `.zfi`; see **z-fasta Format Comparison**.
 
-**Measured result:** z-fasta is faster than every reported peer on Genome, Transcriptome, and Proteome. The narrowest lead is 1.98x against noodles on Proteome.
+**Measured result:** z-fasta is faster than every reported peer on Genome, Transcriptome, and Proteome. The narrowest lead is 2.02x against noodles on Proteome.
 
 **Table 3:** Zebrac wall time per dataset (seconds, mean ± stddev, warm cache). Lower is better. Tool order: z-fasta, noodles, rust-bio, samtools, seqkit, fastahack, pyfaidx.
 
 | dataset       | z-fasta (.fai)   | noodles         | rust-bio        | samtools        | seqkit          | fastahack        | pyfaidx          |
 |:--------------|:-----------------|:----------------|:----------------|:----------------|:----------------|:-----------------|:-----------------|
-| Genome        | 0.3279s ±0.0145  | 1.3459s ±0.0179 | 3.4821s ±0.0239 | 8.1025s ±0.0153 | 5.3928s ±0.0837 | 21.4902s ±0.2012 | 26.2267s ±0.3521 |
-| Transcriptome | 0.1252s ±0.0032  | 0.4097s ±0.0110 | 0.7088s ±0.0048 | 1.7222s ±0.0109 | 2.7361s ±0.0627 | 6.4260s ±0.1541  | 6.5143s ±0.1804  |
-| Proteome      | 0.0091s ±0.0003  | 0.0181s ±0.0004 | 0.0253s ±0.0002 | 0.0655s ±0.0022 | 0.1828s ±0.0064 | 0.3218s ±0.0108  | 0.3973s ±0.0071  |
+| Genome        | 0.3019s ±0.0041  | 1.2163s ±0.0044 | 3.7115s ±0.0386 | 8.1222s ±0.0299 | 1.0376s ±0.0066 | 21.0010s ±0.9892 | 25.7154s ±0.0956 |
+| Transcriptome | 0.1223s ±0.0042  | 0.3917s ±0.0196 | 0.7330s ±0.0239 | 1.6906s ±0.0155 | 2.0100s ±0.0547 | 6.3782s ±0.4224  | 6.2162s ±0.0373  |
+| Proteome      | 0.0092s ±0.0004  | 0.0185s ±0.0013 | 0.0262s ±0.0004 | 0.0636s ±0.0040 | 0.1610s ±0.0044 | 0.3184s ±0.0084  | 0.3890s ±0.0056  |
 
 <details>
 
 <summary><strong>Table 4:</strong> Input throughput (MiB/s), calculated from input size and wall time. Higher is better. Same tools and order as Table 3.</summary>
 
-| dataset       | z-fasta (.fai)   | noodles      | rust-bio    | samtools    | seqkit      | fastahack   | pyfaidx     |
-|:--------------|:-----------------|:-------------|:------------|:------------|:------------|:------------|:------------|
-| Genome        | 9165.6 MiB/s     | 2233.0 MiB/s | 863.1 MiB/s | 370.9 MiB/s | 557.3 MiB/s | 139.9 MiB/s | 114.6 MiB/s |
-| Transcriptome | 3664.1 MiB/s     | 1119.5 MiB/s | 647.2 MiB/s | 266.3 MiB/s | 167.6 MiB/s | 71.4 MiB/s  | 70.4 MiB/s  |
-| Proteome      | 1434.7 MiB/s     | 723.8 MiB/s  | 518.2 MiB/s | 199.9 MiB/s | 71.6 MiB/s  | 40.7 MiB/s  | 33.0 MiB/s  |
+| dataset       | z-fasta (.fai)   | noodles      | rust-bio    | samtools    | seqkit       | fastahack   | pyfaidx     |
+|:--------------|:-----------------|:-------------|:------------|:------------|:-------------|:------------|:------------|
+| Genome        | 9955.5 MiB/s     | 2471.0 MiB/s | 809.8 MiB/s | 370.0 MiB/s | 2896.4 MiB/s | 143.1 MiB/s | 116.9 MiB/s |
+| Transcriptome | 3749.4 MiB/s     | 1171.2 MiB/s | 625.8 MiB/s | 271.3 MiB/s | 228.2 MiB/s  | 71.9 MiB/s  | 73.8 MiB/s  |
+| Proteome      | 1423.5 MiB/s     | 706.4 MiB/s  | 500.5 MiB/s | 206.0 MiB/s | 81.4 MiB/s   | 41.1 MiB/s  | 33.7 MiB/s  |
 
 </details>
 
@@ -151,24 +151,24 @@ Headline comparison on the three human reference datasets (see **Datasets**). **
 
 | Dataset       | z-fasta vs   | z-fasta   | Competitor   | Speedup   |   z-fasta MiB/s |   Competitor MiB/s | Throughput ratio   |
 |:--------------|:-------------|:----------|:-------------|:----------|----------------:|-------------------:|:-------------------|
-| Genome        | noodles      | 0.3279s   | 1.3459s      | 4.1x      |          9165.6 |             2233   | 4.1x               |
-| Genome        | rust-bio     | 0.3279s   | 3.4821s      | 10.6x     |          9165.6 |              863.1 | 10.6x              |
-| Genome        | samtools     | 0.3279s   | 8.1025s      | 24.7x     |          9165.6 |              370.9 | 24.7x              |
-| Genome        | seqkit       | 0.3279s   | 5.3928s      | 16.4x     |          9165.6 |              557.3 | 16.4x              |
-| Genome        | fastahack    | 0.3279s   | 21.4902s     | 65.5x     |          9165.6 |              139.9 | 65.5x              |
-| Genome        | pyfaidx      | 0.3279s   | 26.2267s     | 80.0x     |          9165.6 |              114.6 | 80.0x              |
-| Transcriptome | noodles      | 0.1252s   | 0.4097s      | 3.3x      |          3664.1 |             1119.5 | 3.3x               |
-| Transcriptome | rust-bio     | 0.1252s   | 0.7088s      | 5.7x      |          3664.1 |              647.2 | 5.7x               |
-| Transcriptome | samtools     | 0.1252s   | 1.7222s      | 13.8x     |          3664.1 |              266.3 | 13.8x              |
-| Transcriptome | seqkit       | 0.1252s   | 2.7361s      | 21.9x     |          3664.1 |              167.6 | 21.9x              |
-| Transcriptome | fastahack    | 0.1252s   | 6.4260s      | 51.3x     |          3664.1 |               71.4 | 51.3x              |
-| Transcriptome | pyfaidx      | 0.1252s   | 6.5143s      | 52.0x     |          3664.1 |               70.4 | 52.0x              |
-| Proteome      | noodles      | 0.0091s   | 0.0181s      | 1.98x     |          1434.7 |              723.8 | 1.98x              |
-| Proteome      | rust-bio     | 0.0091s   | 0.0253s      | 2.8x      |          1434.7 |              518.2 | 2.8x               |
-| Proteome      | samtools     | 0.0091s   | 0.0655s      | 7.2x      |          1434.7 |              199.9 | 7.2x               |
-| Proteome      | seqkit       | 0.0091s   | 0.1828s      | 20.0x     |          1434.7 |               71.6 | 20.0x              |
-| Proteome      | fastahack    | 0.0091s   | 0.3218s      | 35.3x     |          1434.7 |               40.7 | 35.3x              |
-| Proteome      | pyfaidx      | 0.0091s   | 0.3973s      | 43.5x     |          1434.7 |               33   | 43.5x              |
+| Genome        | noodles      | 0.3019s   | 1.2163s      | 4.0x      |          9955.5 |             2471   | 4.0x               |
+| Genome        | rust-bio     | 0.3019s   | 3.7115s      | 12.3x     |          9955.5 |              809.8 | 12.3x              |
+| Genome        | samtools     | 0.3019s   | 8.1222s      | 26.9x     |          9955.5 |              370   | 26.9x              |
+| Genome        | seqkit       | 0.3019s   | 1.0376s      | 3.4x      |          9955.5 |             2896.4 | 3.4x               |
+| Genome        | fastahack    | 0.3019s   | 21.0010s     | 69.6x     |          9955.5 |              143.1 | 69.6x              |
+| Genome        | pyfaidx      | 0.3019s   | 25.7154s     | 85.2x     |          9955.5 |              116.9 | 85.2x              |
+| Transcriptome | noodles      | 0.1223s   | 0.3917s      | 3.2x      |          3749.4 |             1171.2 | 3.2x               |
+| Transcriptome | rust-bio     | 0.1223s   | 0.7330s      | 6.0x      |          3749.4 |              625.8 | 6.0x               |
+| Transcriptome | samtools     | 0.1223s   | 1.6906s      | 13.8x     |          3749.4 |              271.3 | 13.8x              |
+| Transcriptome | seqkit       | 0.1223s   | 2.0100s      | 16.4x     |          3749.4 |              228.2 | 16.4x              |
+| Transcriptome | fastahack    | 0.1223s   | 6.3782s      | 52.1x     |          3749.4 |               71.9 | 52.1x              |
+| Transcriptome | pyfaidx      | 0.1223s   | 6.2162s      | 50.8x     |          3749.4 |               73.8 | 50.8x              |
+| Proteome      | noodles      | 0.0092s   | 0.0185s      | 2.0x      |          1423.5 |              706.4 | 2.0x               |
+| Proteome      | rust-bio     | 0.0092s   | 0.0262s      | 2.8x      |          1423.5 |              500.5 | 2.8x               |
+| Proteome      | samtools     | 0.0092s   | 0.0636s      | 6.9x      |          1423.5 |              206   | 6.9x               |
+| Proteome      | seqkit       | 0.0092s   | 0.1610s      | 17.5x     |          1423.5 |               81.4 | 17.5x              |
+| Proteome      | fastahack    | 0.0092s   | 0.3184s      | 34.6x     |          1423.5 |               41.1 | 34.6x              |
+| Proteome      | pyfaidx      | 0.0092s   | 0.3890s      | 42.3x     |          1423.5 |               33.7 | 42.3x              |
 
 </details>
 
@@ -189,7 +189,7 @@ Headline comparison on the three human reference datasets (see **Datasets**). **
 
 Same zebrac runs as **Performance: Real Datasets**. z-fasta (.fai) only; the `.zfi` lane is in **z-fasta Format Comparison**.
 
-**Measured result:** noodles uses less peak RSS on Genome (3.41 MiB vs 3.61 MiB).
+**Measured result:** rust-bio uses less peak RSS on Proteome (3.59 MiB vs 3.65 MiB).
 
 ### Peak RSS
 
@@ -199,11 +199,11 @@ Use this to compare tools on the same file and host. Grey dashed lines show file
 
 **Table 6:** Peak RSS (MiB, zebrac mean). Same tool order as Performance.
 
-| dataset       | z-fasta (.fai)   | noodles   | rust-bio   | samtools   | seqkit     | fastahack   | pyfaidx    |
-|:--------------|:-----------------|:----------|:-----------|:-----------|:-----------|:------------|:-----------|
-| Genome        | 3.61 MiB         | 3.41 MiB  | 3.54 MiB   | 9.11 MiB   | 208.06 MiB | 3.84 MiB    | 501.62 MiB |
-| Transcriptome | 3.69 MiB         | 46.63 MiB | 3.55 MiB   | 65.82 MiB  | 132.10 MiB | 269.24 MiB  | 179.56 MiB |
-| Proteome      | 3.62 MiB         | 3.66 MiB  | 3.49 MiB   | 10.76 MiB  | 22.13 MiB  | 15.63 MiB   | 29.02 MiB  |
+| dataset       | z-fasta (.fai)   | noodles   | rust-bio   | samtools   | seqkit    | fastahack   | pyfaidx    |
+|:--------------|:-----------------|:----------|:-----------|:-----------|:----------|:------------|:-----------|
+| Genome        | 3.57 MiB         | 3.57 MiB  | 3.60 MiB   | 8.96 MiB   | 18.43 MiB | 3.80 MiB    | 501.74 MiB |
+| Transcriptome | 3.54 MiB         | 46.90 MiB | 3.62 MiB   | 65.92 MiB  | 98.20 MiB | 269.99 MiB  | 179.70 MiB |
+| Proteome      | 3.65 MiB         | 3.66 MiB  | 3.59 MiB   | 10.95 MiB  | 20.08 MiB | 15.72 MiB   | 29.40 MiB  |
 
 <details>
 
@@ -211,24 +211,24 @@ Use this to compare tools on the same file and host. Grey dashed lines show file
 
 | Dataset       | z-fasta vs   | z-fasta   | Competitor   | RSS ratio   |
 |:--------------|:-------------|:----------|:-------------|:------------|
-| Genome        | noodles      | 3.61 MiB  | 3.41 MiB     | 0.94x       |
-| Genome        | rust-bio     | 3.61 MiB  | 3.54 MiB     | 0.98x       |
-| Genome        | samtools     | 3.61 MiB  | 9.11 MiB     | 2.5x        |
-| Genome        | seqkit       | 3.61 MiB  | 208.06 MiB   | 57.6x       |
-| Genome        | fastahack    | 3.61 MiB  | 3.84 MiB     | 1.06x       |
-| Genome        | pyfaidx      | 3.61 MiB  | 501.62 MiB   | 139x        |
-| Transcriptome | noodles      | 3.69 MiB  | 46.63 MiB    | 12.6x       |
-| Transcriptome | rust-bio     | 3.69 MiB  | 3.55 MiB     | 0.96x       |
-| Transcriptome | samtools     | 3.69 MiB  | 65.82 MiB    | 17.9x       |
-| Transcriptome | seqkit       | 3.69 MiB  | 132.10 MiB   | 35.8x       |
-| Transcriptome | fastahack    | 3.69 MiB  | 269.24 MiB   | 73.0x       |
-| Transcriptome | pyfaidx      | 3.69 MiB  | 179.56 MiB   | 48.7x       |
-| Proteome      | noodles      | 3.62 MiB  | 3.66 MiB     | 1.01x       |
-| Proteome      | rust-bio     | 3.62 MiB  | 3.49 MiB     | 0.97x       |
-| Proteome      | samtools     | 3.62 MiB  | 10.76 MiB    | 3.0x        |
-| Proteome      | seqkit       | 3.62 MiB  | 22.13 MiB    | 6.1x        |
-| Proteome      | fastahack    | 3.62 MiB  | 15.63 MiB    | 4.3x        |
-| Proteome      | pyfaidx      | 3.62 MiB  | 29.02 MiB    | 8.0x        |
+| Genome        | noodles      | 3.57 MiB  | 3.57 MiB     | 1.00x       |
+| Genome        | rust-bio     | 3.57 MiB  | 3.60 MiB     | 1.01x       |
+| Genome        | samtools     | 3.57 MiB  | 8.96 MiB     | 2.5x        |
+| Genome        | seqkit       | 3.57 MiB  | 18.43 MiB    | 5.2x        |
+| Genome        | fastahack    | 3.57 MiB  | 3.80 MiB     | 1.07x       |
+| Genome        | pyfaidx      | 3.57 MiB  | 501.74 MiB   | 141x        |
+| Transcriptome | noodles      | 3.54 MiB  | 46.90 MiB    | 13.3x       |
+| Transcriptome | rust-bio     | 3.54 MiB  | 3.62 MiB     | 1.02x       |
+| Transcriptome | samtools     | 3.54 MiB  | 65.92 MiB    | 18.6x       |
+| Transcriptome | seqkit       | 3.54 MiB  | 98.20 MiB    | 27.7x       |
+| Transcriptome | fastahack    | 3.54 MiB  | 269.99 MiB   | 76.3x       |
+| Transcriptome | pyfaidx      | 3.54 MiB  | 179.70 MiB   | 50.8x       |
+| Proteome      | noodles      | 3.65 MiB  | 3.66 MiB     | 1.00x       |
+| Proteome      | rust-bio     | 3.65 MiB  | 3.59 MiB     | 0.98x       |
+| Proteome      | samtools     | 3.65 MiB  | 10.95 MiB    | 3.0x        |
+| Proteome      | seqkit       | 3.65 MiB  | 20.08 MiB    | 5.5x        |
+| Proteome      | fastahack    | 3.65 MiB  | 15.72 MiB    | 4.3x        |
+| Proteome      | pyfaidx      | 3.65 MiB  | 29.40 MiB    | 8.1x        |
 
 </details>
 
@@ -252,8 +252,8 @@ This focused z-fasta comparison uses **Transcriptome** and **Proteome**. It isol
 
 | Dataset       | .fai wall       | .zfi wall       | Wall ratio   | .fai RSS   | .zfi RSS   | RSS ratio   |
 |:--------------|:----------------|:----------------|:-------------|:-----------|:-----------|:------------|
-| Transcriptome | 0.1252s ±0.0032 | 0.1472s ±0.0056 | 1.18x        | 3.69 MiB   | 3.65 MiB   | 0.99x       |
-| Proteome      | 0.0091s ±0.0003 | 0.0102s ±0.0004 | 1.12x        | 3.62 MiB   | 3.58 MiB   | 0.99x       |
+| Transcriptome | 0.1223s ±0.0042 | 0.1390s ±0.0016 | 1.14x        | 3.54 MiB   | 3.72 MiB   | 1.05x       |
+| Proteome      | 0.0092s ±0.0004 | 0.0102s ±0.0002 | 1.10x        | 3.65 MiB   | 3.59 MiB   | 0.98x       |
 
 <div style="margin: 1.5em 0"></div>
 
@@ -278,9 +278,9 @@ A **minor** fault maps a page without reading disk. A **major** fault reads from
 
 | dataset       |   z-fasta (.fai) |   noodles |   rust-bio |   samtools |   seqkit |   fastahack |   pyfaidx |
 |:--------------|-----------------:|----------:|-----------:|-----------:|---------:|------------:|----------:|
-| Genome        |              442 |       360 |        356 |        846 |  635,286 |         502 | 2,292,140 |
-| Transcriptome |              500 |    11,867 |        362 |     15,579 |   33,288 |      75,990 |    54,106 |
-| Proteome      |              500 |       810 |        358 |      1,430 |    4,521 |       4,249 |     6,786 |
+| Genome        |              439 |       360 |        355 |        840 |    2,749 |         504 | 2,292,139 |
+| Transcriptome |              498 |    11,865 |        363 |     15,575 |   24,080 |      75,990 |    54,076 |
+| Proteome      |              497 |       805 |        361 |      1,429 |    3,371 |       4,246 |     6,753 |
 
 <details>
 
@@ -288,24 +288,24 @@ A **minor** fault maps a page without reading disk. A **major** fault reads from
 
 | Dataset       | z-fasta vs   |   z-fasta |   Competitor | Faults ratio   |
 |:--------------|:-------------|----------:|-------------:|:---------------|
-| Genome        | noodles      |       442 |          360 | 0.81x          |
-| Genome        | rust-bio     |       442 |          356 | 0.81x          |
-| Genome        | samtools     |       442 |          846 | 1.91x          |
-| Genome        | seqkit       |       442 |      635,286 | 1436x          |
-| Genome        | fastahack    |       442 |          502 | 1.14x          |
-| Genome        | pyfaidx      |       442 |    2,292,140 | 5181x          |
-| Transcriptome | noodles      |       500 |       11,867 | 23.7x          |
-| Transcriptome | rust-bio     |       500 |          362 | 0.72x          |
-| Transcriptome | samtools     |       500 |       15,579 | 31.1x          |
-| Transcriptome | seqkit       |       500 |       33,288 | 66.5x          |
-| Transcriptome | fastahack    |       500 |       75,990 | 152x           |
-| Transcriptome | pyfaidx      |       500 |       54,106 | 108x           |
-| Proteome      | noodles      |       500 |          810 | 1.62x          |
-| Proteome      | rust-bio     |       500 |          358 | 0.72x          |
-| Proteome      | samtools     |       500 |        1,430 | 2.9x           |
-| Proteome      | seqkit       |       500 |        4,521 | 9.0x           |
-| Proteome      | fastahack    |       500 |        4,249 | 8.5x           |
-| Proteome      | pyfaidx      |       500 |        6,786 | 13.6x          |
+| Genome        | noodles      |       439 |          360 | 0.82x          |
+| Genome        | rust-bio     |       439 |          355 | 0.81x          |
+| Genome        | samtools     |       439 |          840 | 1.91x          |
+| Genome        | seqkit       |       439 |        2,749 | 6.3x           |
+| Genome        | fastahack    |       439 |          504 | 1.15x          |
+| Genome        | pyfaidx      |       439 |    2,292,139 | 5212x          |
+| Transcriptome | noodles      |       498 |       11,865 | 23.8x          |
+| Transcriptome | rust-bio     |       498 |          363 | 0.73x          |
+| Transcriptome | samtools     |       498 |       15,575 | 31.2x          |
+| Transcriptome | seqkit       |       498 |       24,080 | 48.3x          |
+| Transcriptome | fastahack    |       498 |       75,990 | 152x           |
+| Transcriptome | pyfaidx      |       498 |       54,076 | 108x           |
+| Proteome      | noodles      |       497 |          805 | 1.62x          |
+| Proteome      | rust-bio     |       497 |          361 | 0.73x          |
+| Proteome      | samtools     |       497 |        1,429 | 2.9x           |
+| Proteome      | seqkit       |       497 |        3,371 | 6.8x           |
+| Proteome      | fastahack    |       497 |        4,246 | 8.5x           |
+| Proteome      | pyfaidx      |       497 |        6,753 | 13.6x          |
 
 </details>
 
@@ -337,7 +337,7 @@ A **minor** fault maps a page without reading disk. A **major** fault reads from
 
 Synthetic FASTA files from 1 MiB to 1000 MiB with 100 sequences per file. Uses the zebrac warm-cache setup in **Run Provenance** and the peer-comparable z-fasta `.fai` lane.
 
-**Measured result:** z-fasta is fastest at every measured point.
+**Measured result:** faster than z-fasta: noodles at 1 MiB.
 
 ### Wall time vs file size
 
@@ -349,15 +349,15 @@ Mean wall time (seconds, zebrac) at each file size. **Lower is better.** Record 
 
 | File Size   |   z-fasta (.fai) |   noodles |   rust-bio |   samtools |   seqkit |   fastahack |   pyfaidx |
 |:------------|-----------------:|----------:|-----------:|-----------:|---------:|------------:|----------:|
-| 1 MiB       |           0.0036 |    0.0036 |     0.0043 |     0.0161 |   0.0216 |      0.0122 |    0.0760 |
-| 5 MiB       |           0.0042 |    0.0052 |     0.0080 |     0.0286 |   0.0272 |      0.0394 |    0.0991 |
-| 10 MiB      |           0.0047 |    0.0074 |     0.0126 |     0.0436 |   0.0360 |      0.0740 |    0.1276 |
-| 25 MiB      |           0.0065 |    0.0127 |     0.0259 |     0.3189 |   0.0563 |      0.1765 |    0.2305 |
-| 50 MiB      |           0.0090 |    0.0221 |     0.0485 |     0.5081 |   0.0884 |      0.3478 |    0.3854 |
-| 100 MiB     |           0.0144 |    0.0429 |     0.0934 |     0.4461 |   0.1536 |      0.6909 |    0.7047 |
-| 250 MiB     |           0.0297 |    0.0966 |     0.2271 |     0.8145 |   0.3822 |      1.7009 |    1.6434 |
-| 500 MiB     |           0.0560 |    0.1922 |     0.4466 |     1.3759 |   0.7848 |      3.4118 |    3.2365 |
-| 1000 MiB    |           0.1090 |    0.3739 |     0.8850 |     2.7888 |   1.6087 |      6.7849 |    6.5257 |
+| 1 MiB       |           0.0036 |    0.0035 |     0.0043 |     0.0185 |   0.0185 |      0.0117 |    0.0769 |
+| 5 MiB       |           0.0043 |    0.0050 |     0.0085 |     0.0294 |   0.0197 |      0.0395 |    0.1019 |
+| 10 MiB      |           0.0045 |    0.0070 |     0.0132 |     0.0427 |   0.0205 |      0.0740 |    0.1241 |
+| 25 MiB      |           0.0061 |    0.0120 |     0.0275 |     0.0826 |   0.0253 |      0.1772 |    0.2242 |
+| 50 MiB      |           0.0086 |    0.0201 |     0.0518 |     0.1508 |   0.0334 |      0.3467 |    0.3800 |
+| 100 MiB     |           0.0138 |    0.0375 |     0.1002 |     0.2880 |   0.0495 |      0.6956 |    0.6909 |
+| 250 MiB     |           0.0288 |    0.0914 |     0.2430 |     0.6987 |   0.0926 |      1.7001 |    1.6300 |
+| 500 MiB     |           0.0548 |    0.1740 |     0.4828 |     1.3737 |   0.1667 |      3.4481 |    3.2171 |
+| 1000 MiB    |           0.1043 |    0.3474 |     0.9700 |     2.7489 |   0.3112 |      6.8124 |    6.4848 |
 
 </details>
 
@@ -367,60 +367,60 @@ Mean wall time (seconds, zebrac) at each file size. **Lower is better.** Record 
 
 | File Size   | z-fasta vs   | z-fasta   | Competitor   | Time ratio   |
 |:------------|:-------------|:----------|:-------------|:-------------|
-| 1 MiB       | noodles      | 0.0036s   | 0.0036s      | 1.01x        |
-| 1 MiB       | rust-bio     | 0.0036s   | 0.0043s      | 1.21x        |
-| 1 MiB       | samtools     | 0.0036s   | 0.0161s      | 4.5x         |
-| 1 MiB       | seqkit       | 0.0036s   | 0.0216s      | 6.0x         |
-| 1 MiB       | fastahack    | 0.0036s   | 0.0122s      | 3.4x         |
-| 1 MiB       | pyfaidx      | 0.0036s   | 0.0760s      | 21.2x        |
-| 5 MiB       | noodles      | 0.0042s   | 0.0052s      | 1.25x        |
-| 5 MiB       | rust-bio     | 0.0042s   | 0.0080s      | 1.93x        |
-| 5 MiB       | samtools     | 0.0042s   | 0.0286s      | 6.9x         |
-| 5 MiB       | seqkit       | 0.0042s   | 0.0272s      | 6.5x         |
-| 5 MiB       | fastahack    | 0.0042s   | 0.0394s      | 9.5x         |
-| 5 MiB       | pyfaidx      | 0.0042s   | 0.0991s      | 23.8x        |
-| 10 MiB      | noodles      | 0.0047s   | 0.0074s      | 1.57x        |
-| 10 MiB      | rust-bio     | 0.0047s   | 0.0126s      | 2.7x         |
-| 10 MiB      | samtools     | 0.0047s   | 0.0436s      | 9.3x         |
-| 10 MiB      | seqkit       | 0.0047s   | 0.0360s      | 7.7x         |
-| 10 MiB      | fastahack    | 0.0047s   | 0.0740s      | 15.8x        |
-| 10 MiB      | pyfaidx      | 0.0047s   | 0.1276s      | 27.2x        |
-| 25 MiB      | noodles      | 0.0065s   | 0.0127s      | 1.95x        |
-| 25 MiB      | rust-bio     | 0.0065s   | 0.0259s      | 4.0x         |
-| 25 MiB      | samtools     | 0.0065s   | 0.3189s      | 49.0x        |
-| 25 MiB      | seqkit       | 0.0065s   | 0.0563s      | 8.6x         |
-| 25 MiB      | fastahack    | 0.0065s   | 0.1765s      | 27.1x        |
-| 25 MiB      | pyfaidx      | 0.0065s   | 0.2305s      | 35.4x        |
-| 50 MiB      | noodles      | 0.0090s   | 0.0221s      | 2.5x         |
-| 50 MiB      | rust-bio     | 0.0090s   | 0.0485s      | 5.4x         |
-| 50 MiB      | samtools     | 0.0090s   | 0.5081s      | 56.4x        |
-| 50 MiB      | seqkit       | 0.0090s   | 0.0884s      | 9.8x         |
-| 50 MiB      | fastahack    | 0.0090s   | 0.3478s      | 38.6x        |
-| 50 MiB      | pyfaidx      | 0.0090s   | 0.3854s      | 42.8x        |
-| 100 MiB     | noodles      | 0.0144s   | 0.0429s      | 3.0x         |
-| 100 MiB     | rust-bio     | 0.0144s   | 0.0934s      | 6.5x         |
-| 100 MiB     | samtools     | 0.0144s   | 0.4461s      | 31.0x        |
-| 100 MiB     | seqkit       | 0.0144s   | 0.1536s      | 10.7x        |
-| 100 MiB     | fastahack    | 0.0144s   | 0.6909s      | 48.0x        |
-| 100 MiB     | pyfaidx      | 0.0144s   | 0.7047s      | 49.0x        |
-| 250 MiB     | noodles      | 0.0297s   | 0.0966s      | 3.3x         |
-| 250 MiB     | rust-bio     | 0.0297s   | 0.2271s      | 7.7x         |
-| 250 MiB     | samtools     | 0.0297s   | 0.8145s      | 27.5x        |
-| 250 MiB     | seqkit       | 0.0297s   | 0.3822s      | 12.9x        |
-| 250 MiB     | fastahack    | 0.0297s   | 1.7009s      | 57.3x        |
-| 250 MiB     | pyfaidx      | 0.0297s   | 1.6434s      | 55.4x        |
-| 500 MiB     | noodles      | 0.0560s   | 0.1922s      | 3.4x         |
-| 500 MiB     | rust-bio     | 0.0560s   | 0.4466s      | 8.0x         |
-| 500 MiB     | samtools     | 0.0560s   | 1.3759s      | 24.6x        |
-| 500 MiB     | seqkit       | 0.0560s   | 0.7848s      | 14.0x        |
-| 500 MiB     | fastahack    | 0.0560s   | 3.4118s      | 60.9x        |
-| 500 MiB     | pyfaidx      | 0.0560s   | 3.2365s      | 57.8x        |
-| 1000 MiB    | noodles      | 0.1090s   | 0.3739s      | 3.4x         |
-| 1000 MiB    | rust-bio     | 0.1090s   | 0.8850s      | 8.1x         |
-| 1000 MiB    | samtools     | 0.1090s   | 2.7888s      | 25.6x        |
-| 1000 MiB    | seqkit       | 0.1090s   | 1.6087s      | 14.8x        |
-| 1000 MiB    | fastahack    | 0.1090s   | 6.7849s      | 62.2x        |
-| 1000 MiB    | pyfaidx      | 0.1090s   | 6.5257s      | 59.9x        |
+| 1 MiB       | noodles      | 0.0036s   | 0.0035s      | 0.99x        |
+| 1 MiB       | rust-bio     | 0.0036s   | 0.0043s      | 1.22x        |
+| 1 MiB       | samtools     | 0.0036s   | 0.0185s      | 5.2x         |
+| 1 MiB       | seqkit       | 0.0036s   | 0.0185s      | 5.2x         |
+| 1 MiB       | fastahack    | 0.0036s   | 0.0117s      | 3.3x         |
+| 1 MiB       | pyfaidx      | 0.0036s   | 0.0769s      | 21.6x        |
+| 5 MiB       | noodles      | 0.0043s   | 0.0050s      | 1.17x        |
+| 5 MiB       | rust-bio     | 0.0043s   | 0.0085s      | 1.98x        |
+| 5 MiB       | samtools     | 0.0043s   | 0.0294s      | 6.9x         |
+| 5 MiB       | seqkit       | 0.0043s   | 0.0197s      | 4.6x         |
+| 5 MiB       | fastahack    | 0.0043s   | 0.0395s      | 9.2x         |
+| 5 MiB       | pyfaidx      | 0.0043s   | 0.1019s      | 23.9x        |
+| 10 MiB      | noodles      | 0.0045s   | 0.0070s      | 1.56x        |
+| 10 MiB      | rust-bio     | 0.0045s   | 0.0132s      | 2.9x         |
+| 10 MiB      | samtools     | 0.0045s   | 0.0427s      | 9.6x         |
+| 10 MiB      | seqkit       | 0.0045s   | 0.0205s      | 4.6x         |
+| 10 MiB      | fastahack    | 0.0045s   | 0.0740s      | 16.6x        |
+| 10 MiB      | pyfaidx      | 0.0045s   | 0.1241s      | 27.8x        |
+| 25 MiB      | noodles      | 0.0061s   | 0.0120s      | 1.96x        |
+| 25 MiB      | rust-bio     | 0.0061s   | 0.0275s      | 4.5x         |
+| 25 MiB      | samtools     | 0.0061s   | 0.0826s      | 13.5x        |
+| 25 MiB      | seqkit       | 0.0061s   | 0.0253s      | 4.1x         |
+| 25 MiB      | fastahack    | 0.0061s   | 0.1772s      | 29.0x        |
+| 25 MiB      | pyfaidx      | 0.0061s   | 0.2242s      | 36.7x        |
+| 50 MiB      | noodles      | 0.0086s   | 0.0201s      | 2.3x         |
+| 50 MiB      | rust-bio     | 0.0086s   | 0.0518s      | 6.0x         |
+| 50 MiB      | samtools     | 0.0086s   | 0.1508s      | 17.4x        |
+| 50 MiB      | seqkit       | 0.0086s   | 0.0334s      | 3.9x         |
+| 50 MiB      | fastahack    | 0.0086s   | 0.3467s      | 40.1x        |
+| 50 MiB      | pyfaidx      | 0.0086s   | 0.3800s      | 43.9x        |
+| 100 MiB     | noodles      | 0.0138s   | 0.0375s      | 2.7x         |
+| 100 MiB     | rust-bio     | 0.0138s   | 0.1002s      | 7.2x         |
+| 100 MiB     | samtools     | 0.0138s   | 0.2880s      | 20.8x        |
+| 100 MiB     | seqkit       | 0.0138s   | 0.0495s      | 3.6x         |
+| 100 MiB     | fastahack    | 0.0138s   | 0.6956s      | 50.3x        |
+| 100 MiB     | pyfaidx      | 0.0138s   | 0.6909s      | 50.0x        |
+| 250 MiB     | noodles      | 0.0288s   | 0.0914s      | 3.2x         |
+| 250 MiB     | rust-bio     | 0.0288s   | 0.2430s      | 8.4x         |
+| 250 MiB     | samtools     | 0.0288s   | 0.6987s      | 24.3x        |
+| 250 MiB     | seqkit       | 0.0288s   | 0.0926s      | 3.2x         |
+| 250 MiB     | fastahack    | 0.0288s   | 1.7001s      | 59.1x        |
+| 250 MiB     | pyfaidx      | 0.0288s   | 1.6300s      | 56.6x        |
+| 500 MiB     | noodles      | 0.0548s   | 0.1740s      | 3.2x         |
+| 500 MiB     | rust-bio     | 0.0548s   | 0.4828s      | 8.8x         |
+| 500 MiB     | samtools     | 0.0548s   | 1.3737s      | 25.1x        |
+| 500 MiB     | seqkit       | 0.0548s   | 0.1667s      | 3.0x         |
+| 500 MiB     | fastahack    | 0.0548s   | 3.4481s      | 62.9x        |
+| 500 MiB     | pyfaidx      | 0.0548s   | 3.2171s      | 58.7x        |
+| 1000 MiB    | noodles      | 0.1043s   | 0.3474s      | 3.3x         |
+| 1000 MiB    | rust-bio     | 0.1043s   | 0.9700s      | 9.3x         |
+| 1000 MiB    | samtools     | 0.1043s   | 2.7489s      | 26.4x        |
+| 1000 MiB    | seqkit       | 0.1043s   | 0.3112s      | 3.0x         |
+| 1000 MiB    | fastahack    | 0.1043s   | 6.8124s      | 65.3x        |
+| 1000 MiB    | pyfaidx      | 0.1043s   | 6.4848s      | 62.2x        |
 
 </details>
 
@@ -430,15 +430,15 @@ Mean wall time (seconds, zebrac) at each file size. **Lower is better.** Record 
 
 | File Size   |   Peak RSS (MiB) |   RSS spread (MiB) |
 |:------------|-----------------:|-------------------:|
-| 1 MiB       |             3.63 |               0.3  |
-| 5 MiB       |             3.5  |               0.21 |
-| 10 MiB      |             3.47 |               0.26 |
-| 25 MiB      |             3.61 |               0.29 |
-| 50 MiB      |             3.56 |               0.27 |
-| 100 MiB     |             3.58 |               0.26 |
-| 250 MiB     |             3.53 |               0.25 |
-| 500 MiB     |             3.55 |               0.17 |
-| 1000 MiB    |             3.65 |               0.53 |
+| 1 MiB       |             3.59 |               0.19 |
+| 5 MiB       |             3.5  |               0.23 |
+| 10 MiB      |             3.59 |               0.25 |
+| 25 MiB      |             3.65 |               0.27 |
+| 50 MiB      |             3.65 |               0.25 |
+| 100 MiB     |             3.66 |               0.25 |
+| 250 MiB     |             3.7  |               0.07 |
+| 500 MiB     |             3.54 |               0.3  |
+| 1000 MiB    |             3.56 |               0.23 |
 
 </details>
 
@@ -470,10 +470,10 @@ Mean wall time (seconds, zebrac) at each record count. **Lower is better.** Isol
 
 |   Sequences |   z-fasta (.fai) |   noodles |   rust-bio |   samtools |   seqkit |   fastahack |   pyfaidx |
 |------------:|-----------------:|----------:|-----------:|-----------:|---------:|------------:|----------:|
-|       1,000 |           0.0094 |    0.0225 |     0.0489 |     0.1522 |   0.0953 |      0.3936 |    0.3490 |
-|      10,000 |           0.0104 |    0.0255 |     0.0513 |     0.1583 |   0.1592 |      0.4114 |    0.4391 |
-|     100,000 |           0.0240 |    0.0577 |     0.0808 |     0.2113 |   0.6475 |      1.0473 |    1.4864 |
-|     250,000 |           0.0479 |    0.1053 |     0.1239 |     0.3170 |   1.5310 |      2.0174 |    3.1672 |
+|       1,000 |           0.0091 |    0.0212 |     0.0531 |     0.1495 |   0.0401 |      0.3609 |    0.3410 |
+|      10,000 |           0.0103 |    0.0247 |     0.0552 |     0.1580 |   0.0847 |      0.4118 |    0.4345 |
+|     100,000 |           0.0238 |    0.0561 |     0.0818 |     0.2055 |   0.5576 |      1.0097 |    1.4216 |
+|     250,000 |           0.0476 |    0.1152 |     0.1243 |     0.3052 |   1.3431 |      2.0057 |    2.9960 |
 
 </details>
 
@@ -483,30 +483,30 @@ Mean wall time (seconds, zebrac) at each record count. **Lower is better.** Isol
 
 |   Sequences | z-fasta vs   | z-fasta   | Competitor   | Time ratio   |
 |------------:|:-------------|:----------|:-------------|:-------------|
-|       1,000 | noodles      | 0.0094s   | 0.0225s      | 2.4x         |
-|       1,000 | rust-bio     | 0.0094s   | 0.0489s      | 5.2x         |
-|       1,000 | samtools     | 0.0094s   | 0.1522s      | 16.2x        |
-|       1,000 | seqkit       | 0.0094s   | 0.0953s      | 10.1x        |
-|       1,000 | fastahack    | 0.0094s   | 0.3936s      | 41.9x        |
-|       1,000 | pyfaidx      | 0.0094s   | 0.3490s      | 37.1x        |
-|      10,000 | noodles      | 0.0104s   | 0.0255s      | 2.5x         |
-|      10,000 | rust-bio     | 0.0104s   | 0.0513s      | 5.0x         |
-|      10,000 | samtools     | 0.0104s   | 0.1583s      | 15.3x        |
-|      10,000 | seqkit       | 0.0104s   | 0.1592s      | 15.4x        |
-|      10,000 | fastahack    | 0.0104s   | 0.4114s      | 39.7x        |
-|      10,000 | pyfaidx      | 0.0104s   | 0.4391s      | 42.4x        |
-|     100,000 | noodles      | 0.0240s   | 0.0577s      | 2.4x         |
-|     100,000 | rust-bio     | 0.0240s   | 0.0808s      | 3.4x         |
-|     100,000 | samtools     | 0.0240s   | 0.2113s      | 8.8x         |
-|     100,000 | seqkit       | 0.0240s   | 0.6475s      | 27.0x        |
-|     100,000 | fastahack    | 0.0240s   | 1.0473s      | 43.6x        |
-|     100,000 | pyfaidx      | 0.0240s   | 1.4864s      | 61.9x        |
-|     250,000 | noodles      | 0.0479s   | 0.1053s      | 2.2x         |
-|     250,000 | rust-bio     | 0.0479s   | 0.1239s      | 2.6x         |
-|     250,000 | samtools     | 0.0479s   | 0.3170s      | 6.6x         |
-|     250,000 | seqkit       | 0.0479s   | 1.5310s      | 31.9x        |
-|     250,000 | fastahack    | 0.0479s   | 2.0174s      | 42.1x        |
-|     250,000 | pyfaidx      | 0.0479s   | 3.1672s      | 66.1x        |
+|       1,000 | noodles      | 0.0091s   | 0.0212s      | 2.3x         |
+|       1,000 | rust-bio     | 0.0091s   | 0.0531s      | 5.8x         |
+|       1,000 | samtools     | 0.0091s   | 0.1495s      | 16.4x        |
+|       1,000 | seqkit       | 0.0091s   | 0.0401s      | 4.4x         |
+|       1,000 | fastahack    | 0.0091s   | 0.3609s      | 39.5x        |
+|       1,000 | pyfaidx      | 0.0091s   | 0.3410s      | 37.3x        |
+|      10,000 | noodles      | 0.0103s   | 0.0247s      | 2.4x         |
+|      10,000 | rust-bio     | 0.0103s   | 0.0552s      | 5.4x         |
+|      10,000 | samtools     | 0.0103s   | 0.1580s      | 15.3x        |
+|      10,000 | seqkit       | 0.0103s   | 0.0847s      | 8.2x         |
+|      10,000 | fastahack    | 0.0103s   | 0.4118s      | 40.0x        |
+|      10,000 | pyfaidx      | 0.0103s   | 0.4345s      | 42.2x        |
+|     100,000 | noodles      | 0.0238s   | 0.0561s      | 2.4x         |
+|     100,000 | rust-bio     | 0.0238s   | 0.0818s      | 3.4x         |
+|     100,000 | samtools     | 0.0238s   | 0.2055s      | 8.6x         |
+|     100,000 | seqkit       | 0.0238s   | 0.5576s      | 23.4x        |
+|     100,000 | fastahack    | 0.0238s   | 1.0097s      | 42.4x        |
+|     100,000 | pyfaidx      | 0.0238s   | 1.4216s      | 59.6x        |
+|     250,000 | noodles      | 0.0476s   | 0.1152s      | 2.4x         |
+|     250,000 | rust-bio     | 0.0476s   | 0.1243s      | 2.6x         |
+|     250,000 | samtools     | 0.0476s   | 0.3052s      | 6.4x         |
+|     250,000 | seqkit       | 0.0476s   | 1.3431s      | 28.2x        |
+|     250,000 | fastahack    | 0.0476s   | 2.0057s      | 42.1x        |
+|     250,000 | pyfaidx      | 0.0476s   | 2.9960s      | 63.0x        |
 
 </details>
 
@@ -516,10 +516,10 @@ Mean wall time (seconds, zebrac) at each record count. **Lower is better.** Isol
 
 |   Sequences |   Peak RSS (MiB) |   RSS spread (MiB) |
 |------------:|-----------------:|-------------------:|
-|       1,000 |             3.57 |               0.44 |
-|      10,000 |             3.53 |               0.24 |
-|     100,000 |             3.58 |               0.3  |
-|     250,000 |             3.65 |               0.54 |
+|       1,000 |             3.6  |               0.27 |
+|      10,000 |             3.52 |               0.3  |
+|     100,000 |             3.59 |               0.35 |
+|     250,000 |             3.68 |               0.45 |
 
 </details>
 
@@ -551,10 +551,10 @@ Mean wall time (seconds, zebrac) at each record count. **Lower is better.** Byte
 
 |   Sequences |   z-fasta (.fai) |   noodles |   rust-bio |   samtools |   seqkit |   fastahack |   pyfaidx |
 |------------:|-----------------:|----------:|-----------:|-----------:|---------:|------------:|----------:|
-|     100,000 |           0.0304 |    0.0766 |     0.1239 |     0.3454 |   0.7477 |      1.3586 |    1.7078 |
-|     250,000 |           0.0655 |    0.1831 |     0.2981 |     0.8752 |   1.8614 |      3.3602 |    4.3490 |
-|     500,000 |           0.1285 |    0.3660 |     0.5975 |     1.7579 |   3.6631 |      6.7369 |    8.6746 |
-|   1,000,000 |           0.2534 |    0.7200 |     1.1851 |     3.6109 |   7.4293 |     13.6173 |   18.0628 |
+|     100,000 |           0.0280 |    0.0744 |     0.1281 |     0.3418 |   0.5730 |      1.3546 |    1.6607 |
+|     250,000 |           0.0650 |    0.1816 |     0.3145 |     0.8674 |   1.4050 |      3.3580 |    4.1716 |
+|     500,000 |           0.1266 |    0.3558 |     0.6291 |     1.7465 |   2.9050 |      6.6958 |    8.5689 |
+|   1,000,000 |           0.2505 |    0.6956 |     1.2513 |     3.5213 |   5.7215 |     13.4871 |   17.6188 |
 
 </details>
 
@@ -564,30 +564,30 @@ Mean wall time (seconds, zebrac) at each record count. **Lower is better.** Byte
 
 |   Sequences | z-fasta vs   | z-fasta   | Competitor   | Time ratio   |
 |------------:|:-------------|:----------|:-------------|:-------------|
-|     100,000 | noodles      | 0.0304s   | 0.0766s      | 2.5x         |
-|     100,000 | rust-bio     | 0.0304s   | 0.1239s      | 4.1x         |
-|     100,000 | samtools     | 0.0304s   | 0.3454s      | 11.3x        |
-|     100,000 | seqkit       | 0.0304s   | 0.7477s      | 24.6x        |
-|     100,000 | fastahack    | 0.0304s   | 1.3586s      | 44.6x        |
-|     100,000 | pyfaidx      | 0.0304s   | 1.7078s      | 56.1x        |
-|     250,000 | noodles      | 0.0655s   | 0.1831s      | 2.8x         |
-|     250,000 | rust-bio     | 0.0655s   | 0.2981s      | 4.5x         |
-|     250,000 | samtools     | 0.0655s   | 0.8752s      | 13.4x        |
-|     250,000 | seqkit       | 0.0655s   | 1.8614s      | 28.4x        |
-|     250,000 | fastahack    | 0.0655s   | 3.3602s      | 51.3x        |
-|     250,000 | pyfaidx      | 0.0655s   | 4.3490s      | 66.4x        |
-|     500,000 | noodles      | 0.1285s   | 0.3660s      | 2.8x         |
-|     500,000 | rust-bio     | 0.1285s   | 0.5975s      | 4.7x         |
-|     500,000 | samtools     | 0.1285s   | 1.7579s      | 13.7x        |
-|     500,000 | seqkit       | 0.1285s   | 3.6631s      | 28.5x        |
-|     500,000 | fastahack    | 0.1285s   | 6.7369s      | 52.4x        |
-|     500,000 | pyfaidx      | 0.1285s   | 8.6746s      | 67.5x        |
-|   1,000,000 | noodles      | 0.2534s   | 0.7200s      | 2.8x         |
-|   1,000,000 | rust-bio     | 0.2534s   | 1.1851s      | 4.7x         |
-|   1,000,000 | samtools     | 0.2534s   | 3.6109s      | 14.3x        |
-|   1,000,000 | seqkit       | 0.2534s   | 7.4293s      | 29.3x        |
-|   1,000,000 | fastahack    | 0.2534s   | 13.6173s     | 53.7x        |
-|   1,000,000 | pyfaidx      | 0.2534s   | 18.0628s     | 71.3x        |
+|     100,000 | noodles      | 0.0280s   | 0.0744s      | 2.7x         |
+|     100,000 | rust-bio     | 0.0280s   | 0.1281s      | 4.6x         |
+|     100,000 | samtools     | 0.0280s   | 0.3418s      | 12.2x        |
+|     100,000 | seqkit       | 0.0280s   | 0.5730s      | 20.4x        |
+|     100,000 | fastahack    | 0.0280s   | 1.3546s      | 48.3x        |
+|     100,000 | pyfaidx      | 0.0280s   | 1.6607s      | 59.2x        |
+|     250,000 | noodles      | 0.0650s   | 0.1816s      | 2.8x         |
+|     250,000 | rust-bio     | 0.0650s   | 0.3145s      | 4.8x         |
+|     250,000 | samtools     | 0.0650s   | 0.8674s      | 13.3x        |
+|     250,000 | seqkit       | 0.0650s   | 1.4050s      | 21.6x        |
+|     250,000 | fastahack    | 0.0650s   | 3.3580s      | 51.6x        |
+|     250,000 | pyfaidx      | 0.0650s   | 4.1716s      | 64.1x        |
+|     500,000 | noodles      | 0.1266s   | 0.3558s      | 2.8x         |
+|     500,000 | rust-bio     | 0.1266s   | 0.6291s      | 5.0x         |
+|     500,000 | samtools     | 0.1266s   | 1.7465s      | 13.8x        |
+|     500,000 | seqkit       | 0.1266s   | 2.9050s      | 22.9x        |
+|     500,000 | fastahack    | 0.1266s   | 6.6958s      | 52.9x        |
+|     500,000 | pyfaidx      | 0.1266s   | 8.5689s      | 67.7x        |
+|   1,000,000 | noodles      | 0.2505s   | 0.6956s      | 2.8x         |
+|   1,000,000 | rust-bio     | 0.2505s   | 1.2513s      | 5.0x         |
+|   1,000,000 | samtools     | 0.2505s   | 3.5213s      | 14.1x        |
+|   1,000,000 | seqkit       | 0.2505s   | 5.7215s      | 22.8x        |
+|   1,000,000 | fastahack    | 0.2505s   | 13.4871s     | 53.8x        |
+|   1,000,000 | pyfaidx      | 0.2505s   | 17.6188s     | 70.3x        |
 
 </details>
 
@@ -597,10 +597,10 @@ Mean wall time (seconds, zebrac) at each record count. **Lower is better.** Byte
 
 |   Sequences |   Peak RSS (MiB) |   RSS spread (MiB) |
 |------------:|-----------------:|-------------------:|
-|     100,000 |             3.54 |               0.28 |
-|     250,000 |             3.59 |               0.19 |
-|     500,000 |             3.56 |               0.27 |
-|   1,000,000 |             3.55 |               0.31 |
+|     100,000 |             3.59 |               0.27 |
+|     250,000 |             3.74 |               0.25 |
+|     500,000 |             3.6  |               0.28 |
+|   1,000,000 |             3.53 |               0.52 |
 
 </details>
 

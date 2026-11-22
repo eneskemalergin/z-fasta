@@ -1,7 +1,8 @@
 //! The `z-fasta` package. Only its public declarations are supported. Calls fill a caller-owned
 //! `diagnostics.Failure` and never print or exit.
 //! `IndexedReader` opens a FASTA and its sidecar once and fetches many intervals from it; a
-//! `.zfi` is checked as its records are used, so opening costs the same for any index size.
+//! `.zfi` is checked as its records are used, so opening reads no records and its only
+//! per-record cost is one zeroed check bit.
 //! Intervals are zero-based half-open and never clipped. A reader is not safe for concurrent use,
 //! and its `io` must outlive it.
 //! `RecordReader` streams every record of a FASTA from any `std.Io.Reader`, by `index`'s rules.

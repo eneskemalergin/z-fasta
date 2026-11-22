@@ -27,7 +27,7 @@ z-fasta has a deliberately narrow input contract. Check this page before buildin
 > [!NOTE]
 > Use samtools, bedtools, SeqKit, or another suitable tool when a workflow needs compressed FASTA, FASTQ, BED12 blocks, GFF/VCF intervals, or broader format conversion. See [Choosing a FASTA tool](Choosing-a-FASTA-Tool).
 
-FASTQ is coming as a separate project, z-fastq, built around the same priorities: speed, low memory use, and portability. Supporting gzip or BGZF well would mean investing real time in Zig's deflate path or writing an efficient implementation myself. I have not been able to justify that work yet, but I would be happy to revisit it if enough people need it.
+FASTQ has its own project, [z-fastq](https://github.com/eneskemalergin/z-fastq), built around the same priorities: speed, low memory use, and portability. z-fasta reads uncompressed FASTA only, and gzip or BGZF input has no release target yet. [Zipir](https://github.com/eneskemalergin/zipir), the gzip implementation z-fastq reads through, is where that work would start, and I would be happy to revisit it if enough people need it.
 
 ## Input limits
 
@@ -43,7 +43,7 @@ FASTQ is coming as a separate project, z-fastq, built around the same priorities
 - Validate duplicate check: unbounded unless `--max-name-memory` sets a budget; on a file it reserves about 1 MiB before its first name. On a file it holds 8 to 16 bytes per identifier (1,000,000 records: 15 MiB); from standard input it also holds a copy of each identifier (the same records: 31 MiB; 254,070 identifiers of 29 MB in all: 29 MiB).
 - Default validate header warning threshold: 1024 bytes.
 - Validate type sample: first 100000 symbols across the file, unless `--type` names the alphabet.
-- GET complement type sample: up to 256 requested bases per record.
+- GET complement type sample: the first 256 bases of each record.
 
 ## Streaming batches
 
@@ -78,7 +78,7 @@ Validate uses the same rule: spaces and tabs in a sequence line are not symbols 
 
 ## Index limits
 
-`.zfi` record counts are stored as `u32` and cannot be zero. Names use `u16` lengths. Side-table absolute offsets use 40 bits. Other persisted offsets and lengths use `u64`, with range checks against actual files.
+`.zfi` record counts are stored as `u32` and cannot be zero. Names use `u16` lengths. In a `.zfi` record, sequence offsets and lengths use 48 bits, name offsets 40 bits, and side-table offsets 39 bits. `.fai` offsets and lengths are `u64`. All are range-checked against the actual files.
 
 These format widths are implementation limits, not recommended operating targets.
 

@@ -108,21 +108,6 @@ ensure_scaling() {
     bench_ensure_scaling "${args[@]}"
 }
 
-prepare_benchmark_binary() {
-    echo "Building ReleaseFast benchmark subject..."
-    (cd "$PROJECT_ROOT" && zig build -Doptimize=ReleaseFast -Dstrip=true)
-    if [[ "$ZFASTA" == "$PROJECT_ROOT/zig-out/bin/z-fasta" ]]; then
-        export BENCH_BUILD_OPTIMIZE=ReleaseFast
-        BENCH_BUILD_ZIG_VERSION="$(zig version)"
-        BENCH_BUILD_TARGET="$(zig env | sed -n 's/^[[:space:]]*\.target = "\([^" ]*\)",/\1/p')"
-        BENCH_BUILD_REVISION=""
-        if [[ -z "$(git -C "$PROJECT_ROOT" status --porcelain --untracked-files=normal 2>/dev/null)" ]]; then
-            BENCH_BUILD_REVISION="$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null)" || BENCH_BUILD_REVISION=""
-        fi
-        export BENCH_BUILD_ZIG_VERSION BENCH_BUILD_REVISION BENCH_BUILD_TARGET
-    fi
-}
-
 require_real_datasets() {
     local missing=false file
     for file in \
@@ -444,7 +429,11 @@ run_tests() {
         local file="$1" name="$2"
         rm -f "${file}.fai" "${file}.zfi" 2>/dev/null || true
         "$SAMTOOLS" faidx "$file" 2>/dev/null || true
-        if [[ $zf_exit -ne 0 && $sam_exit -ne 0 ]]; then
+        # z-fasta rejects with exit 1; any other status, a signal included, is a crash.
+        if [[ $zf_exit -gt 1 ]]; then
+            match="DIFF"
+            echo "FAILURE: $name (z-fasta exit $zf_exit is not a rejection)" >> "$fail_log"
+        elif [[ $zf_exit -ne 0 && $sam_exit -ne 0 ]]; then
             match="MATCH"
         elif [[ $zf_exit -ne 0 || $sam_exit -ne 0 ]]; then
             match="DIFF"
@@ -696,12 +685,6 @@ run_benchmarks() {
     fi
 
     if ! $SKIP_SCALING; then
-        if $REGENERATE_FIXTURES; then
-            shopt -s nullglob
-            legacy=("$RESULTS_DIR"/scale_seqs_*)
-            ((${#legacy[@]})) && rm -rf "${legacy[@]}"
-            shopt -u nullglob
-        fi
         ensure_scaling
         local missing=false mb c
         for mb in "${SIZE_MBS[@]}"; do [[ -f "$SCALING_DIR/size_${mb}mb.fasta" ]] || missing=true; done
@@ -818,7 +801,7 @@ run_report() {
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 if $DO_BENCHMARKS; then
-    prepare_benchmark_binary
+    bench_prepare_subject
 fi
 if $DO_TESTS; then
     run_tests || exit 1

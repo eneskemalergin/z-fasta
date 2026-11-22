@@ -115,7 +115,7 @@ If the rightmost suffix is malformed or overflows `u64`, GET treats the whole to
 
 ## Names ending in coordinate syntax
 
-A literal identifier that ends in a valid `:START-END` or `:START-` suffix is interpreted as a positional region. Use names input when you need the complete record with those literal bytes:
+A literal identifier that ends in a valid `:START-END` or `:START-` suffix is interpreted as a positional region, even when a record with that literal name exists (samtools refuses such a request as ambiguous). Use names input when you need the complete record with those literal bytes:
 
 ```bash
 printf '%s\n' 'sample:1-100' | z-fasta get genome.fa --names -

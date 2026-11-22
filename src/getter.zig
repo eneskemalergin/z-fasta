@@ -2,7 +2,8 @@
 //! Requests are one-based inclusive; an end past the record is clamped, and a suffix that does
 //! not parse as a range stays part of the name. Lookups are first-wins.
 //! Byte spans come from the uniform line formula or a side-table search; reads are positional.
-//! Output is wrapped at 60 and written per record, so a later failure can leave a valid prefix.
+//! Output is wrapped at 60 and flushed every 64 KiB, so a later failure can leave a prefix that
+//! ends inside a record.
 
 const std = @import("std");
 const fasta = @import("fasta.zig");
@@ -95,6 +96,8 @@ pub const ResolvedRegion = struct {
     line_bytes: u32,
     side_table: []const index_format.SideTableLine,
     record_index: usize,
+    /// The whole record's length; the complement guard samples the record's own first bases.
+    record_len: u64,
     orientation: Orientation,
     annotate_transform: bool,
 };
@@ -154,6 +157,7 @@ pub fn fetchSymbols(idx: *const LoadedIndex, ordinal: usize, start: u64, end: u6
         .line_bytes = rec.line_bytes,
         .side_table = side_table,
         .record_index = ordinal,
+        .record_len = rec.seq_len,
         .orientation = .{},
         .annotate_transform = false,
     };
@@ -373,12 +377,17 @@ fn parseRangeSuffix(suffix: []const u8) ?ParsedRange {
     const start_str = suffix[0..dash_pos];
     const end_str = suffix[dash_pos + 1 ..];
 
-    if (start_str.len == 0) return null;
-    const start = std.fmt.parseInt(u64, start_str, 10) catch return null;
+    const start = switch (bed_parser.parseCoordinate(start_str)) {
+        .value => |value| value,
+        .invalid, .out_of_range => return null,
+    };
 
     if (end_str.len == 0) return .{ .start = start, .end = null };
 
-    const end = std.fmt.parseInt(u64, end_str, 10) catch return null;
+    const end = switch (bed_parser.parseCoordinate(end_str)) {
+        .value => |value| value,
+        .invalid, .out_of_range => return null,
+    };
     return .{ .start = start, .end = end };
 }
 
@@ -438,18 +447,21 @@ fn resolveParsedRequest(
         .line_bytes = rec.line_bytes,
         .side_table = side_table,
         .record_index = rec_idx,
+        .record_len = rec.seq_len,
         .orientation = request.orientation,
         .annotate_transform = annotate_transform,
     };
 }
 
-fn detectRegionType(source: FastaSource, resolved: ResolvedRegion, diag: *Diagnostics, buffers: *GetBuffers) diagnostics.Error!fasta.SequenceType {
+/// Reads into its own small buffer: the caller's read window may still hold the region it is about to write.
+fn detectRegionType(source: FastaSource, resolved: ResolvedRegion, diag: *Diagnostics) diagnostics.Error!fasta.SequenceType {
     const span = try diskSpanForRegion(resolved, diag);
     if (span.end > source.size) return diag.span(span.end, source.size);
     if (span.start >= span.end) return diag.consistency(.traversal_position);
 
     var sample = SampleCounts{ .skip = span.leading_bases, .wanted = resolved.num_bases };
-    const input = &buffers.input;
+    var local: [4096]u8 = undefined;
+    const input = &local;
     var offset = span.start;
     while (offset < span.end and sample.total < resolved.num_bases) {
         const wanted: usize = @intCast(@min(@as(u64, input.len), span.end - offset));
@@ -459,7 +471,7 @@ fn detectRegionType(source: FastaSource, resolved: ResolvedRegion, diag: *Diagno
         offset += got;
     }
     if (sample.total != resolved.num_bases) return diag.mismatch(resolved, span, sample.total);
-    return fasta.typeFromCounts(sample.nucleotides, sample.total);
+    return fasta.typeFromCounts(sample.nucleotides, sample.classified);
 }
 
 fn detectBufferedType(resolved: ResolvedRegion, bytes: []const u8, bytes_start: u64, diag: *Diagnostics) diagnostics.Error!fasta.SequenceType {
@@ -468,11 +480,14 @@ fn detectBufferedType(resolved: ResolvedRegion, bytes: []const u8, bytes_start: 
     var sample = SampleCounts{ .skip = span.leading_bases, .wanted = resolved.num_bases };
     sample.add(bytes[@intCast(span.start - bytes_start)..@intCast(span.end - bytes_start)]);
     if (sample.total != resolved.num_bases) return diag.mismatch(resolved, span, sample.total);
-    return fasta.typeFromCounts(sample.nucleotides, sample.total);
+    return fasta.typeFromCounts(sample.nucleotides, sample.classified);
 }
 
+// Gap (`-`) and stop (`*`) bytes are sampled but not classified, so an aligned nucleotide
+// region with gaps still reads as nucleotide.
 const SampleCounts = struct {
     nucleotides: u64 = 0,
+    classified: u64 = 0,
     total: u64 = 0,
     skip: u64,
     wanted: u64,
@@ -485,21 +500,27 @@ const SampleCounts = struct {
                 self.skip -= 1;
                 continue;
             }
-            self.nucleotides += @intFromBool(fasta.isIupacNucleotide(byte));
             self.total += 1;
+            if (byte == '-' or byte == '*') continue;
+            self.nucleotides += @intFromBool(fasta.isIupacNucleotide(byte));
+            self.classified += 1;
         }
     }
 };
 
 const TypedRecord = struct { record: usize, kind: fasta.SequenceType, sample: diagnostics.Sample };
 
-fn checkComplement(region: ResolvedRegion, typed: *?TypedRecord, buffered: ?struct { bytes: []const u8, start: u64 }, source: FastaSource, diag: *Diagnostics, buffers: *GetBuffers) diagnostics.Error!void {
+fn checkComplement(region: ResolvedRegion, typed: *?TypedRecord, buffered: ?struct { bytes: []const u8, start: u64 }, source: FastaSource, diag: *Diagnostics) diagnostics.Error!void {
     if (!region.orientation.complement) return;
     const known = if (typed.*) |record| record.record == region.record_index else false;
     if (!known) {
+        // The sample is the record's first bases, whichever region asks first, so every request
+        // on a record gets the same verdict.
         var sample = region;
-        sample.num_bases = @min(sample.num_bases, TYPE_SAMPLE_BASES);
-        const kind = if (buffered) |read| try detectBufferedType(sample, read.bytes, read.start, diag) else try detectRegionType(source, sample, diag, buffers);
+        sample.start = 1;
+        sample.num_bases = @min(region.record_len, TYPE_SAMPLE_BASES);
+        const inside = region.start == 1 and region.num_bases >= sample.num_bases;
+        const kind = if (buffered != null and inside) try detectBufferedType(sample, buffered.?.bytes, buffered.?.start, diag) else try detectRegionType(source, sample, diag);
         typed.* = .{ .record = region.record_index, .kind = kind, .sample = .{ .symbols = @intCast(sample.num_bases), .rule = .nucleotide_above_90_percent, .interval = .{ .start = sample.start, .end = sample.start + sample.num_bases - 1 }, .request = diag.at.request } };
     }
     const record = typed.*.?;
@@ -922,6 +943,8 @@ fn copyRegion(
     writer: anytype,
     diag: *Diagnostics,
 ) diagnostics.Error!void {
+    // An empty buffer would make no progress; every caller passes at least one read window.
+    std.debug.assert(input_buffer.len != 0);
     var skip = if (resolved.orientation.reverse) span.trailing_bases else span.leading_bases;
     var base_index = if (resolved.orientation.reverse)
         resolved.start - 1 + resolved.num_bases - 1
@@ -1010,7 +1033,7 @@ fn emitResolvedBatch(
             for (resolved[i..group_end], i..) |region, ordinal| {
                 diag.at = requestReference(request_source, request_entries[ordinal].lineNumber(), request_base + ordinal + 1);
                 const next_total = try diag.add(.total_symbols, total_bases, region.num_bases);
-                try checkComplement(region, &typed, .{ .bytes = shared[0..got], .start = shared_start }, source, diag, buffers);
+                try checkComplement(region, &typed, .{ .bytes = shared[0..got], .start = shared_start }, source, diag);
                 const span = try diskSpanForRegion(region, diag);
                 try emitRegionFromSpan(region, span, shared_start, shared[0..got], buffers, writer, diag);
                 total_bases = next_total;
@@ -1020,7 +1043,7 @@ fn emitResolvedBatch(
         }
 
         const next_total = try diag.add(.total_symbols, total_bases, resolved[i].num_bases);
-        try checkComplement(resolved[i], &typed, null, source, diag, buffers);
+        try checkComplement(resolved[i], &typed, null, source, diag);
         try emitRegion(resolved[i], source, buffers, writer, diag);
         total_bases = next_total;
         i += 1;
@@ -1092,8 +1115,7 @@ fn appendBedLineRequest(allocator: std.mem.Allocator, workspace: *RequestWorkspa
 
 fn appendNamesLine(allocator: std.mem.Allocator, workspace: *RequestWorkspace, line: []const u8, line_number: usize, orientation: Orientation, diag: *Diagnostics) diagnostics.Error!void {
     diag.at.location.line = line_number;
-    const name = if (line.len > 0 and line[line.len - 1] == '\r') line[0 .. line.len - 1] else line;
-    if (name.len == 0 or name[0] == '#') return;
+    const name = bed_parser.requestText(line) orelse return;
     if (name.len > MAX_REQUEST_NAME_BYTES) return diag.fail(.{ .@"request.identifier_too_long" = .{
         .identifier_bytes = name.len,
         .limit_bytes = MAX_REQUEST_NAME_BYTES,
@@ -1195,11 +1217,7 @@ const RequestedNames = struct {
                 break :buffered available[0..end];
             } else (reader.takeDelimiter('\n') catch return false) orelse return true;
             const name = switch (source) {
-                .names => blk: {
-                    const name = if (line.len > 0 and line[line.len - 1] == '\r') line[0 .. line.len - 1] else line;
-                    if (name.len == 0 or name[0] == '#') continue;
-                    break :blk name;
-                },
+                .names => bed_parser.requestText(line) orelse continue,
                 .bed => bed_parser.requestChrom(line) orelse continue,
             };
             if (name.len > MAX_REQUEST_NAME_BYTES) return false;
@@ -1488,6 +1506,18 @@ fn checkGetRequestAllocations(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(u64, 4), result.total_bases);
 }
 
+test "[unit] - [get regions]: range bounds are ASCII digits only" {
+    const ranged = parseRegion("a:3-5");
+    try std.testing.expectEqualStrings("a", ranged.name);
+    try std.testing.expectEqual(@as(u64, 3), ranged.start);
+    try std.testing.expectEqual(@as(?u64, 5), ranged.end);
+    for ([_][]const u8{ "a:1_0-1_2", "a:+2-+4", "a:3-+5", "a: 3-5", "a:3-5 ", "a:-3", "a:99999999999999999999-1" }) |text| {
+        const region = parseRegion(text);
+        try std.testing.expectEqualStrings(text, region.name);
+        try std.testing.expect(region.is_full);
+    }
+}
+
 test "[failure] - [get requests]: releases partial collection" {
     for ([_]bool{ false, true }) |stable_input| {
         try std.testing.checkAllAllocationFailures(std.testing.allocator, collectNamesForAllocationCheck, .{stable_input});
@@ -1534,7 +1564,7 @@ test "[property] - [get extraction]: uniform copy matches a byte-by-byte copy ac
         const count = if (round == 0) seq_len else 1 + random.uintLessThan(u64, seq_len - start);
         const orientations = [_]Orientation{ .{}, .reverseComplement(), .reverseOnly(), .complementOnly() };
         for (orientations) |orientation| for ([_]bool{ true, false }) |wrap| {
-            const resolved = ResolvedRegion{ .name = "r", .start = start + 1, .display_end = start + count, .is_full = false, .seq_offset = seq_offset, .num_bases = count, .line_bases = line_bases, .line_bytes = line_bytes, .side_table = &.{}, .record_index = 0, .orientation = orientation, .annotate_transform = false };
+            const resolved = ResolvedRegion{ .name = "r", .start = start + 1, .display_end = start + count, .is_full = false, .seq_offset = seq_offset, .num_bases = count, .line_bases = line_bases, .line_bytes = line_bytes, .side_table = &.{}, .record_index = 0, .record_len = start + count, .orientation = orientation, .annotate_transform = false };
             expected.clearRetainingCapacity();
             for (0..@intCast(count)) |i| {
                 const k = if (orientation.reverse) start + count - 1 - i else start + i;
@@ -1603,7 +1633,7 @@ test "[property] - [get extraction]: side-table byte filter keeps exactly the ba
         var sink = std.Io.Writer.Allocating.init(allocator);
         defer sink.deinit();
         var output = RegionOutput{ .bytes = &output_storage, .diag = &context, .wrap = false };
-        const resolved = ResolvedRegion{ .name = "r", .start = skip_start + 1, .display_end = skip_start + count, .is_full = false, .seq_offset = 0, .num_bases = count, .line_bases = 0, .line_bytes = 0, .side_table = &.{}, .record_index = 0, .orientation = .{}, .annotate_transform = false };
+        const resolved = ResolvedRegion{ .name = "r", .start = skip_start + 1, .display_end = skip_start + count, .is_full = false, .seq_offset = 0, .num_bases = count, .line_bases = 0, .line_bytes = 0, .side_table = &.{}, .record_index = 0, .record_len = skip_start + count, .orientation = .{}, .annotate_transform = false };
         var skip = skip_start;
         try consumeForwardBytes(resolved, bytes[0..len], &skip, &output, &sink.writer);
         try output.flush(&sink.writer);
@@ -1787,8 +1817,6 @@ test "[failure] - [get requests]: keeps original rows and ordinals across skippe
     try std.testing.expect(primary.at.location.offset == null);
     try std.testing.expectEqualStrings("missing", failure.preview(primary.details.@"request.sequence_not_found".identifier.?));
     try std.testing.expectEqual(@as(usize, 12 * BED_REQUEST_BATCH_SIZE), output.written().len);
-    const PreviousRequest = struct { name_offset: u32, name_len: u16, start: u64, end: u64, orientation: Orientation };
-    try std.testing.expectEqual(@sizeOf(PreviousRequest) + 8, @sizeOf(OwnedRequest));
 }
 
 test "[failure] - [get requests]: rejects repeated-request overflow before writing another region" {

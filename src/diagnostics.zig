@@ -248,12 +248,11 @@ pub const CapacityRole = enum {
 pub const Counter = enum {
     source_bytes,
     total_symbols,
-    aun_numerator,
     physical_lines,
     records,
     requests,
 };
-pub const PathReason = enum { too_long, directory };
+pub const PathReason = enum { too_long, directory, not_regular_file };
 pub const TemporaryPurpose = enum { fai, names, side_tables, catalog };
 pub const TemporaryPlace = enum { environment, system, current_directory };
 pub const TemporaryReason = enum { randomness, directory_open, creation, collisions };
@@ -455,6 +454,7 @@ pub const Blocker = union(enum) {
     content_before_header: Preamble,
     header_control_byte: ControlByte,
     sequence_control_byte: ControlByte,
+    sequence_header_marker: void,
 
     pub fn code(self: *const Blocker) Code {
         return switch (self.*) {
@@ -462,6 +462,7 @@ pub const Blocker = union(enum) {
             .content_before_header => .@"fasta.content_before_header",
             .header_control_byte => .@"fasta.header_control_byte",
             .sequence_control_byte => .@"fasta.sequence_control_byte",
+            .sequence_header_marker => .@"fasta.sequence_header_marker",
         };
     }
 };
@@ -503,6 +504,7 @@ pub const Details = union(enum(u8)) {
     @"fasta.content_before_header": Preamble,
     @"fasta.header_control_byte": ControlByte,
     @"fasta.sequence_control_byte": ControlByte,
+    @"fasta.sequence_header_marker": void,
     @"fasta.empty_record": void,
     @"fasta.empty_identifier": void,
     @"fasta.duplicate_identifier": Duplicate,
@@ -879,6 +881,7 @@ fn describeCode(code: Code) Metadata {
         .@"fasta.content_before_header" => describe(code, .structure, .finding, .line, .correct_data, error.InvalidFasta),
         .@"fasta.header_control_byte" => describe(code, .structure, .finding, .byte, .correct_data, error.InvalidFasta),
         .@"fasta.sequence_control_byte" => describe(code, .structure, .finding, .byte, .correct_data, error.InvalidFasta),
+        .@"fasta.sequence_header_marker" => warning(code, .structure, .byte),
         .@"fasta.empty_record" => warning(code, .structure, .record),
         .@"fasta.empty_identifier" => describe(code, .identifiers, .finding, .record, .correct_data, error.InvalidFasta),
         .@"fasta.duplicate_identifier" => describe(code, .identifiers, .finding, .record, .correct_data, error.InvalidFasta),

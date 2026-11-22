@@ -6,6 +6,7 @@ const std = @import("std");
 
 const index_format = @import("index_format.zig");
 const fasta = @import("fasta.zig");
+const reporting = @import("reporting.zig");
 const diagnostics = @import("diagnostics");
 
 pub fn runStats(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8, failure: *diagnostics.Failure) diagnostics.Error!void {
@@ -266,7 +267,8 @@ fn summarizeLengths(comptime T: type, lengths: []T, diag: *Diagnostics) diagnost
         total = std.math.add(u64, total, length) catch return diag.overflow(.total_symbols, total, length, std.math.maxInt(u64), diag.index_source);
         if (narrow < lengths[shortest_index]) shortest_index = i;
         if (narrow > lengths[longest_index]) longest_index = i;
-        aun_numerator = std.math.add(u128, aun_numerator, @as(u128, length) * length) catch return diag.consistency(.numeric_buffer);
+        // Cannot overflow: the lengths sum to under 2^64, so their squares sum to under 2^128.
+        aun_numerator += @as(u128, length) * length;
     }
     const shortest_length: u64 = lengths[shortest_index];
     const longest_length: u64 = lengths[longest_index];
@@ -449,22 +451,20 @@ fn renderReport(
     comp: *const CompositionStats,
     composition: CompositionSummary,
 ) std.Io.Writer.Error!void {
+    // Names and the path are file bytes: they are escaped as diagnostics escape them, so no
+    // control byte reaches the terminal.
+    try writer.writeAll("File:\n  path: ");
+    try reporting.writeEscapedBytes(writer, fasta_path);
+    try writer.writeAll("\n  index: ");
+    try reporting.writeEscapedBytes(writer, fasta_path);
+    try writer.print("{s}\n  size_bytes: {d}\n\n", .{ index_extension, fasta_size });
+    try writer.print("Lengths:\n  indexed_records: {d}\n  total_symbols: {d}\n  shortest_length: {d}\n  shortest_name: ", .{ summary.record_count, summary.total_symbols, summary.shortest_length });
+    try reporting.writeEscapedBytes(writer, shortest_name);
+    try writer.print("\n  longest_length: {d}\n  longest_name: ", .{summary.longest_length});
+    try reporting.writeEscapedBytes(writer, longest_name);
     try writer.print(
-        "File:\n  path: {s}\n  index: {s}{s}\n  size_bytes: {d}\n\n",
-        .{ fasta_path, fasta_path, index_extension, fasta_size },
-    );
-    try writer.print(
-        "Lengths:\n  indexed_records: {d}\n  total_symbols: {d}\n" ++
-            "  shortest_length: {d}\n  shortest_name: {s}\n" ++
-            "  longest_length: {d}\n  longest_name: {s}\n" ++
-            "  mean: {d}\n  q1: {d}\n  median: {d}\n  q3: {d}\n  range: {d}\n\n",
+        "\n  mean: {d}\n  q1: {d}\n  median: {d}\n  q3: {d}\n  range: {d}\n\n",
         .{
-            summary.record_count,
-            summary.total_symbols,
-            summary.shortest_length,
-            shortest_name,
-            summary.longest_length,
-            longest_name,
             summary.mean,
             summary.q1,
             summary.median,
@@ -553,7 +553,7 @@ fn computeStats(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8
     diag.record = null;
     if (lengths.len() == 0) return diag.fail(.{ .@"index.no_records" = .{ .format = if (stream.source == .zfi) .zfi else .fai } }, .scan, diag.index_source, null, null);
     if (in_file_order) {
-        computed.comp.seq_type = fasta.detectType(&computed.comp.counts, computed.comp.total_bases);
+        computed.comp.seq_type = fasta.detectSequenceType(&computed.comp.counts, computed.comp.total_bases);
     } else {
         // Spans are read in file order, so an index listing records out of it is loaded whole.
         var idx = try index_format.loadIndex(allocator, io, fasta_path, .automatic, .stats_scan, diag.failure);
@@ -572,14 +572,27 @@ fn computeStats(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const u8
 }
 
 fn scanStreamedSides(stream: *index_format.EntryStream, reader: *BoundedFastaReader, rec: IndexRecord, comp: *CompositionStats) diagnostics.Error!void {
-    const count = try stream.sideLineCount(rec);
+    const Lines = struct {
+        stream: *index_format.EntryStream,
+        rec: IndexRecord,
+        fn get(self: @This(), index: u64) diagnostics.Error!SideTableLine {
+            return self.stream.sideLine(self.rec, index);
+        }
+    };
+    try scanSideLines(reader, try stream.sideLineCount(rec), Lines{ .stream = stream, .rec = rec }, comp);
+}
+
+/// Scans a non-uniform record's lines, joining adjacent lines into spans of at most one buffer.
+/// `lines.get(i)` returns line `i`, from a mapped table or a stream.
+fn scanSideLines(reader: *BoundedFastaReader, count: u64, lines: anytype, comp: *CompositionStats) diagnostics.Error!void {
+    if (count == 0) return reader.diag.consistency(.missing_side_table);
     var index: u64 = 0;
     while (index < count) {
-        const first = try stream.sideLine(rec, index);
+        const first = try lines.get(index);
         var end = std.math.add(u64, first.byte_offset, first.line_bytes) catch return reader.diag.consistency(.side_table_state);
         index += 1;
         while (index < count) {
-            const line = try stream.sideLine(rec, index);
+            const line = try lines.get(index);
             if (line.byte_offset != end) break;
             const next_end = std.math.add(u64, end, line.line_bytes) catch return reader.diag.consistency(.side_table_state);
             if (next_end - first.byte_offset > reader.buffer.len) break;
@@ -679,23 +692,13 @@ fn scanSideTableRecord(
     lines: []const SideTableLine,
     comp: *CompositionStats,
 ) diagnostics.Error!void {
-    if (lines.len == 0) return reader.diag.consistency(.missing_side_table);
-
-    var line_index: usize = 0;
-    while (line_index < lines.len) {
-        const start = lines[line_index].byte_offset;
-        var end = std.math.add(u64, start, lines[line_index].line_bytes) catch return reader.diag.consistency(.side_table_state);
-        line_index += 1;
-
-        while (line_index < lines.len and lines[line_index].byte_offset == end) {
-            const next_end = std.math.add(u64, end, lines[line_index].line_bytes) catch return reader.diag.consistency(.side_table_state);
-            if (next_end - start > reader.buffer.len) break;
-            end = next_end;
-            line_index += 1;
+    const Lines = struct {
+        lines: []const SideTableLine,
+        fn get(self: @This(), index: u64) diagnostics.Error!SideTableLine {
+            return self.lines[@intCast(index)];
         }
-        if (end > reader.file_size) return reader.diag.span(end, reader.file_size, line_index);
-        try scanSpan(reader, start, end, comp);
-    }
+    };
+    try scanSideLines(reader, lines.len, Lines{ .lines = lines }, comp);
 }
 
 fn scanRecord(
@@ -745,7 +748,7 @@ fn scanComposition(allocator: std.mem.Allocator, idx: *const LoadedIndex, buffer
     }
 
     diag.record = null;
-    comp.seq_type = fasta.detectType(&comp.counts, comp.total_bases);
+    comp.seq_type = fasta.detectSequenceType(&comp.counts, comp.total_bases);
 }
 
 fn recordsInSeqOffsetOrder(records: Records) bool {
@@ -1126,6 +1129,51 @@ test "[property] - [stats lengths]: narrow and widened lengths sort and summariz
             } else {
                 for (reference, lengths.narrow.items) |want, got| try std.testing.expectEqual(want, got);
             }
+        }
+    }
+}
+
+test "[property] - [stats lengths]: quartiles and Nx match a direct reference" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x4e78);
+    const random = prng.random();
+    for ([_]usize{ 1, 2, 3, 4, 5, 10, 11, 101, 1000 }) |count| {
+        var failure: diagnostics.Failure = undefined;
+        failure.reset(.stats);
+        var diag = Diagnostics{ .failure = &failure };
+        const lengths = try allocator.alloc(u64, count);
+        defer allocator.free(lengths);
+        for (lengths) |*value| value.* = random.intRangeAtMost(u64, 1, if (random.boolean()) 20 else 1_000_000);
+        const sorted = try allocator.dupe(u64, lengths);
+        defer allocator.free(sorted);
+        std.mem.sort(u64, sorted, {}, std.sort.asc(u64));
+        const summary = try summarizeLengths(u64, lengths, &diag);
+
+        // Median: the middle value, or the floor of the two middle values' mean.
+        const median = struct {
+            fn of(values: []const u64) u64 {
+                const n = values.len;
+                if (n % 2 == 1) return values[n / 2];
+                return @intCast((@as(u128, values[n / 2 - 1]) + values[n / 2]) / 2);
+            }
+        }.of;
+        var total: u128 = 0;
+        for (sorted) |value| total += value;
+        try std.testing.expectEqual(median(sorted), summary.median);
+        const half = count / 2;
+        try std.testing.expectEqual(if (count == 1) sorted[0] else median(sorted[0..half]), summary.q1);
+        try std.testing.expectEqual(if (count == 1) sorted[0] else median(sorted[count - half ..]), summary.q3);
+        // Nx: the shortest of the fewest longest records holding at least x percent of the total.
+        for ([_]u8{ 50, 90 }) |percent| {
+            var held: u128 = 0;
+            var rank: usize = 0;
+            const length = while (rank < count) {
+                rank += 1;
+                held += sorted[count - rank];
+                if (held * 100 >= total * percent) break sorted[count - rank];
+            } else unreachable;
+            try std.testing.expectEqual(length, if (percent == 50) summary.n50 else summary.n90);
+            try std.testing.expectEqual(rank, if (percent == 50) summary.l50 else summary.l90);
         }
     }
 }

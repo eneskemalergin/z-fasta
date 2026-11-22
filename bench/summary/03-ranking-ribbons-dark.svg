@@ -47,17 +47,17 @@ z
    <g id="matplotlib.axis_2"/>
    <g id="line2d_3">
     <path d="M 176.381621 182.565041
-L 308.707535 210.839014
+L 308.707535 182.565041
 " clip-path="url(#p72a3a1962e)" style="fill: none; stroke: #f7a41d; stroke-width: 3.2; stroke-linecap: square"/>
    </g>
    <g id="line2d_4">
-    <path d="M 176.381621 196.702027
-L 308.707535 182.565041
+    <path d="M 176.381621 210.839014
+L 308.707535 196.702027
 " clip-path="url(#p72a3a1962e)" style="fill: none; stroke: #e07a3f; stroke-opacity: 0.78; stroke-width: 1.45; stroke-linecap: square"/>
    </g>
    <g id="line2d_5">
-    <path d="M 176.381621 210.839014
-L 308.707535 196.702027
+    <path d="M 176.381621 224.976
+L 308.707535 210.839014
 " clip-path="url(#p72a3a1962e)" style="fill: none; stroke: #d46a54; stroke-opacity: 0.78; stroke-width: 1.45; stroke-linecap: square"/>
    </g>
    <g id="line2d_6">
@@ -66,7 +66,7 @@ L 308.707535 239.112986
 " clip-path="url(#p72a3a1962e)" style="fill: none; stroke: #b8c0c5; stroke-opacity: 0.78; stroke-width: 1.45; stroke-linecap: square"/>
    </g>
    <g id="line2d_7">
-    <path d="M 176.381621 224.976
+    <path d="M 176.381621 196.702027
 L 308.707535 253.249973
 " clip-path="url(#p72a3a1962e)" style="fill: none; stroke: #25bdb0; stroke-opacity: 0.78; stroke-width: 1.45; stroke-linecap: square"/>
    </g>
@@ -96,14 +96,14 @@ z
     </defs>
     <g clip-path="url(#p72a3a1962e)">
      <use xlink:href="#m4dfca203b6" x="176.381621" y="182.565041" style="fill: #f7a41d; stroke: #f7a41d; stroke-width: 1.1"/>
-     <use xlink:href="#m4dfca203b6" x="308.707535" y="210.839014" style="fill: #f7a41d; stroke: #f7a41d; stroke-width: 1.1"/>
+     <use xlink:href="#m4dfca203b6" x="308.707535" y="182.565041" style="fill: #f7a41d; stroke: #f7a41d; stroke-width: 1.1"/>
     </g>
    </g>
    <g id="text_1">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="171.750214" y="184.150354" transform="rotate(-0 171.750214 184.150354)">z-fasta .fai  0.328 s | 1.0x</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="171.750214" y="184.136994" transform="rotate(-0 171.750214 184.136994)">z-fasta .fai  0.302 s | 1.0x</text>
    </g>
    <g id="text_2">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="315.98546" y="212.424326" transform="rotate(-0 315.98546 212.424326)">3.79 MB | 1.1x  z-fasta .fai</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="315.98546" y="184.136994" transform="rotate(-0 315.98546 184.136994)">3.74 MB | 1.0x  z-fasta .fai</text>
    </g>
    <g id="PathCollection_2">
     <defs>
@@ -120,15 +120,15 @@ z
 " style="stroke: #e07a3f; stroke-width: 1.1"/>
     </defs>
     <g clip-path="url(#p72a3a1962e)">
-     <use xlink:href="#ma83da5bd6c" x="176.381621" y="196.702027" style="fill: #e07a3f; stroke: #e07a3f; stroke-width: 1.1"/>
-     <use xlink:href="#ma83da5bd6c" x="308.707535" y="182.565041" style="fill: #e07a3f; stroke: #e07a3f; stroke-width: 1.1"/>
+     <use xlink:href="#ma83da5bd6c" x="176.381621" y="210.839014" style="fill: #e07a3f; stroke: #e07a3f; stroke-width: 1.1"/>
+     <use xlink:href="#ma83da5bd6c" x="308.707535" y="196.702027" style="fill: #e07a3f; stroke: #e07a3f; stroke-width: 1.1"/>
     </g>
    </g>
    <g id="text_3">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="198.28734" transform="rotate(-0 171.750214 198.28734)">noodles  1.35 s | 4.1x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="212.410967" transform="rotate(-0 171.750214 212.410967)">noodles  1.22 s | 4.0x</text>
    </g>
    <g id="text_4">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="184.150354" transform="rotate(-0 315.98546 184.150354)">3.58 MB | 1.0x  noodles</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="198.273981" transform="rotate(-0 315.98546 198.273981)">3.74 MB | 1.0x  noodles</text>
    </g>
    <g id="PathCollection_3">
     <defs>
@@ -145,15 +145,15 @@ z
 " style="stroke: #d46a54; stroke-width: 1.1"/>
     </defs>
     <g clip-path="url(#p72a3a1962e)">
-     <use xlink:href="#m5e3159baaf" x="176.381621" y="210.839014" style="fill: #d46a54; stroke: #d46a54; stroke-width: 1.1"/>
-     <use xlink:href="#m5e3159baaf" x="308.707535" y="196.702027" style="fill: #d46a54; stroke: #d46a54; stroke-width: 1.1"/>
+     <use xlink:href="#m5e3159baaf" x="176.381621" y="224.976" style="fill: #d46a54; stroke: #d46a54; stroke-width: 1.1"/>
+     <use xlink:href="#m5e3159baaf" x="308.707535" y="210.839014" style="fill: #d46a54; stroke: #d46a54; stroke-width: 1.1"/>
     </g>
    </g>
    <g id="text_5">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="212.424326" transform="rotate(-0 171.750214 212.424326)">rust-bio  3.48 s | 11x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="226.547953" transform="rotate(-0 171.750214 226.547953)">rust-bio  3.71 s | 12x</text>
    </g>
    <g id="text_6">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="198.28734" transform="rotate(-0 315.98546 198.28734)">3.72 MB | 1.0x  rust-bio</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="212.410967" transform="rotate(-0 315.98546 212.410967)">3.78 MB | 1.0x  rust-bio</text>
    </g>
    <g id="PathCollection_4">
     <defs>
@@ -175,10 +175,10 @@ z
     </g>
    </g>
    <g id="text_7">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="240.698299" transform="rotate(-0 171.750214 240.698299)">samtools  8.1 s | 25x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="240.684939" transform="rotate(-0 171.750214 240.684939)">samtools  8.12 s | 27x</text>
    </g>
    <g id="text_8">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="240.698299" transform="rotate(-0 315.98546 240.698299)">9.55 MB | 2.7x  samtools</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="240.684939" transform="rotate(-0 315.98546 240.684939)">9.39 MB | 2.5x  samtools</text>
    </g>
    <g id="PathCollection_5">
     <defs>
@@ -195,15 +195,15 @@ z
 " style="stroke: #25bdb0; stroke-width: 1.1"/>
     </defs>
     <g clip-path="url(#p72a3a1962e)">
-     <use xlink:href="#mc194c729d1" x="176.381621" y="224.976" style="fill: #25bdb0; stroke: #25bdb0; stroke-width: 1.1"/>
+     <use xlink:href="#mc194c729d1" x="176.381621" y="196.702027" style="fill: #25bdb0; stroke: #25bdb0; stroke-width: 1.1"/>
      <use xlink:href="#mc194c729d1" x="308.707535" y="253.249973" style="fill: #25bdb0; stroke: #25bdb0; stroke-width: 1.1"/>
     </g>
    </g>
    <g id="text_9">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="226.561312" transform="rotate(-0 171.750214 226.561312)">SeqKit faidx  5.39 s | 16x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="198.273981" transform="rotate(-0 171.750214 198.273981)">SeqKit faidx  1.04 s | 3.4x</text>
    </g>
    <g id="text_10">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="254.835285" transform="rotate(-0 315.98546 254.835285)">218 MB | 61x  SeqKit faidx</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="254.821926" transform="rotate(-0 315.98546 254.821926)">19.3 MB | 5.2x  SeqKit faidx</text>
    </g>
    <g id="PathCollection_6">
     <defs>
@@ -225,10 +225,10 @@ z
     </g>
    </g>
    <g id="text_11">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="254.835285" transform="rotate(-0 171.750214 254.835285)">fastahack  21.5 s | 66x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="254.821926" transform="rotate(-0 171.750214 254.821926)">fastahack  21 s | 70x</text>
    </g>
    <g id="text_12">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="226.561312" transform="rotate(-0 315.98546 226.561312)">4.03 MB | 1.1x  fastahack</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="226.547953" transform="rotate(-0 315.98546 226.547953)">3.99 MB | 1.1x  fastahack</text>
    </g>
    <g id="PathCollection_7">
     <defs>
@@ -250,10 +250,10 @@ z
     </g>
    </g>
    <g id="text_13">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="268.972271" transform="rotate(-0 171.750214 268.972271)">pyfaidx  26.2 s | 80x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="268.958912" transform="rotate(-0 171.750214 268.958912)">pyfaidx  25.7 s | 85x</text>
    </g>
    <g id="text_14">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="268.972271" transform="rotate(-0 315.98546 268.972271)">526 MB | 147x  pyfaidx</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="268.958912" transform="rotate(-0 315.98546 268.958912)">526 MB | 141x  pyfaidx</text>
    </g>
   </g>
   <g id="axes_2">
@@ -276,7 +276,7 @@ z
    <g id="matplotlib.axis_4"/>
    <g id="line2d_12">
     <path d="M 538.637043 182.565041
-L 670.962957 196.702027
+L 670.962957 182.565041
 " clip-path="url(#pcd334f413c)" style="fill: none; stroke: #f7a41d; stroke-width: 3.2; stroke-linecap: square"/>
    </g>
    <g id="line2d_13">
@@ -286,7 +286,7 @@ L 670.962957 210.839014
    </g>
    <g id="line2d_14">
     <path d="M 538.637043 210.839014
-L 670.962957 182.565041
+L 670.962957 196.702027
 " clip-path="url(#pcd334f413c)" style="fill: none; stroke: #d46a54; stroke-opacity: 0.78; stroke-width: 1.45; stroke-linecap: square"/>
    </g>
    <g id="line2d_15">
@@ -300,26 +300,26 @@ L 670.962957 239.112986
 " clip-path="url(#pcd334f413c)" style="fill: none; stroke: #25bdb0; stroke-opacity: 0.78; stroke-width: 1.45; stroke-linecap: square"/>
    </g>
    <g id="line2d_17">
-    <path d="M 538.637043 253.249973
+    <path d="M 538.637043 267.386959
 L 670.962957 267.386959
 " clip-path="url(#pcd334f413c)" style="fill: none; stroke: #ff6b9c; stroke-opacity: 0.78; stroke-width: 1.45; stroke-linecap: square"/>
    </g>
    <g id="line2d_18">
-    <path d="M 538.637043 267.386959
+    <path d="M 538.637043 253.249973
 L 670.962957 253.249973
 " clip-path="url(#pcd334f413c)" style="fill: none; stroke: #6ca7d9; stroke-opacity: 0.78; stroke-width: 1.45; stroke-linecap: square"/>
    </g>
    <g id="PathCollection_8">
     <g clip-path="url(#pcd334f413c)">
      <use xlink:href="#m4dfca203b6" x="538.637043" y="182.565041" style="fill: #f7a41d; stroke: #f7a41d; stroke-width: 1.1"/>
-     <use xlink:href="#m4dfca203b6" x="670.962957" y="196.702027" style="fill: #f7a41d; stroke: #f7a41d; stroke-width: 1.1"/>
+     <use xlink:href="#m4dfca203b6" x="670.962957" y="182.565041" style="fill: #f7a41d; stroke: #f7a41d; stroke-width: 1.1"/>
     </g>
    </g>
    <g id="text_15">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="534.005636" y="184.150354" transform="rotate(-0 534.005636 184.150354)">z-fasta .fai  0.125 s | 1.0x</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="534.005636" y="184.136994" transform="rotate(-0 534.005636 184.136994)">z-fasta .fai  0.122 s | 1.0x</text>
    </g>
    <g id="text_16">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="678.240882" y="198.28734" transform="rotate(-0 678.240882 198.28734)">3.87 MB | 1.0x  z-fasta .fai</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="678.240882" y="184.136994" transform="rotate(-0 678.240882 184.136994)">3.71 MB | 1.0x  z-fasta .fai</text>
    </g>
    <g id="PathCollection_9">
     <g clip-path="url(#pcd334f413c)">
@@ -328,22 +328,22 @@ L 670.962957 253.249973
     </g>
    </g>
    <g id="text_17">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="198.28734" transform="rotate(-0 534.005636 198.28734)">noodles  0.41 s | 3.3x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="198.273981" transform="rotate(-0 534.005636 198.273981)">noodles  0.392 s | 3.2x</text>
    </g>
    <g id="text_18">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="212.424326" transform="rotate(-0 678.240882 212.424326)">48.9 MB | 13x  noodles</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="212.410967" transform="rotate(-0 678.240882 212.410967)">49.2 MB | 13x  noodles</text>
    </g>
    <g id="PathCollection_10">
     <g clip-path="url(#pcd334f413c)">
      <use xlink:href="#m5e3159baaf" x="538.637043" y="210.839014" style="fill: #d46a54; stroke: #d46a54; stroke-width: 1.1"/>
-     <use xlink:href="#m5e3159baaf" x="670.962957" y="182.565041" style="fill: #d46a54; stroke: #d46a54; stroke-width: 1.1"/>
+     <use xlink:href="#m5e3159baaf" x="670.962957" y="196.702027" style="fill: #d46a54; stroke: #d46a54; stroke-width: 1.1"/>
     </g>
    </g>
    <g id="text_19">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="212.424326" transform="rotate(-0 534.005636 212.424326)">rust-bio  0.709 s | 5.7x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="212.410967" transform="rotate(-0 534.005636 212.410967)">rust-bio  0.733 s | 6.0x</text>
    </g>
    <g id="text_20">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="184.150354" transform="rotate(-0 678.240882 184.150354)">3.72 MB | 1.0x  rust-bio</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="198.273981" transform="rotate(-0 678.240882 198.273981)">3.8 MB | 1.0x  rust-bio</text>
    </g>
    <g id="PathCollection_11">
     <g clip-path="url(#pcd334f413c)">
@@ -352,10 +352,10 @@ L 670.962957 253.249973
     </g>
    </g>
    <g id="text_21">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="226.561312" transform="rotate(-0 534.005636 226.561312)">samtools  1.72 s | 14x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="226.547953" transform="rotate(-0 534.005636 226.547953)">samtools  1.69 s | 14x</text>
    </g>
    <g id="text_22">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="226.561312" transform="rotate(-0 678.240882 226.561312)">69 MB | 19x  samtools</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="226.547953" transform="rotate(-0 678.240882 226.547953)">69.1 MB | 19x  samtools</text>
    </g>
    <g id="PathCollection_12">
     <g clip-path="url(#pcd334f413c)">
@@ -364,34 +364,34 @@ L 670.962957 253.249973
     </g>
    </g>
    <g id="text_23">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="240.698299" transform="rotate(-0 534.005636 240.698299)">SeqKit faidx  2.74 s | 22x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="240.684939" transform="rotate(-0 534.005636 240.684939)">SeqKit faidx  2.01 s | 16x</text>
    </g>
    <g id="text_24">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="240.698299" transform="rotate(-0 678.240882 240.698299)">139 MB | 37x  SeqKit faidx</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="240.684939" transform="rotate(-0 678.240882 240.684939)">103 MB | 28x  SeqKit faidx</text>
    </g>
    <g id="PathCollection_13">
     <g clip-path="url(#pcd334f413c)">
-     <use xlink:href="#mebcb7966b1" x="538.637043" y="253.249973" style="fill: #ff6b9c; stroke: #ff6b9c; stroke-width: 1.1"/>
+     <use xlink:href="#mebcb7966b1" x="538.637043" y="267.386959" style="fill: #ff6b9c; stroke: #ff6b9c; stroke-width: 1.1"/>
      <use xlink:href="#mebcb7966b1" x="670.962957" y="267.386959" style="fill: #ff6b9c; stroke: #ff6b9c; stroke-width: 1.1"/>
     </g>
    </g>
    <g id="text_25">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="254.835285" transform="rotate(-0 534.005636 254.835285)">fastahack  6.43 s | 51x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="268.958912" transform="rotate(-0 534.005636 268.958912)">fastahack  6.38 s | 52x</text>
    </g>
    <g id="text_26">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="268.972271" transform="rotate(-0 678.240882 268.972271)">282 MB | 76x  fastahack</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="268.958912" transform="rotate(-0 678.240882 268.958912)">283 MB | 76x  fastahack</text>
    </g>
    <g id="PathCollection_14">
     <g clip-path="url(#pcd334f413c)">
-     <use xlink:href="#m06aa0706a4" x="538.637043" y="267.386959" style="fill: #6ca7d9; stroke: #6ca7d9; stroke-width: 1.1"/>
+     <use xlink:href="#m06aa0706a4" x="538.637043" y="253.249973" style="fill: #6ca7d9; stroke: #6ca7d9; stroke-width: 1.1"/>
      <use xlink:href="#m06aa0706a4" x="670.962957" y="253.249973" style="fill: #6ca7d9; stroke: #6ca7d9; stroke-width: 1.1"/>
     </g>
    </g>
    <g id="text_27">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="268.972271" transform="rotate(-0 534.005636 268.972271)">pyfaidx  6.51 s | 52x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="254.821926" transform="rotate(-0 534.005636 254.821926)">pyfaidx  6.22 s | 51x</text>
    </g>
    <g id="text_28">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="254.835285" transform="rotate(-0 678.240882 254.835285)">188 MB | 51x  pyfaidx</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="254.821926" transform="rotate(-0 678.240882 254.821926)">188 MB | 51x  pyfaidx</text>
    </g>
   </g>
   <g id="axes_3">
@@ -454,10 +454,10 @@ L 1033.218379 267.386959
     </g>
    </g>
    <g id="text_29">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="896.261058" y="184.150354" transform="rotate(-0 896.261058 184.150354)">z-fasta .fai  9.13 ms | 1.0x</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="896.261058" y="184.136994" transform="rotate(-0 896.261058 184.136994)">z-fasta .fai  9.2 ms | 1.0x</text>
    </g>
    <g id="text_30">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="1040.496304" y="198.28734" transform="rotate(-0 1040.496304 198.28734)">3.79 MB | 1.0x  z-fasta .fai</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="1040.496304" y="198.273981" transform="rotate(-0 1040.496304 198.273981)">3.83 MB | 1.0x  z-fasta .fai</text>
    </g>
    <g id="PathCollection_16">
     <g clip-path="url(#pa4ca21cebb)">
@@ -466,10 +466,10 @@ L 1033.218379 267.386959
     </g>
    </g>
    <g id="text_31">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="198.28734" transform="rotate(-0 896.261058 198.28734)">noodles  18.1 ms | 2.0x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="198.273981" transform="rotate(-0 896.261058 198.273981)">noodles  18.5 ms | 2.0x</text>
    </g>
    <g id="text_32">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="212.424326" transform="rotate(-0 1040.496304 212.424326)">3.83 MB | 1.0x  noodles</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="212.410967" transform="rotate(-0 1040.496304 212.410967)">3.84 MB | 1.0x  noodles</text>
    </g>
    <g id="PathCollection_17">
     <g clip-path="url(#pa4ca21cebb)">
@@ -478,10 +478,10 @@ L 1033.218379 267.386959
     </g>
    </g>
    <g id="text_33">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="212.424326" transform="rotate(-0 896.261058 212.424326)">rust-bio  25.3 ms | 2.8x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="212.410967" transform="rotate(-0 896.261058 212.410967)">rust-bio  26.2 ms | 2.8x</text>
    </g>
    <g id="text_34">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="184.150354" transform="rotate(-0 1040.496304 184.150354)">3.66 MB | 1.0x  rust-bio</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="184.136994" transform="rotate(-0 1040.496304 184.136994)">3.76 MB | 1.0x  rust-bio</text>
    </g>
    <g id="PathCollection_18">
     <g clip-path="url(#pa4ca21cebb)">
@@ -490,10 +490,10 @@ L 1033.218379 267.386959
     </g>
    </g>
    <g id="text_35">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="226.561312" transform="rotate(-0 896.261058 226.561312)">samtools  65.5 ms | 7.2x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="226.547953" transform="rotate(-0 896.261058 226.547953)">samtools  63.6 ms | 6.9x</text>
    </g>
    <g id="text_36">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="226.561312" transform="rotate(-0 1040.496304 226.561312)">11.3 MB | 3.1x  samtools</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="226.547953" transform="rotate(-0 1040.496304 226.547953)">11.5 MB | 3.1x  samtools</text>
    </g>
    <g id="PathCollection_19">
     <g clip-path="url(#pa4ca21cebb)">
@@ -502,10 +502,10 @@ L 1033.218379 267.386959
     </g>
    </g>
    <g id="text_37">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="240.698299" transform="rotate(-0 896.261058 240.698299)">SeqKit faidx  0.183 s | 20x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="240.684939" transform="rotate(-0 896.261058 240.684939)">SeqKit faidx  0.161 s | 17x</text>
    </g>
    <g id="text_38">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="254.835285" transform="rotate(-0 1040.496304 254.835285)">23.2 MB | 6.3x  SeqKit faidx</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="254.821926" transform="rotate(-0 1040.496304 254.821926)">21.1 MB | 5.6x  SeqKit faidx</text>
    </g>
    <g id="PathCollection_20">
     <g clip-path="url(#pa4ca21cebb)">
@@ -514,10 +514,10 @@ L 1033.218379 267.386959
     </g>
    </g>
    <g id="text_39">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="254.835285" transform="rotate(-0 896.261058 254.835285)">fastahack  0.322 s | 35x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="254.821926" transform="rotate(-0 896.261058 254.821926)">fastahack  0.318 s | 35x</text>
    </g>
    <g id="text_40">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="240.698299" transform="rotate(-0 1040.496304 240.698299)">16.4 MB | 4.5x  fastahack</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="240.684939" transform="rotate(-0 1040.496304 240.684939)">16.5 MB | 4.4x  fastahack</text>
    </g>
    <g id="PathCollection_21">
     <g clip-path="url(#pa4ca21cebb)">
@@ -526,10 +526,10 @@ L 1033.218379 267.386959
     </g>
    </g>
    <g id="text_41">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="268.972271" transform="rotate(-0 896.261058 268.972271)">pyfaidx  0.397 s | 44x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="268.958912" transform="rotate(-0 896.261058 268.958912)">pyfaidx  0.389 s | 42x</text>
    </g>
    <g id="text_42">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="268.972271" transform="rotate(-0 1040.496304 268.972271)">30.4 MB | 8.3x  pyfaidx</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="268.958912" transform="rotate(-0 1040.496304 268.958912)">30.8 MB | 8.2x  pyfaidx</text>
    </g>
   </g>
   <g id="axes_4">
@@ -551,13 +551,13 @@ z
    </g>
    <g id="matplotlib.axis_8"/>
    <g id="line2d_30">
-    <path d="M 176.381621 299.956721
-L 308.707535 316.874754
+    <path d="M 176.381621 316.874754
+L 308.707535 299.956721
 " clip-path="url(#p099fd4fee3)" style="fill: none; stroke: #f7a41d; stroke-width: 3.2; stroke-linecap: square"/>
    </g>
    <g id="line2d_31">
-    <path d="M 176.381621 316.874754
-L 308.707535 299.956721
+    <path d="M 176.381621 299.956721
+L 308.707535 350.71082
 " clip-path="url(#p099fd4fee3)" style="fill: none; stroke: #ffd078; stroke-width: 3.2; stroke-linecap: square"/>
    </g>
    <g id="line2d_32">
@@ -567,7 +567,7 @@ L 308.707535 333.792787
    </g>
    <g id="line2d_33">
     <path d="M 176.381621 350.71082
-L 308.707535 350.71082
+L 308.707535 316.874754
 " clip-path="url(#p099fd4fee3)" style="fill: none; stroke: #d46a54; stroke-opacity: 0.78; stroke-width: 1.45; stroke-linecap: square"/>
    </g>
    <g id="line2d_34">
@@ -582,15 +582,15 @@ L 308.707535 381.163279
    </g>
    <g id="PathCollection_22">
     <g clip-path="url(#p099fd4fee3)">
-     <use xlink:href="#m4dfca203b6" x="176.381621" y="299.956721" style="fill: #f7a41d; stroke: #f7a41d; stroke-width: 1.1"/>
-     <use xlink:href="#m4dfca203b6" x="308.707535" y="316.874754" style="fill: #f7a41d; stroke: #f7a41d; stroke-width: 1.1"/>
+     <use xlink:href="#m4dfca203b6" x="176.381621" y="316.874754" style="fill: #f7a41d; stroke: #f7a41d; stroke-width: 1.1"/>
+     <use xlink:href="#m4dfca203b6" x="308.707535" y="299.956721" style="fill: #f7a41d; stroke: #f7a41d; stroke-width: 1.1"/>
     </g>
    </g>
    <g id="text_43">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="171.750214" y="301.542034" transform="rotate(-0 171.750214 301.542034)">z-fasta .zfi  2.1 ms | 1.0x</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="171.750214" y="318.446707" transform="rotate(-0 171.750214 318.446707)">z-fasta .zfi  2.18 ms | 1.1x</text>
    </g>
    <g id="text_44">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="315.98546" y="318.460067" transform="rotate(-0 315.98546 318.460067)">3.79 MB | 1.0x  z-fasta .zfi</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="315.98546" y="301.528674" transform="rotate(-0 315.98546 301.528674)">3.65 MB | 1.0x  z-fasta .zfi</text>
    </g>
    <g id="PathCollection_23">
     <defs>
@@ -607,15 +607,15 @@ z
 " style="stroke: #ffd078; stroke-width: 1.1"/>
     </defs>
     <g clip-path="url(#p099fd4fee3)">
-     <use xlink:href="#m898af51bed" x="176.381621" y="316.874754" style="fill: #ffd078; stroke: #ffd078; stroke-width: 1.1"/>
-     <use xlink:href="#m898af51bed" x="308.707535" y="299.956721" style="fill: #ffd078; stroke: #ffd078; stroke-width: 1.1"/>
+     <use xlink:href="#m898af51bed" x="176.381621" y="299.956721" style="fill: #ffd078; stroke: #ffd078; stroke-width: 1.1"/>
+     <use xlink:href="#m898af51bed" x="308.707535" y="350.71082" style="fill: #ffd078; stroke: #ffd078; stroke-width: 1.1"/>
     </g>
    </g>
    <g id="text_45">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="171.750214" y="318.460067" transform="rotate(-0 171.750214 318.460067)">z-fasta .fai  2.11 ms | 1.0x</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="171.750214" y="301.528674" transform="rotate(-0 171.750214 301.528674)">z-fasta .fai  2.07 ms | 1.0x</text>
    </g>
    <g id="text_46">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="315.98546" y="301.542034" transform="rotate(-0 315.98546 301.542034)">3.79 MB | 1.0x  z-fasta .fai</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="315.98546" y="352.282773" transform="rotate(-0 315.98546 352.282773)">3.75 MB | 1.0x  z-fasta .fai</text>
    </g>
    <g id="PathCollection_24">
     <g clip-path="url(#p099fd4fee3)">
@@ -624,22 +624,22 @@ z
     </g>
    </g>
    <g id="text_47">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="335.378099" transform="rotate(-0 171.750214 335.378099)">noodles  2.58 ms | 1.2x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="335.36474" transform="rotate(-0 171.750214 335.36474)">noodles  2.54 ms | 1.2x</text>
    </g>
    <g id="text_48">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="335.378099" transform="rotate(-0 315.98546 335.378099)">3.79 MB | 1.0x  noodles</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="335.36474" transform="rotate(-0 315.98546 335.36474)">3.75 MB | 1.0x  noodles</text>
    </g>
    <g id="PathCollection_25">
     <g clip-path="url(#p099fd4fee3)">
      <use xlink:href="#m5e3159baaf" x="176.381621" y="350.71082" style="fill: #d46a54; stroke: #d46a54; stroke-width: 1.1"/>
-     <use xlink:href="#m5e3159baaf" x="308.707535" y="350.71082" style="fill: #d46a54; stroke: #d46a54; stroke-width: 1.1"/>
+     <use xlink:href="#m5e3159baaf" x="308.707535" y="316.874754" style="fill: #d46a54; stroke: #d46a54; stroke-width: 1.1"/>
     </g>
    </g>
    <g id="text_49">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="352.296132" transform="rotate(-0 171.750214 352.296132)">rust-bio  2.89 ms | 1.4x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="352.282773" transform="rotate(-0 171.750214 352.282773)">rust-bio  2.91 ms | 1.4x</text>
    </g>
    <g id="text_50">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="352.296132" transform="rotate(-0 315.98546 352.296132)">3.9 MB | 1.0x  rust-bio</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="318.446707" transform="rotate(-0 315.98546 318.446707)">3.72 MB | 1.0x  rust-bio</text>
    </g>
    <g id="PathCollection_26">
     <g clip-path="url(#p099fd4fee3)">
@@ -648,10 +648,10 @@ z
     </g>
    </g>
    <g id="text_51">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="369.214165" transform="rotate(-0 171.750214 369.214165)">samtools  8.68 ms | 4.1x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="369.200806" transform="rotate(-0 171.750214 369.200806)">samtools  8.25 ms | 4.0x</text>
    </g>
    <g id="text_52">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="369.214165" transform="rotate(-0 315.98546 369.214165)">9.89 MB | 2.6x  samtools</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="369.200806" transform="rotate(-0 315.98546 369.200806)">10 MB | 2.8x  samtools</text>
    </g>
    <g id="PathCollection_27">
     <defs>
@@ -673,10 +673,10 @@ z
     </g>
    </g>
    <g id="text_53">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="382.748591" transform="rotate(-0 171.750214 382.748591)">seqtk scan ref  1.45 s | ref</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="382.735232" transform="rotate(-0 171.750214 382.735232)">seqtk scan ref  1.38 s | ref</text>
    </g>
    <g id="text_54">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="382.748591" transform="rotate(-0 315.98546 382.748591)">252 MB | ref  seqtk scan ref</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="382.735232" transform="rotate(-0 315.98546 382.735232)">252 MB | ref  seqtk scan ref</text>
    </g>
   </g>
   <g id="axes_5">
@@ -699,12 +699,12 @@ z
    <g id="matplotlib.axis_10"/>
    <g id="line2d_38">
     <path d="M 538.637043 299.956721
-L 670.962957 316.874754
+L 670.962957 299.956721
 " clip-path="url(#pc5a5a53390)" style="fill: none; stroke: #f7a41d; stroke-width: 3.2; stroke-linecap: square"/>
    </g>
    <g id="line2d_39">
     <path d="M 538.637043 316.874754
-L 670.962957 299.956721
+L 670.962957 316.874754
 " clip-path="url(#pc5a5a53390)" style="fill: none; stroke: #ffd078; stroke-width: 3.2; stroke-linecap: square"/>
    </g>
    <g id="line2d_40">
@@ -730,26 +730,26 @@ L 670.962957 381.163279
    <g id="PathCollection_28">
     <g clip-path="url(#pc5a5a53390)">
      <use xlink:href="#m4dfca203b6" x="538.637043" y="299.956721" style="fill: #f7a41d; stroke: #f7a41d; stroke-width: 1.1"/>
-     <use xlink:href="#m4dfca203b6" x="670.962957" y="316.874754" style="fill: #f7a41d; stroke: #f7a41d; stroke-width: 1.1"/>
+     <use xlink:href="#m4dfca203b6" x="670.962957" y="299.956721" style="fill: #f7a41d; stroke: #f7a41d; stroke-width: 1.1"/>
     </g>
    </g>
    <g id="text_55">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="534.005636" y="301.542034" transform="rotate(-0 534.005636 301.542034)">z-fasta .zfi  2.21 ms | 1.0x</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="534.005636" y="301.528674" transform="rotate(-0 534.005636 301.528674)">z-fasta .zfi  2.44 ms | 1.0x</text>
    </g>
    <g id="text_56">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="678.240882" y="318.460067" transform="rotate(-0 678.240882 318.460067)">3.95 MB | 1.0x  z-fasta .zfi</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="678.240882" y="301.528674" transform="rotate(-0 678.240882 301.528674)">3.72 MB | 1.0x  z-fasta .zfi</text>
    </g>
    <g id="PathCollection_29">
     <g clip-path="url(#pc5a5a53390)">
      <use xlink:href="#m898af51bed" x="538.637043" y="316.874754" style="fill: #ffd078; stroke: #ffd078; stroke-width: 1.1"/>
-     <use xlink:href="#m898af51bed" x="670.962957" y="299.956721" style="fill: #ffd078; stroke: #ffd078; stroke-width: 1.1"/>
+     <use xlink:href="#m898af51bed" x="670.962957" y="316.874754" style="fill: #ffd078; stroke: #ffd078; stroke-width: 1.1"/>
     </g>
    </g>
    <g id="text_57">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="534.005636" y="318.460067" transform="rotate(-0 534.005636 318.460067)">z-fasta .fai  11.1 ms | 5.0x</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="534.005636" y="318.446707" transform="rotate(-0 534.005636 318.446707)">z-fasta .fai  9.51 ms | 3.9x</text>
    </g>
    <g id="text_58">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="678.240882" y="301.542034" transform="rotate(-0 678.240882 301.542034)">3.81 MB | 1.0x  z-fasta .fai</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="678.240882" y="318.446707" transform="rotate(-0 678.240882 318.446707)">3.75 MB | 1.0x  z-fasta .fai</text>
    </g>
    <g id="PathCollection_30">
     <g clip-path="url(#pc5a5a53390)">
@@ -758,10 +758,10 @@ L 670.962957 381.163279
     </g>
    </g>
    <g id="text_59">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="335.378099" transform="rotate(-0 534.005636 335.378099)">noodles  88.5 ms | 40x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="335.36474" transform="rotate(-0 534.005636 335.36474)">noodles  87.5 ms | 36x</text>
    </g>
    <g id="text_60">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="335.378099" transform="rotate(-0 678.240882 335.378099)">49.1 MB | 13x  noodles</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="335.36474" transform="rotate(-0 678.240882 335.36474)">49 MB | 13x  noodles</text>
    </g>
    <g id="PathCollection_31">
     <g clip-path="url(#pc5a5a53390)">
@@ -770,10 +770,10 @@ L 670.962957 381.163279
     </g>
    </g>
    <g id="text_61">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="369.214165" transform="rotate(-0 534.005636 369.214165)">rust-bio  0.536 s | 242x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="369.200806" transform="rotate(-0 534.005636 369.200806)">rust-bio  0.535 s | 219x</text>
    </g>
    <g id="text_62">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="369.214165" transform="rotate(-0 678.240882 369.214165)">152 MB | 40x  rust-bio</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="369.200806" transform="rotate(-0 678.240882 369.200806)">152 MB | 41x  rust-bio</text>
    </g>
    <g id="PathCollection_32">
     <g clip-path="url(#pc5a5a53390)">
@@ -782,10 +782,10 @@ L 670.962957 381.163279
     </g>
    </g>
    <g id="text_63">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="352.296132" transform="rotate(-0 534.005636 352.296132)">samtools  0.292 s | 132x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="352.282773" transform="rotate(-0 534.005636 352.282773)">samtools  0.289 s | 118x</text>
    </g>
    <g id="text_64">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="352.296132" transform="rotate(-0 678.240882 352.296132)">69.3 MB | 18x  samtools</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="352.282773" transform="rotate(-0 678.240882 352.282773)">69.4 MB | 19x  samtools</text>
    </g>
    <g id="PathCollection_33">
     <g clip-path="url(#pc5a5a53390)">
@@ -794,10 +794,10 @@ L 670.962957 381.163279
     </g>
    </g>
    <g id="text_65">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="382.748591" transform="rotate(-0 534.005636 382.748591)">seqtk scan ref  0.218 s | ref</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="382.735232" transform="rotate(-0 534.005636 382.735232)">seqtk scan ref  0.219 s | ref</text>
    </g>
    <g id="text_66">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="382.748591" transform="rotate(-0 678.240882 382.748591)">3.78 MB | ref  seqtk scan ref</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="382.735232" transform="rotate(-0 678.240882 382.735232)">3.82 MB | ref  seqtk scan ref</text>
    </g>
   </g>
   <g id="axes_6">
@@ -825,12 +825,12 @@ L 1033.218379 299.956721
    </g>
    <g id="line2d_47">
     <path d="M 900.892465 316.874754
-L 1033.218379 316.874754
+L 1033.218379 333.792787
 " clip-path="url(#pea394dae53)" style="fill: none; stroke: #ffd078; stroke-width: 3.2; stroke-linecap: square"/>
    </g>
    <g id="line2d_48">
     <path d="M 900.892465 333.792787
-L 1033.218379 333.792787
+L 1033.218379 316.874754
 " clip-path="url(#pea394dae53)" style="fill: none; stroke: #e07a3f; stroke-opacity: 0.78; stroke-width: 1.45; stroke-linecap: square"/>
    </g>
    <g id="line2d_49">
@@ -855,34 +855,34 @@ L 1033.218379 381.163279
     </g>
    </g>
    <g id="text_67">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="896.261058" y="301.542034" transform="rotate(-0 896.261058 301.542034)">z-fasta .zfi  2.29 ms | 1.0x</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="896.261058" y="301.528674" transform="rotate(-0 896.261058 301.528674)">z-fasta .zfi  2.12 ms | 1.0x</text>
    </g>
    <g id="text_68">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="1040.496304" y="301.542034" transform="rotate(-0 1040.496304 301.542034)">3.81 MB | 1.0x  z-fasta .zfi</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="1040.496304" y="301.528674" transform="rotate(-0 1040.496304 301.528674)">3.72 MB | 1.0x  z-fasta .zfi</text>
    </g>
    <g id="PathCollection_35">
     <g clip-path="url(#pea394dae53)">
      <use xlink:href="#m898af51bed" x="900.892465" y="316.874754" style="fill: #ffd078; stroke: #ffd078; stroke-width: 1.1"/>
-     <use xlink:href="#m898af51bed" x="1033.218379" y="316.874754" style="fill: #ffd078; stroke: #ffd078; stroke-width: 1.1"/>
+     <use xlink:href="#m898af51bed" x="1033.218379" y="333.792787" style="fill: #ffd078; stroke: #ffd078; stroke-width: 1.1"/>
     </g>
    </g>
    <g id="text_69">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="896.261058" y="318.460067" transform="rotate(-0 896.261058 318.460067)">z-fasta .fai  2.69 ms | 1.2x</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="896.261058" y="318.446707" transform="rotate(-0 896.261058 318.446707)">z-fasta .fai  2.41 ms | 1.1x</text>
    </g>
    <g id="text_70">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="1040.496304" y="318.460067" transform="rotate(-0 1040.496304 318.460067)">3.85 MB | 1.0x  z-fasta .fai</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="1040.496304" y="335.36474" transform="rotate(-0 1040.496304 335.36474)">3.82 MB | 1.0x  z-fasta .fai</text>
    </g>
    <g id="PathCollection_36">
     <g clip-path="url(#pea394dae53)">
      <use xlink:href="#ma83da5bd6c" x="900.892465" y="333.792787" style="fill: #e07a3f; stroke: #e07a3f; stroke-width: 1.1"/>
-     <use xlink:href="#ma83da5bd6c" x="1033.218379" y="333.792787" style="fill: #e07a3f; stroke: #e07a3f; stroke-width: 1.1"/>
+     <use xlink:href="#ma83da5bd6c" x="1033.218379" y="316.874754" style="fill: #e07a3f; stroke: #e07a3f; stroke-width: 1.1"/>
     </g>
    </g>
    <g id="text_71">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="335.378099" transform="rotate(-0 896.261058 335.378099)">noodles  7.3 ms | 3.2x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="335.36474" transform="rotate(-0 896.261058 335.36474)">noodles  6.99 ms | 3.3x</text>
    </g>
    <g id="text_72">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="335.378099" transform="rotate(-0 1040.496304 335.378099)">3.98 MB | 1.0x  noodles</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="318.446707" transform="rotate(-0 1040.496304 318.446707)">3.8 MB | 1.0x  noodles</text>
    </g>
    <g id="PathCollection_37">
     <g clip-path="url(#pea394dae53)">
@@ -891,10 +891,10 @@ L 1033.218379 381.163279
     </g>
    </g>
    <g id="text_73">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="369.214165" transform="rotate(-0 896.261058 369.214165)">rust-bio  22 ms | 9.6x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="369.200806" transform="rotate(-0 896.261058 369.200806)">rust-bio  20.2 ms | 9.5x</text>
    </g>
    <g id="text_74">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="352.296132" transform="rotate(-0 1040.496304 352.296132)">7.64 MB | 2.0x  rust-bio</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="352.282773" transform="rotate(-0 1040.496304 352.282773)">7.73 MB | 2.1x  rust-bio</text>
    </g>
    <g id="PathCollection_38">
     <g clip-path="url(#pea394dae53)">
@@ -903,10 +903,10 @@ L 1033.218379 381.163279
     </g>
    </g>
    <g id="text_75">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="352.296132" transform="rotate(-0 896.261058 352.296132)">samtools  18.2 ms | 8.0x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="352.282773" transform="rotate(-0 896.261058 352.282773)">samtools  17.1 ms | 8.1x</text>
    </g>
    <g id="text_76">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="369.214165" transform="rotate(-0 1040.496304 369.214165)">11.5 MB | 3.0x  samtools</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="369.200806" transform="rotate(-0 1040.496304 369.200806)">11.6 MB | 3.1x  samtools</text>
    </g>
    <g id="PathCollection_39">
     <g clip-path="url(#pea394dae53)">
@@ -915,10 +915,10 @@ L 1033.218379 381.163279
     </g>
    </g>
    <g id="text_77">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="382.748591" transform="rotate(-0 896.261058 382.748591)">seqtk scan ref  9.54 ms | ref</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="382.735232" transform="rotate(-0 896.261058 382.735232)">seqtk scan ref  9.07 ms | ref</text>
    </g>
    <g id="text_78">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="382.748591" transform="rotate(-0 1040.496304 382.748591)">3.8 MB | ref  seqtk scan ref</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="382.735232" transform="rotate(-0 1040.496304 382.735232)">3.82 MB | ref  seqtk scan ref</text>
    </g>
   </g>
   <g id="axes_7">
@@ -946,12 +946,12 @@ z
    </g>
    <g id="matplotlib.axis_14"/>
    <g id="line2d_54">
-    <path d="M 176.381621 415.913492
+    <path d="M 176.381621 433.405017
 L 308.707535 433.405017
 " clip-path="url(#pb59dc6ed57)" style="fill: none; stroke: #f7a41d; stroke-width: 3.2; stroke-linecap: square"/>
    </g>
    <g id="line2d_55">
-    <path d="M 176.381621 433.405017
+    <path d="M 176.381621 415.913492
 L 308.707535 415.913492
 " clip-path="url(#pb59dc6ed57)" style="fill: none; stroke: #ffd078; stroke-width: 3.2; stroke-linecap: square"/>
    </g>
@@ -966,38 +966,38 @@ L 308.707535 468.388068
 " clip-path="url(#pb59dc6ed57)" style="fill: none; stroke: #d46a54; stroke-opacity: 0.78; stroke-width: 1.45; stroke-linecap: square"/>
    </g>
    <g id="line2d_58">
-    <path d="M 176.381621 482.381288
+    <path d="M 176.381621 496.374508
 L 308.707535 482.381288
 " clip-path="url(#pb59dc6ed57)" style="fill: none; stroke-dasharray: 5.365,2.32; stroke-dashoffset: 0; stroke: #c58af9; stroke-opacity: 0.78; stroke-width: 1.45"/>
    </g>
    <g id="line2d_59">
-    <path d="M 176.381621 496.374508
+    <path d="M 176.381621 482.381288
 L 308.707535 496.374508
 " clip-path="url(#pb59dc6ed57)" style="fill: none; stroke-dasharray: 5.365,2.32; stroke-dashoffset: 0; stroke: #58a6ff; stroke-opacity: 0.78; stroke-width: 1.45"/>
    </g>
    <g id="PathCollection_40">
     <g clip-path="url(#pb59dc6ed57)">
-     <use xlink:href="#m4dfca203b6" x="176.381621" y="415.913492" style="fill: #f7a41d; stroke: #f7a41d; stroke-width: 1.1"/>
+     <use xlink:href="#m4dfca203b6" x="176.381621" y="433.405017" style="fill: #f7a41d; stroke: #f7a41d; stroke-width: 1.1"/>
      <use xlink:href="#m4dfca203b6" x="308.707535" y="433.405017" style="fill: #f7a41d; stroke: #f7a41d; stroke-width: 1.1"/>
     </g>
    </g>
    <g id="text_81">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="171.750214" y="417.498804" transform="rotate(-0 171.750214 417.498804)">z-fasta .zfi  0.413 s | 1.0x</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="171.750214" y="434.97697" transform="rotate(-0 171.750214 434.97697)">z-fasta .zfi  0.421 s | 1.0x</text>
    </g>
    <g id="text_82">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="315.98546" y="434.990329" transform="rotate(-0 315.98546 434.990329)">3.77 MB | 1.0x  z-fasta .zfi</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="315.98546" y="434.97697" transform="rotate(-0 315.98546 434.97697)">3.81 MB | 1.0x  z-fasta .zfi</text>
    </g>
    <g id="PathCollection_41">
     <g clip-path="url(#pb59dc6ed57)">
-     <use xlink:href="#m898af51bed" x="176.381621" y="433.405017" style="fill: #ffd078; stroke: #ffd078; stroke-width: 1.1"/>
+     <use xlink:href="#m898af51bed" x="176.381621" y="415.913492" style="fill: #ffd078; stroke: #ffd078; stroke-width: 1.1"/>
      <use xlink:href="#m898af51bed" x="308.707535" y="415.913492" style="fill: #ffd078; stroke: #ffd078; stroke-width: 1.1"/>
     </g>
    </g>
    <g id="text_83">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="171.750214" y="434.990329" transform="rotate(-0 171.750214 434.990329)">z-fasta .fai  0.421 s | 1.0x</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="171.750214" y="417.485445" transform="rotate(-0 171.750214 417.485445)">z-fasta .fai  0.414 s | 1.0x</text>
    </g>
    <g id="text_84">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="315.98546" y="417.498804" transform="rotate(-0 315.98546 417.498804)">3.67 MB | 1.0x  z-fasta .fai</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="315.98546" y="417.485445" transform="rotate(-0 315.98546 417.485445)">3.76 MB | 1.0x  z-fasta .fai</text>
    </g>
    <g id="PathCollection_42">
     <g clip-path="url(#pb59dc6ed57)">
@@ -1006,10 +1006,10 @@ L 308.707535 496.374508
     </g>
    </g>
    <g id="text_85">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="469.97338" transform="rotate(-0 171.750214 469.97338)">noodles  10.1 s | 25x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="469.960021" transform="rotate(-0 171.750214 469.960021)">noodles  10.4 s | 25x</text>
    </g>
    <g id="text_86">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="452.481855" transform="rotate(-0 315.98546 452.481855)">251 MB | 68x  noodles</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="452.468495" transform="rotate(-0 315.98546 452.468495)">251 MB | 67x  noodles</text>
    </g>
    <g id="PathCollection_43">
     <g clip-path="url(#pb59dc6ed57)">
@@ -1018,22 +1018,22 @@ L 308.707535 496.374508
     </g>
    </g>
    <g id="text_87">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="452.481855" transform="rotate(-0 171.750214 452.481855)">rust-bio  7.49 s | 18x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="452.468495" transform="rotate(-0 171.750214 452.468495)">rust-bio  7 s | 17x</text>
    </g>
    <g id="text_88">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="469.97338" transform="rotate(-0 315.98546 469.97338)">251 MB | 68x  rust-bio</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="469.960021" transform="rotate(-0 315.98546 469.960021)">251 MB | 67x  rust-bio</text>
    </g>
    <g id="PathCollection_44">
     <g clip-path="url(#pb59dc6ed57)">
-     <use xlink:href="#mc88bff2971" x="176.381621" y="482.381288" style="fill: #0d1117; stroke: #c58af9; stroke-width: 1.1"/>
+     <use xlink:href="#mc88bff2971" x="176.381621" y="496.374508" style="fill: #0d1117; stroke: #c58af9; stroke-width: 1.1"/>
      <use xlink:href="#mc88bff2971" x="308.707535" y="482.381288" style="fill: #0d1117; stroke: #c58af9; stroke-width: 1.1"/>
     </g>
    </g>
    <g id="text_89">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="483.966601" transform="rotate(-0 171.750214 483.966601)">seqtk partial  15.3 s | ref</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="497.946462" transform="rotate(-0 171.750214 497.946462)">seqtk partial  15.4 s | ref</text>
    </g>
    <g id="text_90">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="483.966601" transform="rotate(-0 315.98546 483.966601)">251 MB | ref  seqtk partial</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="483.953241" transform="rotate(-0 315.98546 483.953241)">252 MB | ref  seqtk partial</text>
    </g>
    <g id="PathCollection_45">
     <defs>
@@ -1050,15 +1050,15 @@ z
 " style="stroke: #58a6ff; stroke-width: 1.1"/>
     </defs>
     <g clip-path="url(#pb59dc6ed57)">
-     <use xlink:href="#m2552cb92b8" x="176.381621" y="496.374508" style="fill: #0d1117; stroke: #58a6ff; stroke-width: 1.1"/>
+     <use xlink:href="#m2552cb92b8" x="176.381621" y="482.381288" style="fill: #0d1117; stroke: #58a6ff; stroke-width: 1.1"/>
      <use xlink:href="#m2552cb92b8" x="308.707535" y="496.374508" style="fill: #0d1117; stroke: #58a6ff; stroke-width: 1.1"/>
     </g>
    </g>
    <g id="text_91">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="497.959821" transform="rotate(-0 171.750214 497.959821)">seqkit partial  17.6 s | ref</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="171.750214" y="483.953241" transform="rotate(-0 171.750214 483.953241)">seqkit partial  7.85 s | ref</text>
    </g>
    <g id="text_92">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="497.959821" transform="rotate(-0 315.98546 497.959821)">1,196 MB | ref  seqkit partial</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="315.98546" y="497.946462" transform="rotate(-0 315.98546 497.946462)">680 MB | ref  seqkit partial</text>
    </g>
   </g>
   <g id="axes_8">
@@ -1096,12 +1096,12 @@ L 670.962957 433.405017
 " clip-path="url(#p6449b6df2f)" style="fill: none; stroke: #ffd078; stroke-width: 3.2; stroke-linecap: square"/>
    </g>
    <g id="line2d_64">
-    <path d="M 538.637043 450.896542
+    <path d="M 538.637043 468.388068
 L 670.962957 450.896542
 " clip-path="url(#p6449b6df2f)" style="fill: none; stroke: #e07a3f; stroke-opacity: 0.78; stroke-width: 1.45; stroke-linecap: square"/>
    </g>
    <g id="line2d_65">
-    <path d="M 538.637043 468.388068
+    <path d="M 538.637043 450.896542
 L 670.962957 468.388068
 " clip-path="url(#p6449b6df2f)" style="fill: none; stroke: #d46a54; stroke-opacity: 0.78; stroke-width: 1.45; stroke-linecap: square"/>
    </g>
@@ -1122,10 +1122,10 @@ L 670.962957 496.374508
     </g>
    </g>
    <g id="text_95">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="534.005636" y="417.498804" transform="rotate(-0 534.005636 417.498804)">z-fasta .zfi  88.9 ms | 1.0x</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="534.005636" y="417.485445" transform="rotate(-0 534.005636 417.485445)">z-fasta .zfi  0.132 s | 1.0x</text>
    </g>
    <g id="text_96">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="678.240882" y="417.498804" transform="rotate(-0 678.240882 417.498804)">3.81 MB | 1.0x  z-fasta .zfi</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="678.240882" y="417.485445" transform="rotate(-0 678.240882 417.485445)">3.67 MB | 1.0x  z-fasta .zfi</text>
    </g>
    <g id="PathCollection_47">
     <g clip-path="url(#p6449b6df2f)">
@@ -1134,34 +1134,34 @@ L 670.962957 496.374508
     </g>
    </g>
    <g id="text_97">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="534.005636" y="434.990329" transform="rotate(-0 534.005636 434.990329)">z-fasta .fai  0.107 s | 1.2x</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="534.005636" y="434.97697" transform="rotate(-0 534.005636 434.97697)">z-fasta .fai  0.17 s | 1.3x</text>
    </g>
    <g id="text_98">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="678.240882" y="434.990329" transform="rotate(-0 678.240882 434.990329)">3.81 MB | 1.0x  z-fasta .fai</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="678.240882" y="434.97697" transform="rotate(-0 678.240882 434.97697)">3.75 MB | 1.0x  z-fasta .fai</text>
    </g>
    <g id="PathCollection_48">
     <g clip-path="url(#p6449b6df2f)">
-     <use xlink:href="#ma83da5bd6c" x="538.637043" y="450.896542" style="fill: #e07a3f; stroke: #e07a3f; stroke-width: 1.1"/>
+     <use xlink:href="#ma83da5bd6c" x="538.637043" y="468.388068" style="fill: #e07a3f; stroke: #e07a3f; stroke-width: 1.1"/>
      <use xlink:href="#ma83da5bd6c" x="670.962957" y="450.896542" style="fill: #e07a3f; stroke: #e07a3f; stroke-width: 1.1"/>
     </g>
    </g>
    <g id="text_99">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="452.481855" transform="rotate(-0 534.005636 452.481855)">noodles  1.13 s | 13x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="469.960021" transform="rotate(-0 534.005636 469.960021)">noodles  1.55 s | 12x</text>
    </g>
    <g id="text_100">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="452.481855" transform="rotate(-0 678.240882 452.481855)">91.7 MB | 24x  noodles</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="452.468495" transform="rotate(-0 678.240882 452.468495)">92 MB | 25x  noodles</text>
    </g>
    <g id="PathCollection_49">
     <g clip-path="url(#p6449b6df2f)">
-     <use xlink:href="#m5e3159baaf" x="538.637043" y="468.388068" style="fill: #d46a54; stroke: #d46a54; stroke-width: 1.1"/>
+     <use xlink:href="#m5e3159baaf" x="538.637043" y="450.896542" style="fill: #d46a54; stroke: #d46a54; stroke-width: 1.1"/>
      <use xlink:href="#m5e3159baaf" x="670.962957" y="468.388068" style="fill: #d46a54; stroke: #d46a54; stroke-width: 1.1"/>
     </g>
    </g>
    <g id="text_101">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="469.97338" transform="rotate(-0 534.005636 469.97338)">rust-bio  1.2 s | 13x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="452.468495" transform="rotate(-0 534.005636 452.468495)">rust-bio  1.17 s | 8.9x</text>
    </g>
    <g id="text_102">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="469.97338" transform="rotate(-0 678.240882 469.97338)">92 MB | 24x  rust-bio</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="469.960021" transform="rotate(-0 678.240882 469.960021)">92.8 MB | 25x  rust-bio</text>
    </g>
    <g id="PathCollection_50">
     <g clip-path="url(#p6449b6df2f)">
@@ -1170,10 +1170,10 @@ L 670.962957 496.374508
     </g>
    </g>
    <g id="text_103">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="497.959821" transform="rotate(-0 534.005636 497.959821)">seqtk partial  2.5 s | ref</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="497.946462" transform="rotate(-0 534.005636 497.946462)">seqtk partial  2.52 s | ref</text>
    </g>
    <g id="text_104">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="483.966601" transform="rotate(-0 678.240882 483.966601)">3.76 MB | ref  seqtk partial</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="483.953241" transform="rotate(-0 678.240882 483.953241)">3.93 MB | ref  seqtk partial</text>
    </g>
    <g id="PathCollection_51">
     <g clip-path="url(#p6449b6df2f)">
@@ -1182,10 +1182,10 @@ L 670.962957 496.374508
     </g>
    </g>
    <g id="text_105">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="483.966601" transform="rotate(-0 534.005636 483.966601)">seqkit partial  2.4 s | ref</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="534.005636" y="483.953241" transform="rotate(-0 534.005636 483.953241)">seqkit partial  1.1 s | ref</text>
    </g>
    <g id="text_106">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="497.959821" transform="rotate(-0 678.240882 497.959821)">23.7 MB | ref  seqkit partial</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="678.240882" y="497.946462" transform="rotate(-0 678.240882 497.946462)">21.7 MB | ref  seqkit partial</text>
    </g>
   </g>
   <g id="axes_9">
@@ -1244,10 +1244,10 @@ L 1033.218379 494.591059
     </g>
    </g>
    <g id="text_109">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="896.261058" y="419.282254" transform="rotate(-0 896.261058 419.282254)">z-fasta .zfi  10.4 ms | 1.0x</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="896.261058" y="419.268894" transform="rotate(-0 896.261058 419.268894)">z-fasta .zfi  10.5 ms | 1.0x</text>
    </g>
    <g id="text_110">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="1040.496304" y="419.282254" transform="rotate(-0 1040.496304 419.282254)">3.79 MB | 1.0x  z-fasta .zfi</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="1040.496304" y="419.268894" transform="rotate(-0 1040.496304 419.268894)">3.77 MB | 1.0x  z-fasta .zfi</text>
    </g>
    <g id="PathCollection_53">
     <g clip-path="url(#p9a93a3de54)">
@@ -1256,10 +1256,10 @@ L 1033.218379 494.591059
     </g>
    </g>
    <g id="text_111">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="896.261058" y="439.517548" transform="rotate(-0 896.261058 439.517548)">z-fasta .fai  11.3 ms | 1.1x</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="896.261058" y="439.504188" transform="rotate(-0 896.261058 439.504188)">z-fasta .fai  11.4 ms | 1.1x</text>
    </g>
    <g id="text_112">
-    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="1040.496304" y="439.517548" transform="rotate(-0 1040.496304 439.517548)">3.81 MB | 1.0x  z-fasta .fai</text>
+    <text style="font-weight: 700; font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="1040.496304" y="439.504188" transform="rotate(-0 1040.496304 439.504188)">3.79 MB | 1.0x  z-fasta .fai</text>
    </g>
    <g id="PathCollection_54">
     <g clip-path="url(#p9a93a3de54)">
@@ -1268,10 +1268,10 @@ L 1033.218379 494.591059
     </g>
    </g>
    <g id="text_113">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="459.752842" transform="rotate(-0 896.261058 459.752842)">noodles  37.7 ms | 3.6x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="459.739483" transform="rotate(-0 896.261058 459.739483)">noodles  37 ms | 3.5x</text>
    </g>
    <g id="text_114">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="459.752842" transform="rotate(-0 1040.496304 459.752842)">5.16 MB | 1.4x  noodles</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="459.739483" transform="rotate(-0 1040.496304 459.739483)">5.25 MB | 1.4x  noodles</text>
    </g>
    <g id="PathCollection_55">
     <g clip-path="url(#p9a93a3de54)">
@@ -1280,10 +1280,10 @@ L 1033.218379 494.591059
     </g>
    </g>
    <g id="text_115">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="479.988136" transform="rotate(-0 896.261058 479.988136)">rust-bio  39.2 ms | 3.8x</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="479.974777" transform="rotate(-0 896.261058 479.974777)">rust-bio  37.7 ms | 3.6x</text>
    </g>
    <g id="text_116">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="479.988136" transform="rotate(-0 1040.496304 479.988136)">5.19 MB | 1.4x  rust-bio</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="479.974777" transform="rotate(-0 1040.496304 479.974777)">5.34 MB | 1.4x  rust-bio</text>
    </g>
    <g id="PathCollection_56">
     <g clip-path="url(#p9a93a3de54)">
@@ -1292,10 +1292,10 @@ L 1033.218379 494.591059
     </g>
    </g>
    <g id="text_117">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="496.176371" transform="rotate(-0 896.261058 496.176371)">seqkit partial  64.1 ms | ref</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="896.261058" y="496.163012" transform="rotate(-0 896.261058 496.163012)">seqkit partial  44.1 ms | ref</text>
    </g>
    <g id="text_118">
-    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="496.176371" transform="rotate(-0 1040.496304 496.176371)">27.3 MB | ref  seqkit partial</text>
+    <text style="font-size: 6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="1040.496304" y="496.163012" transform="rotate(-0 1040.496304 496.163012)">25.2 MB | ref  seqkit partial</text>
    </g>
   </g>
   <g id="line2d_75">
@@ -1329,22 +1329,22 @@ L 812.16 535.608
 " style="fill: none; stroke: #30363d; stroke-width: 0.8; stroke-linecap: square"/>
   </g>
   <g id="text_119">
-   <text style="font-weight: 700; font-size: 11.5px; font-family: 'DejaVu Sans'; fill: #f7a41d" transform="translate(31.973281 245.061469) rotate(-90)">INDEX</text>
+   <text style="font-weight: 700; font-size: 11.5px; font-family: 'DejaVu Sans'; fill: #f7a41d" transform="translate(31.787305 245.061469) rotate(-90)">INDEX</text>
   </g>
   <g id="text_120">
-   <text style="font-weight: 700; font-size: 11.5px; font-family: 'DejaVu Sans'; fill: #f7a41d" transform="translate(31.973281 353.130039) rotate(-90)">GET</text>
+   <text style="font-weight: 700; font-size: 11.5px; font-family: 'DejaVu Sans'; fill: #f7a41d" transform="translate(31.787305 353.130039) rotate(-90)">GET</text>
   </g>
   <g id="text_121">
-   <text style="font-weight: 700; font-size: 11.5px; font-family: 'DejaVu Sans'; fill: #f7a41d" transform="translate(31.973281 475.829664) rotate(-90)">STATS</text>
+   <text style="font-weight: 700; font-size: 11.5px; font-family: 'DejaVu Sans'; fill: #f7a41d" transform="translate(31.787305 475.827867) rotate(-90)">STATS</text>
   </g>
   <g id="text_122">
-   <text style="font-weight: 700; font-size: 9.5px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #f0f3f6" x="242.544578" y="161.136606" transform="rotate(-0 242.544578 161.136606)">GENOME</text>
+   <text style="font-weight: 700; font-size: 9.5px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #f0f3f6" x="242.544578" y="160.982973" transform="rotate(-0 242.544578 160.982973)">GENOME</text>
   </g>
   <g id="text_123">
-   <text style="font-weight: 700; font-size: 9.5px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #f0f3f6" x="604.8" y="161.136606" transform="rotate(-0 604.8 161.136606)">TRANSCRIPTOME</text>
+   <text style="font-weight: 700; font-size: 9.5px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #f0f3f6" x="604.8" y="160.982973" transform="rotate(-0 604.8 160.982973)">TRANSCRIPTOME</text>
   </g>
   <g id="text_124">
-   <text style="font-weight: 700; font-size: 9.5px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #f0f3f6" x="967.055422" y="161.136606" transform="rotate(-0 967.055422 161.136606)">PROTEOME</text>
+   <text style="font-weight: 700; font-size: 9.5px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #f0f3f6" x="967.055422" y="160.982973" transform="rotate(-0 967.055422 160.982973)">PROTEOME</text>
   </g>
   <g id="text_125">
    <text style="font-weight: 700; font-size: 22px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="167.04" y="43.961363" transform="rotate(-0 167.04 43.961363)">Speed and memory across real FASTA shapes</text>
@@ -1353,49 +1353,49 @@ L 812.16 535.608
    <text style="font-size: 10.2px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #9da7b0" x="167.04" y="68.476631" transform="rotate(-0 167.04 68.476631)">FASTA index construction | 1 kbp positional extraction | complete statistics output</text>
   </g>
   <g id="text_127">
-   <text style="font-weight: 700; font-size: 10.5px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="1134.72" y="37.699959" transform="rotate(-0 1134.72 37.699959)">z-fasta v0.4.0</text>
+   <text style="font-weight: 700; font-size: 10.5px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="1134.72" y="37.699959" transform="rotate(-0 1134.72 37.699959)">z-fasta v0.4.1</text>
   </g>
   <g id="text_128">
    <text style="font-weight: 700; font-size: 7.2px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f7a41d" x="1134.72" y="51.910875" transform="rotate(-0 1134.72 51.910875)">github.com/eneskemalergin/z-fasta</text>
   </g>
   <g id="text_129">
-   <text style="font-weight: 700; font-size: 7.4px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="1134.72" y="71.258044" transform="rotate(-0 1134.72 71.258044)">REAL FASTA BENCHMARK SUMMARY</text>
+   <text style="font-weight: 700; font-size: 7.4px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="1134.72" y="71.257466" transform="rotate(-0 1134.72 71.257466)">REAL FASTA BENCHMARK SUMMARY</text>
   </g>
   <g id="text_130">
-   <text style="font-weight: 700; font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f7a41d" x="28.8" y="549.304362" transform="rotate(-0 28.8 549.304362)">HUMAN DATASETS</text>
+   <text style="font-weight: 700; font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f7a41d" x="28.8" y="549.191159" transform="rotate(-0 28.8 549.191159)">HUMAN DATASETS</text>
   </g>
   <g id="text_131">
-   <text style="font-size: 6.6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="28.8" y="567.073444" transform="rotate(-0 28.8 567.073444)">Genome  GRCh38 primary (Ensembl 113) | 3.15 GB | 194 sequences</text>
+   <text style="font-size: 6.6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="28.8" y="567.058748" transform="rotate(-0 28.8 567.058748)">Genome  GRCh38 primary (Ensembl 113) | 3.15 GB | 194 sequences</text>
   </g>
   <g id="text_132">
-   <text style="font-size: 6.6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="28.8" y="583.791844" transform="rotate(-0 28.8 583.791844)">Transcriptome  GENCODE v46 | 481 MB | 254K sequences</text>
+   <text style="font-size: 6.6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="28.8" y="583.777148" transform="rotate(-0 28.8 583.777148)">Transcriptome  GENCODE v46 | 481 MB | 254K sequences</text>
   </g>
   <g id="text_133">
-   <text style="font-size: 6.6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="28.8" y="600.510244" transform="rotate(-0 28.8 600.510244)">Proteome  UniProt UP000005640 | 13.7 MB | 20.7K sequences</text>
+   <text style="font-size: 6.6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="28.8" y="600.495548" transform="rotate(-0 28.8 600.495548)">Proteome  UniProt UP000005640 | 13.7 MB | 20.7K sequences</text>
   </g>
   <g id="text_134">
-   <text style="font-weight: 700; font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #f7a41d" x="645.12" y="549.304362" transform="rotate(-0 645.12 549.304362)">RANKING RIBBONS</text>
+   <text style="font-weight: 700; font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #f7a41d" x="645.12" y="549.191159" transform="rotate(-0 645.12 549.191159)">RANKING RIBBONS</text>
   </g>
   <g id="text_135">
-   <text style="font-weight: 700; font-size: 6.8px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #f0f3f6" x="645.12" y="567.205975" transform="rotate(-0 645.12 567.205975)">Rank 1 = best complete lane for that metric</text>
+   <text style="font-weight: 700; font-size: 6.8px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #f0f3f6" x="645.12" y="567.096272" transform="rotate(-0 645.12 567.096272)">Rank 1 = best complete lane for that metric</text>
   </g>
   <g id="text_136">
-   <text style="font-weight: 700; font-size: 6.8px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #f0f3f6" x="645.12" y="583.844687" transform="rotate(-0 645.12 583.844687)">Labels = absolute value | x best complete</text>
+   <text style="font-weight: 700; font-size: 6.8px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #f0f3f6" x="645.12" y="583.829547" transform="rotate(-0 645.12 583.829547)">Labels = absolute value | x best complete</text>
   </g>
   <g id="text_137">
-   <text style="font-size: 6.6px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #9da7b0" x="645.12" y="600.587587" transform="rotate(-0 645.12 600.587587)">Open + dashed lanes = reference or partial work, not ranked</text>
+   <text style="font-size: 6.6px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #9da7b0" x="645.12" y="600.481111" transform="rotate(-0 645.12 600.481111)">Open + dashed lanes = reference or partial work, not ranked</text>
   </g>
   <g id="text_138">
-   <text style="font-weight: 700; font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f7a41d" x="1123.2" y="549.304362" transform="rotate(-0 1123.2 549.304362)">MEASUREMENT</text>
+   <text style="font-weight: 700; font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f7a41d" x="1123.2" y="549.191159" transform="rotate(-0 1123.2 549.191159)">MEASUREMENT</text>
   </g>
   <g id="text_139">
-   <text style="font-weight: 700; font-size: 6.8px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="1123.2" y="567.126287" transform="rotate(-0 1123.2 567.126287)">zebrac 0.6.2 | 5 samples | 3 warmups</text>
+   <text style="font-weight: 700; font-size: 6.8px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="1123.2" y="567.111147" transform="rotate(-0 1123.2 567.111147)">zebrac 0.6.2 | 5 samples | 3 warmups</text>
   </g>
   <g id="text_140">
-   <text style="font-size: 6.8px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="1123.2" y="583.844687" transform="rotate(-0 1123.2 583.844687)">5000 ms budget | Zig 0.16.0</text>
+   <text style="font-size: 6.8px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #f0f3f6" x="1123.2" y="583.829547" transform="rotate(-0 1123.2 583.829547)">5000 ms budget | Zig 0.16.0</text>
   </g>
   <g id="text_141">
-   <text style="font-size: 6.6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="1123.2" y="600.510244" transform="rotate(-0 1123.2 600.510244)">Warm-cache benchmark | 2026-10-15</text>
+   <text style="font-size: 6.6px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #9da7b0" x="1123.2" y="600.495548" transform="rotate(-0 1123.2 600.495548)">Warm-cache benchmark | 2026-11-22</text>
   </g>
   <g id="legend_1">
    <g id="line2d_81">
@@ -1408,11 +1408,11 @@ z
 " style="stroke: #f7a41d; stroke-linejoin: miter"/>
     </defs>
     <g>
-     <use xlink:href="#m7c8e3cc1cb" x="453.501664" y="118.426609" style="fill: #f7a41d; stroke: #f7a41d; stroke-linejoin: miter"/>
+     <use xlink:href="#m7c8e3cc1cb" x="453.498523" y="118.21043" style="fill: #f7a41d; stroke: #f7a41d; stroke-linejoin: miter"/>
     </g>
    </g>
    <g id="text_142">
-    <text style="font-size: 6.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="462.546664" y="120.771609" transform="rotate(-0 462.546664 120.771609)">z-fasta .zfi 0.4.0</text>
+    <text style="font-size: 6.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="462.543523" y="120.55543" transform="rotate(-0 462.543523 120.55543)">z-fasta .zfi 0.4.1</text>
    </g>
    <g id="line2d_82">
     <defs>
@@ -1424,11 +1424,11 @@ z
 " style="stroke: #f7a41d; stroke-linejoin: miter"/>
     </defs>
     <g>
-     <use xlink:href="#m59240924dd" x="453.501664" y="128.260953" style="fill: #f7a41d; stroke: #f7a41d; stroke-linejoin: miter"/>
+     <use xlink:href="#m59240924dd" x="453.498523" y="128.260953" style="fill: #f7a41d; stroke: #f7a41d; stroke-linejoin: miter"/>
     </g>
    </g>
    <g id="text_143">
-    <text style="font-size: 6.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="462.546664" y="130.605953" transform="rotate(-0 462.546664 130.605953)">z-fasta .fai 0.4.0</text>
+    <text style="font-size: 6.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="462.543523" y="130.605953" transform="rotate(-0 462.543523 130.605953)">z-fasta .fai 0.4.1</text>
    </g>
    <g id="line2d_83">
     <defs>
@@ -1445,11 +1445,11 @@ z
 " style="stroke: #e07a3f"/>
     </defs>
     <g>
-     <use xlink:href="#mec713a159d" x="530.32868" y="118.426609" style="fill: #e07a3f; stroke: #e07a3f"/>
+     <use xlink:href="#mec713a159d" x="530.325539" y="118.21043" style="fill: #e07a3f; stroke: #e07a3f"/>
     </g>
    </g>
    <g id="text_144">
-    <text style="font-size: 6.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="539.37368" y="120.771609" transform="rotate(-0 539.37368 120.771609)">noodles 0.66.0</text>
+    <text style="font-size: 6.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="539.370539" y="120.55543" transform="rotate(-0 539.370539 120.55543)">noodles 0.69.0</text>
    </g>
    <g id="line2d_84">
     <defs>
@@ -1460,11 +1460,11 @@ z
 " style="stroke: #d46a54; stroke-linejoin: miter"/>
     </defs>
     <g>
-     <use xlink:href="#mef5beeeffd" x="530.32868" y="128.260953" style="fill: #d46a54; stroke: #d46a54; stroke-linejoin: miter"/>
+     <use xlink:href="#mef5beeeffd" x="530.325539" y="128.260953" style="fill: #d46a54; stroke: #d46a54; stroke-linejoin: miter"/>
     </g>
    </g>
    <g id="text_145">
-    <text style="font-size: 6.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="539.37368" y="130.605953" transform="rotate(-0 539.37368 130.605953)">rust-bio 4.0.1</text>
+    <text style="font-size: 6.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="539.370539" y="130.605953" transform="rotate(-0 539.370539 130.605953)">rust-bio 4.2.2</text>
    </g>
    <g id="line2d_85">
     <defs>
@@ -1475,11 +1475,11 @@ z
 " style="stroke: #b8c0c5; stroke-linejoin: miter"/>
     </defs>
     <g>
-     <use xlink:href="#m8607f0da94" x="602.386133" y="118.426609" style="fill: #b8c0c5; stroke: #b8c0c5; stroke-linejoin: miter"/>
+     <use xlink:href="#m8607f0da94" x="602.382992" y="118.21043" style="fill: #b8c0c5; stroke: #b8c0c5; stroke-linejoin: miter"/>
     </g>
    </g>
    <g id="text_146">
-    <text style="font-size: 6.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="611.431133" y="120.771609" transform="rotate(-0 611.431133 120.771609)">samtools 1.24</text>
+    <text style="font-size: 6.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="611.427992" y="120.55543" transform="rotate(-0 611.427992 120.55543)">samtools 1.25</text>
    </g>
    <g id="line2d_86">
     <defs>
@@ -1499,16 +1499,16 @@ z
 " style="stroke: #25bdb0; stroke-linejoin: miter"/>
     </defs>
     <g>
-     <use xlink:href="#mb63527fc74" x="602.386133" y="128.260953" style="fill: #25bdb0; stroke: #25bdb0; stroke-linejoin: miter"/>
+     <use xlink:href="#mb63527fc74" x="602.382992" y="128.260953" style="fill: #25bdb0; stroke: #25bdb0; stroke-linejoin: miter"/>
     </g>
    </g>
    <g id="text_147">
-    <text style="font-size: 6.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="611.431133" y="130.605953" transform="rotate(-0 611.431133 130.605953)">SeqKit faidx 2.13.0</text>
+    <text style="font-size: 6.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="611.427992" y="130.605953" transform="rotate(-0 611.427992 130.605953)">SeqKit faidx 2.14.0</text>
    </g>
    <g id="line2d_87">
-    <path d="M 681.756008 118.426609
-L 688.456008 118.426609
-L 695.156008 118.426609
+    <path d="M 681.752867 118.21043
+L 688.452867 118.21043
+L 695.152867 118.21043
 " style="fill: none; stroke-dasharray: 5.55,2.4; stroke-dashoffset: 0; stroke: #58a6ff; stroke-width: 1.5"/>
     <defs>
      <path id="mb07834a691" d="M -1.166667 3.5
@@ -1527,16 +1527,16 @@ z
 " style="stroke: #58a6ff; stroke-linejoin: miter"/>
     </defs>
     <g>
-     <use xlink:href="#mb07834a691" x="688.456008" y="118.426609" style="fill: #0d1117; stroke: #58a6ff; stroke-linejoin: miter"/>
+     <use xlink:href="#mb07834a691" x="688.452867" y="118.21043" style="fill: #0d1117; stroke: #58a6ff; stroke-linejoin: miter"/>
     </g>
    </g>
    <g id="text_148">
-    <text style="font-size: 6.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="697.501008" y="120.771609" transform="rotate(-0 697.501008 120.771609)">SeqKit partial 2.13.0</text>
+    <text style="font-size: 6.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="697.497867" y="120.55543" transform="rotate(-0 697.497867 120.55543)">SeqKit partial 2.14.0</text>
    </g>
    <g id="line2d_88">
-    <path d="M 681.756008 128.260953
-L 688.456008 128.260953
-L 695.156008 128.260953
+    <path d="M 681.752867 128.260953
+L 688.452867 128.260953
+L 695.152867 128.260953
 " style="fill: none; stroke-dasharray: 5.55,2.4; stroke-dashoffset: 0; stroke: #c58af9; stroke-width: 1.5"/>
     <defs>
      <path id="m64c19c3c55" d="M 0 -3.5
@@ -1553,11 +1553,11 @@ z
 " style="stroke: #c58af9; stroke-linejoin: bevel"/>
     </defs>
     <g>
-     <use xlink:href="#m64c19c3c55" x="688.456008" y="128.260953" style="fill: #0d1117; stroke: #c58af9; stroke-linejoin: bevel"/>
+     <use xlink:href="#m64c19c3c55" x="688.452867" y="128.260953" style="fill: #0d1117; stroke: #c58af9; stroke-linejoin: bevel"/>
     </g>
    </g>
    <g id="text_149">
-    <text style="font-size: 6.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="697.501008" y="130.605953" transform="rotate(-0 697.501008 130.605953)">seqtk reference 1.5-r133</text>
+    <text style="font-size: 6.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="697.497867" y="130.605953" transform="rotate(-0 697.497867 130.605953)">seqtk reference 1.5-r133</text>
    </g>
    <g id="line2d_89">
     <defs>
@@ -1577,11 +1577,11 @@ z
 " style="stroke: #ff6b9c; stroke-linejoin: miter"/>
     </defs>
     <g>
-     <use xlink:href="#m5f34f43c3c" x="794.133852" y="118.426609" style="fill: #ff6b9c; stroke: #ff6b9c; stroke-linejoin: miter"/>
+     <use xlink:href="#m5f34f43c3c" x="794.136992" y="118.21043" style="fill: #ff6b9c; stroke: #ff6b9c; stroke-linejoin: miter"/>
     </g>
    </g>
    <g id="text_150">
-    <text style="font-size: 6.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="803.178852" y="120.771609" transform="rotate(-0 803.178852 120.771609)">fastahack 1.0.0</text>
+    <text style="font-size: 6.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="803.181992" y="120.55543" transform="rotate(-0 803.181992 120.55543)">fastahack 1.0.0</text>
    </g>
    <g id="line2d_90">
     <defs>
@@ -1595,11 +1595,11 @@ z
 " style="stroke: #6ca7d9; stroke-linejoin: miter"/>
     </defs>
     <g>
-     <use xlink:href="#m41478c86f2" x="794.133852" y="128.260953" style="fill: #6ca7d9; stroke: #6ca7d9; stroke-linejoin: miter"/>
+     <use xlink:href="#m41478c86f2" x="794.136992" y="128.260953" style="fill: #6ca7d9; stroke: #6ca7d9; stroke-linejoin: miter"/>
     </g>
    </g>
    <g id="text_151">
-    <text style="font-size: 6.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="803.178852" y="130.605953" transform="rotate(-0 803.178852 130.605953)">pyfaidx 0.9.0.4</text>
+    <text style="font-size: 6.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #f0f3f6" x="803.181992" y="130.605953" transform="rotate(-0 803.181992 130.605953)">pyfaidx 0.9.2.3</text>
    </g>
   </g>
  </g>

@@ -26,10 +26,10 @@ Running `z-fasta get --error-format=json` returns exit 1 and one newline-termina
 
 ```json
 {
-  "catalog_revision": "0.4.0-1",
+  "catalog_revision": "0.4.1-1",
   "producer": {
     "name": "z-fasta",
-    "version": "0.4.0"
+    "version": "0.4.1"
   },
   "kind": "failure",
   "operation": {
@@ -70,11 +70,11 @@ Read `failure.primary.code`, not the English message or the numeric Zig error ta
 
 ## Interpret the report
 
-`catalog_revision` identifies the code definitions (`0.4.0-1` for this catalog), and `producer.version` identifies the executable. They are separate values. Preserve unknown codes and fields when forwarding a report; do not turn an unknown code into success or infer a retry policy from its category or suggested `action`.
+`catalog_revision` identifies the code definitions (`0.4.1-1` for this catalog), and `producer.version` identifies the executable. They are separate values. Preserve unknown codes and fields when forwarding a report; do not turn an unknown code into success or infer a retry policy from its category or suggested `action`.
 
 `operation.work_complete` records whether the command's work finished. `operation.complete` also requires its required side effects to finish. `accepted` cannot be true for incomplete work or a blocking failure. A failed notice can therefore return exit 1 after data has already reached stdout.
 
-`outputs` describes stdout, a requested file or caller writer, and stderr separately. States are `not_started`, `staged`, `published`, `streaming`, `unknown` or `aborted`. `records` counts records completed by the writer. `logical_bytes` counts bytes accepted by the writer, including buffered bytes. Neither proves the visible prefix is complete. `may_be_partial` marks a possible prefix, and `final_flush` is `not_attempted`, `succeeded` or `failed`. The serialized object cannot certify its own final stderr flush. Always check the actual process status and whether the full JSON object arrived.
+`outputs` describes stdout, a requested file or caller writer, and stderr separately. States are `not_started`, `staged`, `published`, `streaming`, `unknown` or `aborted`. `records` counts records completed by the writer. `logical_bytes` counts bytes accepted by the writer, including buffered bytes. After a failure, both include output still buffered when the command stopped, which is discarded: `get` flushes stdout in 64 KiB blocks, so stdout may hold fewer records than `records` says, the last one possibly cut. Neither proves the visible prefix is complete, and neither is a length to trim output to. `may_be_partial` marks a possible prefix, and `final_flush` is `not_attempted`, `succeeded` or `failed`. The serialized object cannot certify its own final stderr flush. Always check the actual process status and whether the full JSON object arrived.
 
 Source IDs name roles within this command: FASTA, the selected sidecar, names or BED input, stdout, stderr, requested output, or a temporary spool. Their labels can be truncated; an unavailable label or location stays null. Derived sidecar labels use the original FASTA path and suffix. Offsets are zero-based byte offsets; lines, byte columns, records and requests are one-based original positions, not slots in a retained array. A code's unit describes the reported condition, not an occurrence count or a promise that every location is known.
 
@@ -100,7 +100,7 @@ rm -r "$work"
 
 GET can write earlier valid records before a later request fails. Do not publish its temporary stdout file merely because it is non-empty. Ordinary successful machine-mode commands need not emit a stderr report. `get --summary --error-format=json` requests a summary envelope with decimal-string `region_count`, `total_bases` and `elapsed_ns`; its successful FASTA still goes to stdout.
 
-Validate needs a separate policy: exit 0 means no findings, exit 2 means warnings only, and exit 1 means errors, strict warning rejection, an unfinished report, or an operational failure. With `--json`, stdout is one envelope whose `validation` holds the findings: read `validation.outcome`, `validation.completion` and `accepted` together with the status. Allow exit 2 only if your job explicitly permits warnings. A report whose completion is `interrupted` also fills `failure`, and the same failure goes to stderr in the format `--error-format` selects. See [Validation and repair](Validation-and-Repair) for counting and repair rules.
+Validate needs a separate policy: exit 0 means no findings (after a published `--fix` repair, format warnings the copy no longer has do not count), exit 2 means warnings only, and exit 1 means errors, strict warning rejection, an unfinished report, or an operational failure. With `--json`, stdout is one envelope whose `validation` holds the findings: read `validation.outcome`, `validation.completion` and `accepted` together with the status. Allow exit 2 only if your job explicitly permits warnings. A report whose completion is `interrupted` also fills `failure`, and the same failure goes to stderr in the format `--error-format` selects. See [Validation and repair](Validation-and-Repair) for counting and repair rules.
 
 A local consumer example in `tests/consumer_json.sh` exercises these policies, including missing and truncated JSON. It does not establish integration with a workflow scheduler, HTTP service or telemetry system.
 
@@ -167,6 +167,7 @@ A field ending in `offset` or describing a byte extent refers to bytes in its na
   - `fasta.content_before_header`: finding per line; fields `content_bytes`.
   - `fasta.header_control_byte`: finding per byte; fields `byte`, `grammar`.
   - `fasta.sequence_control_byte`: finding per byte; fields `byte`, `grammar`.
+  - `fasta.sequence_header_marker`: finding per byte; no fields.
   - `fasta.empty_record`: finding per record; no fields.
   - `fasta.empty_identifier`: finding per record; no fields.
   - `fasta.duplicate_identifier`: finding per record; fields `identifier`.

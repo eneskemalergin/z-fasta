@@ -15,6 +15,7 @@ const fasta = @import("fasta.zig");
 const diagnostics = @import("diagnostics");
 const index_format = @import("index_format.zig");
 const reporting = @import("reporting.zig");
+const platform = @import("platform.zig");
 
 const TYPE_SAMPLE_SYMBOLS: u64 = 100_000;
 pub const READ_BUFFER_BYTES = 256 * 1024;
@@ -50,7 +51,7 @@ pub const Options = struct {
 
 pub const NameSource = struct { io: std.Io, file: std.Io.File, size: u64 };
 
-pub const Result = struct { status: u8, fix_written: bool };
+pub const Result = struct { status: u8 };
 
 /// `validation` returns a view that borrows it.
 pub const Report = struct {
@@ -109,9 +110,13 @@ pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const
     failure.sources.set(.fasta, if (from_stdin) .{ .label = .{ .borrowed = "stdin" }, .kind = .stream } else .{ .label = .{ .borrowed = fasta_path }, .kind = .path });
     failure.sources.set(.stdout, .{ .label = .{ .borrowed = "stdout" }, .kind = .stream });
     if (options.output_path) |path| failure.sources.set(.output, .{ .label = .{ .borrowed = path }, .kind = .path });
-    const file = if (from_stdin) std.Io.File.stdin() else std.Io.Dir.cwd().openFile(io, fasta_path, .{}) catch |err| return failure.fail(.{ .details = diagnostics.openFailure(err), .stage = .open, .at = .{ .source = .fasta }, .cause = .{ .zig = err } });
+    // A FIFO is a stream validate can read, as stdin is, except with `--index`: an index needs a
+    // regular file, so that open must not wait for a writer.
+    const open_result = if (from_stdin) std.Io.File.stdin() else if (options.index != null) platform.openWithoutWaiting(io, fasta_path) else std.Io.Dir.cwd().openFile(io, fasta_path, .{});
+    const file = open_result catch |err| return failure.fail(.{ .details = diagnostics.openFailure(err), .stage = .open, .at = .{ .source = .fasta }, .cause = .{ .zig = err } });
     defer if (!from_stdin) file.close(io);
     const before: ?std.Io.File.Stat = if (from_stdin) null else file.stat(io) catch |err| return failure.fail(.{ .details = .{ .@"io.stat_failed" = {} }, .stage = .stat, .at = .{ .source = .fasta }, .cause = .{ .zig = err } });
+    if (options.index != null) if (before) |stat| if (stat.kind != .file) return failure.fail(.{ .details = .{ .@"io.invalid_path" = .{ .reason = if (stat.kind == .directory) .directory else .not_regular_file } }, .stage = .stat, .at = .{ .source = .fasta } });
 
     var pair: Pair = undefined;
     if (options.index) |selection| {
@@ -126,6 +131,7 @@ pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const
     var rewrite: ?Rewrite = null;
     if (options.fix) {
         const output_path = options.output_path orelse return failure.fail(.{ .details = .{ .@"usage.option_requires" = .{ .option = .fix, .required = .output } }, .stage = .arguments, .at = .{ .source = .fasta } });
+        try checkOutputNotDirectory(io, output_path, failure);
         if (!from_stdin) try checkRewriteDestination(io, fasta_path, output_path, failure);
         try staged.create(allocator, io, output_path, failure);
         staged_open = true;
@@ -147,13 +153,18 @@ pub fn runValidate(allocator: std.mem.Allocator, io: std.Io, fasta_path: []const
         scan(allocator, &reader.interface, read_buf, names, options.rules, null, compared, report, failure);
     scanned catch |err| {
         diagnostics.retainReaderCause(failure, &reader);
+        // Discard the staged output first, so the report states its final state and any cleanup failure.
+        if (staged_open) {
+            staged.cleanup(io, failure);
+            staged_open = false;
+        }
         writeReportOutput(io, report, options, false, read_buf, failure) catch {};
         return err;
     };
     if (options.fix) try staged.publish(io, if (before) |stat| .{ .file = file, .before = stat } else null, failure);
     failure.succeed();
     try writeReportOutput(io, report, options, options.fix, read_buf, failure);
-    return .{ .status = report.status(options.strict, options.fix), .fix_written = options.fix };
+    return .{ .status = report.status(options.strict, options.fix) };
 }
 
 /// After a failure, `report` covers what was examined and is `interrupted`.
@@ -185,6 +196,7 @@ const REPORT_CODES = [_]diagnostics.Code{
     .@"fasta.content_before_header",
     .@"fasta.header_control_byte",
     .@"fasta.sequence_control_byte",
+    .@"fasta.sequence_header_marker",
     .@"fasta.empty_record",
     .@"fasta.empty_identifier",
     .@"fasta.duplicate_identifier",
@@ -219,6 +231,8 @@ fn reportSlot(comptime code: diagnostics.Code) usize {
 // Bit `n` of a byte's class marks a symbol outside candidate `n` (nucleotide, protein, or custom twice).
 const WHITESPACE: u8 = 1 << 2;
 const CONTROL: u8 = 1 << 3;
+// `>` inside a sequence line: rewrapping could move it to a line start, where it reads as a header.
+const MARKER: u8 = 1 << 4;
 
 fn outsideBit(candidate: u1) u8 {
     return @as(u8, 1) << candidate;
@@ -284,6 +298,13 @@ const Staged = struct {
         errdefer allocator.free(self.buffer);
         self.atomic = std.Io.Dir.cwd().createFileAtomic(io, path, .{ .replace = true }) catch |err| return failure.fail(.{ .details = .{ .@"io.create_failed" = {} }, .stage = .create, .at = .{ .source = .output }, .cause = .{ .zig = err } });
         failure.outputs.file.state = .staged;
+        // Replacing a file keeps its permissions, as writing over it in place would.
+        if (std.Io.Dir.cwd().statFile(io, path, .{})) |existing| {
+            self.atomic.file.setPermissions(io, existing.permissions) catch |err| {
+                diagnostics.discardStaged(&self.atomic, io, failure, .output);
+                return failure.fail(.{ .details = .{ .@"io.create_failed" = {} }, .stage = .create, .at = .{ .source = .output }, .cause = .{ .zig = err } });
+            };
+        } else |_| {}
         self.writer = self.atomic.file.writer(io, self.buffer);
     }
 
@@ -312,6 +333,7 @@ fn fixBlocker(report: *const Report) ?FixBlocker {
     if (report.finding(.@"fasta.content_before_header").first) |first| keepEarliest(&best, .{ .content_before_header = first.details.@"fasta.content_before_header" }, first.at);
     if (report.finding(.@"fasta.header_control_byte").first) |first| keepEarliest(&best, .{ .header_control_byte = first.details.@"fasta.header_control_byte" }, first.at);
     if (report.finding(.@"fasta.sequence_control_byte").first) |first| keepEarliest(&best, .{ .sequence_control_byte = first.details.@"fasta.sequence_control_byte" }, first.at);
+    if (report.finding(.@"fasta.sequence_header_marker").first) |first| keepEarliest(&best, .{ .sequence_header_marker = {} }, first.at);
     return best;
 }
 
@@ -609,7 +631,7 @@ const Pair = struct {
             .fasta_path = fasta_path,
             .selection = selection,
             .stream = stream,
-            .scanner = .{ .allocator = allocator, .collect_side_tables = format == .zfi, .diag = .{ .failure = failure, .format = format } },
+            .scanner = .{ .allocator = allocator, .collect_side_tables = format == .zfi, .skip_long_names = true, .diag = .{ .failure = failure, .format = format } },
         };
     }
 
@@ -745,6 +767,7 @@ const Scan = struct {
         for (&classes, 0..) |*class, index| {
             const byte: u8 = @intCast(index);
             class.* = if (byte == ' ' or byte == '\t') WHITESPACE else if (byte < ' ') CONTROL else @as(u8, @intFromBool(!alphabets[0][index])) | @as(u8, @intFromBool(!alphabets[1][index])) << 1;
+            if (byte == '>') class.* |= MARKER;
         }
         var self = Scan{
             .allocator = allocator,
@@ -1007,7 +1030,7 @@ const Scan = struct {
             .plain_dna => !fasta.PlainDna.anyOutside(fasta.DENSE_VECTOR_LEN, bytes),
             .plain_rna => !fasta.PlainRna.anyOutside(fasta.DENSE_VECTOR_LEN, bytes),
             .protein => !fasta.ProteinSymbols.anyOutside(fasta.DENSE_VECTOR_LEN, bytes),
-            .any => !fasta.Bases.anyOutside(fasta.DENSE_VECTOR_LEN, bytes),
+            .any => !fasta.Bases.anyOutside(fasta.DENSE_VECTOR_LEN, bytes) and std.mem.findScalar(u8, bytes, '>') == null,
         };
         if (all_fast) {
             self.line.symbols += bytes.len;
@@ -1019,6 +1042,7 @@ const Scan = struct {
         const outside: u8 = if (self.chosen) |chosen| outsideBit(chosen) else outsideBit(0) | outsideBit(1);
         var classes: u8 = 0;
         for (bytes) |byte| classes |= self.classes[byte];
+        if (classes & MARKER != 0) self.countMarkers(bytes, at);
         if (classes & (WHITESPACE | CONTROL) != 0) {
             try self.irregularContent(bytes, at, outside);
         } else {
@@ -1041,6 +1065,13 @@ const Scan = struct {
             if (self.rewrite) |sink| sink.symbols(bytes) catch |err| return self.writeFailed(err);
         }
         if (self.chosen == null and self.sample_total == TYPE_SAMPLE_SYMBOLS) self.chooseAlphabet(@intFromBool(fasta.detectType(&self.sample_counts, self.sample_total) == .protein));
+    }
+
+    fn countMarkers(self: *Scan, bytes: []const u8, at: u64) void {
+        @branchHint(.cold);
+        for (bytes, 0..) |byte, index| {
+            if (byte == '>') self.count(.{ .@"fasta.sequence_header_marker" = {} }, self.recordAt(at + index));
+        }
     }
 
     fn irregularContent(self: *Scan, bytes: []const u8, at: u64, outside: u8) diagnostics.Error!void {
@@ -1434,6 +1465,12 @@ fn unknownOutputIdentity(failure: *diagnostics.Failure, source: diagnostics.Sour
         .cause = .{ .zig = cause },
     });
 }
+/// A directory destination fails before the scan; publishing over it could only fail after all the work.
+fn checkOutputNotDirectory(io: std.Io, output_path: []const u8, failure: *diagnostics.Failure) diagnostics.Error!void {
+    const stat = std.Io.Dir.cwd().statFile(io, output_path, .{}) catch return;
+    if (stat.kind == .directory) return failure.fail(.{ .details = .{ .@"io.invalid_path" = .{ .reason = .directory } }, .stage = .create, .at = .{ .source = .output } });
+}
+
 fn checkRewriteDestination(io: std.Io, input_path: []const u8, output_path: []const u8, failure: *diagnostics.Failure) diagnostics.Error!void {
     if (std.mem.eql(u8, input_path, output_path)) return failure.fail(.{
         .details = .{ .@"repair.output_is_input" = .{ .input = .fasta, .output = .output, .comparison = .lexical_path } },

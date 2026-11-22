@@ -17,7 +17,7 @@
 I built z-fasta to keep four common FASTA jobs in one place: check a file, index it, pull out the records you need, and understand what is inside. When exact behavior matters, this Wiki gets specific about coordinates, sidecars, output, and failure modes.
 
 > [!NOTE]
-> This Wiki documents z-fasta v0.4.0. Run `z-fasta --version` before following version-specific behavior.
+> This Wiki documents z-fasta v0.4.1. Run `z-fasta --version` before following version-specific behavior.
 
 ## Start with this workflow
 
@@ -62,7 +62,7 @@ reference.fa
 
 ## Know the boundary
 
-I intentionally keep z-fasta focused on uncompressed FASTA. FASTQ is coming as a separate project, z-fastq, with the same focus on speed, low memory use, and portability. Supporting gzip or BGZF well would require real work on deflate performance, and I have not been able to justify that work yet. If your workflow starts outside that boundary, [Choosing a FASTA tool](Choosing-a-FASTA-Tool) will save you time.
+I intentionally keep z-fasta focused on uncompressed FASTA. FASTQ has its own project, [z-fastq](https://github.com/eneskemalergin/z-fastq), with the same focus on speed, low memory use, and portability. gzip and BGZF input have no release target yet; [Zipir](https://github.com/eneskemalergin/zipir), the gzip implementation z-fastq reads through, is where that work would start. If your workflow starts outside that boundary, [Choosing a FASTA tool](Choosing-a-FASTA-Tool) will save you time.
 
 ## The reading path I recommend
 

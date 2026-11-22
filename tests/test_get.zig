@@ -491,7 +491,9 @@ test "[cli] - [get names]: failures preserve only valid output prefixes" {
     try std.testing.expect(result.stdout.len > 0);
     try support.expectDiagnostic(allocator, result.stderr, .@"request.sequence_not_found");
     const one_output = ">seq1\nACGTACGTACGTACGTACGTACGT\n";
-    try std.testing.expect(result.stdout.len <= one_output.len * 65536);
+    // The failing request discards what the writer still buffers, at most one stdout and one region buffer.
+    try std.testing.expect(result.stdout.len < one_output.len * 65536);
+    try std.testing.expect(one_output.len * 65536 - result.stdout.len <= 2 * 64 * 1024);
     for (result.stdout, 0..) |byte, i| {
         try std.testing.expectEqual(one_output[i % one_output.len], byte);
     }
@@ -711,6 +713,66 @@ test "[cli] - [get]: applies each orientation and names it on request" {
         try expectCliSuccess(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "seq1:1-5", case.flag }, try std.fmt.allocPrint(allocator, ">seq1:1-5\n{s}\n", .{case.bases}));
         try expectCliSuccess(allocator, &.{ ZFASTA_BIN, "get", "tests/data/simple.fasta", "seq1:1-5", case.flag, "--annotate-rc" }, try std.fmt.allocPrint(allocator, ">seq1:1-5{s}\n{s}\n", .{ case.note, case.bases }));
     }
+}
+
+test "[cli] - [get]: each orientation is exact across the lines of a non-uniform record" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    // Lines of 7, 3, 9, and 5 bases, one blank line, and a final line of 4: a side-table record.
+    const bases = "ACGTTGCAAGTCCATGGATCAGTTGACCA";
+    const fasta = ">nu\nACGTTGC\nAAG\nTCCATGGAT\n\nCAGTT\nGACCA\n";
+    const fasta_path = try writeFastaArtifact(allocator, "get-orientation-nonuniform", fasta);
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+    try support.expectCliResult(allocator, &.{ ZFASTA_BIN, "index", fasta_path }, 0, "", try std.fmt.allocPrint(allocator, "wrote {s} (1 sequences)\n", .{zfi_path}));
+
+    const Span = struct { start: usize, end: usize };
+    for ([_]Span{ .{ .start = 1, .end = 29 }, .{ .start = 6, .end = 12 }, .{ .start = 7, .end = 8 }, .{ .start = 18, .end = 25 }, .{ .start = 29, .end = 29 } }) |span| {
+        const forward = bases[span.start - 1 .. span.end];
+        const complement = try allocator.alloc(u8, forward.len);
+        for (forward, complement) |base, *out| out.* = switch (base) {
+            'A' => 'T',
+            'C' => 'G',
+            'G' => 'C',
+            'T' => 'A',
+            else => unreachable,
+        };
+        const reversed = try allocator.dupe(u8, forward);
+        std.mem.reverse(u8, reversed);
+        const reverse_complement = try allocator.dupe(u8, complement);
+        std.mem.reverse(u8, reverse_complement);
+        const region = try std.fmt.allocPrint(allocator, "nu:{d}-{d}", .{ span.start, span.end });
+        const cases = [_]struct { flag: []const u8, want: []const u8 }{
+            .{ .flag = "--rc", .want = reverse_complement },
+            .{ .flag = "--complement-only", .want = complement },
+            .{ .flag = "--reverse-only", .want = reversed },
+        };
+        for (cases) |case| {
+            try expectCliSuccess(allocator, &.{ ZFASTA_BIN, "get", fasta_path, region, case.flag }, try std.fmt.allocPrint(allocator, ">{s}\n{s}\n", .{ region, case.want }));
+        }
+    }
+}
+
+test "[cli] - [get]: the complement guard samples each record's first bases and skips gaps" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    // `ADKTNVKAAW` (bases 6-15) is all nucleotide letters inside a protein.
+    const fasta = ">prot\nMKVLAADKTNVKAAWLLQHRSTEFIL\n>gap\nACGTACGT--------\n";
+    const fasta_path = try writeFastaArtifact(allocator, "get-complement-sample", fasta);
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+    try support.expectCliResult(allocator, &.{ ZFASTA_BIN, "index", fasta_path }, 0, "", try std.fmt.allocPrint(allocator, "wrote {s} (2 sequences)\n", .{zfi_path}));
+    for ([_][]const []const u8{
+        &.{ ZFASTA_BIN, "get", fasta_path, "prot:6-15", "--rc" },
+        &.{ ZFASTA_BIN, "get", fasta_path, "prot:6-15", "prot", "--rc" },
+        &.{ ZFASTA_BIN, "get", fasta_path, "prot:6-15", "--complement-only" },
+    }) |argv| try support.expectCliFailureCode(allocator, argv, .@"transform.complement_on_protein");
+    try expectCliSuccess(allocator, &.{ ZFASTA_BIN, "get", fasta_path, "gap", "--rc" }, ">gap\n--------ACGTACGT\n");
+    try expectCliSuccess(allocator, &.{ ZFASTA_BIN, "get", fasta_path, "prot:6-15", "--reverse-only" }, ">prot:6-15\nWAAKVNTKDA\n");
 }
 
 test "[cli] - [get bed]: annotations describe the composed orientation" {
@@ -984,9 +1046,10 @@ test "[failure] - [get diagnostics]: captures the actual protein sample and sour
         .orientation = main.getter.Orientation.complementOnly(),
     }, &failure));
     const detail = failure.primary().?.details.@"transform.complement_on_protein";
-    try std.testing.expectEqual(@as(u32, 10), detail.sample.symbols);
+    // The sample is the record's first bases (all 51 here), not the 10 requested.
+    try std.testing.expectEqual(@as(u32, 51), detail.sample.symbols);
     try std.testing.expectEqual(@as(?u64, 1), detail.sample.request);
-    try std.testing.expectEqual(diagnostics.Interval{ .start = 1, .end = 10 }, detail.sample.interval.?);
+    try std.testing.expectEqual(diagnostics.Interval{ .start = 1, .end = 51 }, detail.sample.interval.?);
     try std.testing.expect(detail.transform.complement and !detail.transform.reverse);
     try std.testing.expectEqualStrings("sp|P12345|PROT_HUMAN", failure.preview(detail.identifier.?));
     try std.testing.expectEqual(.not_started, failure.outputs.stdout.state);
@@ -1182,14 +1245,24 @@ test "[cli] - [get]: many .zfi lookups keep every record's bytes, uniform or not
     var fasta: std.ArrayList(u8) = .empty;
     var names: std.ArrayList(u8) = .empty;
     var expected: std.ArrayList(u8) = .empty;
+    // Each record's 10 bases spell its ordinal in base 4, so a lookup that returns another record's bytes fails.
+    var bases: [600][10]u8 = undefined;
+    for (&bases, 0..) |*seq, i| {
+        var rest = i;
+        for (seq) |*base| {
+            base.* = "ACGT"[rest % 4];
+            rest /= 4;
+        }
+    }
     for (0..600) |i| {
+        const seq: []const u8 = &bases[i];
         try fasta.print(allocator, ">rec{d}\n", .{i});
-        if (i % 3 == 0) try fasta.appendSlice(allocator, "ACG\nTACGT\nAC\n") else try fasta.appendSlice(allocator, "ACGT\nACGT\nAC\n");
+        if (i % 3 == 0) try fasta.print(allocator, "{s}\n{s}\n{s}\n", .{ seq[0..3], seq[3..8], seq[8..] }) else try fasta.print(allocator, "{s}\n{s}\n{s}\n", .{ seq[0..4], seq[4..8], seq[8..] });
     }
     for (0..600) |k| {
         const i = (k * 7) % 600;
         try names.print(allocator, "rec{d}\n", .{i});
-        try expected.print(allocator, ">rec{d}\n{s}\n", .{ i, if (i % 3 == 0) "ACGTACGTAC" else "ACGTACGTAC" });
+        try expected.print(allocator, ">rec{d}\n{s}\n", .{ i, &bases[i] });
     }
     const fasta_path = try writeFastaArtifact(allocator, "get-many-lookups", fasta.items);
     defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};

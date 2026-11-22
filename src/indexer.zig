@@ -12,6 +12,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const index_format = @import("index_format.zig");
 const fasta = @import("fasta.zig");
+const platform = @import("platform.zig");
 const diagnostics = @import("diagnostics");
 
 pub const INDEX_READ_BUFFER_BYTES = 256 * 1024;
@@ -19,7 +20,6 @@ pub const INDEX_READ_BUFFER_BYTES = 256 * 1024;
 pub const MAX_INDEX_NAME_LEN = std.math.maxInt(u16);
 
 const ScanOptions = struct {
-    max_name_len: ?usize = null,
     collect_side_tables: bool = false,
     require_initial_header: bool = false,
     failure: *diagnostics.Failure,
@@ -37,6 +37,7 @@ pub const FastaRecordEmit = struct {
     name: []const u8,
     source_reference: ?*const diagnostics.Reference = null,
     nonuniform_reason: diagnostics.NonuniformReason = .nonuniform_layout,
+    nonuniform_line: ?diagnostics.Geometry = null,
     uses_uniform_formula: bool,
     side_table: []const u8 = &.{},
 };
@@ -160,21 +161,41 @@ pub fn scanFastaReader(
     defer if (options.collect_side_tables) state.side_table.deinit(allocator);
     var record_count: u32 = 0;
     var emitter = IndexEmitter(@TypeOf(ctx), emitRecord){ .ctx = ctx, .record_count = &record_count, .diag = state.diag };
-    const max_name_len = @min(options.max_name_len orelse MAX_INDEX_NAME_LEN, MAX_INDEX_NAME_LEN);
+    const max_name_len: usize = MAX_INDEX_NAME_LEN;
     var file_offset: u64 = 0;
+    // Lines before the first header may hold only spaces, tabs, and CR, as validate allows.
+    var preamble = options.require_initial_header;
+    var preamble_line_start: u64 = 0;
 
     while (true) {
         var read_diag = state.diag;
         read_diag.at = .{ .source = .fasta, .location = .{ .offset = file_offset } };
         const n = reader.readSliceShort(read_buf) catch |err| return read_diag.fail(diagnostics.readFailure(read_buf.len, null), .read, .fasta, err);
         if (n == 0) break;
-        if (file_offset == 0 and options.require_initial_header and read_buf[0] != '>') {
-            return read_diag.fail(.{ .@"index.initial_header_required" = .{ .byte = read_buf[0] } }, .scan, .fasta, null);
+        if (preamble) {
+            for (read_buf[0..n], 0..) |byte, i| {
+                const at = file_offset + i;
+                switch (byte) {
+                    ' ', '\t', '\r' => {},
+                    '\n' => preamble_line_start = at + 1,
+                    else => {
+                        if (byte == '>' and at == preamble_line_start) {
+                            preamble = false;
+                            break;
+                        }
+                        read_diag.at.location.offset = at;
+                        return read_diag.fail(.{ .@"index.initial_header_required" = .{ .byte = byte, .required_offset = preamble_line_start } }, .scan, .fasta, null);
+                    },
+                }
+            }
         }
         const next_offset = std.math.add(u64, file_offset, n) catch return read_diag.fail(.{ .@"resource.count_overflow" = .{ .counter = .source_bytes, .max_value = std.math.maxInt(u64), .current = file_offset, .increment = n } }, .scan, .fasta, null);
         try state.processChunk(read_buf[0..n], file_offset, max_name_len, &emitter, @TypeOf(emitter).emit);
         file_offset = next_offset;
     }
+
+    // Blank lines and no header: an empty FASTA, as validate reports it.
+    if (preamble) return state.diag.fail(.{ .@"fasta.no_records" = {} }, .scan, .fasta, null);
 
     if (state.active) {
         try state.emitRecord(&emitter, @TypeOf(emitter).emit);
@@ -208,7 +229,8 @@ pub fn runIndex(
     failure.sources.set(.zfi, .{ .label = .{ .borrowed = path }, .kind = .path, .suffix = .zfi });
     failure.sources.set(.stdout, .{ .label = .{ .borrowed = "stdout" }, .kind = .stream });
     const diag = Diagnostics{ .failure = failure, .format = if (options.emit_fai) .fai else .zfi };
-    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| return failure.fail(.{
+    // Opened without blocking, so a FIFO is refused by its kind instead of waiting for a writer.
+    const file = platform.openWithoutWaiting(io, path) catch |err| return failure.fail(.{
         .details = diagnostics.openFailure(err),
         .stage = .open,
         .at = .{ .source = .fasta },
@@ -216,6 +238,8 @@ pub fn runIndex(
     });
     defer file.close(io);
     const stat = file.stat(io) catch |err| return failure.fail(.{ .details = .{ .@"io.stat_failed" = {} }, .stage = .stat, .at = .{ .source = .fasta }, .cause = .{ .zig = err } });
+    // Indexing needs a regular file: offsets must address it again later.
+    if (stat.kind != .file) return failure.fail(.{ .details = .{ .@"io.invalid_path" = .{ .reason = if (stat.kind == .directory) .directory else .not_regular_file } }, .stage = .stat, .at = .{ .source = .fasta } });
     if (stat.size == 0) return failure.fail(.{ .details = .{ .@"fasta.no_records" = {} }, .stage = .stat, .at = .{ .source = .fasta } });
     if (!options.emit_fai and stat.size > index_format.MAX_ZFI_SOURCE_OFFSET) return failure.fail(.{ .details = .{ .@"resource.capacity_limit_exceeded" = .{ .capacity_role = .input_bytes, .limit = index_format.MAX_ZFI_SOURCE_OFFSET, .required = .{ .exact = stat.size } } }, .stage = .stat, .at = .{ .source = .fasta } });
     const buffers = allocator.create(IndexBuffers) catch return diag.oom(.reader_buffer, @sizeOf(IndexBuffers));
@@ -362,6 +386,7 @@ fn IndexEmitter(comptime Ctx: type, comptime emitRecord: fn (Ctx, FastaRecordEmi
                 .name = info.name,
                 .source_reference = info.reference,
                 .nonuniform_reason = info.nonuniform_reason,
+                .nonuniform_line = info.nonuniform_line,
                 .uses_uniform_formula = info.uses_uniform_formula,
                 .side_table = info.side_table,
             });
@@ -453,7 +478,12 @@ const FaiEmitBuffer = struct {
     fn emitRecord(self: *FaiEmitBuffer, emit_info: FastaRecordEmit) !void {
         if (!emit_info.uses_uniform_formula) {
             const scan_diag = self.diag.forRecord(emit_info);
-            return scan_diag.fail(.{ .@"index.nonuniform_fai" = .{ .reason = emit_info.nonuniform_reason, .observed = .{ .line_bases = emit_info.record.line_bases, .line_bytes = emit_info.record.line_bytes } } }, .scan, .fasta, null);
+            const established: diagnostics.Geometry = .{ .line_bases = emit_info.record.line_bases, .line_bytes = emit_info.record.line_bytes };
+            const facts: diagnostics.Nonuniform = if (emit_info.nonuniform_line) |offending|
+                .{ .reason = emit_info.nonuniform_reason, .expected = established, .observed = offending }
+            else
+                .{ .reason = emit_info.nonuniform_reason, .observed = established };
+            return scan_diag.fail(.{ .@"index.nonuniform_fai" = facts }, .scan, .fasta, null);
         }
         const rec = emit_info.record;
         var suffix_buf: [FAI_SUFFIX_BUFFER_BYTES]u8 = undefined;
@@ -633,12 +663,22 @@ fn sourceTimestamp(stat: std.Io.File.Stat, diag: Diagnostics) !u64 {
     return index_format.timestampToNs(stat.mtime) catch return diag.fail(.{ .@"index.source_timestamp_out_of_range" = .{ .timestamp_ns = stat.mtime.nanoseconds, .min_ns = 0, .max_ns = std.math.maxInt(u64) } }, .stat, .fasta, null);
 }
 
+/// Replacing a `.zfi` keeps its permissions, as writing over it in place would.
+fn keepPermissions(io: std.Io, dir: std.Io.Dir, path: []const u8, atomic: *std.Io.File.Atomic, diag: Diagnostics) !void {
+    const existing = dir.statFile(io, path, .{}) catch return;
+    atomic.file.setPermissions(io, existing.permissions) catch |err| return diag.fail(.{ .@"io.create_failed" = {} }, .create, .zfi, err);
+}
+
 fn noIndexableRecords(diag: Diagnostics) anyerror {
     return diag.fail(.{ .@"index.no_indexable_records" = {} }, .scan, .fasta, null);
 }
 
-fn zfiOutputPath(buffer: []u8, path: []const u8, diag: Diagnostics) ![]const u8 {
-    return std.fmt.bufPrint(buffer, "{s}.zfi", .{path}) catch return diag.fail(.{ .@"io.invalid_path" = .{ .reason = .too_long, .limit_bytes = buffer.len } }, .create, .zfi, null);
+/// A directory at the `.zfi` path fails before the scan; publishing over it could only fail after all the work.
+fn zfiOutputPath(io: std.Io, buffer: []u8, path: []const u8, diag: Diagnostics) ![]const u8 {
+    const zfi_path = std.fmt.bufPrint(buffer, "{s}.zfi", .{path}) catch return diag.fail(.{ .@"io.invalid_path" = .{ .reason = .too_long, .limit_bytes = buffer.len } }, .create, .zfi, null);
+    const existing = std.Io.Dir.cwd().statFile(io, zfi_path, .{}) catch return zfi_path;
+    if (existing.kind == .directory) return diag.fail(.{ .@"io.invalid_path" = .{ .reason = .directory } }, .create, .zfi, null);
+    return zfi_path;
 }
 
 fn retainScanCause(destination: *diagnostics.Failure, reader: *std.Io.File.Reader, writer: ?*std.Io.File.Writer) void {
@@ -696,7 +736,7 @@ fn indexFai(
 fn runIndexSmall(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, path: []const u8, options: Options, file: std.Io.File, stat: std.Io.File.Stat, diag: Diagnostics, buffers: *IndexBuffers) !u32 {
     var file_reader = file.reader(io, &buffers.file_io);
     if (options.emit_fai) return indexFai(allocator, io, environ, path, stat, &file_reader, buffers, diag);
-    const zfi_path = try zfiOutputPath(&buffers.path, path, diag);
+    const zfi_path = try zfiOutputPath(io, &buffers.path, path, diag);
     var index = scanZfiReader(allocator, &file_reader.interface, &buffers.read, .{ .require_initial_header = true, .failure = diag.failure }) catch |err| {
         retainScanCause(diag.failure, &file_reader, null);
         return err;
@@ -707,6 +747,7 @@ fn runIndexSmall(allocator: std.mem.Allocator, io: std.Io, environ: std.process.
     const mtime = try sourceTimestamp(stat, diag);
     var atomic = std.Io.Dir.cwd().createFileAtomic(io, zfi_path, .{ .replace = true }) catch |err| return diag.fail(.{ .@"io.create_failed" = {} }, .create, .zfi, err);
     defer diagnostics.discardStaged(&atomic, io, diag.failure, .zfi);
+    try keepPermissions(io, std.Io.Dir.cwd(), zfi_path, &atomic, diag);
     diag.failure.outputs.file.state = .staged;
     var output = atomic.file.writer(io, &buffers.output);
     writeZfiIndex(&output.interface, &index, stat.size, mtime) catch |err| return diag.fail(.{ .@"io.write_failed" = {} }, .write, .zfi, if (output.err) |cause| cause else err);
@@ -729,7 +770,7 @@ fn publishZfi(atomic: *std.Io.File.Atomic, io: std.Io, path: []const u8, stat: s
 fn runIndexLarge(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, path: []const u8, options: Options, file: std.Io.File, stat: std.Io.File.Stat, diag: Diagnostics, buffers: *IndexBuffers) !u32 {
     var reader = file.reader(io, &buffers.file_io);
     if (options.emit_fai) return indexFai(allocator, io, environ, path, stat, &reader, buffers, diag);
-    const zfi_path = try zfiOutputPath(&buffers.path, path, diag);
+    const zfi_path = try zfiOutputPath(io, &buffers.path, path, diag);
     var deferred = diag;
     deferred.deferred = true;
     deferred.at = .{ .source = .fasta };
@@ -937,6 +978,7 @@ const StreamedCatalog = struct {
         if (self.atomic_file == null) {
             self.atomic_file = self.dir.createFileAtomic(self.io, self.path, .{ .replace = true }) catch |err| return self.diag.fail(.{ .@"io.create_failed" = {} }, .create, .zfi, err);
             self.diag.failure.outputs.file.state = .staged;
+            try keepPermissions(self.io, self.dir, self.path, &self.atomic_file.?, self.diag);
         }
         self.atomic_file.?.file.writePositionalAll(self.io, self.records[0..self.buffered], @sizeOf(ZfiHeader) + self.record_bytes - self.buffered) catch |err| return self.diag.fail(.{ .@"io.write_failed" = {} }, .write, .zfi, err);
         self.buffered = 0;
@@ -1280,6 +1322,7 @@ test "[edge] - [fasta scanner]: rejects excess records before emitting" {
         .uses_uniform_formula = true,
         .side_table = &.{},
         .nonuniform_reason = .nonuniform_layout,
+        .nonuniform_line = null,
     };
     var ctx = Ctx{};
     var count: u32 = std.math.maxInt(u32) - 1;
@@ -1365,7 +1408,7 @@ test "[integration] - [index]: detects path replacement" {
     failure.reset(.index);
     try std.testing.expectError(error.InputChanged, checkSourceUnchanged(std.testing.io, tmp.dir, "source.fa", before, .{ .failure = &failure }));
     const details = failure.primary().?.details.@"input.changed";
-    try std.testing.expect(details.changed_fields.size or details.changed_fields.mtime);
+    try std.testing.expect(details.changed_fields.size);
     try std.testing.expectEqual(before.size, details.before.bytes.?);
     try std.testing.expectEqual(before.mtime.nanoseconds, details.before.mtime_ns.?);
     try std.testing.expect(details.after != null);
@@ -1725,7 +1768,7 @@ test "[failure] - [index diagnostics]: reports the known ZFI path buffer limit" 
     var failure: diagnostics.Failure = undefined;
     failure.reset(.index);
     var buffer: [8]u8 = undefined;
-    try std.testing.expectError(error.Io, zfiOutputPath(&buffer, "input", .{ .failure = &failure }));
+    try std.testing.expectError(error.Io, zfiOutputPath(std.testing.io, &buffer, "input", .{ .failure = &failure }));
     const primary = failure.primary().?;
     try std.testing.expectEqual(diagnostics.Code.@"io.invalid_path", primary.code());
     try std.testing.expectEqual(diagnostics.Stage.create, primary.stage);

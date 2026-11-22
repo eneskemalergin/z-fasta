@@ -2,7 +2,7 @@
 # Validate benchmark: correctness against index, samtools faidx, and seqkit, then performance.
 # Usage: bash bench/validate/run.sh [options]   (ZFASTA, ZEBRAC select the binaries)
 #   --runs N --warmup N --duration MS      sampling (defaults 5, 3, 5000)
-#   --skip-tests --skip-benchmarks --skip-report   (--skip-messy is accepted; no messy section)
+#   --skip-tests --skip-benchmarks --skip-report   (--skip-messy is accepted and ignored; the messy checks always run)
 # Results go to results/, the report to REPORT.md.
 
 set -euo pipefail
@@ -271,10 +271,12 @@ check_real_flags() {
     record flags "$ds" "--index=PATH" "fai; passed" \
         "$(validate_value "$view" 'v["index"]["format"] + "; " + v["checks"]["index_match"]' "--index=$WORK_DIR/explicit_$ds.fai")"
 
-    local before after code
-    before="$(stat -c '%s %Y' "$file")"
-    code="$("$ZFASTA" validate --error-format=json --fix -o "$file" "$file" 2>&1 > /dev/null | "$PYTHON" -c 'import json, sys; print(json.load(sys.stdin)["failure"]["primary"]["code"])')"
-    after="$(stat -c '%s %Y' "$file")"
+    # The output-is-input refusal runs on a small copy, so a regression cannot rewrite the dataset.
+    local before after code refuse="$WORK_DIR/refuse_$ds.fa"
+    head -n 200 "$file" > "$refuse"
+    before="$(stat -c '%s %Y' "$refuse") $(sha256sum < "$refuse")"
+    code="$("$ZFASTA" validate --error-format=json --fix -o "$refuse" "$refuse" 2>&1 > /dev/null | "$PYTHON" -c 'import json, sys; print(json.load(sys.stdin)["failure"]["primary"]["code"])')"
+    after="$(stat -c '%s %Y' "$refuse") $(sha256sum < "$refuse")"
     record flags "$ds" "--error-format=json" "repair.output_is_input; unchanged" "$code; $( [[ "$before" == "$after" ]] && echo unchanged || echo changed )"
 }
 
@@ -516,6 +518,9 @@ run_report() {
 }
 
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+if $DO_BENCHMARKS; then
+    bench_prepare_subject || exit 1
+fi
 TESTS_TSV="$RESULTS_DIR/tests_${TIMESTAMP}.tsv"
 mkdir -p "$RESULTS_DIR"
 

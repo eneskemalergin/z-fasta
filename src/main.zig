@@ -426,7 +426,12 @@ fn runValidateCmd(cli: *Cli) diagnostics.Error!u8 {
         if (std.mem.eql(u8, arg, "--strict")) options.strict = true else if (std.mem.eql(u8, arg, "--json")) options.json = true else if (std.mem.eql(u8, arg, "--fix")) options.fix = true else if (std.mem.eql(u8, arg, "--index") or std.mem.startsWith(u8, arg, "--index=")) {
             if (options.index != null) return cli.fail(.{ .@"usage.repeated_option" = .{ .option = .index } });
             options.index = try indexSelection(cli, arg);
-        } else if (std.mem.eql(u8, arg, "-o")) options.output_path = try cli.value(.output, .path) else if (std.mem.eql(u8, arg, "--custom-alphabet")) options.rules.custom_alphabet = try cli.value(.custom_alphabet, .alphabet) else if (std.mem.eql(u8, arg, "--schema")) {
+        } else if (std.mem.eql(u8, arg, "-o")) {
+            // `-` names stdin as the input; as the output it would silently create a file named `-`.
+            const output = try cli.value(.output, .path);
+            if (std.mem.eql(u8, output, "-")) return cli.fail(.{ .@"usage.invalid_option_value" = .{ .option = .output, .expected = .path, .value = cli.failure.retain(output, 32) } });
+            options.output_path = output;
+        } else if (std.mem.eql(u8, arg, "--custom-alphabet")) options.rules.custom_alphabet = try cli.value(.custom_alphabet, .alphabet) else if (std.mem.eql(u8, arg, "--schema")) {
             const raw = try cli.value(.schema, .schema);
             options.rules.schema = if (std.mem.eql(u8, raw, "uniprot")) .uniprot else if (std.mem.eql(u8, raw, "refseq")) .refseq else return cli.fail(.{ .@"usage.invalid_option_value" = .{ .option = .schema, .expected = .schema, .value = cli.failure.retain(raw, 32) } });
         } else if (std.mem.eql(u8, arg, "--type")) {
@@ -469,7 +474,10 @@ fn indexSelection(cli: *Cli, arg: []const u8) diagnostics.Error!index_format.Ind
 
 fn positiveValue(cli: *Cli, option: diagnostics.Argument) diagnostics.Error!u64 {
     const raw = try cli.value(option, .positive_usize);
-    const value = std.fmt.parseInt(u64, raw, 10) catch 0;
+    const value = switch (bed_parser.parseCoordinate(raw)) {
+        .value => |parsed| parsed,
+        .invalid, .out_of_range => 0,
+    };
     if (value == 0) return cli.fail(.{ .@"usage.invalid_option_value" = .{ .option = option, .expected = .positive_usize, .value = cli.failure.retain(raw, 32) } });
     return value;
 }

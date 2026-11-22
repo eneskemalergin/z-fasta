@@ -56,11 +56,11 @@ No. It requires `-o` and refuses a destination that resolves to the input.
 
 ## Does z-fasta support FASTQ?
 
-No. FASTQ is coming as a separate project, z-fastq, built around the same priorities: speed, low memory use, and portability.
+No. FASTQ has its own project, [z-fastq](https://github.com/eneskemalergin/z-fastq), built around the same priorities: speed, low memory use, and portability.
 
 ## Does z-fasta support compressed FASTA?
 
-No. Current input is uncompressed FASTA only. I have not invested the time required to optimize deflate or write a separate decompressor for this project.
+No. Current input is uncompressed FASTA only, and gzip or BGZF input has no release target yet. [Zipir](https://github.com/eneskemalergin/zipir), the gzip implementation z-fastq reads through, is where that work would start.
 
 ## Does z-fasta publish Windows binaries?
 
@@ -76,7 +76,7 @@ The requested sample classified as protein. Complement-based transforms are nucl
 
 ## How is sequence type detected?
 
-Case-insensitive IUPAC nucleotide symbols must be strictly more than 90 percent of counted symbols. Stats uses the full indexed population, validate samples the first 100000 symbols unless `--type` names the alphabet, and GET samples up to 256 requested bases per record for complement eligibility.
+Case-insensitive IUPAC nucleotide symbols must be strictly more than 90 percent of counted symbols. Stats uses the full indexed population, validate samples the first 100000 symbols unless `--type` names the alphabet, and GET samples each record's first 256 bases for complement eligibility. Stats and GET leave gap (`-`) and stop (`*`) bytes out of the count, so a gapped nucleotide alignment reads as nucleotide. Validate counts them, since it is choosing the alphabet to check against and only the protein alphabet holds `-` and `*`; pass `--type any` or `--custom-alphabet` for alignments.
 
 ## Can names or BED come from stdin?
 
@@ -89,6 +89,10 @@ No. GET can write earlier valid records before a later names or BED request fail
 ## Where does the GET summary go?
 
 Stderr after successful stdout output. It is suppressed on failure.
+
+## How do I cite z-fasta?
+
+Use the "Cite this repository" button on the repository page; it reads `CITATION.cff` and gives APA and BibTeX. Cite the version you ran, from `z-fasta --version`.
 
 ## How do I report a problem safely?
 

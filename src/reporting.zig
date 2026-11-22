@@ -62,10 +62,12 @@ pub const Validation = struct {
         return result;
     }
 
+    /// An error found is final, so `invalid` wins over `incomplete`; without one, an unfinished
+    /// scan cannot claim `clean` or `warnings`.
     pub fn outcome(self: *const Validation) Outcome {
-        if (self.completion != .complete) return .incomplete;
         const all = self.totals(null);
         if (all.errors != 0) return .invalid;
+        if (self.completion != .complete) return .incomplete;
         return if (all.warnings != 0) .warnings else .clean;
     }
 
@@ -132,7 +134,7 @@ pub fn writeJson(writer: *std.Io.Writer, failure: *const diagnostics.Failure, op
     }
     var json: std.json.Stringify = .{ .writer = writer };
     try json.beginObject();
-    try field(&json, "catalog_revision", "0.4.0-1");
+    try field(&json, "catalog_revision", "0.4.1-1");
     try json.objectField("producer");
     try json.beginObject();
     try field(&json, "name", "z-fasta");
@@ -244,13 +246,23 @@ pub fn writeValidationText(writer: *std.Io.Writer, failure: *const diagnostics.F
     try writer.writeByte('\n');
 }
 
+/// The bytes one input byte takes when escaped: `"` and `\` get a backslash, other printable
+/// ASCII stays, and everything else becomes `\xHH`.
+fn escapedLen(byte: u8) usize {
+    return switch (byte) {
+        '"', '\\' => 2,
+        0x20...0x21, 0x23...0x5b, 0x5d...0x7e => 1,
+        else => 4,
+    };
+}
+
 pub fn writeEscapedBytes(writer: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Error!void {
-    for (bytes) |byte| switch (byte) {
-        '"', '\\' => {
+    for (bytes) |byte| switch (escapedLen(byte)) {
+        1 => try writer.writeByte(byte),
+        2 => {
             try writer.writeByte('\\');
             try writer.writeByte(byte);
         },
-        0x20...0x21, 0x23...0x5b, 0x5d...0x7e => try writer.writeByte(byte),
         else => try writer.print("\\x{x:0>2}", .{byte}),
     };
 }
@@ -473,7 +485,15 @@ fn jsonValidation(json: *std.json.Stringify, failure: *const diagnostics.Failure
                 try json.endObject();
             } else try json.write(null);
             try json.objectField("data");
-            try jsonDetails(json, failure, first.details);
+            if (first.details == .@"fasta.duplicate_identifier") {
+                // The scan keeps the identifier once, on `first`; the duplicate's own field repeats it.
+                try json.beginObject();
+                try json.objectField("identifier");
+                if (first.identifier) |identifier| {
+                    try writeOpaque(json, identifier.slice(), identifier.original_bytes, false, identifier.len != identifier.original_bytes);
+                } else try json.write(null);
+                try json.endObject();
+            } else try jsonDetails(json, failure, first.details);
             try json.endObject();
         } else try json.write(null);
         try json.endObject();
@@ -597,11 +617,7 @@ fn textOpaque(writer: *std.Io.Writer, bytes: []const u8, original: u128, lower_b
 fn escapedPrefix(bytes: []const u8, width: usize) []const u8 {
     var escaped_bytes: usize = 0;
     for (bytes, 0..) |byte, index| {
-        const cost: usize = switch (byte) {
-            '"', '\\' => 2,
-            0x20...0x21, 0x23...0x5b, 0x5d...0x7e => 1,
-            else => 4,
-        };
+        const cost = escapedLen(byte);
         if (escaped_bytes + cost > width) return bytes[0..index];
         escaped_bytes += cost;
     }
@@ -644,9 +660,12 @@ fn textValue(writer: *std.Io.Writer, failure: *const diagnostics.Failure, value:
             .at_least => |number| try writer.print("at least {d}", .{number}),
         }
     } else if (T == diagnostics.RepairBlock) {
-        try writer.print("reason_code={s} ", .{@tagName(value.blocker.code())});
+        try writer.print("reason_code={s}", .{@tagName(value.blocker.code())});
         switch (value.blocker) {
-            inline else => |facts| try textValue(writer, failure, facts),
+            inline else => |facts| if (@TypeOf(facts) != void) {
+                try writer.writeByte(' ');
+                try textValue(writer, failure, facts);
+            },
         }
         try writer.print(" repair_policy={s}", .{@tagName(value.repair_policy)});
     } else switch (@typeInfo(T)) {
@@ -825,6 +844,7 @@ fn message(code: diagnostics.Code) []const u8 {
         .@"fasta.no_records" => "No FASTA records were found.",
         .@"fasta.content_before_header" => "Content appears before the first FASTA header.",
         .@"fasta.header_control_byte" => "Header contains a prohibited control byte.",
+        .@"fasta.sequence_header_marker" => "Sequence line contains '>', which starts a header at a line start.",
         .@"fasta.sequence_control_byte" => "Sequence contains a prohibited control byte.",
         .@"fasta.empty_record" => "FASTA record contains no sequence symbols.",
         .@"fasta.empty_identifier" => "Header has an empty identifier.",
@@ -839,7 +859,7 @@ fn message(code: diagnostics.Code) []const u8 {
         .@"format.leading_bom" => "File starts with a UTF-8 BOM.",
         .@"format.missing_terminal_newline" => "Nonempty file has no terminal newline.",
         .@"format.mixed_line_endings" => "File mixes LF and CRLF line endings.",
-        .@"index.initial_header_required" => "Indexing requires a FASTA header at byte zero.",
+        .@"index.initial_header_required" => "Indexing requires a FASTA header on the first line that is not blank.",
         .@"index.no_indexable_records" => "Every record is empty.",
         .@"index.identifier_too_long" => "Identifier exceeds the selected index limit.",
         .@"index.sequence_line_too_long" => "Sequence line exceeds its width limit.",

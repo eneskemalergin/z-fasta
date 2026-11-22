@@ -4,6 +4,45 @@
 
 All notable changes to z-fasta will be documented in this file.
 
+## [0.4.1]
+
+A maintenance release: fixes for what turned up after 0.4.0, documentation that matches the code, and links to z-fastq. `.zfi` files are unchanged, so no re-index is needed. The diagnostics catalog moves to `0.4.1-1`.
+
+### Added
+
+- **Citation file and social preview.** `CITATION.cff` enables GitHub's "Cite this repository"; `assets/social-preview.png` is built by `tools/social_preview.sh`.
+- **`fasta.sequence_header_marker`.** A `validate` warning for each `>` inside a sequence line, which a rewrapped copy could turn into a header; `--fix` refuses such a file.
+
+### Changed
+
+- **Input rules.**
+  - Blank lines before the first header are skipped by `index` and `RecordReader`, as `validate` skips them; a file of only blank lines reports `fasta.no_records`.
+  - Region bounds and numeric options are ASCII digits only: `chr1:1_0-2_0`, `chr1:+2-+4`, and `--width +4` are no longer read as numbers.
+  - `.fai` rows may end in CRLF, as samtools allows.
+- **Sequence type.**
+  - `get`'s complement guard samples each record's first 256 bases, so every request on a record gets the same verdict.
+  - `get` and `stats` leave gap (`-`) and stop (`*`) bytes out of the count, so a gapped nucleotide alignment is nucleotide.
+- **`validate`.**
+  - Any error makes the outcome `invalid`, even when the duplicate check stopped at its budget.
+  - `-o -` is refused instead of creating a file named `-`.
+  - A replaced output keeps its permissions; so does a `.zfi` that `index` replaces.
+- **`stats` escapes names and the path** as diagnostics do (closes [#40](https://github.com/eneskemalergin/z-fasta/issues/40)).
+- **Docs.** The README and wiki link [z-fastq](https://github.com/eneskemalergin/z-fastq) and [Zipir](https://github.com/eneskemalergin/zipir), and say where z-fasta and samtools differ.
+
+### Fixed
+
+- **Performance.** Records sharing one name index in linear time instead of quadratic: 200,000 records named `a` take milliseconds instead of about 14 seconds (closes [#39](https://github.com/eneskemalergin/z-fasta/issues/39)).
+- **Crashes and memory safety.** A damaged `.zfi` fails with its coded error in every build mode.
+- **Inputs that are not regular files** (closes [#41](https://github.com/eneskemalergin/z-fasta/issues/41)).
+  - A pipe, FIFO, or directory as the FASTA or a sidecar fails with `io.invalid_path` instead of `fasta.no_records`, without waiting on a FIFO.
+  - A directory at an output path fails before any work.
+  - A dangling `.zfi` link blocks `.fai` fallback instead of being treated as absent.
+- **Diagnostics.**
+  - `validate --index` goes on past an identifier too long for any index (closes [#42](https://github.com/eneskemalergin/z-fasta/issues/42)).
+  - `index.nonuniform_fai` reports the offending line as `observed` and the record's width as `expected`.
+  - `fasta.duplicate_identifier` fills `data.identifier`.
+  - `validate --json --fix` reports a discarded output as `aborted`, matching stderr.
+
 ## [0.4.0]
 
 The 0.4.0 update is a huge one. It makes z-fasta also a rudimentary library, so other Zig projects can take it as a package dependency. Another large change is the error codes and diagnostic flexibility I wanted to provide: begun in 0.3.5, they now cover `validate` too, which is rebuilt as one streaming pass. They have ballooned the binary size, but I believe they serve pipeline usage better and make it easy to track what went wrong. Alongside this I've made various improvements, especially around speed and memory footprint (`get`, `stats`, and `validate --fix` are several times faster), and fixed the issues and bugs that I could find.

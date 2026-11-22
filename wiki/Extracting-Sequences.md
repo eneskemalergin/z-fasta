@@ -31,7 +31,7 @@ The output header uses the indexed identifier, not the original description.
 z-fasta get genome.fa chr1:1000-2000
 ```
 
-Regions are 1-based inclusive. `1000-2000` contains 1001 symbols.
+Regions are 1-based inclusive. `1000-2000` contains 1001 symbols. Bounds are plain ASCII digits; a suffix with a sign, `_`, or spaces does not parse as a range and stays part of the name.
 
 Open-ended ranges continue through record end:
 
@@ -113,7 +113,7 @@ These flags are mutually exclusive.
 - `--reverse-only`: reverse order without complementing.
 - `--complement-only`: complement without changing order.
 
-The complement map covers uppercase and lowercase IUPAC nucleotide symbols and maps `U/u` to `A/a`. Unknown bytes pass through the table, but complement-based transforms first classify up to 256 requested bases. Protein classification is rejected. Reverse-only remains available for protein.
+The complement map covers uppercase and lowercase IUPAC nucleotide symbols and maps `U/u` to `A/a`. Unknown bytes pass through the table, but complement-based transforms first classify the record's first 256 bases (the whole record when shorter), and fail when that sample classifies as protein. Every request on a record gets the same verdict, whatever region it asks for. Gap (`-`) and stop (`*`) bytes are left out of the count, so a gapped nucleotide alignment can be complemented. Reverse-only remains available for protein.
 
 ## Annotate transformed headers
 
@@ -141,11 +141,13 @@ z-fasta get genome.fa --names ids.txt --summary \
 
 The summary includes region count, total bases, elapsed seconds, and regions per second. Timing starts before index loading and includes request acquisition.
 
-If any request fails, no summary is printed. Names and BED streams may already have emitted complete earlier records before a later failure.
+If any request fails, no summary is printed. Names and BED streams may already have written output before a later failure; output is flushed in 64 KiB blocks, so it can end inside a record.
 
 ## Output compatibility
 
-The verified positional path matches `samtools faidx` output bytes, including headers, end clamping, request order, and 60-symbol wrapping. Names and BED behavior has separate peer and project correctness coverage.
+Positional output has the same bases as `samtools faidx`, with end clamping and request order alike. Two things differ: GET always wraps at 60 symbols, while samtools wraps at the record's own line width; and GET writes a canonical header (`chr1:3-` prints as `>chr1:3-14`, `chr1:03-05` as `>chr1:3-5`), while samtools echoes the request text. For a FASTA wrapped at 60 and canonical requests the bytes are identical. Names and BED behavior has separate peer and project correctness coverage.
+
+GET copies the symbols it indexed, so a `>` byte inside a sequence line can land at the start of an output line, where a FASTA reader takes it for a header. `validate` reports each such byte as `fasta.sequence_header_marker`.
 
 ## Related pages
 

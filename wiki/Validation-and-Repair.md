@@ -51,11 +51,12 @@ Validate reads FASTA the way `index` does, so the two agree on what a symbol and
   - `fasta.content_before_header`, per line;
   - `fasta.header_control_byte` and `fasta.sequence_control_byte`, per byte;
   - `fasta.empty_identifier`, per record;
-  - `fasta.identifier_too_long`, per record: an identifier over 65,535 bytes, which no `.zfi` or `.fai` can hold; it takes no part in the duplicate check;
+  - `fasta.identifier_too_long`, per record: an identifier over 65,535 bytes, which no `.zfi` or `.fai` can hold; it takes no part in the duplicate check or the index comparison;
   - `fasta.duplicate_identifier`, per record after the first;
   - `sequence.invalid_symbol`, per byte.
 - Warnings:
   - `fasta.empty_record` and `fasta.long_header`, per record;
+  - `fasta.sequence_header_marker`, per `>` byte inside a sequence line, which `index` and `get` read as a symbol but a rewrapped copy could place at a line start, where it starts a header;
   - `header.convention_mismatch`, per record, with `--schema`;
   - `format.sequence_whitespace` and `format.blank_sequence_line`, per line;
   - `format.inconsistent_wrapping`, per record;
@@ -121,7 +122,7 @@ z-fasta validate --json genome.fa
 
 `--json` prints one JSON object on stdout: the envelope described in [Error diagnostics](Error-Diagnostics), with `validation` filled. It holds:
 
-- `outcome`: `clean`, `warnings`, `invalid`, or `incomplete`;
+- `outcome`: `clean`, `warnings`, `invalid`, or `incomplete`. Any error makes it `invalid`, even when the scan did not finish; otherwise an unfinished scan is `incomplete`;
 - `completion` and the selected `policy`;
 - `checks`: `passed`, `warnings`, `failed`, or `incomplete` for structure, identifiers, alphabet, and format;
 - what was `examined`, finding totals, totals by category, and the records with errors and with warnings;
@@ -151,7 +152,14 @@ z-fasta validate --json genome.fa
       "original_bytes": "4"
     },
     "related": { "offset": "1", "line": "1", "column": "2", "record": "1" },
-    "data": { "identifier": null }
+    "data": {
+      "identifier": {
+        "encoding": "utf8",
+        "value": "chr1",
+        "truncated": false,
+        "original_bytes": "4"
+      }
+    }
   }
 }
 ```
@@ -205,7 +213,7 @@ Repair writes in the same pass as validation:
 Duplicate identifiers, symbols outside the alphabet, and empty records are copied as they are and still reported. The report describes the input; after a published repair, the exit status leaves out the format warnings the copy no longer has.
 
 > [!WARNING]
-> Repair never overwrites the input, including an alternate path that resolves to the same existing file. It writes a separate destination through atomic replacement. Publication is refused if required output identity is unknown or an observed source size or mtime changes. Those observations do not prove byte-for-byte source identity. A refusal preserves the previous destination; replacing a separate hard-link path leaves the input inode intact.
+> Repair never overwrites the input, including an alternate path that resolves to the same existing file. It writes a separate destination through atomic replacement, which keeps an existing destination's permissions; `-o -` is refused, since `-` names stdin only as the input. Publication is refused if required output identity is unknown or an observed source size or mtime changes. Those observations do not prove byte-for-byte source identity. A refusal preserves the previous destination; replacing a separate hard-link path leaves the input inode intact.
 
 ## What repair refuses
 
@@ -213,7 +221,8 @@ Repair refuses, and leaves any existing destination unchanged, when the file has
 
 - no records;
 - content before the first header, which the copy could not keep;
-- a control byte in a header or a sequence line.
+- a control byte in a header or a sequence line;
+- a `>` byte inside a sequence line (`fasta.sequence_header_marker`), which wrapping could move to a line start.
 
 The report is still printed, and the refusal goes to stderr as `repair.blocked` with the first blocking finding.
 

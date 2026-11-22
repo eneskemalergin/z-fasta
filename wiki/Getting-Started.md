@@ -81,7 +81,7 @@ z-fasta get example.fa chr1:3-8 --rc --annotate-rc
 ACGTAC
 ```
 
-Complement-based transforms classify up to 256 requested bases and reject protein records.
+Complement-based transforms classify each record's first 256 bases and reject protein records.
 
 ## 7. Print statistics
 

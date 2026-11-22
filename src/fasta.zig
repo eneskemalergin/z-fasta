@@ -120,17 +120,25 @@ pub const ProteinSymbols = struct {
 fn isDenseLineGeometry(line_bases: u32, line_bytes: u32) bool {
     if (line_bases == 0 or line_bytes <= line_bases) return false;
     const sep_len = line_bytes - line_bases;
-    return (sep_len == 1 or sep_len == 2) and line_bases + sep_len == line_bytes;
+    return sep_len == 1 or sep_len == 2;
 }
 
 pub fn countDenseLines(comptime Symbols: type, data: []const u8, start: usize, line_bases: u32, line_bytes: u32) usize {
     return countDenseLinesWith(DENSE_VECTOR_LEN, Symbols, data, start, line_bases, line_bytes);
 }
 
+/// Counts every symbol. `validate` uses it to choose an alphabet, and only the protein alphabet
+/// holds `-` and `*`.
 pub fn detectType(counts: *const [256]u64, total: u64) SequenceType {
     var nucleotides: u64 = 0;
     for (IUPAC_NUCLEOTIDE_LETTERS) |letter| nucleotides += counts[letter] + counts[std.ascii.toLower(letter)];
     return typeFromCounts(nucleotides, total);
+}
+
+/// Leaves gap (`-`) and stop (`*`) bytes out of the count, so a gapped nucleotide alignment reads
+/// as nucleotide. `stats` and `get`'s complement guard classify this way.
+pub fn detectSequenceType(counts: *const [256]u64, total: u64) SequenceType {
+    return detectType(counts, total -| (counts['-'] + counts['*']));
 }
 
 pub fn typeFromCounts(nucleotides: u64, total: u64) SequenceType {
@@ -221,6 +229,9 @@ pub const RecordReader = struct {
     headers: u64 = 0,
     byte: [1]u8 = undefined,
     byte_held: bool = false,
+    /// Position in the lines before the first header, which may hold only spaces, tabs, and CR.
+    preamble_line: u64 = 1,
+    preamble_line_start: u64 = 0,
 
     pub const Record = struct {
         id: []const u8,
@@ -253,12 +264,20 @@ pub const RecordReader = struct {
                         self.finish();
                         return null;
                     }
-                    if (bytes[0] != '>') return self.failure.fail(.{
-                        .details = .{ .@"fasta.content_before_header" = .{ .content_bytes = .{ .at_least = 1 } } },
-                        .stage = .scan,
-                        .at = .{ .source = .fasta, .location = .{ .offset = 0, .line = 1, .column = 1 } },
-                    });
-                    self.startHeader();
+                    switch (bytes[0]) {
+                        '>' => if (self.offset == self.preamble_line_start) self.startHeader() else return self.contentBeforeHeader(),
+                        ' ', '\t', '\r' => {
+                            self.consume(1);
+                            continue;
+                        },
+                        '\n' => {
+                            self.consume(1);
+                            self.preamble_line += 1;
+                            self.preamble_line_start = self.offset;
+                            continue;
+                        },
+                        else => return self.contentBeforeHeader(),
+                    }
                 },
             }
             const header_len = try self.readHeader();
@@ -366,6 +385,15 @@ pub const RecordReader = struct {
         self.offset +|= count;
     }
 
+    fn contentBeforeHeader(self: *RecordReader) diagnostics.Error {
+        @branchHint(.cold);
+        return self.failure.fail(.{
+            .details = .{ .@"fasta.content_before_header" = .{ .content_bytes = .{ .at_least = 1 } } },
+            .stage = .scan,
+            .at = .{ .source = .fasta, .location = .{ .offset = self.preamble_line_start, .line = self.preamble_line, .column = 1 } },
+        });
+    }
+
     fn startHeader(self: *RecordReader) void {
         self.header_offset = self.offset;
         self.headers +|= 1;
@@ -433,6 +461,8 @@ pub const ScannedRecord = struct {
     uses_uniform_formula: bool,
     side_table: []const u8,
     nonuniform_reason: diagnostics.NonuniformReason,
+    /// Geometry of the first line that breaks the record's established width, or null when the first line itself is not dense.
+    nonuniform_line: ?diagnostics.Geometry,
 };
 
 pub fn RecordScannerWith(comptime Diag: type) type {
@@ -450,6 +480,10 @@ pub fn RecordScannerWith(comptime Diag: type) type {
         diag: Diag,
         allocator: std.mem.Allocator,
         collect_side_tables: bool = false,
+        /// Skip, instead of failing on, a record whose identifier exceeds the limit; for a caller
+        /// that reports the identifier itself and goes on scanning.
+        skip_long_names: bool = false,
+        name_too_long: bool = false,
         active: bool = false,
         in_header: bool = false,
         parsing_name: bool = false,
@@ -521,6 +555,7 @@ pub fn RecordScannerWith(comptime Diag: type) type {
             self.source_reference.location.offset = header_start_offset;
             self.source_reference.record = self.source_record;
             self.name.clearRetainingCapacity();
+            self.name_too_long = false;
             self.seq_offset = 0;
             self.seq_offset_set = false;
             self.line_builder = .{};
@@ -653,6 +688,7 @@ pub fn RecordScannerWith(comptime Diag: type) type {
             self.line_builder.pending_bases = bases;
             self.line_builder.pending_actual_bytes = line_bytes;
             self.line_builder.pending_content_len = self.line_builder.first_content_len;
+            self.line_builder.pending_has_lf = true;
             self.line_builder.have_pending = true;
             self.at_line_start = true;
         }
@@ -766,6 +802,7 @@ pub fn RecordScannerWith(comptime Diag: type) type {
                 @memcpy(self.side_table.items[0..@sizeOf(u64)], std.mem.asBytes(&metrics.line_count));
                 side_table_slice = self.side_table.items;
             }
+            if (self.name_too_long) return;
             try emit(ctx, .{
                 .name = self.name.items,
                 .header_offset = self.header_start_offset,
@@ -777,6 +814,7 @@ pub fn RecordScannerWith(comptime Diag: type) type {
                 .uses_uniform_formula = seq_info.uses_uniform_formula,
                 .side_table = side_table_slice,
                 .nonuniform_reason = if (!metrics.first_content_dense) .sequence_whitespace else self.line_builder.nonuniform_reason,
+                .nonuniform_line = if (!metrics.first_content_dense) null else self.line_builder.nonuniform_line,
             });
         }
 
@@ -826,11 +864,12 @@ pub fn RecordScannerWith(comptime Diag: type) type {
 
                         const fragment = data[i..name_end];
                         if (max_name_len) |limit| {
-                            if (state.name.items.len > limit or fragment.len > limit - state.name.items.len) {
-                                return identifierTooLong(state.recordDiagnostics(), @as(u128, state.name.items.len) + fragment.len, limit);
+                            if (state.name_too_long or state.name.items.len > limit or fragment.len > limit - state.name.items.len) {
+                                if (!state.skip_long_names) return identifierTooLong(state.recordDiagnostics(), @as(u128, state.name.items.len) + fragment.len, limit);
+                                state.name_too_long = true;
                             }
                         }
-                        state.name.appendSlice(state.allocator, fragment) catch return state.diag.oom(.names, fragment.len);
+                        if (!state.name_too_long) state.name.appendSlice(state.allocator, fragment) catch return state.diag.oom(.names, fragment.len);
                         i = name_end;
                         if (i >= data.len) return;
                         if (data[i] == '\n') {
@@ -920,31 +959,52 @@ fn findLineFeed(data: []const u8, start: usize, end: usize) usize {
 const LineMetricsBuilder = struct {
     metrics: LineMetrics = .{},
     nonuniform_reason: diagnostics.NonuniformReason = .nonuniform_layout,
+    /// Geometry of the line behind `nonuniform_reason`; line_bytes counts a missing final newline as one byte, like `metrics.line_bytes`.
+    nonuniform_line: ?diagnostics.Geometry = null,
     first_actual_bytes: u32 = 0,
     first_content_len: u32 = 0,
     pending_bases: u32 = 0,
     pending_actual_bytes: u32 = 0,
     pending_content_len: u32 = 0,
+    pending_has_lf: bool = false,
     have_pending: bool = false,
     blank_after_bases: bool = false,
+    blank_bytes: u32 = 0,
+
+    fn markNonuniform(self: *LineMetricsBuilder, reason: diagnostics.NonuniformReason, bases: u32, actual_bytes: u32, has_lf: bool) void {
+        @branchHint(.cold);
+        if (self.metrics.is_uniform_width) {
+            self.nonuniform_reason = reason;
+            self.nonuniform_line = .{ .line_bases = bases, .line_bytes = if (has_lf) actual_bytes else @as(u64, actual_bytes) + 1 };
+        }
+        self.metrics.is_uniform_width = false;
+    }
 
     fn ingestLine(self: *LineMetricsBuilder, bases: u32, actual_bytes: u32, has_lf: bool, content_len: u32) void {
         if (bases == 0) {
-            if (self.metrics.line_count > 0) {
+            if (self.metrics.line_count > 0 and !self.blank_after_bases) {
                 self.blank_after_bases = true;
+                self.blank_bytes = actual_bytes;
             }
             return;
         }
+        // Lines are checked in file order: the pending line, then a blank line after it, then this line.
+        if (self.metrics.line_count > 1 and self.have_pending) {
+            if (self.pending_bases != self.metrics.line_bases or
+                self.pending_actual_bytes != self.first_actual_bytes)
+            {
+                const reason: diagnostics.NonuniformReason = if (self.pending_bases < self.metrics.line_bases) .interior_short_line else if (self.pending_bases > self.metrics.line_bases) .wider_line else .mixed_line_endings;
+                self.markNonuniform(reason, self.pending_bases, self.pending_actual_bytes, self.pending_has_lf);
+            }
+        }
         if (self.blank_after_bases) {
-            self.metrics.is_uniform_width = false;
-            self.nonuniform_reason = .interior_blank_line;
+            self.markNonuniform(.interior_blank_line, 0, self.blank_bytes, true);
             self.blank_after_bases = false;
         }
         self.metrics.seq_len += bases;
         self.metrics.line_count += 1;
         if (bases != content_len) {
-            if (self.metrics.is_uniform_width) self.nonuniform_reason = .sequence_whitespace;
-            self.metrics.is_uniform_width = false;
+            self.markNonuniform(.sequence_whitespace, bases, actual_bytes, has_lf);
         }
 
         if (self.metrics.line_count == 1) {
@@ -954,18 +1014,12 @@ const LineMetricsBuilder = struct {
             self.metrics.line_bytes = if (has_lf) actual_bytes else actual_bytes + 1;
             const sep_len = if (has_lf) actual_bytes -| content_len else @as(u32, 1);
             self.metrics.first_content_dense = bases == content_len and (sep_len == 1 or sep_len == 2);
-        } else if (self.have_pending) {
-            if (self.pending_bases != self.metrics.line_bases or
-                self.pending_actual_bytes != self.first_actual_bytes)
-            {
-                if (self.metrics.is_uniform_width) self.nonuniform_reason = if (self.pending_bases < self.metrics.line_bases) .interior_short_line else if (self.pending_bases > self.metrics.line_bases) .wider_line else .mixed_line_endings;
-                self.metrics.is_uniform_width = false;
-            }
         }
 
         self.pending_bases = bases;
         self.pending_actual_bytes = actual_bytes;
         self.pending_content_len = content_len;
+        self.pending_has_lf = has_lf;
         self.have_pending = true;
     }
 
@@ -975,8 +1029,7 @@ const LineMetricsBuilder = struct {
             if (self.pending_bases > self.metrics.line_bases or
                 self.pending_content_len > self.first_content_len)
             {
-                if (self.metrics.is_uniform_width) self.nonuniform_reason = .wider_line;
-                self.metrics.is_uniform_width = false;
+                self.markNonuniform(.wider_line, self.pending_bases, self.pending_actual_bytes, self.pending_has_lf);
             }
         }
         return self.metrics;
@@ -1040,7 +1093,9 @@ pub fn PackedNamesWith(comptime Diag: type) type {
             return self.blocks.items[ref.offset / BLOCK_BYTES][ref.offset % BLOCK_BYTES ..][0..ref.len];
         }
 
+        /// Callers pass identifiers of at most 65,535 bytes, so every name fits one block.
         pub fn observe(self: *@This(), name: []const u8) !bool {
+            std.debug.assert(name.len <= BLOCK_BYTES);
             self.map.ctx.owner = self;
             const entry = self.map.getOrPutAdapted(name, Lookup{ .owner = self }) catch return self.diag.oom(.dedup_table, null);
             if (entry.found_existing) return true;
@@ -1376,10 +1431,6 @@ pub fn SourceDedupWith(comptime Diag: type) type {
                     }
                     self.buckets = buckets;
                     self.metadata = metadata;
-                }
-
-                pub fn observe(self: *@This(), source: *SourceDedup, name: []const u8, offset: Offset) !bool {
-                    return self.observeWithFingerprint(source, name, offset, @truncate(std.hash_map.hashString(name)));
                 }
 
                 pub fn observeWithFingerprint(self: *@This(), source: *SourceDedup, name: []const u8, offset: Offset, fingerprint: u32) !bool {

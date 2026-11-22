@@ -142,3 +142,19 @@ export_manifest_optional_tool_versions() {
         fi
     done
 }
+
+# Builds the ReleaseFast subject a run times, and declares how, so no suite times a stale `zig-out`.
+bench_prepare_subject() {
+    echo "Building ReleaseFast benchmark subject..."
+    (cd "$PROJECT_ROOT" && zig build -Doptimize=ReleaseFast -Dstrip=true) || return 1
+    if [[ "$ZFASTA" == "$PROJECT_ROOT/zig-out/bin/z-fasta" ]]; then
+        export BENCH_BUILD_OPTIMIZE=ReleaseFast
+        BENCH_BUILD_ZIG_VERSION="$(zig version)"
+        BENCH_BUILD_TARGET="$(zig env | sed -n 's/^[[:space:]]*\.target = "\([^" ]*\)",/\1/p')"
+        BENCH_BUILD_REVISION=""
+        if [[ -z "$(git -C "$PROJECT_ROOT" status --porcelain --untracked-files=normal 2>/dev/null)" ]]; then
+            BENCH_BUILD_REVISION="$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null)" || BENCH_BUILD_REVISION=""
+        fi
+        export BENCH_BUILD_ZIG_VERSION BENCH_BUILD_REVISION BENCH_BUILD_TARGET
+    fi
+}

@@ -593,3 +593,60 @@ test "[failure] - [stats diagnostics]: retains final flush cause and resets oper
     try std.testing.expect(failure.primary() == null);
     try std.testing.expectEqual(.succeeded, failure.outputs.stdout.final_flush);
 }
+
+test "[cli] - [stats]: ties go to the first indexed record, and an out-of-order .fai reports the same values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const fasta_path = try support.writeFastaArtifact(allocator, "stats-ties", ">b\nAC\n>a\nACG\n>c\nAC\n>d\nACGT\n");
+    defer std.Io.Dir.cwd().deleteFile(io, fasta_path) catch {};
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{fasta_path});
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+
+    // File order: `b` and `c` tie for shortest, so `b` wins.
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = fai_path, .data = "b\t2\t3\t2\t3\na\t3\t9\t3\t4\nc\t2\t16\t2\t3\nd\t4\t22\t4\t5\n" });
+    const ordered = try runStatsAndCapture(allocator, fasta_path);
+    try std.testing.expect(std.mem.find(u8, ordered, "  shortest_name: b\n") != null);
+    try std.testing.expect(std.mem.find(u8, ordered, "  longest_name: d\n") != null);
+
+    // Reversed rows take the out-of-order path; `c` is now the first shortest record.
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = fai_path, .data = "d\t4\t22\t4\t5\nc\t2\t16\t2\t3\na\t3\t9\t3\t4\nb\t2\t3\t2\t3\n" });
+    const reversed = try runStatsAndCapture(allocator, fasta_path);
+    try std.testing.expect(std.mem.find(u8, reversed, "  shortest_name: c\n") != null);
+    const ordered_rest = try std.mem.replaceOwned(u8, allocator, ordered, "  shortest_name: b\n", "");
+    const reversed_rest = try std.mem.replaceOwned(u8, allocator, reversed, "  shortest_name: c\n", "");
+    try std.testing.expectEqualStrings(ordered_rest, reversed_rest);
+}
+
+test "[cli] - [stats]: names and the path are escaped as diagnostics escape them" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const path = try support.uniqueArtifactPath(allocator, "stats-escape\nline", "fa");
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = ">x\x1b[31mRED\x07\xff\nACGT\n>y\"\\\nAC\n" });
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    try support.expectCliResult(allocator, &.{ ZFASTA_BIN, "index", "--emit-fai", path }, 0, "x\x1b[31mRED\x07\xff\t4\t13\t4\t5\ny\"\\\t2\t23\t2\t3\n", "");
+    const fai_path = try std.fmt.allocPrint(allocator, "{s}.fai", .{path});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = fai_path, .data = "x\x1b[31mRED\x07\xff\t4\t13\t4\t5\ny\"\\\t2\t23\t2\t3\n" });
+    defer std.Io.Dir.cwd().deleteFile(io, fai_path) catch {};
+    const report = try runStatsAndCapture(allocator, path);
+    const escaped_path = try std.mem.replaceOwned(u8, allocator, path, "\n", "\\x0a");
+    const head = try std.fmt.allocPrint(allocator, "File:\n  path: {s}\n  index: {s}.fai\n", .{ escaped_path, escaped_path });
+    try std.testing.expect(std.mem.startsWith(u8, report, head));
+    try std.testing.expect(std.mem.find(u8, report, "  shortest_name: y\\\"\\\\\n") != null);
+    try std.testing.expect(std.mem.find(u8, report, "  longest_name: x\\x1b[31mRED\\x07\\xff\n") != null);
+    for (report) |byte| try std.testing.expect(byte == '\n' or (byte >= 0x20 and byte < 0x7f));
+}
+
+test "[cli] - [stats]: a gapped nucleotide alignment classifies as nucleotide" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const path = try support.writeFastaArtifact(allocator, "stats-gapped", ">al\nACGT--------ACGT--------\n");
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    const zfi_path = try std.fmt.allocPrint(allocator, "{s}.zfi", .{path});
+    defer std.Io.Dir.cwd().deleteFile(io, zfi_path) catch {};
+    try support.expectCliResult(allocator, &.{ ZFASTA_BIN, "index", path }, 0, "", try std.fmt.allocPrint(allocator, "wrote {s} (1 sequences)\n", .{zfi_path}));
+    const report = try runStatsAndCapture(allocator, path);
+    try std.testing.expect(std.mem.find(u8, report, "  type: nucleotide") != null);
+}

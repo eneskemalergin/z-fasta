@@ -35,7 +35,7 @@ mod peer_stats;
 mod peer_get;
 use peer_get::{parse_get_args, revcomp, GetConfig, GetMode};
 
-const PEER_VERSION: &str = "0.66.0";
+const PEER_VERSION: &str = "0.69.0";
 
 fn print_version() {
     println!("noodles-fasta {PEER_VERSION} (wrapper)");

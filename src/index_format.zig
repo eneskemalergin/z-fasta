@@ -3,8 +3,9 @@
 //! An index older than its FASTA is rejected. `.zfi` also stores the FASTA size and mtime.
 //! `.zfi` version 2, little-endian: a 16-byte header, 24-byte records, side tables, the name
 //! blob, the name table, then the FASTA's mtime and the blob's length. Everything is read in
-//! place. A load for `get` checks the file's frame and each record a request uses; `stats`, the
-//! package, and `validate --index` check every record, and the latter two the name table.
+//! place. A load for `get` checks the file's frame and each record a request uses, and the
+//! package's `IndexedReader` each record the first time it reads it; `stats` checks every record
+//! at load, and `validate --index` every record and the name table.
 //! `LoadedIndex.deinit` releases the FASTA descriptor, mappings, and arena; names and records
 //! borrow them until then. Loaders never reset the caller's `Failure`.
 
@@ -189,6 +190,11 @@ pub const NameTable = struct {
     pub const Builder = struct {
         slots: []u32,
         ordinal_bits: u6,
+        allocator: std.mem.Allocator,
+        /// Skip links over filled slots: entry `i` holds `j + 1` for a slot `j` with every slot
+        /// from `i` up to it filled, or 0 for `i + 1`. They keep many records with one name from
+        /// probing past each other one slot at a time. Null when a `u32` cannot name every slot.
+        next: ?[]u32 = null,
         count: u64 = 0,
         queue: [QUEUE]u64 = undefined,
         head: usize = 0,
@@ -201,10 +207,18 @@ pub const NameTable = struct {
             const blocks: [*]align(4) volatile @Vector(16, u32) = @ptrCast(slots.ptr);
             for (0..slots.len / 16) |i| blocks[i] = @splat(0);
             @memset(slots[slots.len / 16 * 16 ..], 0);
-            return .{ .slots = slots, .ordinal_bits = ordinalBits(record_count) };
+            errdefer allocator.free(slots);
+            var next: ?[]u32 = null;
+            if (slots.len < std.math.maxInt(u32)) {
+                const links = try allocator.alloc(u32, slots.len);
+                @memset(links, 0);
+                next = links;
+            }
+            return .{ .slots = slots, .ordinal_bits = ordinalBits(record_count), .allocator = allocator, .next = next };
         }
 
         pub fn deinit(self: *Builder, allocator: std.mem.Allocator) void {
+            if (self.next) |next| allocator.free(next);
             allocator.free(self.slots);
         }
 
@@ -225,10 +239,13 @@ pub const NameTable = struct {
             }
         }
 
+        /// The caller may take the slots without `deinit`; the links are freed here.
         pub fn finish(self: *Builder) []u32 {
             for (0..self.queued) |i| self.place(self.queue[(self.head + i) % QUEUE]);
             self.head = 0;
             self.queued = 0;
+            if (self.next) |next| self.allocator.free(next);
+            self.next = null;
             return self.slots;
         }
 
@@ -236,21 +253,50 @@ pub const NameTable = struct {
             return std.mem.sliceAsBytes(self.finish());
         }
 
+        /// Windows scanned from the home slot before the skip links take over.
+        const DIRECT_WINDOWS = 4;
+
+        /// Puts the entry in the first empty slot at or after its home slot, wrapping at the end.
         fn place(self: *Builder, name_hash: u64) void {
             std.debug.assert(self.count + 1 < self.slots.len);
             self.count += 1;
             const entry: u32 = @intCast(fingerprint(name_hash, self.ordinal_bits) << self.ordinal_bits | self.count);
             var slot: usize = @intCast(home(name_hash, self.slots.len));
-            while (slot + 16 <= self.slots.len) : (slot += 16) {
+            var windows: usize = 0;
+            while (slot + 16 <= self.slots.len and windows < DIRECT_WINDOWS) : (slot += 16) {
                 const window: @Vector(16, u32) = self.slots[slot..][0..16].*;
                 const empty: u16 = @bitCast(window == @as(@Vector(16, u32), @splat(0)));
                 if (empty != 0) {
                     self.slots[slot + @ctz(empty)] = entry;
                     return;
                 }
+                windows += 1;
             }
-            while (self.slots[slot] != 0) slot = if (slot + 1 == self.slots.len) 0 else slot + 1;
-            self.slots[slot] = entry;
+            // The windows can run to the table's end; the walk then goes on from slot 0.
+            if (slot == self.slots.len) slot = 0;
+            self.slots[self.firstEmpty(slot)] = entry;
+        }
+
+        fn after(self: *const Builder, slot: usize) usize {
+            if (self.next) |next| {
+                if (next[slot] != 0) return next[slot] - 1;
+            }
+            return if (slot + 1 == self.slots.len) 0 else slot + 1;
+        }
+
+        /// The first empty slot at or after `start`, wrapping; links every slot walked to it.
+        fn firstEmpty(self: *Builder, start: usize) usize {
+            @branchHint(.unlikely);
+            var slot = start;
+            while (self.slots[slot] != 0) slot = self.after(slot);
+            const next = self.next orelse return slot;
+            var walk = start;
+            while (walk != slot) {
+                const following = self.after(walk);
+                next[walk] = @intCast(slot + 1);
+                walk = following;
+            }
+            return slot;
         }
     };
 };
@@ -570,7 +616,7 @@ const ZfiOnDemand = struct {
             var last = window_start;
             var k = i + 1;
             while (k < keys.len and (keys[k] >> 24) - last <= 4 * PREFETCH_GAP_BYTES and (keys[k] >> 24) - window_start < buffer.len) : (k += 1) last = @intCast(keys[k] >> 24);
-            const window_len = @min(buffer.len, self.side_end - window_start, last - window_start + 4 * PREFETCH_GAP_BYTES);
+            const window_len = @min(buffer.len, self.side_end -| window_start, last - window_start + 4 * PREFETCH_GAP_BYTES);
             const got = std.Io.File.readPositionalAll(self.file, self.io, buffer[0..window_len], window_start) catch 0;
             if (got != window_len) return;
             var j = i;
@@ -593,7 +639,9 @@ const ZfiOnDemand = struct {
     fn prefetch(self: *ZfiOnDemand, names: []const []const u8, buffer: []u8) error{OutOfMemory}!void {
         self.clearPrefetch();
         const request_bits = 30;
-        if (names.len >= 1 << request_bits or buffer.len < PREFETCH_PROBE_SLOTS * 4) return;
+        // Name-blob spans are read into the buffer, and a span starts with one whole name of up
+        // to 65,535 bytes; a smaller buffer skips prefetch and leaves each lookup to `findNameAt`.
+        if (names.len >= 1 << request_bits or buffer.len < std.math.maxInt(u16)) return;
         const allocator = self.prefetch_arena.allocator();
         const count: u64 = self.record_count;
         const ordinal_bits = NameTable.ordinalBits(count);
@@ -937,16 +985,17 @@ pub const EntryStream = struct {
         return std.mem.bytesToValue(SideTableLine, try self.sides.take(offset, @sizeOf(SideTableLine), &self.context));
     }
 
-    fn start(self: *EntryStream, io: std.Io, path: []const u8, source: LoadedIndex.IndexSource, fasta_size: u64, context: *Diagnostics) diagnostics.Error!void {
-        const file = platform.openSidecar(io, path) catch |err| return context.ioFailure(.open, err);
+    /// Takes ownership of `file`, the descriptor the loader already checked, so a path replaced
+    /// after those checks is never read.
+    fn start(self: *EntryStream, io: std.Io, file: std.Io.File, source: LoadedIndex.IndexSource, fasta_size: u64, context: *Diagnostics) void {
         self.* = .{ .io = io, .file = file, .source = source, .context = context.*, .fasta_size = fasta_size, .reader = undefined };
         self.reader = file.reader(io, &self.buffers[0]);
     }
 
     // Mirrors `tryLoadZfi`'s checks before its records, in its order.
-    fn startZfi(self: *EntryStream, allocator: std.mem.Allocator, io: std.Io, path: []const u8, zfi_size: u64, fasta_size: u64, fasta_mtime_ns: i96, check_name_table: bool, context: *Diagnostics) diagnostics.Error!void {
-        try self.start(io, path, .zfi, fasta_size, context);
-        errdefer self.file.close(io);
+    /// The caller keeps `file` on failure and closes it.
+    fn startZfi(self: *EntryStream, allocator: std.mem.Allocator, io: std.Io, file: std.Io.File, zfi_size: u64, fasta_size: u64, fasta_mtime_ns: i96, check_name_table: bool, context: *Diagnostics) diagnostics.Error!void {
+        self.start(io, file, .zfi, fasta_size, context);
         const size = std.math.cast(usize, zfi_size) orelse return context.capacity(.map_bytes, std.math.maxInt(usize), zfi_size);
         context.at.location.offset = 0;
         if (size < @sizeOf(ZfiHeader)) return context.truncated(.header, ZFI_HEADER_BYTES, size);
@@ -974,6 +1023,10 @@ pub const EntryStream = struct {
         self.table_start = blob.regions.table_start;
         self.allocator = allocator;
         if (check_name_table) self.table = NameTable.Builder.init(allocator, header.record_count) catch return context.allocation(.name_map, blob.regions.table_len);
+        errdefer if (self.table) |*table| {
+            table.deinit(allocator);
+            self.table = null;
+        };
         self.previous_side_end = self.records_end;
         self.reader.seekTo(ZFI_HEADER_BYTES) catch |err| return context.ioFailure(.read, err);
         self.remaining = header.record_count;
@@ -1108,9 +1161,11 @@ pub fn loadIndex(
         });
     }
     var context = Diagnostics{ .failure = failure, .at = .{ .source = .fasta } };
-    const fasta_file = std.Io.Dir.cwd().openFile(io, fasta_path, .{}) catch |err| return context.ioFailure(.open, err);
+    // Opened without blocking, so a FIFO is refused by its kind instead of waiting for a writer.
+    const fasta_file = platform.openWithoutWaiting(io, fasta_path) catch |err| return context.ioFailure(.open, err);
     errdefer fasta_file.close(io);
     const fasta_stat = fasta_file.stat(io) catch |err| return context.ioFailure(.stat, err);
+    if (fasta_stat.kind != .file) return context.notRegularFile(fasta_stat.kind, .stat);
     if (fasta_stat.size == 0) return context.fail(.{ .@"fasta.no_records" = {} });
 
     switch (selection) {
@@ -1195,7 +1250,6 @@ comptime {
 const Diagnostics = struct {
     failure: *diagnostics.Failure,
     at: diagnostics.Reference,
-    deferred: bool = false,
 
     fn failureStage(details: diagnostics.Details) diagnostics.Stage {
         return switch (std.meta.activeTag(details)) {
@@ -1208,12 +1262,7 @@ const Diagnostics = struct {
 
     fn fail(self: *const Diagnostics, details: diagnostics.Details) diagnostics.Error {
         @branchHint(.cold);
-        const diagnostic = diagnostics.Diagnostic{ .details = details, .stage = failureStage(details), .at = self.at };
-        if (self.deferred) {
-            self.failure.deferFailure(diagnostic);
-            return diagnostics.metadata(diagnostic.code()).returned_error;
-        }
-        return self.failure.fail(diagnostic);
+        return self.failure.fail(.{ .details = details, .stage = failureStage(details), .at = self.at });
     }
 
     const IoStage = enum { open, stat, read };
@@ -1249,6 +1298,12 @@ const Diagnostics = struct {
         return self.failure.fail(.{ .details = .{ .@"io.map_failed" = .{ .map_bytes = bytes } }, .stage = .map, .at = self.at, .cause = if (err) |cause| .{ .zig = cause } else null });
     }
 
+    /// A sidecar or FASTA must be a regular file; anything else fails before it is read.
+    fn notRegularFile(self: *const Diagnostics, kind: std.Io.File.Kind, stage: diagnostics.Stage) diagnostics.Error {
+        @branchHint(.cold);
+        return self.failure.fail(.{ .details = .{ .@"io.invalid_path" = .{ .reason = if (kind == .directory) .directory else .not_regular_file } }, .stage = stage, .at = self.at });
+    }
+
     fn pathLimit(self: *const Diagnostics, limit: u64) diagnostics.Error {
         @branchHint(.cold);
         return self.failure.fail(.{ .details = .{ .@"io.invalid_path" = .{ .reason = .too_long, .limit_bytes = limit } }, .stage = .open, .at = self.at });
@@ -1274,6 +1329,7 @@ const Diagnostics = struct {
     }
 
     fn truncated(self: *const Diagnostics, section: diagnostics.Section, required: u128, available: u64) diagnostics.Error {
+        @branchHint(.cold);
         return self.fail(.{ .@"index.truncated" = .{ .section = section, .required_end = required, .available_end = available } });
     }
 };
@@ -1291,6 +1347,10 @@ fn zfiNameRegions(payload_end: usize, name_blob_len: u64, record_count: u32, rec
     return .{ .regions = .{ .blob_start = blob_start, .blob_len = blob_len, .table_start = table_start, .table_len = table_len } };
 }
 
+fn checkedRecordWords(record_count: u32) usize {
+    return (@as(usize, record_count) + @bitSizeOf(usize) - 1) / @bitSizeOf(usize);
+}
+
 fn zfiRecordsEnd(record_count: u32, context: *Diagnostics) diagnostics.Error!usize {
     const records_bytes = std.math.mul(usize, @as(usize, record_count), ZFI_INDEX_RECORD_BYTES) catch return context.overflow(.record_count, .multiply, record_count, ZFI_INDEX_RECORD_BYTES, std.math.maxInt(usize));
     return std.math.add(usize, @sizeOf(ZfiHeader), records_bytes) catch return context.overflow(.record_count, .add, @sizeOf(ZfiHeader), records_bytes, std.math.maxInt(usize));
@@ -1305,8 +1365,12 @@ fn tryLoadZfi(
     mode: LoadMode,
     context: *Diagnostics,
 ) diagnostics.Error!?LoadedIndex {
-    const zfi_file = platform.openSidecar(io, zfi_path) catch |err| switch (err) {
-        error.FileNotFound => return null,
+    const zfi_file = platform.openWithoutWaiting(io, zfi_path) catch |err| switch (err) {
+        // Only an absent entry falls back to `.fai`; a dangling link is an inaccessible `.zfi`.
+        error.FileNotFound => {
+            _ = std.Io.Dir.cwd().statFile(io, zfi_path, .{ .follow_symlinks = false }) catch return null;
+            return context.ioFailure(.open, err);
+        },
         else => return context.ioFailure(.open, err),
     };
     var keep_file = false;
@@ -1314,7 +1378,7 @@ fn tryLoadZfi(
 
     const zfi_stat = zfi_file.stat(io) catch |err| return context.ioFailure(.stat, err);
 
-    if (zfi_stat.kind == .directory) return context.mapping(zfi_stat.size, null);
+    if (zfi_stat.kind != .file) return context.notRegularFile(zfi_stat.kind, .open);
     if (zfi_stat.size == 0) {
         return context.truncated(.header, ZFI_HEADER_BYTES, zfi_stat.size);
     }
@@ -1324,7 +1388,9 @@ fn tryLoadZfi(
     }
 
     if (mode == .stream) {
-        try mode.stream.entries.startZfi(backing_allocator, io, zfi_path, zfi_stat.size, fasta_stat.size, fasta_stat.mtime.nanoseconds, mode.stream.check_name_table, context);
+        try mode.stream.entries.startZfi(backing_allocator, io, zfi_file, zfi_stat.size, fasta_stat.size, fasta_stat.mtime.nanoseconds, mode.stream.check_name_table, context);
+        keep_file = true;
+        errdefer mode.stream.entries.close();
         return streamShell(backing_allocator, io, fasta_file, fasta_stat.size, .zfi);
     }
 
@@ -1387,7 +1453,7 @@ fn tryLoadZfi(
     var arena = std.heap.ArenaAllocator.init(backing_allocator);
     errdefer arena.deinit();
     const checked_records: []usize = if (mode == .on_access) checked: {
-        const words = arena.allocator().alloc(usize, (header.record_count + @bitSizeOf(usize) - 1) / @bitSizeOf(usize)) catch return context.allocation(.records, null);
+        const words = arena.allocator().alloc(usize, checkedRecordWords(header.record_count)) catch return context.allocation(.records, null);
         @memset(words, 0);
         break :checked words;
     } else &.{};
@@ -1651,14 +1717,15 @@ fn tryLoadFai(
     mode: LoadMode,
     context: *Diagnostics,
 ) diagnostics.Error!?LoadedIndex {
-    const fai_file = platform.openSidecar(io, fai_path) catch |err| switch (err) {
+    const fai_file = platform.openWithoutWaiting(io, fai_path) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return context.ioFailure(.open, err),
     };
-    defer fai_file.close(io);
+    var keep_file = false;
+    defer if (!keep_file) fai_file.close(io);
 
     const fai_stat = fai_file.stat(io) catch |err| return context.ioFailure(.stat, err);
-    if (fai_stat.kind == .directory) return context.mapping(fai_stat.size, null);
+    if (fai_stat.kind != .file) return context.notRegularFile(fai_stat.kind, .open);
 
     if (fai_stat.mtime.nanoseconds < fasta_stat.mtime.nanoseconds) {
         return context.fail(.{ .@"index.older_than_source" = .{ .index_mtime_ns = fai_stat.mtime.nanoseconds, .source_mtime_ns = fasta_stat.mtime.nanoseconds } });
@@ -1668,7 +1735,9 @@ fn tryLoadFai(
         return context.fail(.{ .@"index.no_records" = .{ .format = .fai } });
     }
     if (mode == .stream) {
-        try mode.stream.entries.start(io, fai_path, .fai, fasta_stat.size, context);
+        mode.stream.entries.start(io, fai_file, .fai, fasta_stat.size, context);
+        keep_file = true;
+        errdefer mode.stream.entries.close();
         return streamShell(backing_allocator, io, fasta_file, fasta_stat.size, .fai);
     }
 
@@ -2055,7 +2124,9 @@ const NamePrefilter = struct {
     }
 };
 
-fn parseFaiIndexLine(line: []const u8, context: *Diagnostics) diagnostics.Error!FaiLineFields {
+/// A row may end in CRLF, as samtools accepts: one CR before the newline is not part of `line_bytes`.
+fn parseFaiIndexLine(row: []const u8, context: *Diagnostics) diagnostics.Error!FaiLineFields {
+    const line = if (row.len != 0 and row[row.len - 1] == '\r') row[0 .. row.len - 1] else row;
     const name_end = std.mem.findScalar(u8, line, '\t') orelse {
         var field_context = faiFieldContext(context, line.len);
         return missingFaiField(&field_context, .length);
@@ -2115,6 +2186,7 @@ fn takeLongFaiLine(file_reader: *std.Io.File.Reader, buffer: []u8, context: *Dia
             error.EndOfStream => break,
         };
         if (byte == '\n') break;
+        if (byte == '\r' and (reader.peekByte() catch 0) == '\n') continue;
         if (field == values.len) continue;
         if (byte == '\t') {
             var field_context = faiFieldContext(context, field_start);
@@ -2225,4 +2297,98 @@ test "[property] - [fai parser]: integer fields match a reference parse" {
             try std.testing.expect(got == null);
         }
     }
+}
+
+test "[edge] - [zfi loader]: check-bit words cover every u32 record count" {
+    try std.testing.expectEqual(@as(usize, 1), checkedRecordWords(1));
+    try std.testing.expectEqual(@as(usize, 1), checkedRecordWords(@bitSizeOf(usize)));
+    try std.testing.expectEqual(@as(usize, 2), checkedRecordWords(@bitSizeOf(usize) + 1));
+    const max = std.math.maxInt(u32);
+    try std.testing.expectEqual((@as(usize, max) + @bitSizeOf(usize) - 1) / @bitSizeOf(usize), checkedRecordWords(max));
+    try std.testing.expect(checkedRecordWords(max) * @bitSizeOf(usize) >= max);
+}
+
+test "[property] - [zfi loader]: radix sort orders keys with 8-bit and 11-bit digits" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x7261_6469);
+    const random = prng.random();
+    // Below 4,096 keys the sort uses 8-bit digits; from 4,096 on, 11-bit digits.
+    for ([_]usize{ 1, 100, 4095, 4096, 5000 }) |count| {
+        for ([_]u7{ 0, 24 }) |low_bit| {
+            const keys = try allocator.alloc(u64, count);
+            defer allocator.free(keys);
+            const scratch = try allocator.alloc(u64, count);
+            defer allocator.free(scratch);
+            const low_mask = (@as(u64, 1) << @intCast(low_bit)) -% 1;
+            for (keys) |*key| key.* = random.int(u64) & ~low_mask;
+            const expected = try allocator.dupe(u64, keys);
+            defer allocator.free(expected);
+            std.mem.sort(u64, expected, {}, std.sort.asc(u64));
+            radixSort(keys, scratch, low_bit);
+            try std.testing.expectEqualSlices(u64, expected, keys);
+        }
+    }
+}
+
+test "[property] - [zfi name table]: placement matches a plain first-empty-slot walk" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x6e74);
+    const random = prng.random();
+    // Few distinct names make long probe runs, and the names whose home lies in the last window
+    // reach the table's end; the plain walk is the frozen placement rule.
+    for ([_]usize{ 1, 17, 300, 5000 }) |count| {
+        for ([_]u64{ 1, 3, 1000 }) |distinct| {
+            var builder = try NameTable.Builder.init(allocator, count);
+            defer builder.deinit(allocator);
+            const reference = try allocator.alloc(u32, builder.slots.len);
+            defer allocator.free(reference);
+            @memset(reference, 0);
+            for (1..count + 1) |ordinal| {
+                const name_hash = NameTable.hash(std.mem.asBytes(&random.uintLessThan(u64, distinct)));
+                builder.insertHash(name_hash);
+                const entry: u32 = @intCast(NameTable.fingerprint(name_hash, builder.ordinal_bits) << builder.ordinal_bits | ordinal);
+                var slot: usize = @intCast(NameTable.home(name_hash, reference.len));
+                while (reference[slot] != 0) slot = (slot + 1) % reference.len;
+                reference[slot] = entry;
+            }
+            try std.testing.expectEqualSlices(u32, reference, builder.finish());
+        }
+    }
+}
+
+test "[edge] - [zfi name table]: many records with one name place in near-linear time" {
+    const allocator = std.testing.allocator;
+    const count = 200_000;
+    var builder = try NameTable.Builder.init(allocator, count);
+    defer builder.deinit(allocator);
+    // A quadratic walk takes many seconds here even in ReleaseFast; skip links take milliseconds,
+    // so a 5-second bound fails only on a return to the quadratic walk.
+    const started = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+    for (0..count) |_| builder.insert("a");
+    const slots = builder.finish();
+    const elapsed = started.durationTo(std.Io.Clock.Timestamp.now(std.testing.io, .awake));
+    try std.testing.expect(elapsed.raw.toNanoseconds() < 5 * std.time.ns_per_s);
+    var filled: usize = 0;
+    for (slots) |slot| filled += @intFromBool(slot != 0);
+    try std.testing.expectEqual(@as(usize, count), filled);
+}
+
+test "[edge] - [zfi name table]: a probe that fills the table's last window wraps to slot 0" {
+    const allocator = std.testing.allocator;
+    // 17 records give 22 slots; a name whose home is slot 6 fills 6..21 with 16 records, and the
+    // 17th must wrap to slot 0.
+    const count = 17;
+    var builder = try NameTable.Builder.init(allocator, count);
+    defer builder.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 22), builder.slots.len);
+    var name_buf: [16]u8 = undefined;
+    const name = for (0..100_000) |i| {
+        const candidate = try std.fmt.bufPrint(&name_buf, "n{d}", .{i});
+        if (NameTable.home(NameTable.hash(candidate), builder.slots.len) == 6) break candidate;
+    } else unreachable;
+    for (0..count) |_| builder.insert(name);
+    const slots = builder.finish();
+    for (slots[6..]) |slot| try std.testing.expect(slot != 0);
+    try std.testing.expect(slots[0] != 0);
+    try std.testing.expectEqual(@as(u64, count), slots[0] & ((@as(u64, 1) << builder.ordinal_bits) - 1));
 }

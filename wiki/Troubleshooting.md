@@ -123,7 +123,7 @@ In a pipeline with `set -o pipefail`, an early-closing reader makes the pipeline
 
 - `io.file_not_found`: the named FASTA, sidecar, names, or BED file does not exist.
 - `io.access_denied`: the file exists but cannot be opened with the current permissions.
-- `io.invalid_path`: the path is too long or otherwise rejected before opening; `reason` and `limit_bytes` say which.
+- `io.invalid_path`: the path is too long, names a directory where a file is needed (the FASTA, a sidecar, the `.zfi` that `index` writes, or the `--fix` output), or names a pipe or FIFO where `index`, `get`, `stats`, or `validate --index` need a regular file (plain `validate` reads a FIFO as a stream, as it reads stdin); `reason` and `limit_bytes` say which. It is reported before any work.
 
 The report's source label says which input failed, and `cause` keeps the operating-system reason.
 
@@ -172,11 +172,11 @@ A separate hard-link destination can be atomically replaced without modifying th
 
 ## File is empty or not FASTA
 
-- `fasta.no_records`: the input is empty.
-- `index.initial_header_required`: the first byte is not `>`. The report's `byte` shows it; `0xef` is the start of a UTF-8 BOM.
+- `fasta.no_records`: the input is empty, or holds only blank lines.
+- `index.initial_header_required`: the first line that holds more than spaces, tabs, or CR does not start with `>`. The report's `byte` shows the first such byte and `required_offset` the start of its line; `0xef` is the start of a UTF-8 BOM.
 - `index.no_indexable_records`: every record is empty.
 
-Index requires a non-empty input whose first byte is `>`. Validate can report a BOM and write a clean copy:
+Index requires a non-empty input whose first line that is not blank starts with `>`; blank lines and lines of spaces, tabs, or CR before it are skipped, as validate allows them. Validate can report a BOM and write a clean copy:
 
 ```bash
 z-fasta validate --fix -o clean.fa input.fa

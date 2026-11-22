@@ -2,7 +2,7 @@
 # Stats benchmark: correctness against oracles and peers, then real and scaling performance.
 # Usage: bash bench/stats/run.sh [options]   (ZFASTA, ZEBRAC select the binaries)
 #   --runs N --warmup N --duration MS      sampling (defaults 5, 1, 5000)
-#   --skip-tests --skip-benchmarks --skip-report   (--skip-messy is accepted; no messy section)
+#   --skip-tests --skip-benchmarks --skip-report --skip-messy   (the last skips the messy-file checks)
 #   --skip-full --skip-scale --skip-size --skip-seqs   leave out a benchmark group
 #   --regenerate-fixtures   rebuild the fixtures; --allow-incomplete   draft report
 # STATS_RUN_TIMESTAMP resumes a run. Results go to results/, the report to REPORT.md.
@@ -34,6 +34,7 @@ DO_REPORT=true
 REGENERATE_FIXTURES=false
 ALLOW_INCOMPLETE=false
 
+SKIP_MESSY=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         --runs) RUNS="$2"; shift 2 ;;
@@ -45,7 +46,7 @@ while [[ $# -gt 0 ]]; do
         --skip-scale) DO_SCALE=false; shift ;;
         --skip-size) DO_SCALE_SIZE=false; shift ;;
         --skip-seqs) DO_SCALE_SEQS=false; shift ;;
-        --skip-messy) shift ;;
+        --skip-messy) SKIP_MESSY=true; shift ;;
         --skip-report) DO_REPORT=false; shift ;;
         --regenerate-fixtures) REGENERATE_FIXTURES=true; shift ;;
         --allow-incomplete) ALLOW_INCOMPLETE=true; shift ;;
@@ -297,12 +298,6 @@ run_stats_tools() {
 
 # --- Correctness ---
 
-SKIP_TOOLS=false
-SKIP_MESSY=false
-SKIP_DUPLICATES=false
-SKIP_EDGE=false
-SKIP_LAYOUT=false
-
 ORACLE="$SCRIPT_DIR/oracle.py"
 TEST_DATA="$PROJECT_ROOT/tests/data"
 MESSY_DIR="$BENCH_ROOT/shared/cache/messy_fixtures"
@@ -351,11 +346,13 @@ expect_fail() {
     local label="$1"; shift
     local err="$TMPDIR/edge_${label//[^a-zA-Z0-9_]/_}.err"
     local out="$TMPDIR/edge_${label//[^a-zA-Z0-9_]/_}.out"
-    if "$@" >"$out" 2>"$err"; then
-        echo "expected non-zero exit" >"$err"
-        fail "$label" "$err"
-    else
+    local status=0
+    "$@" >"$out" 2>"$err" || status=$?
+    if [[ $status -eq 1 ]]; then
         pass "$label"
+    else
+        echo "expected exit 1 (a z-fasta failure), got $status" >>"$err"
+        fail "$label" "$err"
     fi
 }
 
@@ -468,7 +465,7 @@ verify_formats() {
     err="$TMPDIR/$name.zfi.err"
     label="[oracle:$name:zfi] exact report"
     run_stats "$fasta" "$zfi_txt" "$err" || { fail "$label" "$err"; return; }
-    check_oracle "$label" check zfi "$fasta" "$exp" "$zfi_txt"
+    check_oracle "$label" check zfi "$fasta" "$zfi_txt"
     if [[ "$zfi_only" == zfi-only ]]; then
         return
     fi
@@ -483,7 +480,7 @@ verify_formats() {
         mv "$stash" "${fasta}.zfi"
         return
     fi
-    check_oracle "$label" check fai "$fasta" "$exp" "$fai_txt"
+    check_oracle "$label" check fai "$fasta" "$fai_txt"
     mv "$stash" "${fasta}.zfi"
 
     if [[ "$("$PYTHON" -c "import json; print(json.load(open('$exp'))['duplicates'])")" -eq 0 ]]; then
@@ -513,8 +510,11 @@ verify_parity() {
         for pair in "noodles:$NOODLES" "rustbio:$RUSTBIO"; do
             tool="${pair%%:*}"
             bin="${pair#*:}"
-            [[ -x "$bin" ]] || continue
             label="[parity:$tool] $name assembly/composition"
+            if [[ ! -x "$bin" ]]; then
+                fail "$label (peer not installed: $bin)"
+                continue
+            fi
             out="$TMPDIR/$name.$tool.stats"
             err="$TMPDIR/$name.$tool.err"
             if ! "$bin" stats "$fasta" >"$out" 2>"$err"; then
@@ -527,14 +527,13 @@ verify_parity() {
                 fail "$label (stale binary)" "$err"
                 continue
             fi
-            check_oracle "$label" parity "$fasta" "$exp" "$stats_txt" "$tool" "$out"
+            check_oracle "$label" parity "$fasta" "$tool" "$out"
             ran=$((ran + 1))
         done
     fi
 
     for sk in "${SEQKIT_FIXTURES[@]}"; do
         [[ "$sk" == "$name" ]] || continue
-        [[ -x "$SEQKIT" ]] || continue
         label="[parity:seqkit] $name supported assembly fields"
         out="$TMPDIR/$name.seqkit.txt"
         err="$TMPDIR/$name.seqkit.err"
@@ -542,14 +541,13 @@ verify_parity() {
             fail "$label (run)" "$err"
             break
         fi
-        check_oracle "$label" parity "$fasta" "$exp" "$stats_txt" seqkit "$out"
+        check_oracle "$label" parity "$fasta" seqkit "$out"
         ran=$((ran + 1))
         break
     done
 
     for sk in "${SEQTK_FIXTURES[@]}"; do
         [[ "$sk" == "$name" ]] || continue
-        [[ -x "$SEQTK" ]] || continue
         label="[parity:seqtk] $name supported nucleotide counts"
         out="$TMPDIR/$name.seqtk.txt"
         err="$TMPDIR/$name.seqtk.err"
@@ -557,7 +555,7 @@ verify_parity() {
             fail "$label (run)" "$err"
             break
         fi
-        check_oracle "$label" parity "$fasta" "$exp" "$stats_txt" seqtk "$out"
+        check_oracle "$label" parity "$fasta" seqtk "$out"
         ran=$((ran + 1))
         break
     done
@@ -572,9 +570,7 @@ verify_parity() {
 verify_file() {
     local name="$1"
     verify_formats oracle "$name" "$TMPDIR/$name.fasta" "$TMPDIR/$name.expected.json"
-    if ! $SKIP_TOOLS; then
-        verify_parity "$name" "$TMPDIR/$name.fasta" "$TMPDIR/$name.expected.json"
-    fi
+    verify_parity "$name" "$TMPDIR/$name.fasta" "$TMPDIR/$name.expected.json"
 }
 
 verify_messy() {
@@ -637,9 +633,7 @@ verify_layout_twins() {
     run_stats "$uniform" "$uniform_stats" "$err" \
         || { fail "[extended:layout] uniform stats" "$err"; return; }
 
-    oracle expected "$uniform" >"$TMPDIR/layout_uniform.expected.json"
-    check_oracle "[extended:layout] uniform exact report" check zfi \
-        "$uniform" "$TMPDIR/layout_uniform.expected.json" "$uniform_stats"
+    check_oracle "[extended:layout] uniform exact report" check zfi "$uniform" "$uniform_stats"
 
     for variant in "${LAYOUT_TWIN_VARIANTS[@]}"; do
         name="layout_$variant"
@@ -659,9 +653,7 @@ verify_layout_twins() {
         check_oracle "[extended:layout] $variant == uniform" same \
             "$uniform_stats" "$TMPDIR/${name}.txt"
 
-        oracle expected "$fasta" >"$TMPDIR/${name}.expected.json"
-        check_oracle "[extended:layout] $variant exact report" check zfi \
-            "$fasta" "$TMPDIR/${name}.expected.json" "$TMPDIR/${name}.txt"
+        check_oracle "[extended:layout] $variant exact report" check zfi "$fasta" "$TMPDIR/${name}.txt"
     done
 }
 
@@ -748,11 +740,7 @@ run_tests() {
 
     echo "z-fasta stats verification"
     echo "  z-fasta:  $ZFASTA"
-    echo "  skip tools: $SKIP_TOOLS"
     echo "  skip messy: $SKIP_MESSY"
-    echo "  skip duplicates: $SKIP_DUPLICATES"
-    echo "  skip edge: $SKIP_EDGE"
-    echo "  skip layout: $SKIP_LAYOUT"
 
     cd "$PROJECT_ROOT"
     if [[ ! -x "$ZFASTA" ]]; then
@@ -777,19 +765,10 @@ run_tests() {
         verify_messy
     fi
 
-    if ! $SKIP_LAYOUT; then
-        verify_layout_twins
-    fi
-
-    if ! $SKIP_DUPLICATES; then
-        verify_duplicate_stats
-    fi
-
+    verify_layout_twins
+    verify_duplicate_stats
     verify_real
-
-    if ! $SKIP_EDGE; then
-        verify_edge_paths
-    fi
+    verify_edge_paths
 
     echo ""
     echo "Results: $PASS passed, $FAIL failed"
@@ -946,6 +925,9 @@ run_report() {
 }
 
 TIMESTAMP="${STATS_RUN_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
+if $DO_BENCHMARKS; then
+    bench_prepare_subject || exit 1
+fi
 mkdir -p "$RESULTS_DIR"
 
 if $DO_TESTS; then

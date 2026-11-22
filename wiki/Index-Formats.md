@@ -19,7 +19,7 @@ z-fasta index genome.fa
 - a name table that finds an identifier's first record directly;
 - optional side tables for non-uniform records.
 
-Uniform records use direct byte-offset arithmetic. Non-uniform records use a binary-searchable per-line table. Each record takes 24 bytes plus its identifier and 5 bytes of name table, and a non-uniform record adds 24 bytes per sequence line. Everything is read in place: GET looks a name up and checks only the records it uses, so opening even a large index costs about as much as opening a small one. The Zig package's `IndexedReader` checks each record the first time it reads it; `stats` and `validate --index` check every record.
+Uniform records use direct byte-offset arithmetic. Non-uniform records use a binary-searchable per-line table. Each record takes 24 bytes plus its identifier and 5 bytes of name table, and a non-uniform record adds an 8-byte line count and 24 bytes per sequence line. `index` builds a FASTA of up to 32 MiB in memory, side tables included, so a file of very short non-uniform lines needs about 24 bytes of memory per line while it is indexed. Everything is read in place: GET looks a name up and checks only the records it uses, so opening even a large index costs about as much as opening a small one. The Zig package's `IndexedReader` checks each record the first time it reads it; `stats` and `validate --index` check every record.
 
 ## Compatibility `.fai`
 
@@ -29,7 +29,7 @@ Create it with:
 z-fasta index --emit-fai genome.fa > genome.fa.fai
 ```
 
-Each FASTA record is one tab-separated line containing name, sequence length, first-base byte offset, line bases, and line bytes.
+Each FASTA record is one tab-separated line containing name, sequence length, first-base byte offset, line bases, and line bytes. When reading a `.fai`, a row may end in LF or CRLF.
 
 `.fai` can represent ordinary fixed-width records whose final sequence line may be shorter. It cannot represent arbitrary mixed widths, interior blank lines, or sequence-line whitespace.
 
@@ -57,7 +57,7 @@ A `.zfi` written by an earlier z-fasta version fails with `index.unsupported_ver
 
 `.fai` has no embedded source identity. z-fasta can only check that the sidecar is not older than the FASTA.
 
-Timestamp-preserving same-size source replacement remains a residual risk. Sidecars are not full-content fingerprints.
+Sidecars are not full-content fingerprints, so size and time cannot see every change: a same-size rewrite that keeps the FASTA's timestamp, or lands within one filesystem timestamp tick, still looks fresh. Rebuild the index after any in-place edit. A sidecar is read through a memory map, so truncating it while z-fasta reads it ends the process with `SIGBUS`; replace sidecars by writing a new file and renaming it, as `index` does (it keeps an existing `.zfi`'s permissions).
 
 ## Messy FASTA
 
