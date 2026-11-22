@@ -2,12 +2,26 @@ cff-version: 1.2.0
 message: "If you use z-fasta, please cite it as below."
 type: software
 title: "z-fasta"
-abstract: "Index, extract, validate, and inspect uncompressed FASTA with one static executable built in Zig, also usable as a Zig package."
+abstract: >-
+  Lightning FASTA work without the toolchain sprawl. z-fasta is a single
+  static executable, written in Zig, that indexes, extracts, validates, and
+  summarizes uncompressed FASTA files. It builds a compact binary index
+  (.zfi) that supports any line layout, including mixed widths and blank
+  lines, and emits a samtools-compatible .fai for uniformly wrapped files.
+  Extraction serves positional regions, name lists, and BED intervals, with
+  strand-aware reverse complement. Validation checks structure, identifiers,
+  alphabet, and layout in one streaming pass with flat memory, compares a
+  file with its index, and writes a repaired copy. Statistics report Nx,
+  quartiles, and sequence composition through a bounded scan. Every failure
+  carries a stable error code in text or JSON, and the same rules are
+  available to other Zig programs as a package. Correctness is checked
+  against samtools, bedtools, SeqKit, and other peers on human genome,
+  transcriptome, and proteome datasets.
 authors:
   - family-names: "Ergin"
     given-names: "Enes Kemal"
-version: "0.4.0"
-date-released: "2026-10-15"
+version: "0.4.1"
+date-released: "2026-11-22"
 license: MIT
 repository-code: "https://github.com/eneskemalergin/z-fasta"
 url: "https://github.com/eneskemalergin/z-fasta/wiki"

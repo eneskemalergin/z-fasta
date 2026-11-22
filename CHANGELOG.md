@@ -4,39 +4,46 @@
 
 All notable changes to z-fasta will be documented in this file.
 
-## [Unreleased]
+## [0.4.1]
+
+A maintenance release: fixes for what turned up after 0.4.0, documentation that matches the code, and links to z-fastq. `.zfi` files are unchanged, so no re-index is needed. The diagnostics catalog moves to `0.4.1-1`.
 
 ### Added
 
-- **Citation file.** `CITATION.cff` gives the title, author, version, and release date, so GitHub shows "Cite this repository"; the FAQ says how to cite z-fasta.
-- **Social preview.** `assets/social-preview.png`, built by `tools/social_preview.sh` from the README logo and tagline.
-
-### Fixed
-
-- **Damaged `.zfi` files.** Two size computations on values read from an index are bounded, so a damaged `.zfi` read by `get` or opened by `IndexedReader` fails with its coded error in every build mode.
-- **`index.nonuniform_fai` names the offending line.** `observed` holds the first line that breaks the record's width, and `expected` the width the record set; `reason` describes the same line. `observed` used to carry the record's first line, and `expected` was empty.
-- **A dangling `.zfi` link blocks `.fai` fallback.** A `.zfi` symlink whose target is gone fails with `io.file_not_found` on the `.zfi` instead of silently using the `.fai` beside it, as the index precedence rule says for any inaccessible `.zfi`.
-- **A directory where a file belongs fails first.** A directory at a sidecar path, at the `.zfi` path `index` writes, or at the `validate --fix` output fails with `io.invalid_path` (`reason=directory`) before any work. A sidecar used to fail as `io.map_failed` with the directory's size, and an output only after the whole scan, as `io.publish_failed`.
-- **`fasta.duplicate_identifier` fills `data.identifier`.** A validation report's duplicate entry carries the duplicated identifier in `data`, as the catalog lists, instead of `null`; it equals `first.identifier`.
-- **`.fai` rows may end in CRLF.** One CR before a row's newline is ignored in every `.fai` reader, as samtools does; such a file used to fail with `index.fai.invalid_integer` on `line_bytes`.
-- **`validate --fix` no longer turns a `>` symbol into a header.** A sequence line holding `>` blocks repair with `repair.blocked` (`reason_code=fasta.sequence_header_marker`); rewrapping used to be able to move it to a line start, so the copy gained a record and lost the byte while validating clean.
-- **`stats` escapes names and the path (closes [#40](https://github.com/eneskemalergin/z-fasta/issues/40)).** `path`, `index`, `shortest_name`, and `longest_name` escape control and non-ASCII bytes as `\xHH`, and `"` and `\` with a backslash, as diagnostics do, so a hostile header cannot reach the terminal. Printable-ASCII names without `"` or `\` print as before.
-- **Name-table placement wraps at the table's end.** When the records sharing a name filled the table up to its last slot, `index` and `validate --index` read and wrote one slot past the table: a Debug build stopped with a panic, and a ReleaseFast build could lose a later record from the name table, so `get` reported it missing.
-- **Many records sharing a name index in linear time (closes [#39](https://github.com/eneskemalergin/z-fasta/issues/39)).** Name-table placement skips filled slots instead of probing them one by one, so 200,000 records named `a` index in milliseconds instead of about 14 seconds, in `index` and in `validate --index`. The `.zfi` bytes are unchanged; building the table takes 4 more bytes of memory per table slot.
-- **A pipe, FIFO, or directory given as the FASTA or a sidecar names its kind (closes [#41](https://github.com/eneskemalergin/z-fasta/issues/41)).** `index`, `get`, `stats`, `validate --index`, and the package fail with `io.invalid_path` (`reason=not_regular_file` or `directory`) without waiting on a FIFO; they used to report `fasta.no_records`, or an index error for a sidecar.
-- **`validate --index` goes on past an over-long identifier (closes [#42](https://github.com/eneskemalergin/z-fasta/issues/42)).** A record whose identifier no index can hold is counted as `fasta.identifier_too_long` and left out of the index comparison; the report used to stop there as `interrupted` with `index.identifier_too_long`.
-- **A replaced output keeps its permissions.** `validate --fix` and `index` copy an existing destination's permissions to the new file before the atomic replace, so a `0600` file stays `0600`.
-- **`validate` outcome: an error wins.** A report with an error is `invalid` even when the duplicate check stopped at its name budget; only a report without errors reads `incomplete`.
-- **`validate --fix -o -` is refused** with `usage.invalid_option_value`; it used to create a file named `-`.
-- **`validate --json --fix` reports a discarded output as `aborted`.** On a failed repair the staged output is discarded before the stdout report is written, so the report's file state matches stderr, and a cleanup failure appears in both.
+- **Citation file and social preview.** `CITATION.cff` enables GitHub's "Cite this repository"; `assets/social-preview.png` is built by `tools/social_preview.sh`.
+- **`fasta.sequence_header_marker`.** A `validate` warning for each `>` inside a sequence line, which a rewrapped copy could turn into a header; `--fix` refuses such a file.
 
 ### Changed
 
-- **z-fastq and Zipir are linked.** The README and wiki point FASTQ readers to [z-fastq](https://github.com/eneskemalergin/z-fastq), and say that gzip and BGZF FASTA input has no release target, with [Zipir](https://github.com/eneskemalergin/zipir) as where that work would start.
-- **The complement guard samples each record's own first 256 bases.** Every request on a record gets the same verdict, so a short region of nucleotide letters inside a protein no longer lets later requests complement it. Gap (`-`) and stop (`*`) bytes are left out of the count, so a gapped nucleotide alignment can be complemented, as samtools does, and `stats` reports it as nucleotide. `validate` still counts them when it chooses an alphabet.
-- **Blank lines before the first header are skipped.** `index` and the package's `RecordReader` accept leading lines of only spaces, tabs, or CR, as `validate` does; a validate-then-index pipeline no longer passes and then fails. Other content before the first header still fails, now naming the first byte that is not blank and the start of its line, and a file of blank lines only reports `fasta.no_records`, as `validate` does.
-- **Catalog revision `0.4.1-1`.** It adds `fasta.sequence_header_marker`, a validate warning for each `>` inside a sequence line, and the matching `repair.blocked` reason.
-- **Decimal numbers are ASCII digits only.** Region bounds (`chr1:1_0-2_0`, `chr1:+2-+4`) and the values of `--width`, `--max-header-len`, and `--max-name-memory` no longer accept a sign or `_` separators, matching BED coordinates. Such a region is now looked up as a literal name; such an option value fails with `usage.invalid_option_value`.
+- **Input rules.**
+  - Blank lines before the first header are skipped by `index` and `RecordReader`, as `validate` skips them; a file of only blank lines reports `fasta.no_records`.
+  - Region bounds and numeric options are ASCII digits only: `chr1:1_0-2_0`, `chr1:+2-+4`, and `--width +4` are no longer read as numbers.
+  - `.fai` rows may end in CRLF, as samtools allows.
+- **Sequence type.**
+  - `get`'s complement guard samples each record's first 256 bases, so every request on a record gets the same verdict.
+  - `get` and `stats` leave gap (`-`) and stop (`*`) bytes out of the count, so a gapped nucleotide alignment is nucleotide.
+- **`validate`.**
+  - Any error makes the outcome `invalid`, even when the duplicate check stopped at its budget.
+  - `-o -` is refused instead of creating a file named `-`.
+  - A replaced output keeps its permissions; so does a `.zfi` that `index` replaces.
+- **`stats` escapes names and the path** as diagnostics do (closes [#40](https://github.com/eneskemalergin/z-fasta/issues/40)).
+- **Docs.** The README and wiki link [z-fastq](https://github.com/eneskemalergin/z-fastq) and [Zipir](https://github.com/eneskemalergin/zipir), and say where z-fasta and samtools differ.
+
+### Fixed
+
+- **Performance.** Records sharing one name index in linear time instead of quadratic: 200,000 records named `a` take milliseconds instead of about 14 seconds (closes [#39](https://github.com/eneskemalergin/z-fasta/issues/39)).
+- **Crashes and memory safety.**
+  - A damaged `.zfi` fails with its coded error in every build mode.
+  - Name-table placement no longer writes past the table when shared names fill its last slot.
+- **Inputs that are not regular files** (closes [#41](https://github.com/eneskemalergin/z-fasta/issues/41)).
+  - A pipe, FIFO, or directory as the FASTA or a sidecar fails with `io.invalid_path` instead of `fasta.no_records`, without waiting on a FIFO.
+  - A directory at an output path fails before any work.
+  - A dangling `.zfi` link blocks `.fai` fallback instead of being treated as absent.
+- **Diagnostics.**
+  - `validate --index` goes on past an identifier too long for any index (closes [#42](https://github.com/eneskemalergin/z-fasta/issues/42)).
+  - `index.nonuniform_fai` reports the offending line as `observed` and the record's width as `expected`.
+  - `fasta.duplicate_identifier` fills `data.identifier`.
+  - `validate --json --fix` reports a discarded output as `aborted`, matching stderr.
 
 ## [0.4.0]
 
