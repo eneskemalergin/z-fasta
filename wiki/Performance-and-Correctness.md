@@ -46,23 +46,23 @@ I care about correct output before timing. The benchmark harness keeps correctne
 
 ## Representative published results
 
-The selected v0.4.0 reports use an AMD Ryzen 9 3950X with warm cache, measured on 2026-10-15. These tables are snapshots from those reports; times and memory use depend on the machine and dataset.
+The selected v0.4.1 reports use an AMD Ryzen 9 3950X with warm cache, measured on 2026-11-22. These tables are snapshots from those reports; times and memory use depend on the machine and dataset.
 
 Index `.fai` examples:
 
 | Dataset       |     Size |  z-fasta | samtools |
 | ------------- | -------: | -------: | -------: |
-| Human genome  | ~2.9 GiB | 0.3279 s | 8.1025 s |
-| Transcriptome | ~459 MiB | 0.1252 s | 1.7222 s |
-| Proteome      |  ~13 MiB | 0.0091 s | 0.0655 s |
+| Human genome  | ~2.9 GiB | 0.3019 s | 8.1222 s |
+| Transcriptome | ~459 MiB | 0.1223 s | 1.6906 s |
+| Proteome      |  ~13 MiB | 0.0092 s | 0.0636 s |
 
 GET 1 kbp examples through `.zfi`:
 
 | Dataset       | z-fasta | samtools |
 | ------------- | ------: | -------: |
-| Human genome  |  2.1 ms |   8.7 ms |
-| Transcriptome |  2.2 ms | 292.0 ms |
-| Proteome      |  2.3 ms |  18.2 ms |
+| Human genome  |  2.2 ms |   8.3 ms |
+| Transcriptome |  2.4 ms | 289.1 ms |
+| Proteome      |  2.1 ms |  17.1 ms |
 
 <details>
 <summary>View the full positional GET chart</summary>
@@ -75,11 +75,11 @@ The chart includes additional indexed peers, region sizes from 100 bp through a 
 
 Complete stats examples through `.zfi`:
 
-| Dataset       | z-fasta | SeqKit `stats -a` |
-| ------------- | ------: | ----------------: |
-| Human genome  | 0.413 s |          17.619 s |
-| Transcriptome | 88.9 ms |           2.405 s |
-| Proteome      | 10.4 ms |           64.1 ms |
+| Dataset       |  z-fasta | SeqKit `stats -a` |
+| ------------- | -------: | ----------------: |
+| Human genome  |  0.421 s |           7.848 s |
+| Transcriptome | 131.5 ms |           1.101 s |
+| Proteome      |  10.5 ms |           44.1 ms |
 
 <details>
 <summary>View the full stats chart</summary>

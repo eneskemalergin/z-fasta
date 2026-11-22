@@ -32,9 +32,7 @@ A maintenance release: fixes for what turned up after 0.4.0, documentation that 
 ### Fixed
 
 - **Performance.** Records sharing one name index in linear time instead of quadratic: 200,000 records named `a` take milliseconds instead of about 14 seconds (closes [#39](https://github.com/eneskemalergin/z-fasta/issues/39)).
-- **Crashes and memory safety.**
-  - A damaged `.zfi` fails with its coded error in every build mode.
-  - Name-table placement no longer writes past the table when shared names fill its last slot.
+- **Crashes and memory safety.** A damaged `.zfi` fails with its coded error in every build mode.
 - **Inputs that are not regular files** (closes [#41](https://github.com/eneskemalergin/z-fasta/issues/41)).
   - A pipe, FIFO, or directory as the FASTA or a sidecar fails with `io.invalid_path` instead of `fasta.no_records`, without waiting on a FIFO.
   - A directory at an output path fails before any work.

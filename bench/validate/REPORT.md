@@ -21,35 +21,35 @@ Correctness reported **81** passing and **0** failing checks before performance 
 
 Expected findings come from how each input is built and from the documented exit rules: 0 for a clean file, 2 for warnings only, and 1 for errors. A file counts as accepted when validate reports no error-level code.
 
-| Inputs                  | Check                         | Passed |
-| ----------------------- | ----------------------------- | ------ |
-| Crafted proteome copies | findings                      | 9 of 9 |
-| Messy fixtures          | findings                      | 5 of 5 |
-| Messy proteome variants | findings                      | 4 of 4 |
-| REAL datasets           | stdin (validate -)            | 3 of 3 |
-| REAL datasets           | accepted (index, validate)    | 3 of 3 |
-| REAL datasets           | index pair (validate --index) | 3 of 3 |
-| Messy fixtures          | accepted (index, validate)    | 5 of 5 |
-| Messy fixtures          | index pair (validate --index) | 5 of 5 |
-| Messy proteome variants | accepted (index, validate)    | 4 of 4 |
+| Inputs | Check | Passed |
+| --- | --- | --- |
+| Crafted proteome copies | findings | 9 of 9 |
+| Messy fixtures | findings | 5 of 5 |
+| Messy proteome variants | findings | 4 of 4 |
+| REAL datasets | stdin (validate -) | 3 of 3 |
+| REAL datasets | accepted (index, validate) | 3 of 3 |
+| REAL datasets | index pair (validate --index) | 3 of 3 |
+| Messy fixtures | accepted (index, validate) | 5 of 5 |
+| Messy fixtures | index pair (validate --index) | 5 of 5 |
+| Messy proteome variants | accepted (index, validate) | 4 of 4 |
 | Messy proteome variants | index pair (validate --index) | 4 of 4 |
-| REAL datasets           | layout (samtools, validate)   | 3 of 3 |
-| Messy fixtures          | layout (samtools, validate)   | 5 of 5 |
-| Messy proteome variants | layout (samtools, validate)   | 4 of 4 |
-| REAL datasets           | alphabet (seqkit, validate)   | 3 of 3 |
-| Crafted proteome copies | alphabet (seqkit, validate)   | 1 of 1 |
-| Options on REAL data    | --type dna (tr)               | 2 of 2 |
-| Options on REAL data    | --type any                    | 3 of 3 |
-| Options on REAL data    | --index=PATH                  | 3 of 3 |
-| Options on REAL data    | --error-format=json           | 3 of 3 |
-| Options on REAL data    | --type rna (tr)               | 1 of 1 |
-| Options on REAL data    | --custom-alphabet (tr)        | 1 of 1 |
-| Options on REAL data    | --schema refseq (awk)         | 1 of 1 |
-| Options on REAL data    | --max-name-memory             | 1 of 1 |
-| Options on REAL data    | --fix --width (awk)           | 2 of 2 |
-| Options on REAL data    | --type protein (tr)           | 1 of 1 |
-| Options on REAL data    | --schema uniprot (awk)        | 1 of 1 |
-| Options on REAL data    | --max-header-len (awk)        | 1 of 1 |
+| REAL datasets | layout (samtools, validate) | 3 of 3 |
+| Messy fixtures | layout (samtools, validate) | 5 of 5 |
+| Messy proteome variants | layout (samtools, validate) | 4 of 4 |
+| REAL datasets | alphabet (seqkit, validate) | 3 of 3 |
+| Crafted proteome copies | alphabet (seqkit, validate) | 1 of 1 |
+| Options on REAL data | --type dna (tr) | 2 of 2 |
+| Options on REAL data | --type any | 3 of 3 |
+| Options on REAL data | --index=PATH | 3 of 3 |
+| Options on REAL data | --error-format=json | 3 of 3 |
+| Options on REAL data | --type rna (tr) | 1 of 1 |
+| Options on REAL data | --custom-alphabet (tr) | 1 of 1 |
+| Options on REAL data | --schema refseq (awk) | 1 of 1 |
+| Options on REAL data | --max-name-memory | 1 of 1 |
+| Options on REAL data | --fix --width (awk) | 2 of 2 |
+| Options on REAL data | --type protein (tr) | 1 of 1 |
+| Options on REAL data | --schema uniprot (awk) | 1 of 1 |
+| Options on REAL data | --max-header-len (awk) | 1 of 1 |
 
 ### Proteome copies with one injected defect
 
@@ -116,11 +116,11 @@ Each option runs on the REAL datasets, and the expected value comes from another
 Each file holds one byte in question inside 240 nucleotide bases, checked with SeqKit `-t dna`. These verdicts are recorded each run and not asserted, since the two alphabets are defined differently.
 
 | Byte in question | SeqKit seq -v | validate |
-| ---------------- | ------------- | -------- |
-| `rna_u`          | reject        | accept   |
-| `dot_gap`        | accept        | reject   |
-| `space_inside`   | accept        | accept   |
-| `tab_at_end`     | reject        | accept   |
+| --- | --- | --- |
+| `rna_u` | reject | accept |
+| `dot_gap` | accept | reject |
+| `space_inside` | accept | accept |
+| `tab_at_end` | reject | accept |
 
 ## Performance
 
@@ -128,63 +128,63 @@ zebrac times each command in turn, in one batch, on a warm page cache. The peers
 
 ### Wall time (mean +/- standard deviation)
 
-| Dataset       | z-fasta validate  | z-fasta validate --index | SeqKit seq -v (partial) | samtools faidx (partial) |
-| ------------- | ----------------- | ------------------------ | ----------------------- | ------------------------ |
-| Genome        | 0.362 +/- 0.005 s | 0.433 +/- 0.007 s        | 5.512 +/- 0.052 s       | 8.080 +/- 0.020 s        |
-| Transcriptome | 0.151 +/- 0.001 s | 0.238 +/- 0.003 s        | 0.630 +/- 0.011 s       | 1.700 +/- 0.010 s        |
-| Proteome      | 0.011 +/- 0.000 s | 0.017 +/- 0.000 s        | 0.085 +/- 0.005 s       | 0.059 +/- 0.001 s        |
+| Dataset | z-fasta validate | z-fasta validate --index | SeqKit seq -v (partial) | samtools faidx (partial) |
+| --- | --- | --- | --- | --- |
+| Genome | 0.371 +/- 0.004 s | 0.426 +/- 0.006 s | 6.899 +/- 0.032 s | 8.115 +/- 0.019 s |
+| Transcriptome | 0.152 +/- 0.005 s | 0.234 +/- 0.004 s | 0.720 +/- 0.004 s | 1.684 +/- 0.013 s |
+| Proteome | 0.010 +/- 0.000 s | 0.016 +/- 0.000 s | 0.084 +/- 0.004 s | 0.059 +/- 0.001 s |
 
 ### Peak memory (mean resident set)
 
 validate reads through a fixed buffer, so its peak memory does not grow with sequence bytes; its duplicate check keeps a fingerprint and an offset per identifier. With `--index` it reads the index in file order through fixed buffers.
 
-| Dataset       | z-fasta validate | z-fasta validate --index | SeqKit seq -v (partial) | samtools faidx (partial) |
-| ------------- | ---------------- | ------------------------ | ----------------------- | ------------------------ |
-| Genome        | 3.6 MiB          | 3.6 MiB                  | 1,192.8 MiB             | 9.2 MiB                  |
-| Transcriptome | 5.3 MiB          | 6.8 MiB                  | 71.8 MiB                | 65.5 MiB                 |
-| Proteome      | 3.5 MiB          | 3.6 MiB                  | 70.8 MiB                | 11.0 MiB                 |
+| Dataset | z-fasta validate | z-fasta validate --index | SeqKit seq -v (partial) | samtools faidx (partial) |
+| --- | --- | --- | --- | --- |
+| Genome | 3.6 MiB | 3.7 MiB | 944.2 MiB | 9.1 MiB |
+| Transcriptome | 5.7 MiB | 8.3 MiB | 71.6 MiB | 65.7 MiB |
+| Proteome | 3.5 MiB | 3.7 MiB | 70.6 MiB | 10.8 MiB |
 
 ### Minor page faults (mean)
 
-| Dataset       | z-fasta validate | z-fasta validate --index | SeqKit seq -v (partial) | samtools faidx (partial) |
-| ------------- | ---------------- | ------------------------ | ----------------------- | ------------------------ |
-| Genome        | 330              | 336                      | 304,064                 | 726                      |
-| Transcriptome | 2,234            | 2,595                    | 17,397                  | 15,455                   |
-| Proteome      | 521              | 602                      | 17,048                  | 1,313                    |
+| Dataset | z-fasta validate | z-fasta validate --index | SeqKit seq -v (partial) | samtools faidx (partial) |
+| --- | --- | --- | --- | --- |
+| Genome | 328 | 339 | 240,013 | 726 |
+| Transcriptome | 2,234 | 2,907 | 17,020 | 15,454 |
+| Proteome | 524 | 630 | 16,658 | 1,310 |
 
 ### Throughput (input MiB per second of wall time)
 
-| Dataset       | z-fasta validate | z-fasta validate --index | SeqKit seq -v (partial) | samtools faidx (partial) |
-| ------------- | ---------------- | ------------------------ | ----------------------- | ------------------------ |
-| Genome        | 8,299 MiB/s      | 6,939 MiB/s              | 545 MiB/s               | 372 MiB/s                |
-| Transcriptome | 3,034 MiB/s      | 1,930 MiB/s              | 728 MiB/s               | 270 MiB/s                |
-| Proteome      | 1,174 MiB/s      | 761 MiB/s                | 154 MiB/s               | 223 MiB/s                |
+| Dataset | z-fasta validate | z-fasta validate --index | SeqKit seq -v (partial) | samtools faidx (partial) |
+| --- | --- | --- | --- | --- |
+| Genome | 8,091 MiB/s | 7,048 MiB/s | 436 MiB/s | 370 MiB/s |
+| Transcriptome | 3,023 MiB/s | 1,963 MiB/s | 637 MiB/s | 272 MiB/s |
+| Proteome | 1,268 MiB/s | 804 MiB/s | 156 MiB/s | 222 MiB/s |
 
 ## Run Provenance
 
-- Run: `20261015_130219`, zebrac `zebrac 0.6.2`, 5 measured samples, 3 warmups, 5000 ms budget per command.
-- z-fasta: `z-fasta 0.4.0`.
-- samtools: `samtools 1.24`; SeqKit: `seqkit v2.13.0`.
+- Run: `20261122_085834`, zebrac `zebrac 0.6.2`, 5 measured samples, 3 warmups, 5000 ms budget per command.
+- z-fasta: `z-fasta 0.4.1`.
+- samtools: `samtools 1.25`; SeqKit: `seqkit v2.14.0`.
 
 **Source and executable facts**
 
 ```json
 {
-  "checkout_revision": "faf505d1a3f3404e18a2d4ad8744720af93ae71d",
+  "checkout_revision": "52483244ac933df5e6f7901cb492c5059b5aa4ba",
   "checkout_dirty": true,
   "executable": {
     "path": "zig-out/bin/z-fasta",
-    "size": 924808,
-    "mtime_ns": 1792091667689566327,
-    "ctime_ns": 1792091667745838707,
-    "device": 52,
-    "inode": 47976209
+    "size": 933608,
+    "mtime_ns": 1795317893551889311,
+    "ctime_ns": 1795318050878056176,
+    "device": 50,
+    "inode": 199116288
   },
   "declared_build": {
     "revision": null,
-    "zig_version": null,
-    "optimize": null,
-    "target": null
+    "zig_version": "0.16.0",
+    "optimize": "ReleaseFast",
+    "target": "x86_64-linux.5.10...6.19-gnu.2.43"
   }
 }
 ```
